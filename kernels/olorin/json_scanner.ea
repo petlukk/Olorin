@@ -1,0 +1,121 @@
+// JSON structural scanner — find { } [ ] : , " \ positions.
+//
+// Uses u8x16 (not u8x32) to avoid movemask sign-bit issue.
+// Eä v1.6: for loops.
+
+export func count_json_structural(text: *u8, len: i32, out_count: *mut i32) {
+    let v_lbrace: u8x16 = splat(123)
+    let v_rbrace: u8x16 = splat(125)
+    let v_lbracket: u8x16 = splat(91)
+    let v_rbracket: u8x16 = splat(93)
+    let v_colon: u8x16 = splat(58)
+    let v_comma: u8x16 = splat(44)
+    let v_quote: u8x16 = splat(34)
+    let v_backslash: u8x16 = splat(92)
+    let v_one: u8x16 = splat(1)
+    let v_zero: u8x16 = splat(0)
+    let v_ones: u8x16 = splat(255)
+
+    let mut total: i32 = 0
+    let n_full: i32 = (len / 16) * 16
+
+    for i in 0..n_full step 16 {
+        let v: u8x16 = load(text, i)
+        prefetch(text, i + 64)
+
+        let h1: u8x16 = select(v .== v_lbrace, v_ones, v_zero)
+        let h2: u8x16 = select(v .== v_rbrace, v_ones, v_zero)
+        let h3: u8x16 = select(v .== v_lbracket, v_ones, v_zero)
+        let h4: u8x16 = select(v .== v_rbracket, v_ones, v_zero)
+        let h5: u8x16 = select(v .== v_colon, v_ones, v_zero)
+        let h6: u8x16 = select(v .== v_comma, v_ones, v_zero)
+        let h7: u8x16 = select(v .== v_quote, v_ones, v_zero)
+        let h8: u8x16 = select(v .== v_backslash, v_ones, v_zero)
+
+        let hits: u8x16 = h1 .| h2 .| h3 .| h4 .| h5 .| h6 .| h7 .| h8
+        let ones: u8x16 = hits .& v_one
+        total = total + to_i32(reduce_add(ones))
+    }
+
+    for i in n_full..len {
+        let b: u8 = text[i]
+        if b == 123 || b == 125 || b == 91 || b == 93 || b == 58 || b == 44 || b == 34 || b == 92 {
+            total = total + 1
+        }
+    }
+
+    out_count[0] = total
+}
+
+#[cfg(x86_64)]
+export func extract_json_structural(text: *u8, len: i32, out_pos: *mut i32, out_types: *mut u8, out_count: *mut i32) {
+    let v_lbrace: u8x16 = splat(123)
+    let v_rbrace: u8x16 = splat(125)
+    let v_lbracket: u8x16 = splat(91)
+    let v_rbracket: u8x16 = splat(93)
+    let v_colon: u8x16 = splat(58)
+    let v_comma: u8x16 = splat(44)
+    let v_quote: u8x16 = splat(34)
+    let v_backslash: u8x16 = splat(92)
+    let hi: u8x16 = splat(255)
+    let lo: u8x16 = splat(0)
+
+    let mut idx: i32 = 0
+    let n_full: i32 = (len / 16) * 16
+
+    for i in 0..n_full step 16 {
+        let v: u8x16 = load(text, i)
+
+        let h1: u8x16 = select(v .== v_lbrace, hi, lo)
+        let h2: u8x16 = select(v .== v_rbrace, hi, lo)
+        let h3: u8x16 = select(v .== v_lbracket, hi, lo)
+        let h4: u8x16 = select(v .== v_rbracket, hi, lo)
+        let h5: u8x16 = select(v .== v_colon, hi, lo)
+        let h6: u8x16 = select(v .== v_comma, hi, lo)
+        let h7: u8x16 = select(v .== v_quote, hi, lo)
+        let h8: u8x16 = select(v .== v_backslash, hi, lo)
+
+        let hits: u8x16 = h1 .| h2 .| h3 .| h4 .| h5 .| h6 .| h7 .| h8
+        let m_init: i32 = movemask(hits)
+
+        if m_init != 0 {
+            let mut m: i32 = m_init
+            let mut bit: i32 = 0
+            while m != 0 {
+                if m - (m / 2) * 2 == 1 {
+                    let pos: i32 = i + bit
+                    out_pos[idx] = pos
+                    out_types[idx] = text[pos]
+                    idx = idx + 1
+                }
+                m = m / 2
+                bit = bit + 1
+            }
+        }
+    }
+
+    for i in n_full..len {
+        let b: u8 = text[i]
+        if b == 123 || b == 125 || b == 91 || b == 93 || b == 58 || b == 44 || b == 34 || b == 92 {
+            out_pos[idx] = i
+            out_types[idx] = b
+            idx = idx + 1
+        }
+    }
+
+    out_count[0] = idx
+}
+
+#[cfg(aarch64)]
+export func extract_json_structural(text: *u8, len: i32, out_pos: *mut i32, out_types: *mut u8, out_count: *mut i32) {
+    let mut idx: i32 = 0
+    for i in 0..len {
+        let b: u8 = text[i]
+        if b == 123 || b == 125 || b == 91 || b == 93 || b == 58 || b == 44 || b == 34 || b == 92 {
+            out_pos[idx] = i
+            out_types[idx] = b
+            idx = idx + 1
+        }
+    }
+    out_count[0] = idx
+}

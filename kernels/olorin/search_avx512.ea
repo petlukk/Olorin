@@ -1,0 +1,335 @@
+// Vector similarity search — AVX-512 (f32x16) version.
+//
+// Identical API to search.ea. x86_64 paths widened from f32x8 (256-bit)
+// to f32x16 (512-bit), halving inner loop iterations.
+// aarch64 paths unchanged (f32x4). Scalar functions unchanged.
+//
+// For dim=256 (eaclaw byte histograms): 16 FMA iterations vs 32.
+// No scalar tail — 256 is divisible by 16.
+
+// ========== batch_dot ==========
+
+#[cfg(x86_64)]
+export func batch_dot(
+    query: *f32,
+    vecs: *f32,
+    dim: i32,
+    n_vecs: i32,
+    out_scores: *mut f32
+) {
+    for v in 0..n_vecs {
+        let base: i32 = v * dim
+        let mut acc: f32x16 = splat(0.0)        for i in 0..dim step 16 {
+            if i + 16 <= dim {
+                let q: f32x16 = load(query, i)
+                let d: f32x16 = load(vecs, base + i)
+                acc = fma(q, d, acc)
+            }
+        }
+        let mut score: f32 = reduce_add(acc)
+        let simd_end: i32 = (dim / 16) * 16
+        for i in simd_end..dim {
+            let qi: f32 = to_f32(to_i32(query[i]))
+            let di: f32 = to_f32(to_i32(vecs[base + i]))
+            score = score + qi * di
+        }
+        out_scores[v] = score
+    }
+}
+
+#[cfg(aarch64)]
+export func batch_dot(
+    query: *f32,
+    vecs: *f32,
+    dim: i32,
+    n_vecs: i32,
+    out_scores: *mut f32
+) {
+    for v in 0..n_vecs {
+        let base: i32 = v * dim
+        let mut acc: f32x4 = splat(0.0)        for i in 0..dim step 4 {
+            if i + 4 <= dim {
+                let q: f32x4 = load(query, i)
+                let d: f32x4 = load(vecs, base + i)
+                acc = fma(q, d, acc)
+            }
+        }
+        let mut score: f32 = reduce_add(acc)
+        let simd_end: i32 = (dim / 4) * 4
+        for i in simd_end..dim {
+            let qi: f32 = to_f32(to_i32(query[i]))
+            let di: f32 = to_f32(to_i32(vecs[base + i]))
+            score = score + qi * di
+        }
+        out_scores[v] = score
+    }
+}
+
+// ========== batch_cosine ==========
+
+#[cfg(x86_64)]
+export func batch_cosine(
+    query: *f32,
+    query_norm: f32,
+    vecs: *f32,
+    dim: i32,
+    n_vecs: i32,
+    out_scores: *mut f32
+) {
+    for v in 0..n_vecs {
+        let base: i32 = v * dim
+        let mut dot_acc: f32x16 = splat(0.0)        let mut norm_acc: f32x16 = splat(0.0)        for i in 0..dim step 16 {
+            if i + 16 <= dim {
+                let q: f32x16 = load(query, i)
+                let d: f32x16 = load(vecs, base + i)
+                dot_acc = fma(q, d, dot_acc)
+                norm_acc = fma(d, d, norm_acc)
+            }
+        }
+        let mut dot_sum: f32 = reduce_add(dot_acc)
+        let mut norm_sum: f32 = reduce_add(norm_acc)
+        let simd_end: i32 = (dim / 16) * 16
+        for i in simd_end..dim {
+            let qi: f32 = to_f32(to_i32(query[i]))
+            let di: f32 = to_f32(to_i32(vecs[base + i]))
+            dot_sum = dot_sum + qi * di
+            norm_sum = norm_sum + di * di
+        }
+        let vec_norm: f32 = sqrt(norm_sum)
+        let denom: f32 = query_norm * vec_norm
+        if denom > 0.0 {
+            out_scores[v] = dot_sum / denom
+        } else {
+            out_scores[v] = 0.0
+        }
+    }
+}
+
+#[cfg(aarch64)]
+export func batch_cosine(
+    query: *f32,
+    query_norm: f32,
+    vecs: *f32,
+    dim: i32,
+    n_vecs: i32,
+    out_scores: *mut f32
+) {
+    for v in 0..n_vecs {
+        let base: i32 = v * dim
+        let mut dot_acc: f32x4 = splat(0.0)        let mut norm_acc: f32x4 = splat(0.0)        for i in 0..dim step 4 {
+            if i + 4 <= dim {
+                let q: f32x4 = load(query, i)
+                let d: f32x4 = load(vecs, base + i)
+                dot_acc = fma(q, d, dot_acc)
+                norm_acc = fma(d, d, norm_acc)
+            }
+        }
+        let mut dot_sum: f32 = reduce_add(dot_acc)
+        let mut norm_sum: f32 = reduce_add(norm_acc)
+        let simd_end: i32 = (dim / 4) * 4
+        for i in simd_end..dim {
+            let qi: f32 = to_f32(to_i32(query[i]))
+            let di: f32 = to_f32(to_i32(vecs[base + i]))
+            dot_sum = dot_sum + qi * di
+            norm_sum = norm_sum + di * di
+        }
+        let vec_norm: f32 = sqrt(norm_sum)
+        let denom: f32 = query_norm * vec_norm
+        if denom > 0.0 {
+            out_scores[v] = dot_sum / denom
+        } else {
+            out_scores[v] = 0.0
+        }
+    }
+}
+
+// ========== batch_l2 ==========
+
+#[cfg(x86_64)]
+export func batch_l2(
+    query: *f32,
+    vecs: *f32,
+    dim: i32,
+    n_vecs: i32,
+    out_scores: *mut f32
+) {
+    for v in 0..n_vecs {
+        let base: i32 = v * dim
+        let mut acc: f32x16 = splat(0.0)        for i in 0..dim step 16 {
+            if i + 16 <= dim {
+                let q: f32x16 = load(query, i)
+                let d: f32x16 = load(vecs, base + i)
+                let diff: f32x16 = q .- d
+                acc = fma(diff, diff, acc)
+            }
+        }
+        let mut dist: f32 = reduce_add(acc)
+        let simd_end: i32 = (dim / 16) * 16
+        for i in simd_end..dim {
+            let qi: f32 = to_f32(to_i32(query[i]))
+            let di: f32 = to_f32(to_i32(vecs[base + i]))
+            let diff: f32 = qi - di
+            dist = dist + diff * diff
+        }
+        out_scores[v] = dist
+    }
+}
+
+#[cfg(aarch64)]
+export func batch_l2(
+    query: *f32,
+    vecs: *f32,
+    dim: i32,
+    n_vecs: i32,
+    out_scores: *mut f32
+) {
+    for v in 0..n_vecs {
+        let base: i32 = v * dim
+        let mut acc: f32x4 = splat(0.0)        for i in 0..dim step 4 {
+            if i + 4 <= dim {
+                let q: f32x4 = load(query, i)
+                let d: f32x4 = load(vecs, base + i)
+                let diff: f32x4 = q .- d
+                acc = fma(diff, diff, acc)
+            }
+        }
+        let mut dist: f32 = reduce_add(acc)
+        let simd_end: i32 = (dim / 4) * 4
+        for i in simd_end..dim {
+            let qi: f32 = to_f32(to_i32(query[i]))
+            let di: f32 = to_f32(to_i32(vecs[base + i]))
+            let diff: f32 = qi - di
+            dist = dist + diff * diff
+        }
+        out_scores[v] = dist
+    }
+}
+
+// ========== normalize_vectors ==========
+
+#[cfg(x86_64)]
+export func normalize_vectors(
+    vecs: *mut f32,
+    dim: i32,
+    n_vecs: i32
+) {
+    for v in 0..n_vecs {
+        let base: i32 = v * dim
+        let mut acc: f32x16 = splat(0.0)        for i in 0..dim step 16 {
+            if i + 16 <= dim {
+                let d: f32x16 = load(vecs, base + i)
+                acc = fma(d, d, acc)
+            }
+        }
+        let mut norm_sq: f32 = reduce_add(acc)
+        let simd_end: i32 = (dim / 16) * 16
+        for i in simd_end..dim {
+            let di: f32 = to_f32(to_i32(vecs[base + i]))
+            norm_sq = norm_sq + di * di
+        }
+        if norm_sq > 0.0 {
+            let inv_norm: f32 = 1.0 / sqrt(norm_sq)
+            let v_inv: f32x16 = splat(inv_norm)
+            for i in 0..dim step 16 {
+                if i + 16 <= dim {
+                    let d: f32x16 = load(vecs, base + i)
+                    store(vecs, base + i, d .* v_inv)
+                }
+            }
+            for i in simd_end..dim {
+                let di: f32 = to_f32(to_i32(vecs[base + i]))
+                vecs[base + i] = di * inv_norm
+            }
+        }
+    }
+}
+
+#[cfg(aarch64)]
+export func normalize_vectors(
+    vecs: *mut f32,
+    dim: i32,
+    n_vecs: i32
+) {
+    for v in 0..n_vecs {
+        let base: i32 = v * dim
+        let mut acc: f32x4 = splat(0.0)        for i in 0..dim step 4 {
+            if i + 4 <= dim {
+                let d: f32x4 = load(vecs, base + i)
+                acc = fma(d, d, acc)
+            }
+        }
+        let mut norm_sq: f32 = reduce_add(acc)
+        let simd_end: i32 = (dim / 4) * 4
+        for i in simd_end..dim {
+            let di: f32 = to_f32(to_i32(vecs[base + i]))
+            norm_sq = norm_sq + di * di
+        }
+        if norm_sq > 0.0 {
+            let inv_norm: f32 = 1.0 / sqrt(norm_sq)
+            let v_inv: f32x4 = splat(inv_norm)
+            for i in 0..dim step 4 {
+                if i + 4 <= dim {
+                    let d: f32x4 = load(vecs, base + i)
+                    store(vecs, base + i, d .* v_inv)
+                }
+            }
+            for i in simd_end..dim {
+                let di: f32 = to_f32(to_i32(vecs[base + i]))
+                vecs[base + i] = di * inv_norm
+            }
+        }
+    }
+}
+
+// ========== threshold_filter ==========
+// Scalar — no SIMD widening needed.
+
+export func threshold_filter(
+    scores: *f32,
+    n: i32,
+    threshold: f32,
+    out_indices: *mut i32,
+    out_count: *mut i32
+) {
+    let mut count: i32 = 0
+    for i in 0..n {
+        if scores[i] >= threshold {
+            out_indices[count] = i
+            count = count + 1
+        }
+    }
+    out_count[0] = count
+}
+
+// ========== top_k ==========
+// Scalar — no SIMD widening needed.
+
+export func top_k(
+    scores: *f32,
+    n: i32,
+    k: i32,
+    out_indices: *mut i32,
+    out_scores: *mut f32
+) {
+    let actual_k: i32 = min(k, n)
+    for i in 0..actual_k {
+        out_indices[i] = i
+        out_scores[i] = scores[i]
+    }
+
+    for i in actual_k..n {
+        let mut min_val: f32 = out_scores[0]
+        let mut min_idx: i32 = 0
+        for j in 1..actual_k {
+            if out_scores[j] < min_val {
+                min_val = out_scores[j]
+                min_idx = j
+            }
+        }
+        let s: f32 = scores[i]
+        if s > min_val {
+            out_scores[min_idx] = s
+            out_indices[min_idx] = i
+        }
+    }
+}

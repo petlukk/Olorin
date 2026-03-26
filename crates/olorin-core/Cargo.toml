@@ -1,0 +1,29 @@
+[package]
+name = "olorin-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+cougar-engine = { path = "../cougar-engine" }
+eachacha = { path = "../eachacha" }
+eakv = { path = "../eakv" }
+eastat = { path = "../eastat" }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+futures.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+libloading.workspace = true
+libc.workspace = true
+home.workspace = true
+chrono.workspace = true
+rustyline.workspace = true
+
+[features]
+default = ["local", "whatsapp"]
+local = []
+whatsapp = []
+cloud-only = []

@@ -1,0 +1,144 @@
+// Leak scanner — two-byte SIMD prefix filter for secret patterns.
+//
+// Checks consecutive byte pairs, reducing false candidates by ~100x vs single-byte.
+// All pairs are case-sensitive (API keys are case-sensitive).
+// Eä v1.6: for loops.
+//
+// Two-byte pairs:
+//   sk (sk-, sk_live_, sk_test_, sk-ant-api, sk-proj-)
+//   AK (AKIA)
+//   gh (ghp_, gho_, ghu_, ghs_, ghr_)
+//   gi (github_pat_)
+//   xo (xoxb-, xoxp-, xoxa-)
+//   SG (SG.)
+//   se (sess_)
+//   -- (-----BEGIN)
+//   AI (AIza)
+//   Be (Bearer)
+
+#[cfg(x86_64)]
+export func scan_leak_prefixes(text: *u8, len: i32, out_masks: *mut i32, out_n_blocks: *mut i32) {
+    let hi: u8x16 = splat(255)
+    let lo: u8x16 = splat(0)
+
+    // First bytes
+    let v_s: u8x16 = splat(115)
+    let v_A: u8x16 = splat(65)
+    let v_g: u8x16 = splat(103)
+    let v_x: u8x16 = splat(120)
+    let v_S: u8x16 = splat(83)
+    let v_dash: u8x16 = splat(45)
+    let v_B: u8x16 = splat(66)
+
+    // Second bytes
+    let v_k: u8x16 = splat(107)
+    let v_K: u8x16 = splat(75)
+    let v_h: u8x16 = splat(104)
+    let v_i: u8x16 = splat(105)
+    let v_o: u8x16 = splat(111)
+    let v_G: u8x16 = splat(71)
+    let v_e: u8x16 = splat(101)
+    let v_I: u8x16 = splat(73)
+
+    let mut n_blocks: i32 = 0
+    let n_full: i32 = ((len - 1) / 16) * 16
+
+    for i in 0..n_full step 16 {
+        if i + 17 <= len {
+            let curr: u8x16 = load(text, i)
+            let next: u8x16 = load(text, i + 1)
+
+            let c_s: u8x16 = select(curr .== v_s, hi, lo)
+            let n_k: u8x16 = select(next .== v_k, hi, lo)
+            let p_sk: u8x16 = c_s .& n_k
+
+            let c_A: u8x16 = select(curr .== v_A, hi, lo)
+            let n_K: u8x16 = select(next .== v_K, hi, lo)
+            let p_AK: u8x16 = c_A .& n_K
+
+            let c_g: u8x16 = select(curr .== v_g, hi, lo)
+            let n_h: u8x16 = select(next .== v_h, hi, lo)
+            let p_gh: u8x16 = c_g .& n_h
+
+            let n_i: u8x16 = select(next .== v_i, hi, lo)
+            let p_gi: u8x16 = c_g .& n_i
+
+            let c_x: u8x16 = select(curr .== v_x, hi, lo)
+            let n_o: u8x16 = select(next .== v_o, hi, lo)
+            let p_xo: u8x16 = c_x .& n_o
+
+            let c_S: u8x16 = select(curr .== v_S, hi, lo)
+            let n_G: u8x16 = select(next .== v_G, hi, lo)
+            let p_SG: u8x16 = c_S .& n_G
+
+            let n_e: u8x16 = select(next .== v_e, hi, lo)
+            let p_se: u8x16 = c_s .& n_e
+
+            let c_dash: u8x16 = select(curr .== v_dash, hi, lo)
+            let n_dash: u8x16 = select(next .== v_dash, hi, lo)
+            let p_dd: u8x16 = c_dash .& n_dash
+
+            let n_I: u8x16 = select(next .== v_I, hi, lo)
+            let p_AI: u8x16 = c_A .& n_I
+
+            let c_B: u8x16 = select(curr .== v_B, hi, lo)
+            let p_Be: u8x16 = c_B .& n_e
+
+            let h1: u8x16 = p_sk .| p_AK .| p_gh .| p_gi
+            let h2: u8x16 = p_xo .| p_SG .| p_se .| p_dd
+            let h3: u8x16 = p_AI .| p_Be
+            let hits: u8x16 = h1 .| h2 .| h3
+
+            out_masks[n_blocks] = movemask(hits)
+            n_blocks = n_blocks + 1
+        }
+    }
+
+    if n_full < len {
+        out_masks[n_blocks] = 0
+        n_blocks = n_blocks + 1
+    }
+
+    out_n_blocks[0] = n_blocks
+}
+
+#[cfg(aarch64)]
+export func scan_leak_prefixes(text: *u8, len: i32, out_masks: *mut i32, out_n_blocks: *mut i32) {
+    let mut n_blocks: i32 = 0
+    let n_full: i32 = ((len - 1) / 16) * 16
+
+    for i in 0..n_full step 16 {
+        if i + 17 <= len {
+            let mut mask: i32 = 0
+            let mut bit: i32 = 1
+            for j in 0..16 {
+                let c: u8 = text[i + j]
+                let n: u8 = text[i + j + 1]
+                let mut hit: i32 = 0
+                if c == 115 && n == 107 { hit = 1 }
+                if c == 65 && n == 75 { hit = 1 }
+                if c == 103 && n == 104 { hit = 1 }
+                if c == 103 && n == 105 { hit = 1 }
+                if c == 120 && n == 111 { hit = 1 }
+                if c == 83 && n == 71 { hit = 1 }
+                if c == 115 && n == 101 { hit = 1 }
+                if c == 45 && n == 45 { hit = 1 }
+                if c == 65 && n == 73 { hit = 1 }
+                if c == 66 && n == 101 { hit = 1 }
+                if hit == 1 {
+                    mask = mask + bit
+                }
+                bit = bit * 2
+            }
+            out_masks[n_blocks] = mask
+            n_blocks = n_blocks + 1
+        }
+    }
+
+    if n_full < len {
+        out_masks[n_blocks] = 0
+        n_blocks = n_blocks + 1
+    }
+
+    out_n_blocks[0] = n_blocks
+}
