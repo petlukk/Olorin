@@ -1,6 +1,11 @@
 use std::env;
 use std::path::PathBuf;
 
+#[allow(dead_code)]
+mod embedded_kernels {
+    include!(concat!(env!("OUT_DIR"), "/embedded_kernels.rs"));
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
 

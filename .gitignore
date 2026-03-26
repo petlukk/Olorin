@@ -4,3 +4,4 @@
 **/*.a
 *.swp
 .DS_Store
+**/*.ea.json
