@@ -1,0 +1,34 @@
+[workspace]
+members = [
+    "olorin-cli",
+    "crates/cougar-engine",
+    "crates/olorin-core",
+    "crates/eachacha",
+    "crates/eakv",
+    "crates/eastat",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.5.0"
+edition = "2021"
+authors = ["Peter Lukka <peter.lukka@gmail.com>"]
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", features = ["json", "stream"] }
+futures = "0.3"
+async-trait = "0.1"
+thiserror = "2"
+tracing = "0.1"
+libloading = "0.8"
+libc = "0.2"
+home = "0.5"
+chrono = "0.4"
+rustyline = "15"
+
+[profile.release]
+lto = true
+codegen-units = 1
