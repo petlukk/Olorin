@@ -60,7 +60,7 @@ impl OlorinRepl {
         }
     }
 
-    pub(crate) fn handle_teleport(&self, arg: &str) -> String {
+    pub(crate) fn handle_teleport(&mut self, arg: &str) -> String {
         if arg.is_empty() {
             return "Usage: /teleport <whatsapp|web>".into();
         }
@@ -71,12 +71,25 @@ impl OlorinRepl {
         if let Err(e) = std::fs::create_dir_all(&olorin_dir) {
             return format!("Failed to create ~/.olorin: {e}");
         }
+
+        let last_hash = if let Some(ref mut vault) = self.vault {
+            vault.flush().ok();
+            vault
+                .last_block_hash()
+                .map(|h| format!("{:016x}", h))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+
         let vault_id = format!("{}_olorin", arg);
-        let token =
+        let mut token =
             olorin_core::session::SessionToken::new(arg, &vault_id, "cougar-bitnet-2b");
+        token.last_msg_hash = last_hash;
+
         let session_path = olorin_dir.join("session.json");
         match token.save(&session_path) {
-            Ok(()) => format!("Session token saved. Ready to continue on {arg}."),
+            Ok(()) => format!("Teleporting to {arg}. Vault flushed, session saved."),
             Err(e) => format!("Failed to save session token: {e}"),
         }
     }
