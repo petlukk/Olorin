@@ -3,5 +3,9 @@ name = "cougar-engine"
 version.workspace = true
 edition.workspace = true
 
+[lib]
+name = "cougar_engine"
+path = "src/lib.rs"
+
 [dependencies]
 libc.workspace = true

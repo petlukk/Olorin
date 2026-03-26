@@ -1,24 +1,13 @@
-mod embed;
-mod ffi;
-mod forward;
-mod forward_llama;
-mod gguf;
-mod matmul;
-mod matmul_q4k;
-mod matmul_q6k;
-mod gemm_q4k;
-mod gemm_q6k;
-mod gemm_i2s;
-mod prefill;
-mod model;
-mod repl;
-mod server;
-mod threadpool;
-mod tokenizer;
+//! CLI entry point for standalone cougar binary usage.
 
-use forward::InferenceState;
-use model::BitNetModel;
-use tokenizer::Tokenizer;
+use crate::embed;
+use crate::forward::InferenceState;
+use crate::forward_llama;
+use crate::gguf;
+use crate::model::{BitNetModel, QuantType};
+use crate::repl;
+use crate::server;
+use crate::tokenizer::Tokenizer;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -52,7 +41,7 @@ fn parse_arg<T: std::str::FromStr>(args: &[String], i: &mut usize, flag: &str) -
     args[*i].parse().unwrap_or_else(|_| die(&format!("{flag}: invalid value '{}'", args[*i])))
 }
 
-fn main() {
+pub fn run() {
     let args: Vec<String> = std::env::args().collect();
 
     let mut model_path = None;
@@ -98,7 +87,6 @@ fn main() {
         i += 1;
     }
 
-    // Auto-detect model: try known default paths
     let model_path = model_path.unwrap_or_else(|| {
         let home = std::env::var("HOME").unwrap_or_default();
         let defaults = [
@@ -136,7 +124,7 @@ fn main() {
     );
     eprintln!("cougar> quant: {:?}, activation: {:?}", model.quant_type, model.activation);
 
-    let is_q4k = model.quant_type == model::QuantType::Q4K;
+    let is_q4k = model.quant_type == QuantType::Q4K;
 
     if serve {
         if is_q4k {

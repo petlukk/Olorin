@@ -1,7 +1,7 @@
 //! Embedded kernel extraction and runtime loading via dlopen.
 
 use std::ffi::c_void;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 mod embedded {
@@ -86,20 +86,24 @@ unsafe impl Sync for KernelTable {}
 static KERNELS: OnceLock<KernelTable> = OnceLock::new();
 
 /// Returns the loaded kernel table, initializing on first call.
+/// Uses the default extraction path (~/.cougar/lib/{VERSION}/).
 pub fn k() -> &'static KernelTable {
     KERNELS.get_or_init(|| {
-        let dir = extract().expect("kernel extraction failed");
+        let dir = extract_default().expect("kernel extraction failed");
         load(&dir).expect("kernel load failed")
     })
 }
 
-/// Extract embedded .so files to ~/.cougar/lib/{VERSION}/ if not already done.
-pub fn extract() -> Result<PathBuf, String> {
+/// Default extraction path: ~/.cougar/lib/{VERSION}/
+fn extract_default() -> Result<PathBuf, String> {
     let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
-    let dir = PathBuf::from(home)
-        .join(".cougar")
-        .join("lib")
-        .join(embedded::VERSION);
+    let base = PathBuf::from(home).join(".cougar").join("lib");
+    extract(&base)
+}
+
+/// Extract embedded .so files to `base_dir/{VERSION}/` if not already done.
+pub fn extract(base_dir: &Path) -> Result<PathBuf, String> {
+    let dir = base_dir.join(embedded::VERSION);
 
     let marker = dir.join(".extracted");
     if marker.exists() {
@@ -177,9 +181,20 @@ unsafe fn sym<T>(handle: *mut c_void, name: &str) -> Result<T, String> {
     Ok(std::mem::transmute_copy(&ptr))
 }
 
-/// Initialize kernels (extract + load). Safe to call multiple times.
+/// Initialize kernels with default path (~/.cougar/lib/). Safe to call multiple times.
 pub fn init() -> Result<(), String> {
-    // Force initialization via k()
     let _ = k();
+    Ok(())
+}
+
+/// Initialize kernels with a custom base directory. The version subdirectory
+/// is appended automatically. Safe to call multiple times (first call wins).
+pub fn init_with_dir(base_dir: &Path) -> Result<(), String> {
+    if KERNELS.get().is_some() {
+        return Ok(());
+    }
+    let dir = extract(base_dir)?;
+    let table = load(&dir)?;
+    let _ = KERNELS.set(table);
     Ok(())
 }
