@@ -1,0 +1,109 @@
+// SIMD Q4_1 dequantization — AVX2 tier (f32x8, 256-bit)
+//
+// Split packing: byte[k] = quant(value[k+32])*16 + quant(value[k])
+// lo nibble → value[k], hi nibble → value[k+32]
+//
+// AVX2 strategy: widen_u8_f32x8 processes 8 bytes → f32x8 in one shot.
+// Each u8x16 load yields 16 nibbles per channel (lo/hi).
+// 2 widen calls per channel per load = 4 widens per load = 8 total.
+
+export func q4_dequantize_avx2_f32(
+    weights: *restrict u8,
+    scales: *restrict f32,
+    biases: *restrict f32,
+    out: *mut f32,
+    n_groups: i32
+) {
+    let mask15: u8x16 = splat(15)
+    let div16: u8x16 = splat(16)
+
+    let mut g: i32 = 0
+    while g < n_groups {
+        let vs: f32x8 = splat(scales[g])
+        let vb: f32x8 = splat(biases[g])
+        let wb: i32 = g * 32
+        let ob: i32 = g * 64
+
+        // --- First 16 bytes ---
+        let p0: u8x16 = load(weights, wb)
+        let lo0: u8x16 = p0 .& mask15
+        let hi0: u8x16 = p0 ./ div16
+
+        // lo0 bytes 0-7 → out[0..7]
+        store(out, ob, fma(widen_u8_f32x8(lo0), vs, vb))
+        // lo0 bytes 8-15 → out[8..15]
+        let lo0h: u8x16 = shuffle(lo0, [8,9,10,11,12,13,14,15, 0,0,0,0,0,0,0,0])
+        store(out, ob + 8, fma(widen_u8_f32x8(lo0h), vs, vb))
+
+        // --- Second 16 bytes ---
+        let p1: u8x16 = load(weights, wb + 16)
+        let lo1: u8x16 = p1 .& mask15
+        let hi1: u8x16 = p1 ./ div16
+
+        // lo1 bytes 0-7 → out[16..23]
+        store(out, ob + 16, fma(widen_u8_f32x8(lo1), vs, vb))
+        // lo1 bytes 8-15 → out[24..31]
+        let lo1h: u8x16 = shuffle(lo1, [8,9,10,11,12,13,14,15, 0,0,0,0,0,0,0,0])
+        store(out, ob + 24, fma(widen_u8_f32x8(lo1h), vs, vb))
+
+        // --- hi0 → out[32..47] ---
+        store(out, ob + 32, fma(widen_u8_f32x8(hi0), vs, vb))
+        let hi0h: u8x16 = shuffle(hi0, [8,9,10,11,12,13,14,15, 0,0,0,0,0,0,0,0])
+        store(out, ob + 40, fma(widen_u8_f32x8(hi0h), vs, vb))
+
+        // --- hi1 → out[48..63] ---
+        store(out, ob + 48, fma(widen_u8_f32x8(hi1), vs, vb))
+        let hi1h: u8x16 = shuffle(hi1, [8,9,10,11,12,13,14,15, 0,0,0,0,0,0,0,0])
+        store(out, ob + 56, fma(widen_u8_f32x8(hi1h), vs, vb))
+
+        g = g + 1
+    }
+}
+
+// Partial dequantize: contiguous range of groups
+export func q4_dequantize_range_avx2_f32(
+    weights: *restrict u8,
+    scales: *restrict f32,
+    biases: *restrict f32,
+    out: *mut f32,
+    group_start: i32,
+    group_count: i32
+) {
+    let mask15: u8x16 = splat(15)
+    let div16: u8x16 = splat(16)
+
+    let mut i: i32 = 0
+    while i < group_count {
+        let g: i32 = group_start + i
+        let vs: f32x8 = splat(scales[g])
+        let vb: f32x8 = splat(biases[g])
+        let wb: i32 = g * 32
+        let ob: i32 = i * 64
+
+        let p0: u8x16 = load(weights, wb)
+        let lo0: u8x16 = p0 .& mask15
+        let hi0: u8x16 = p0 ./ div16
+
+        store(out, ob, fma(widen_u8_f32x8(lo0), vs, vb))
+        let lo0h: u8x16 = shuffle(lo0, [8,9,10,11,12,13,14,15, 0,0,0,0,0,0,0,0])
+        store(out, ob + 8, fma(widen_u8_f32x8(lo0h), vs, vb))
+
+        let p1: u8x16 = load(weights, wb + 16)
+        let lo1: u8x16 = p1 .& mask15
+        let hi1: u8x16 = p1 ./ div16
+
+        store(out, ob + 16, fma(widen_u8_f32x8(lo1), vs, vb))
+        let lo1h: u8x16 = shuffle(lo1, [8,9,10,11,12,13,14,15, 0,0,0,0,0,0,0,0])
+        store(out, ob + 24, fma(widen_u8_f32x8(lo1h), vs, vb))
+
+        store(out, ob + 32, fma(widen_u8_f32x8(hi0), vs, vb))
+        let hi0h: u8x16 = shuffle(hi0, [8,9,10,11,12,13,14,15, 0,0,0,0,0,0,0,0])
+        store(out, ob + 40, fma(widen_u8_f32x8(hi0h), vs, vb))
+
+        store(out, ob + 48, fma(widen_u8_f32x8(hi1), vs, vb))
+        let hi1h: u8x16 = shuffle(hi1, [8,9,10,11,12,13,14,15, 0,0,0,0,0,0,0,0])
+        store(out, ob + 56, fma(widen_u8_f32x8(hi1h), vs, vb))
+
+        i = i + 1
+    }
+}

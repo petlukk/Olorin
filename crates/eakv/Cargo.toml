@@ -1,0 +1,11 @@
+[package]
+name = "eakv"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+libc.workspace = true
+libloading.workspace = true
+
+[build-dependencies]
+cc = "1"
