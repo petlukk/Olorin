@@ -1,0 +1,177 @@
+// CSV layout kernels — compute row boundaries and field positions.
+//
+// Three exports:
+//   build_row_arrays        — compute row start/end from LF positions
+//   build_row_delim_index   — per-row delimiter mapping via merge-scan
+//   compute_field_bounds    — field start/end for a given column
+
+
+// Compute row_starts/row_ends arrays from LF positions in one pass.
+// Replaces ~70 lines of Python edge-case logic for row boundary computation.
+//
+// header_end: position of the first LF (header boundary), or -1 if no header.
+// Handles: header skip, last row without trailing newline, empty file.
+export func build_row_arrays(
+    lf_pos: *i32,
+    n_lfs: i32,
+    header_end: i32,
+    text_len: i32,
+    out_row_starts: *mut i32,
+    out_row_ends: *mut i32,
+    out_n_rows: *mut i32
+) {
+    let mut n_rows: i32 = 0
+
+    if header_end >= 0 {
+        // Has header: lf_pos[0] is the header LF.
+        // Data rows are between consecutive LFs starting from index 0.
+        // Row i: starts at lf_pos[i]+1, ends at lf_pos[i+1]
+        let mut i: i32 = 0
+        while i + 1 < n_lfs {
+            out_row_starts[n_rows] = lf_pos[i] + 1
+            out_row_ends[n_rows] = lf_pos[i + 1]
+            n_rows = n_rows + 1
+            i = i + 1
+        }
+        // Last row without trailing newline
+        if n_lfs > 0 {
+            let last_lf: i32 = lf_pos[n_lfs - 1]
+            if last_lf + 1 < text_len {
+                out_row_starts[n_rows] = last_lf + 1
+                out_row_ends[n_rows] = text_len
+                n_rows = n_rows + 1
+            }
+        }
+    } else {
+        // No header: all LFs are data boundaries
+        if n_lfs > 0 {
+            // First row: byte 0 to first LF
+            out_row_starts[n_rows] = 0
+            out_row_ends[n_rows] = lf_pos[0]
+            n_rows = n_rows + 1
+
+            // Rows between consecutive LFs
+            let mut i: i32 = 1
+            while i < n_lfs {
+                out_row_starts[n_rows] = lf_pos[i - 1] + 1
+                out_row_ends[n_rows] = lf_pos[i]
+                n_rows = n_rows + 1
+                i = i + 1
+            }
+
+            // Last row without trailing newline
+            let last_lf: i32 = lf_pos[n_lfs - 1]
+            if last_lf + 1 < text_len {
+                out_row_starts[n_rows] = last_lf + 1
+                out_row_ends[n_rows] = text_len
+                n_rows = n_rows + 1
+            }
+        } else {
+            // No LFs at all: entire file is one row (if non-empty)
+            if text_len > 0 {
+                out_row_starts[n_rows] = 0
+                out_row_ends[n_rows] = text_len
+                n_rows = n_rows + 1
+            }
+        }
+    }
+
+    out_n_rows[0] = n_rows
+}
+
+
+// Build per-row delimiter index via merge-scan of sorted arrays.
+// Given sorted delim_pos[] and sorted row_ends[], compute:
+//   delims_per_row[i]:    number of delimiters in row i
+//   row_delim_offset[i]:  index into delim_pos where row i's delimiters start
+//
+// O(n_delims + n_rows) merge — replaces searchsorted + bincount.
+export func build_row_delim_index(
+    delim_pos: *i32,
+    n_delims: i32,
+    row_ends: *i32,
+    n_rows: i32,
+    out_delims_per_row: *mut i32,
+    out_row_delim_offset: *mut i32
+) {
+    let mut di: i32 = 0
+    let mut ri: i32 = 0
+
+    while ri < n_rows {
+        out_row_delim_offset[ri] = di
+        let row_end: i32 = row_ends[ri]
+        let mut count: i32 = 0
+
+        let mut scanning: i32 = 1
+        while di < n_delims && scanning == 1 {
+            if delim_pos[di] < row_end {
+                count = count + 1
+                di = di + 1
+            } else {
+                scanning = 0
+            }
+        }
+
+        out_delims_per_row[ri] = count
+        ri = ri + 1
+    }
+}
+
+
+// Compute field start/end positions for a specific column across all rows.
+// Given structural index, outputs field_starts[i] and field_ends[i] for each row.
+export func compute_field_bounds(
+    col_idx: i32,
+    col_count: i32,
+    n_rows: i32,
+    row_starts: *i32,
+    row_ends: *i32,
+    delim_pos: *i32,
+    row_delim_offset: *i32,
+    delims_per_row: *i32,
+    out_field_starts: *mut i32,
+    out_field_ends: *mut i32
+) {
+    let mut i: i32 = 0
+    let last_col: i32 = col_count - 1
+
+    while i < n_rows {
+        let rs: i32 = row_starts[i]
+        let re: i32 = row_ends[i]
+        let ndel: i32 = delims_per_row[i]
+        let off: i32 = row_delim_offset[i]
+
+        if col_idx == 0 {
+            out_field_starts[i] = rs
+            if ndel > 0 {
+                out_field_ends[i] = delim_pos[off]
+            } else {
+                out_field_ends[i] = re
+            }
+        } else {
+            if col_idx >= last_col {
+                out_field_ends[i] = re
+                if ndel >= col_idx {
+                    out_field_starts[i] = delim_pos[off + col_idx - 1] + 1
+                } else {
+                    out_field_starts[i] = re
+                }
+            } else {
+                if ndel > col_idx {
+                    out_field_starts[i] = delim_pos[off + col_idx - 1] + 1
+                    out_field_ends[i] = delim_pos[off + col_idx]
+                } else {
+                    if ndel == col_idx {
+                        out_field_starts[i] = delim_pos[off + col_idx - 1] + 1
+                        out_field_ends[i] = re
+                    } else {
+                        out_field_starts[i] = re
+                        out_field_ends[i] = re
+                    }
+                }
+            }
+        }
+
+        i = i + 1
+    }
+}

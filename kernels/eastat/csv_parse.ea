@@ -1,0 +1,216 @@
+// CSV parsing kernels — numeric and string field processing.
+//
+// Two exports:
+//   batch_atof          — ASCII-to-float parser
+//   field_length_stats  — string column length statistics
+
+const ASCII_ZERO: i32 = 48
+const ASCII_NINE: i32 = 57
+
+static_assert(ASCII_NINE - ASCII_ZERO == 9, "digit range must be contiguous for atof")
+
+
+// Parse n numeric fields from raw byte data into f32 values.
+// Handles: integers, decimals, signed values, leading whitespace, quotes.
+// Skips nulls (empty fields, non-numeric text). Returns valid count via out_count.
+//
+// ASCII: '0'=48 '9'=57 '-'=45 '+'=43 '.'=46 ' '=32 '\t'=9 '\r'=13 '"'=34
+export func batch_atof(
+    data: *u8,
+    starts: *i32,
+    ends: *i32,
+    n: i32,
+    out: *mut f32,
+    out_count: *mut i32
+) {
+    let mut count: i32 = 0
+    let mut i: i32 = 0
+
+    for i in 0..n {
+        let mut pos: i32 = starts[i]
+        let end: i32 = ends[i]
+
+        if pos < end {
+            // Skip leading whitespace, quotes, CR
+            let mut trimming: i32 = 1
+            while pos < end && trimming == 1 {
+                let b: u8 = data[pos]
+                if b == 32 || b == 9 || b == 13 || b == 34 {
+                    pos = pos + 1
+                } else {
+                    trimming = 0
+                }
+            }
+
+            // Skip trailing whitespace, quotes, CR
+            let mut trim_end: i32 = end
+            let mut trimming_end: i32 = 1
+            while trim_end > pos && trimming_end == 1 {
+                let b: u8 = data[trim_end - 1]
+                if b == 32 || b == 9 || b == 13 || b == 34 {
+                    trim_end = trim_end - 1
+                } else {
+                    trimming_end = 0
+                }
+            }
+
+            if pos < trim_end {
+                let first: u8 = data[pos]
+
+                let mut is_numeric: i32 = 0
+                if first >= 48 && first <= 57 {
+                    is_numeric = 1
+                }
+                if first == 45 || first == 43 {
+                    is_numeric = 1
+                }
+                if first == 46 {
+                    is_numeric = 1
+                }
+
+                if is_numeric == 1 {
+                    let mut negative: i32 = 0
+                    if first == 45 {
+                        negative = 1
+                        pos = pos + 1
+                    } else {
+                        if first == 43 {
+                            pos = pos + 1
+                        }
+                    }
+
+                    let mut int_part: f32 = 0.0
+                    let mut has_digits: i32 = 0
+                    let mut parsing_int: i32 = 1
+                    while pos < trim_end && parsing_int == 1 {
+                        let b: u8 = data[pos]
+                        if b >= 48 && b <= 57 {
+                            int_part = int_part * 10.0 + to_f32(to_i32(b) - ASCII_ZERO)
+                            has_digits = 1
+                            pos = pos + 1
+                        } else {
+                            parsing_int = 0
+                        }
+                    }
+
+                    let mut frac: f32 = 0.0
+                    let mut frac_scale: f32 = 0.1
+                    if pos < trim_end {
+                        let dot_check: u8 = data[pos]
+                        if dot_check == 46 {
+                            pos = pos + 1
+                            let mut parsing_frac: i32 = 1
+                            while pos < trim_end && parsing_frac == 1 {
+                                let b: u8 = data[pos]
+                                if b >= 48 && b <= 57 {
+                                    frac = frac + to_f32(to_i32(b) - ASCII_ZERO) * frac_scale
+                                    frac_scale = frac_scale * 0.1
+                                    has_digits = 1
+                                    pos = pos + 1
+                                } else {
+                                    parsing_frac = 0
+                                }
+                            }
+                        }
+                    }
+
+                    // Scientific notation: detect e/E and parse exponent
+                    let mut exp_scale: f32 = 1.0
+                    if pos < trim_end {
+                        let ec: u8 = data[pos]
+                        if ec == 101 || ec == 69 {
+                            pos = pos + 1
+                            let mut exp_neg: i32 = 0
+                            if pos < trim_end {
+                                let es: u8 = data[pos]
+                                if es == 45 {
+                                    exp_neg = 1
+                                    pos = pos + 1
+                                } else {
+                                    if es == 43 {
+                                        pos = pos + 1
+                                    }
+                                }
+                            }
+                            let mut exp_val: i32 = 0
+                            while pos < trim_end {
+                                let eb: u8 = data[pos]
+                                if eb >= 48 && eb <= 57 {
+                                    exp_val = exp_val * 10 + (to_i32(eb) - ASCII_ZERO)
+                                    has_digits = 1
+                                    pos = pos + 1
+                                } else {
+                                    pos = trim_end
+                                }
+                            }
+                            let mut ei: i32 = 0
+                            if exp_neg == 1 {
+                                while ei < exp_val {
+                                    exp_scale = exp_scale * 0.1
+                                    ei = ei + 1
+                                }
+                            } else {
+                                while ei < exp_val {
+                                    exp_scale = exp_scale * 10.0
+                                    ei = ei + 1
+                                }
+                            }
+                        }
+                    }
+
+                    if has_digits == 1 {
+                        let mut result: f32 = (int_part + frac) * exp_scale
+                        if negative == 1 {
+                            result = 0.0 - result
+                        }
+                        out[count] = result
+                        count = count + 1
+                    }
+                }
+            }
+        }
+    }
+
+    out_count[0] = count
+}
+
+
+// Compute field length statistics for string columns.
+// Returns min/max/total length and null count.
+export func field_length_stats(
+    starts: *i32,
+    ends: *i32,
+    n: i32,
+    out_min_len: *mut i32,
+    out_max_len: *mut i32,
+    out_total_len: *mut i32,
+    out_null_count: *mut i32
+) {
+    let mut min_len: i32 = 2147483647
+    let mut max_len: i32 = 0
+    let mut total_len: i32 = 0
+    let mut null_count: i32 = 0
+    let mut valid_count: i32 = 0
+    let mut i: i32 = 0
+
+    for i in 0..n {
+        let len: i32 = ends[i] - starts[i]
+        if len <= 0 {
+            null_count = null_count + 1
+        } else {
+            total_len = total_len + len
+            valid_count = valid_count + 1
+            min_len = min(len, min_len)
+            max_len = max(len, max_len)
+        }
+    }
+
+    if valid_count == 0 {
+        min_len = 0
+    }
+
+    out_min_len[0] = min_len
+    out_max_len[0] = max_len
+    out_total_len[0] = total_len
+    out_null_count[0] = null_count
+}

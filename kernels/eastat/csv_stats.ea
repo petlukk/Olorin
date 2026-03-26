@@ -1,0 +1,331 @@
+// Fused column statistics — single-pass sum + min + max + sum_of_squares
+//
+// x86_64: f32x8 dual-accumulator with FMA for sum-of-squares.
+// aarch64: f32x4 dual-accumulator with FMA (NEON-compatible).
+// One pass through the data computes all four statistics simultaneously.
+// Dual accumulators expose ILP for superscalar execution.
+
+
+// --- x86_64: f32x8 column stats ---
+
+#[cfg(x86_64)]
+export func f32_column_stats(
+    data: *restrict f32,
+    len: i32,
+    out_sum: *mut f32,
+    out_min: *mut f32,
+    out_max: *mut f32,
+    out_sumsq: *mut f32
+) {
+    let mut sum_acc0: f32x8 = splat(0.0)
+    let mut sum_acc1: f32x8 = splat(0.0)
+    let mut sumsq_acc0: f32x8 = splat(0.0)
+    let mut sumsq_acc1: f32x8 = splat(0.0)
+
+    let init_val: f32 = data[0]
+    let mut min_acc0: f32x8 = splat(init_val)
+    let mut min_acc1: f32x8 = splat(init_val)
+    let mut max_acc0: f32x8 = splat(init_val)
+    let mut max_acc1: f32x8 = splat(init_val)
+
+    let mut i: i32 = 0
+
+    // Main SIMD loop: 16 f32s per iteration (2x f32x8)
+    while i + 16 <= len {
+        prefetch(data, i + 64)
+
+        let v0: f32x8 = load(data, i)
+        let v1: f32x8 = load(data, i + 8)
+
+        sum_acc0 = sum_acc0 .+ v0
+        sum_acc1 = sum_acc1 .+ v1
+
+        sumsq_acc0 = fma(v0, v0, sumsq_acc0)
+        sumsq_acc1 = fma(v1, v1, sumsq_acc1)
+
+        min_acc0 = select(v0 .< min_acc0, v0, min_acc0)
+        min_acc1 = select(v1 .< min_acc1, v1, min_acc1)
+
+        max_acc0 = select(v0 .> max_acc0, v0, max_acc0)
+        max_acc1 = select(v1 .> max_acc1, v1, max_acc1)
+
+        i = i + 16
+    }
+
+    // Remaining full f32x8 vector
+    while i + 8 <= len {
+        let v: f32x8 = load(data, i)
+        sum_acc0 = sum_acc0 .+ v
+        sumsq_acc0 = fma(v, v, sumsq_acc0)
+        min_acc0 = select(v .< min_acc0, v, min_acc0)
+        max_acc0 = select(v .> max_acc0, v, max_acc0)
+        i = i + 8
+    }
+
+    // Merge dual accumulators
+    let sum_merged: f32x8 = sum_acc0 .+ sum_acc1
+    let sumsq_merged: f32x8 = sumsq_acc0 .+ sumsq_acc1
+    let min_merged: f32x8 = select(min_acc0 .< min_acc1, min_acc0, min_acc1)
+    let max_merged: f32x8 = select(max_acc0 .> max_acc1, max_acc0, max_acc1)
+
+    // Horizontal reduction
+    let mut total_sum: f32 = reduce_add(sum_merged)
+    let mut total_sumsq: f32 = reduce_add(sumsq_merged)
+    let mut total_min: f32 = reduce_min(min_merged)
+    let mut total_max: f32 = reduce_max(max_merged)
+
+    // Scalar tail
+    while i < len {
+        let v: f32 = data[i]
+        total_sum = total_sum + v
+        total_sumsq = total_sumsq + v * v
+        total_min = min(v, total_min)
+        total_max = max(v, total_max)
+        i = i + 1
+    }
+
+    out_sum[0] = total_sum
+    out_min[0] = total_min
+    out_max[0] = total_max
+    out_sumsq[0] = total_sumsq
+}
+
+
+// --- aarch64: f32x4 column stats ---
+
+#[cfg(aarch64)]
+export func f32_column_stats(
+    data: *restrict f32,
+    len: i32,
+    out_sum: *mut f32,
+    out_min: *mut f32,
+    out_max: *mut f32,
+    out_sumsq: *mut f32
+) {
+    let mut sum_acc0: f32x4 = splat(0.0)
+    let mut sum_acc1: f32x4 = splat(0.0)
+    let mut sumsq_acc0: f32x4 = splat(0.0)
+    let mut sumsq_acc1: f32x4 = splat(0.0)
+
+    let init_val: f32 = data[0]
+    let mut min_acc0: f32x4 = splat(init_val)
+    let mut min_acc1: f32x4 = splat(init_val)
+    let mut max_acc0: f32x4 = splat(init_val)
+    let mut max_acc1: f32x4 = splat(init_val)
+
+    let mut i: i32 = 0
+
+    // Main SIMD loop: 8 f32s per iteration (2x f32x4)
+    while i + 8 <= len {
+        prefetch(data, i + 32)
+
+        let v0: f32x4 = load(data, i)
+        let v1: f32x4 = load(data, i + 4)
+
+        sum_acc0 = sum_acc0 .+ v0
+        sum_acc1 = sum_acc1 .+ v1
+
+        sumsq_acc0 = fma(v0, v0, sumsq_acc0)
+        sumsq_acc1 = fma(v1, v1, sumsq_acc1)
+
+        min_acc0 = select(v0 .< min_acc0, v0, min_acc0)
+        min_acc1 = select(v1 .< min_acc1, v1, min_acc1)
+
+        max_acc0 = select(v0 .> max_acc0, v0, max_acc0)
+        max_acc1 = select(v1 .> max_acc1, v1, max_acc1)
+
+        i = i + 8
+    }
+
+    // Remaining full f32x4 vector
+    while i + 4 <= len {
+        let v: f32x4 = load(data, i)
+        sum_acc0 = sum_acc0 .+ v
+        sumsq_acc0 = fma(v, v, sumsq_acc0)
+        min_acc0 = select(v .< min_acc0, v, min_acc0)
+        max_acc0 = select(v .> max_acc0, v, max_acc0)
+        i = i + 4
+    }
+
+    // Merge dual accumulators
+    let sum_merged: f32x4 = sum_acc0 .+ sum_acc1
+    let sumsq_merged: f32x4 = sumsq_acc0 .+ sumsq_acc1
+    let min_merged: f32x4 = select(min_acc0 .< min_acc1, min_acc0, min_acc1)
+    let max_merged: f32x4 = select(max_acc0 .> max_acc1, max_acc0, max_acc1)
+
+    // Horizontal reduction
+    let mut total_sum: f32 = reduce_add(sum_merged)
+    let mut total_sumsq: f32 = reduce_add(sumsq_merged)
+    let mut total_min: f32 = reduce_min(min_merged)
+    let mut total_max: f32 = reduce_max(max_merged)
+
+    // Scalar tail
+    while i < len {
+        let v: f32 = data[i]
+        total_sum = total_sum + v
+        total_sumsq = total_sumsq + v * v
+        total_min = min(v, total_min)
+        total_max = max(v, total_max)
+        i = i + 1
+    }
+
+    out_sum[0] = total_sum
+    out_min[0] = total_min
+    out_max[0] = total_max
+    out_sumsq[0] = total_sumsq
+}
+
+
+// Binary-search percentiles — 3 simultaneous searches with SIMD counting.
+//
+// Each iteration does one data pass counting elements <= candidate for all
+// 3 percentiles (p25, p50, p75) via select + reduce_add.  30 iterations
+// converges to f32 precision.
+
+
+// --- x86_64: f32x8 percentiles ---
+
+#[cfg(x86_64)]
+export func f32_percentiles(
+    data: *restrict f32,
+    len: i32,
+    min_val: f32,
+    max_val: f32,
+    out_p25: *mut f32,
+    out_p50: *mut f32,
+    out_p75: *mut f32
+) {
+    let ones: f32x8 = splat(1.0)
+    let zeros: f32x8 = splat(0.0)
+
+    let flen: f32 = to_f32(len)
+    let rank25: f32 = flen * 0.25
+    let rank50: f32 = flen * 0.5
+    let rank75: f32 = flen * 0.75
+
+    let mut lo25: f32 = min_val
+    let mut hi25: f32 = max_val
+    let mut lo50: f32 = min_val
+    let mut hi50: f32 = max_val
+    let mut lo75: f32 = min_val
+    let mut hi75: f32 = max_val
+
+    let mut iter: i32 = 0
+    for iter in 0..30 {
+        let mid25: f32 = (lo25 + hi25) * 0.5
+        let mid50: f32 = (lo50 + hi50) * 0.5
+        let mid75: f32 = (lo75 + hi75) * 0.5
+
+        let s25: f32x8 = splat(mid25)
+        let s50: f32x8 = splat(mid50)
+        let s75: f32x8 = splat(mid75)
+
+        let mut acc25: f32x8 = splat(0.0)
+        let mut acc50: f32x8 = splat(0.0)
+        let mut acc75: f32x8 = splat(0.0)
+
+        let mut i: i32 = 0
+        while i + 8 <= len {
+            let v: f32x8 = load(data, i)
+            acc25 = acc25 .+ select(v .<= s25, ones, zeros)
+            acc50 = acc50 .+ select(v .<= s50, ones, zeros)
+            acc75 = acc75 .+ select(v .<= s75, ones, zeros)
+            i = i + 8
+        }
+
+        let mut cnt25: f32 = reduce_add(acc25)
+        let mut cnt50: f32 = reduce_add(acc50)
+        let mut cnt75: f32 = reduce_add(acc75)
+
+        // Scalar tail
+        while i < len {
+            let v: f32 = data[i]
+            if v <= mid25 { cnt25 = cnt25 + 1.0 }
+            if v <= mid50 { cnt50 = cnt50 + 1.0 }
+            if v <= mid75 { cnt75 = cnt75 + 1.0 }
+            i = i + 1
+        }
+
+        if cnt25 < rank25 { lo25 = mid25 } else { hi25 = mid25 }
+        if cnt50 < rank50 { lo50 = mid50 } else { hi50 = mid50 }
+        if cnt75 < rank75 { lo75 = mid75 } else { hi75 = mid75 }
+    }
+
+    out_p25[0] = (lo25 + hi25) * 0.5
+    out_p50[0] = (lo50 + hi50) * 0.5
+    out_p75[0] = (lo75 + hi75) * 0.5
+}
+
+
+// --- aarch64: f32x4 percentiles ---
+
+#[cfg(aarch64)]
+export func f32_percentiles(
+    data: *restrict f32,
+    len: i32,
+    min_val: f32,
+    max_val: f32,
+    out_p25: *mut f32,
+    out_p50: *mut f32,
+    out_p75: *mut f32
+) {
+    let ones: f32x4 = splat(1.0)
+    let zeros: f32x4 = splat(0.0)
+
+    let flen: f32 = to_f32(len)
+    let rank25: f32 = flen * 0.25
+    let rank50: f32 = flen * 0.5
+    let rank75: f32 = flen * 0.75
+
+    let mut lo25: f32 = min_val
+    let mut hi25: f32 = max_val
+    let mut lo50: f32 = min_val
+    let mut hi50: f32 = max_val
+    let mut lo75: f32 = min_val
+    let mut hi75: f32 = max_val
+
+    let mut iter: i32 = 0
+    for iter in 0..30 {
+        let mid25: f32 = (lo25 + hi25) * 0.5
+        let mid50: f32 = (lo50 + hi50) * 0.5
+        let mid75: f32 = (lo75 + hi75) * 0.5
+
+        let s25: f32x4 = splat(mid25)
+        let s50: f32x4 = splat(mid50)
+        let s75: f32x4 = splat(mid75)
+
+        let mut acc25: f32x4 = splat(0.0)
+        let mut acc50: f32x4 = splat(0.0)
+        let mut acc75: f32x4 = splat(0.0)
+
+        let mut i: i32 = 0
+        while i + 4 <= len {
+            let v: f32x4 = load(data, i)
+            acc25 = acc25 .+ select(v .<= s25, ones, zeros)
+            acc50 = acc50 .+ select(v .<= s50, ones, zeros)
+            acc75 = acc75 .+ select(v .<= s75, ones, zeros)
+            i = i + 4
+        }
+
+        let mut cnt25: f32 = reduce_add(acc25)
+        let mut cnt50: f32 = reduce_add(acc50)
+        let mut cnt75: f32 = reduce_add(acc75)
+
+        // Scalar tail
+        while i < len {
+            let v: f32 = data[i]
+            if v <= mid25 { cnt25 = cnt25 + 1.0 }
+            if v <= mid50 { cnt50 = cnt50 + 1.0 }
+            if v <= mid75 { cnt75 = cnt75 + 1.0 }
+            i = i + 1
+        }
+
+        if cnt25 < rank25 { lo25 = mid25 } else { hi25 = mid25 }
+        if cnt50 < rank50 { lo50 = mid50 } else { hi50 = mid50 }
+        if cnt75 < rank75 { lo75 = mid75 } else { hi75 = mid75 }
+    }
+
+    out_p25[0] = (lo25 + hi25) * 0.5
+    out_p50[0] = (lo50 + hi50) * 0.5
+    out_p75[0] = (lo75 + hi75) * 0.5
+}
