@@ -8,3 +8,4 @@ pub mod persist;
 pub mod recall;
 pub mod safety;
 pub mod tools;
+pub mod vault;

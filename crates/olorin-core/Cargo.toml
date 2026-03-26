@@ -25,3 +25,6 @@ rustyline.workspace = true
 [features]
 default = ["whatsapp"]
 whatsapp = []
+
+[dev-dependencies]
+tempfile = "3.27.0"
