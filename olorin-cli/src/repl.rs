@@ -154,28 +154,33 @@ impl OlorinRepl {
             format!("{}{}", context, prompt)
         };
 
-        let response = match &self.engine {
-            Some(eng) => {
-                let resp = eng.generate_text(&full_prompt, &|tok| {
-                    print!("{}", tok);
-                    stdout.lock().flush().ok();
-                });
+        let response = if self.backend_mode == "cloud" {
+            let msg = "Cloud backend requires ANTHROPIC_API_KEY. Set it and restart.";
+            print!("{}", msg);
+            msg.to_string()
+        } else {
+            match &self.engine {
+                Some(eng) => {
+                    let resp = eng.generate_text(&full_prompt, &|tok| {
+                        print!("{}", tok);
+                        stdout.lock().flush().ok();
+                    });
 
-                // Safety scan on LLM output (warn only — already streamed)
-                let scan = self.safety.scan_output(&resp);
-                if scan.is_blocked() {
-                    eprintln!(
-                        "\n[Safety] Warning: output {}",
-                        scan.block_reason().unwrap_or("flagged")
-                    );
+                    let scan = self.safety.scan_output(&resp);
+                    if scan.is_blocked() {
+                        eprintln!(
+                            "\n[Safety] Warning: output {}",
+                            scan.block_reason().unwrap_or("flagged")
+                        );
+                    }
+
+                    resp
                 }
-
-                resp
-            }
-            None => {
-                let msg = "No local model loaded.";
-                print!("{}", msg);
-                msg.to_string()
+                None => {
+                    let msg = "No local model loaded.";
+                    print!("{}", msg);
+                    msg.to_string()
+                }
             }
         };
 
@@ -215,25 +220,31 @@ impl OlorinRepl {
             format!("{}{}", context, prompt)
         };
 
-        let response = match &self.engine {
-            Some(eng) => {
-                let resp = eng.generate_text(&full_prompt, on_token);
+        let response = if self.backend_mode == "cloud" {
+            let msg = "Cloud backend requires ANTHROPIC_API_KEY. Set it and restart.";
+            on_token(msg);
+            msg.to_string()
+        } else {
+            match &self.engine {
+                Some(eng) => {
+                    let resp = eng.generate_text(&full_prompt, on_token);
 
-                let scan = self.safety.scan_output(&resp);
-                if scan.is_blocked() {
-                    let warn = format!(
-                        "\n[Safety] Warning: output {}",
-                        scan.block_reason().unwrap_or("flagged")
-                    );
-                    on_token(&warn);
+                    let scan = self.safety.scan_output(&resp);
+                    if scan.is_blocked() {
+                        let warn = format!(
+                            "\n[Safety] Warning: output {}",
+                            scan.block_reason().unwrap_or("flagged")
+                        );
+                        on_token(&warn);
+                    }
+
+                    resp
                 }
-
-                resp
-            }
-            None => {
-                let msg = "No local model loaded.";
-                on_token(msg);
-                msg.to_string()
+                None => {
+                    let msg = "No local model loaded.";
+                    on_token(msg);
+                    msg.to_string()
+                }
             }
         };
 

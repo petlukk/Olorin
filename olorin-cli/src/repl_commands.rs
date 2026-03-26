@@ -28,18 +28,33 @@ impl OlorinRepl {
         )
     }
 
-    pub(crate) fn handle_model(&self, arg: &str) -> String {
+    pub(crate) fn handle_model(&mut self, arg: &str) -> String {
         match arg {
-            "local" => "Backend: local (Cougar)".into(),
-            "cloud" => "Backend: cloud (Anthropic)".into(),
-            "auto" => "Backend: auto".into(),
+            "local" => {
+                if self.engine.is_none() {
+                    return "Cannot switch to local: no model loaded.".into();
+                }
+                self.backend_mode = "local".to_string();
+                "Backend: local (Cougar)".into()
+            }
+            "cloud" => {
+                if std::env::var("ANTHROPIC_API_KEY").is_err() {
+                    return "Cannot switch to cloud: ANTHROPIC_API_KEY not set.".into();
+                }
+                self.backend_mode = "cloud".to_string();
+                "Backend: cloud (Anthropic)".into()
+            }
+            "auto" => {
+                self.backend_mode = "auto".to_string();
+                "Backend: auto".into()
+            }
             "" => {
                 let local = if self.engine.is_some() {
                     "Cougar BitNet 2B (loaded)"
                 } else {
                     "no model loaded"
                 };
-                format!("Backend: auto\n  Local: {}", local)
+                format!("Backend: {}\n  Local: {}", self.backend_mode, local)
             }
             other => format!("Unknown backend '{}'. Use: local|cloud|auto", other),
         }
