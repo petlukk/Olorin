@@ -854,6 +854,7 @@ name = "olorin"
 version = "0.5.0"
 dependencies = [
  "cougar-engine",
+ "home",
  "olorin-core",
  "tokio",
 ]
