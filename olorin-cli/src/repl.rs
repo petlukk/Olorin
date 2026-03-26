@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use olorin_core::kernels::command_router as cmd_router;
 use olorin_core::safety::SafetyLayer;
+use olorin_core::vault::{Vault, XorCrypto};
 
 use crate::CougarEngine;
 
@@ -15,12 +16,59 @@ pub enum ReplAction {
 pub struct OlorinRepl {
     pub engine: Option<Arc<CougarEngine>>,
     safety: SafetyLayer,
+    pub(crate) vault: Option<Vault>,
 }
 
 impl OlorinRepl {
     pub fn new(engine: Option<Arc<CougarEngine>>) -> Self {
         let safety = SafetyLayer::with_capacity(8192);
-        Self { engine, safety }
+        let vault = Self::open_vault();
+        Self {
+            engine,
+            safety,
+            vault,
+        }
+    }
+
+    fn open_vault() -> Option<Vault> {
+        let home = home::home_dir()?;
+        let vault_dir = home.join(".olorin/vault");
+        std::fs::create_dir_all(&vault_dir).ok()?;
+        let vault_path = vault_dir.join("default.vault");
+
+        // Deterministic key derived from a fixed seed.
+        // Real key management comes in a later wire task.
+        let seed = b"olorin-vault-seed-v0.5-default!!";
+        let mut key = [0u8; 32];
+        key.copy_from_slice(seed);
+
+        let crypto = Box::new(XorCrypto);
+        if vault_path.exists() {
+            match Vault::open(&vault_path, &key, crypto) {
+                Ok(v) => {
+                    eprintln!(
+                        "[Olorin] Vault opened ({} blocks)",
+                        v.block_count()
+                    );
+                    Some(v)
+                }
+                Err(e) => {
+                    eprintln!("[Olorin] Vault open failed: {e} — creating new");
+                    Vault::create(&vault_path, &key, Box::new(XorCrypto)).ok()
+                }
+            }
+        } else {
+            match Vault::create(&vault_path, &key, crypto) {
+                Ok(v) => {
+                    eprintln!("[Olorin] Vault created at {}", vault_path.display());
+                    Some(v)
+                }
+                Err(e) => {
+                    eprintln!("[Olorin] Vault creation failed: {e}");
+                    None
+                }
+            }
+        }
     }
 
     pub fn process(&mut self, input: &str) -> ReplAction {
@@ -81,23 +129,63 @@ impl OlorinRepl {
 
     pub fn generate_streaming(&mut self, prompt: &str) {
         let stdout = io::stdout();
-        match &self.engine {
+
+        // Recall context from vault
+        let context = if let Some(ref mut vault) = self.vault {
+            let results = vault.search(prompt, 3).unwrap_or_default();
+            if results.is_empty() {
+                String::new()
+            } else {
+                let ctx: Vec<String> = results
+                    .iter()
+                    .map(|r| String::from_utf8_lossy(&r.text).to_string())
+                    .collect();
+                format!("\n[Recall context]\n{}\n", ctx.join("\n---\n"))
+            }
+        } else {
+            String::new()
+        };
+
+        let full_prompt = if context.is_empty() {
+            prompt.to_string()
+        } else {
+            format!("{}{}", context, prompt)
+        };
+
+        let response = match &self.engine {
             Some(eng) => {
-                let response = eng.generate_text(prompt, &|tok| {
+                let resp = eng.generate_text(&full_prompt, &|tok| {
                     print!("{}", tok);
                     stdout.lock().flush().ok();
                 });
 
                 // Safety scan on LLM output (warn only — already streamed)
-                let scan = self.safety.scan_output(&response);
+                let scan = self.safety.scan_output(&resp);
                 if scan.is_blocked() {
                     eprintln!(
                         "\n[Safety] Warning: output {}",
                         scan.block_reason().unwrap_or("flagged")
                     );
                 }
+
+                resp
             }
-            None => print!("No local model loaded."),
+            None => {
+                let msg = "No local model loaded.";
+                print!("{}", msg);
+                msg.to_string()
+            }
+        };
+
+        // Save conversation turn to vault
+        if let Some(ref mut vault) = self.vault {
+            vault
+                .append_message(&format!("User: {}\n", prompt))
+                .ok();
+            vault
+                .append_message(&format!("Olorin: {}\n", response))
+                .ok();
+            vault.flush().ok();
         }
     }
 }

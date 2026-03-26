@@ -107,11 +107,34 @@ impl OlorinRepl {
             .into()
     }
 
-    pub(crate) fn handle_recall(&self, arg: &str) -> String {
+    pub(crate) fn handle_recall(&mut self, arg: &str) -> String {
         if arg.is_empty() {
             return "Usage: /recall <query>".into();
         }
-        "Recall not yet wired in REPL. Coming in Wire Task 3.".into()
+        match self.vault {
+            Some(ref mut vault) => {
+                let results = match vault.search(arg, 5) {
+                    Ok(r) => r,
+                    Err(e) => return format!("Recall error: {e}"),
+                };
+                if results.is_empty() {
+                    return "No matching conversation history found.".into();
+                }
+                let mut out = String::from("Recall results:\n");
+                for (i, r) in results.iter().enumerate() {
+                    let text = String::from_utf8_lossy(&r.text);
+                    let preview: String = text.chars().take(120).collect();
+                    out.push_str(&format!(
+                        "  [{}] (score {:.2}) {}\n",
+                        i + 1,
+                        r.score,
+                        preview
+                    ));
+                }
+                out.trim_end().to_string()
+            }
+            None => "Vault not available.".into(),
+        }
     }
 
     pub(crate) fn handle_calc(&self, arg: &str) -> String {
