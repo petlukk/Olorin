@@ -1,0 +1,376 @@
+// ARM NEON fused V weighted sum: sum_t(weight[t] * dequant(V[t]))
+//
+// head_dim=128 = 2 Q4 groups per position, 32 f32x4 output accumulators.
+// Each group's 64 values dequantized via shuffle+widen_u8_f32x4.
+
+#[cfg(aarch64)]
+
+export func q4_fused_v_sum_f32(
+    weights:      *restrict f32,
+    v_packed:     *restrict u8,
+    v_scales:     *restrict f32,
+    v_biases:     *restrict f32,
+    out_vec:      *mut f32,
+    seq_len:      i32,
+    group_offset: i32
+) {
+    let mask15: u8x16 = splat(15)
+    let div16: u8x16 = splat(16)
+
+    // 32 accumulators for 128 output floats
+    let mut o00: f32x4 = splat(0.0)
+    let mut o01: f32x4 = splat(0.0)
+    let mut o02: f32x4 = splat(0.0)
+    let mut o03: f32x4 = splat(0.0)
+    let mut o04: f32x4 = splat(0.0)
+    let mut o05: f32x4 = splat(0.0)
+    let mut o06: f32x4 = splat(0.0)
+    let mut o07: f32x4 = splat(0.0)
+    let mut o08: f32x4 = splat(0.0)
+    let mut o09: f32x4 = splat(0.0)
+    let mut o10: f32x4 = splat(0.0)
+    let mut o11: f32x4 = splat(0.0)
+    let mut o12: f32x4 = splat(0.0)
+    let mut o13: f32x4 = splat(0.0)
+    let mut o14: f32x4 = splat(0.0)
+    let mut o15: f32x4 = splat(0.0)
+    let mut o16: f32x4 = splat(0.0)
+    let mut o17: f32x4 = splat(0.0)
+    let mut o18: f32x4 = splat(0.0)
+    let mut o19: f32x4 = splat(0.0)
+    let mut o20: f32x4 = splat(0.0)
+    let mut o21: f32x4 = splat(0.0)
+    let mut o22: f32x4 = splat(0.0)
+    let mut o23: f32x4 = splat(0.0)
+    let mut o24: f32x4 = splat(0.0)
+    let mut o25: f32x4 = splat(0.0)
+    let mut o26: f32x4 = splat(0.0)
+    let mut o27: f32x4 = splat(0.0)
+    let mut o28: f32x4 = splat(0.0)
+    let mut o29: f32x4 = splat(0.0)
+    let mut o30: f32x4 = splat(0.0)
+    let mut o31: f32x4 = splat(0.0)
+
+    let mut t: i32 = 0
+    while t < seq_len {
+        let vw: f32x4 = splat(weights[t])
+
+        // Group 0: V dims [0..63]
+        let g0: i32 = group_offset + t * 2
+        let vs0: f32x4 = splat(v_scales[g0])
+        let vb0: f32x4 = splat(v_biases[g0])
+        let wb0: i32 = g0 * 32
+
+        let p0: u8x16 = load(v_packed, wb0)
+        let lo0: u8x16 = p0 .& mask15
+        let hi0: u8x16 = p0 ./ div16
+        let p1: u8x16 = load(v_packed, wb0 + 16)
+        let lo1: u8x16 = p1 .& mask15
+        let hi1: u8x16 = p1 ./ div16
+
+        // lo0 -> V[0..15]
+        o00 = fma(fma(widen_u8_f32x4(lo0), vs0, vb0), vw, o00)
+        let lo0a: u8x16 = shuffle(lo0, [4,5,6,7, 0,0,0,0, 0,0,0,0, 0,0,0,0])
+        o01 = fma(fma(widen_u8_f32x4(lo0a), vs0, vb0), vw, o01)
+        let lo0b: u8x16 = shuffle(lo0, [8,9,10,11, 0,0,0,0, 0,0,0,0, 0,0,0,0])
+        o02 = fma(fma(widen_u8_f32x4(lo0b), vs0, vb0), vw, o02)
+        let lo0c: u8x16 = shuffle(lo0, [12,13,14,15, 0,0,0,0, 0,0,0,0, 0,0,0,0])
+        o03 = fma(fma(widen_u8_f32x4(lo0c), vs0, vb0), vw, o03)
+
+        // lo1 -> V[16..31]
+        o04 = fma(fma(widen_u8_f32x4(lo1), vs0, vb0), vw, o04)
+        let lo1a: u8x16 = shuffle(lo1, [4,5,6,7, 0,0,0,0, 0,0,0,0, 0,0,0,0])
+        o05 = fma(fma(widen_u8_f32x4(lo1a), vs0, vb0), vw, o05)
+        let lo1b: u8x16 = shuffle(lo1, [8,9,10,11, 0,0,0,0, 0,0,0,0, 0,0,0,0])
+        o06 = fma(fma(widen_u8_f32x4(lo1b), vs0, vb0), vw, o06)
+        let lo1c: u8x16 = shuffle(lo1, [12,13,14,15, 0,0,0,0, 0,0,0,0, 0,0,0,0])
+        o07 = fma(fma(widen_u8_f32x4(lo1c), vs0, vb0), vw, o07)
+
+        // hi0 -> V[32..47]
+        o08 = fma(fma(widen_u8_f32x4(hi0), vs0, vb0), vw, o08)
+        let hi0a: u8x16 = shuffle(hi0, [4,5,6,7, 0,0,0,0, 0,0,0,0, 0,0,0,0])
+        o09 = fma(fma(widen_u8_f32x4(hi0a), vs0, vb0), vw, o09)
+        let hi0b: u8x16 = shuffle(hi0, [8,9,10,11, 0,0,0,0, 0,0,0,0, 0,0,0,0])
+        o10 = fma(fma(widen_u8_f32x4(hi0b), vs0, vb0), vw, o10)
+        let hi0c: u8x16 = shuffle(hi0, [12,13,14,15, 0,0,0,0, 0,0,0,0, 0,0,0,0])
+        o11 = fma(fma(widen_u8_f32x4(hi0c), vs0, vb0), vw, o11)
+
+        // hi1 -> V[48..63]
+        o12 = fma(fma(widen_u8_f32x4(hi1), vs0, vb0), vw, o12)
+        let hi1a: u8x16 = shuffle(hi1, [4,5,6,7, 0,0,0,0, 0,0,0,0, 0,0,0,0])
+        o13 = fma(fma(widen_u8_f32x4(hi1a), vs0, vb0), vw, o13)
+        let hi1b: u8x16 = shuffle(hi1, [8,9,10,11, 0,0,0,0, 0,0,0,0, 0,0,0,0])
+        o14 = fma(fma(widen_u8_f32x4(hi1b), vs0, vb0), vw, o14)
+        let hi1c: u8x16 = shuffle(hi1, [12,13,14,15, 0,0,0,0, 0,0,0,0, 0,0,0,0])
+        o15 = fma(fma(widen_u8_f32x4(hi1c), vs0, vb0), vw, o15)
+
+        // Group 1: V dims [64..127]
+        let g1: i32 = g0 + 1
+        let vs1: f32x4 = splat(v_scales[g1])
+        let vb1: f32x4 = splat(v_biases[g1])
+        let wb1: i32 = g1 * 32
+
+        let p2: u8x16 = load(v_packed, wb1)
+        let lo2: u8x16 = p2 .& mask15
+        let hi2: u8x16 = p2 ./ div16
+        let p3: u8x16 = load(v_packed, wb1 + 16)
+        let lo3: u8x16 = p3 .& mask15
+        let hi3: u8x16 = p3 ./ div16
+
+        // lo2 -> V[64..79]
+        o16 = fma(fma(widen_u8_f32x4(lo2), vs1, vb1), vw, o16)
+        let lo2a: u8x16 = shuffle(lo2, [4,5,6,7, 0,0,0,0, 0,0,0,0, 0,0,0,0])
+        o17 = fma(fma(widen_u8_f32x4(lo2a), vs1, vb1), vw, o17)
+        let lo2b: u8x16 = shuffle(lo2, [8,9,10,11, 0,0,0,0, 0,0,0,0, 0,0,0,0])
+        o18 = fma(fma(widen_u8_f32x4(lo2b), vs1, vb1), vw, o18)
+        let lo2c: u8x16 = shuffle(lo2, [12,13,14,15, 0,0,0,0, 0,0,0,0, 0,0,0,0])
+        o19 = fma(fma(widen_u8_f32x4(lo2c), vs1, vb1), vw, o19)
+
+        // lo3 -> V[80..95]
+        o20 = fma(fma(widen_u8_f32x4(lo3), vs1, vb1), vw, o20)
+        let lo3a: u8x16 = shuffle(lo3, [4,5,6,7, 0,0,0,0, 0,0,0,0, 0,0,0,0])
+        o21 = fma(fma(widen_u8_f32x4(lo3a), vs1, vb1), vw, o21)
+        let lo3b: u8x16 = shuffle(lo3, [8,9,10,11, 0,0,0,0, 0,0,0,0, 0,0,0,0])
+        o22 = fma(fma(widen_u8_f32x4(lo3b), vs1, vb1), vw, o22)
+        let lo3c: u8x16 = shuffle(lo3, [12,13,14,15, 0,0,0,0, 0,0,0,0, 0,0,0,0])
+        o23 = fma(fma(widen_u8_f32x4(lo3c), vs1, vb1), vw, o23)
+
+        // hi2 -> V[96..111]
+        o24 = fma(fma(widen_u8_f32x4(hi2), vs1, vb1), vw, o24)
+        let hi2a: u8x16 = shuffle(hi2, [4,5,6,7, 0,0,0,0, 0,0,0,0, 0,0,0,0])
+        o25 = fma(fma(widen_u8_f32x4(hi2a), vs1, vb1), vw, o25)
+        let hi2b: u8x16 = shuffle(hi2, [8,9,10,11, 0,0,0,0, 0,0,0,0, 0,0,0,0])
+        o26 = fma(fma(widen_u8_f32x4(hi2b), vs1, vb1), vw, o26)
+        let hi2c: u8x16 = shuffle(hi2, [12,13,14,15, 0,0,0,0, 0,0,0,0, 0,0,0,0])
+        o27 = fma(fma(widen_u8_f32x4(hi2c), vs1, vb1), vw, o27)
+
+        // hi3 -> V[112..127]
+        o28 = fma(fma(widen_u8_f32x4(hi3), vs1, vb1), vw, o28)
+        let hi3a: u8x16 = shuffle(hi3, [4,5,6,7, 0,0,0,0, 0,0,0,0, 0,0,0,0])
+        o29 = fma(fma(widen_u8_f32x4(hi3a), vs1, vb1), vw, o29)
+        let hi3b: u8x16 = shuffle(hi3, [8,9,10,11, 0,0,0,0, 0,0,0,0, 0,0,0,0])
+        o30 = fma(fma(widen_u8_f32x4(hi3b), vs1, vb1), vw, o30)
+        let hi3c: u8x16 = shuffle(hi3, [12,13,14,15, 0,0,0,0, 0,0,0,0, 0,0,0,0])
+        o31 = fma(fma(widen_u8_f32x4(hi3c), vs1, vb1), vw, o31)
+
+        t = t + 1
+    }
+
+    store(out_vec, 0, o00)
+    store(out_vec, 4, o01)
+    store(out_vec, 8, o02)
+    store(out_vec, 12, o03)
+    store(out_vec, 16, o04)
+    store(out_vec, 20, o05)
+    store(out_vec, 24, o06)
+    store(out_vec, 28, o07)
+    store(out_vec, 32, o08)
+    store(out_vec, 36, o09)
+    store(out_vec, 40, o10)
+    store(out_vec, 44, o11)
+    store(out_vec, 48, o12)
+    store(out_vec, 52, o13)
+    store(out_vec, 56, o14)
+    store(out_vec, 60, o15)
+    store(out_vec, 64, o16)
+    store(out_vec, 68, o17)
+    store(out_vec, 72, o18)
+    store(out_vec, 76, o19)
+    store(out_vec, 80, o20)
+    store(out_vec, 84, o21)
+    store(out_vec, 88, o22)
+    store(out_vec, 92, o23)
+    store(out_vec, 96, o24)
+    store(out_vec, 100, o25)
+    store(out_vec, 104, o26)
+    store(out_vec, 108, o27)
+    store(out_vec, 112, o28)
+    store(out_vec, 116, o29)
+    store(out_vec, 120, o30)
+    store(out_vec, 124, o31)
+}
+
+// Multi-head variant
+export func q4_fused_v_sum_multi_f32(
+    all_weights:    *restrict f32,
+    v_packed:       *restrict u8,
+    v_scales:       *restrict f32,
+    v_biases:       *restrict f32,
+    all_out:        *mut f32,
+    seq_len:        i32,
+    n_heads:        i32,
+    groups_per_head: i32
+) {
+    let mask15: u8x16 = splat(15)
+    let div16: u8x16 = splat(16)
+
+    let mut h: i32 = 0
+    while h < n_heads {
+        let w_offset: i32 = h * seq_len
+        let out_offset: i32 = h * 128
+        let group_offset: i32 = h * groups_per_head
+
+        let mut o00: f32x4 = splat(0.0)
+        let mut o01: f32x4 = splat(0.0)
+        let mut o02: f32x4 = splat(0.0)
+        let mut o03: f32x4 = splat(0.0)
+        let mut o04: f32x4 = splat(0.0)
+        let mut o05: f32x4 = splat(0.0)
+        let mut o06: f32x4 = splat(0.0)
+        let mut o07: f32x4 = splat(0.0)
+        let mut o08: f32x4 = splat(0.0)
+        let mut o09: f32x4 = splat(0.0)
+        let mut o10: f32x4 = splat(0.0)
+        let mut o11: f32x4 = splat(0.0)
+        let mut o12: f32x4 = splat(0.0)
+        let mut o13: f32x4 = splat(0.0)
+        let mut o14: f32x4 = splat(0.0)
+        let mut o15: f32x4 = splat(0.0)
+        let mut o16: f32x4 = splat(0.0)
+        let mut o17: f32x4 = splat(0.0)
+        let mut o18: f32x4 = splat(0.0)
+        let mut o19: f32x4 = splat(0.0)
+        let mut o20: f32x4 = splat(0.0)
+        let mut o21: f32x4 = splat(0.0)
+        let mut o22: f32x4 = splat(0.0)
+        let mut o23: f32x4 = splat(0.0)
+        let mut o24: f32x4 = splat(0.0)
+        let mut o25: f32x4 = splat(0.0)
+        let mut o26: f32x4 = splat(0.0)
+        let mut o27: f32x4 = splat(0.0)
+        let mut o28: f32x4 = splat(0.0)
+        let mut o29: f32x4 = splat(0.0)
+        let mut o30: f32x4 = splat(0.0)
+        let mut o31: f32x4 = splat(0.0)
+
+        let mut t: i32 = 0
+        while t < seq_len {
+            let vw: f32x4 = splat(all_weights[w_offset + t])
+
+            let g0: i32 = group_offset + t * 2
+            let vs0: f32x4 = splat(v_scales[g0])
+            let vb0: f32x4 = splat(v_biases[g0])
+            let wb0: i32 = g0 * 32
+
+            let p0: u8x16 = load(v_packed, wb0)
+            let lo0: u8x16 = p0 .& mask15
+            let hi0: u8x16 = p0 ./ div16
+            let p1: u8x16 = load(v_packed, wb0 + 16)
+            let lo1: u8x16 = p1 .& mask15
+            let hi1: u8x16 = p1 ./ div16
+
+            o00 = fma(fma(widen_u8_f32x4(lo0), vs0, vb0), vw, o00)
+            let a0a: u8x16 = shuffle(lo0, [4,5,6,7, 0,0,0,0, 0,0,0,0, 0,0,0,0])
+            o01 = fma(fma(widen_u8_f32x4(a0a), vs0, vb0), vw, o01)
+            let a0b: u8x16 = shuffle(lo0, [8,9,10,11, 0,0,0,0, 0,0,0,0, 0,0,0,0])
+            o02 = fma(fma(widen_u8_f32x4(a0b), vs0, vb0), vw, o02)
+            let a0c: u8x16 = shuffle(lo0, [12,13,14,15, 0,0,0,0, 0,0,0,0, 0,0,0,0])
+            o03 = fma(fma(widen_u8_f32x4(a0c), vs0, vb0), vw, o03)
+
+            o04 = fma(fma(widen_u8_f32x4(lo1), vs0, vb0), vw, o04)
+            let a1a: u8x16 = shuffle(lo1, [4,5,6,7, 0,0,0,0, 0,0,0,0, 0,0,0,0])
+            o05 = fma(fma(widen_u8_f32x4(a1a), vs0, vb0), vw, o05)
+            let a1b: u8x16 = shuffle(lo1, [8,9,10,11, 0,0,0,0, 0,0,0,0, 0,0,0,0])
+            o06 = fma(fma(widen_u8_f32x4(a1b), vs0, vb0), vw, o06)
+            let a1c: u8x16 = shuffle(lo1, [12,13,14,15, 0,0,0,0, 0,0,0,0, 0,0,0,0])
+            o07 = fma(fma(widen_u8_f32x4(a1c), vs0, vb0), vw, o07)
+
+            o08 = fma(fma(widen_u8_f32x4(hi0), vs0, vb0), vw, o08)
+            let b0a: u8x16 = shuffle(hi0, [4,5,6,7, 0,0,0,0, 0,0,0,0, 0,0,0,0])
+            o09 = fma(fma(widen_u8_f32x4(b0a), vs0, vb0), vw, o09)
+            let b0b: u8x16 = shuffle(hi0, [8,9,10,11, 0,0,0,0, 0,0,0,0, 0,0,0,0])
+            o10 = fma(fma(widen_u8_f32x4(b0b), vs0, vb0), vw, o10)
+            let b0c: u8x16 = shuffle(hi0, [12,13,14,15, 0,0,0,0, 0,0,0,0, 0,0,0,0])
+            o11 = fma(fma(widen_u8_f32x4(b0c), vs0, vb0), vw, o11)
+
+            o12 = fma(fma(widen_u8_f32x4(hi1), vs0, vb0), vw, o12)
+            let b1a: u8x16 = shuffle(hi1, [4,5,6,7, 0,0,0,0, 0,0,0,0, 0,0,0,0])
+            o13 = fma(fma(widen_u8_f32x4(b1a), vs0, vb0), vw, o13)
+            let b1b: u8x16 = shuffle(hi1, [8,9,10,11, 0,0,0,0, 0,0,0,0, 0,0,0,0])
+            o14 = fma(fma(widen_u8_f32x4(b1b), vs0, vb0), vw, o14)
+            let b1c: u8x16 = shuffle(hi1, [12,13,14,15, 0,0,0,0, 0,0,0,0, 0,0,0,0])
+            o15 = fma(fma(widen_u8_f32x4(b1c), vs0, vb0), vw, o15)
+
+            let g1: i32 = g0 + 1
+            let vs1: f32x4 = splat(v_scales[g1])
+            let vb1: f32x4 = splat(v_biases[g1])
+            let wb1: i32 = g1 * 32
+
+            let p2: u8x16 = load(v_packed, wb1)
+            let lo2: u8x16 = p2 .& mask15
+            let hi2: u8x16 = p2 ./ div16
+            let p3: u8x16 = load(v_packed, wb1 + 16)
+            let lo3: u8x16 = p3 .& mask15
+            let hi3: u8x16 = p3 ./ div16
+
+            o16 = fma(fma(widen_u8_f32x4(lo2), vs1, vb1), vw, o16)
+            let c0a: u8x16 = shuffle(lo2, [4,5,6,7, 0,0,0,0, 0,0,0,0, 0,0,0,0])
+            o17 = fma(fma(widen_u8_f32x4(c0a), vs1, vb1), vw, o17)
+            let c0b: u8x16 = shuffle(lo2, [8,9,10,11, 0,0,0,0, 0,0,0,0, 0,0,0,0])
+            o18 = fma(fma(widen_u8_f32x4(c0b), vs1, vb1), vw, o18)
+            let c0c: u8x16 = shuffle(lo2, [12,13,14,15, 0,0,0,0, 0,0,0,0, 0,0,0,0])
+            o19 = fma(fma(widen_u8_f32x4(c0c), vs1, vb1), vw, o19)
+
+            o20 = fma(fma(widen_u8_f32x4(lo3), vs1, vb1), vw, o20)
+            let c1a: u8x16 = shuffle(lo3, [4,5,6,7, 0,0,0,0, 0,0,0,0, 0,0,0,0])
+            o21 = fma(fma(widen_u8_f32x4(c1a), vs1, vb1), vw, o21)
+            let c1b: u8x16 = shuffle(lo3, [8,9,10,11, 0,0,0,0, 0,0,0,0, 0,0,0,0])
+            o22 = fma(fma(widen_u8_f32x4(c1b), vs1, vb1), vw, o22)
+            let c1c: u8x16 = shuffle(lo3, [12,13,14,15, 0,0,0,0, 0,0,0,0, 0,0,0,0])
+            o23 = fma(fma(widen_u8_f32x4(c1c), vs1, vb1), vw, o23)
+
+            o24 = fma(fma(widen_u8_f32x4(hi2), vs1, vb1), vw, o24)
+            let d0a: u8x16 = shuffle(hi2, [4,5,6,7, 0,0,0,0, 0,0,0,0, 0,0,0,0])
+            o25 = fma(fma(widen_u8_f32x4(d0a), vs1, vb1), vw, o25)
+            let d0b: u8x16 = shuffle(hi2, [8,9,10,11, 0,0,0,0, 0,0,0,0, 0,0,0,0])
+            o26 = fma(fma(widen_u8_f32x4(d0b), vs1, vb1), vw, o26)
+            let d0c: u8x16 = shuffle(hi2, [12,13,14,15, 0,0,0,0, 0,0,0,0, 0,0,0,0])
+            o27 = fma(fma(widen_u8_f32x4(d0c), vs1, vb1), vw, o27)
+
+            o28 = fma(fma(widen_u8_f32x4(hi3), vs1, vb1), vw, o28)
+            let d1a: u8x16 = shuffle(hi3, [4,5,6,7, 0,0,0,0, 0,0,0,0, 0,0,0,0])
+            o29 = fma(fma(widen_u8_f32x4(d1a), vs1, vb1), vw, o29)
+            let d1b: u8x16 = shuffle(hi3, [8,9,10,11, 0,0,0,0, 0,0,0,0, 0,0,0,0])
+            o30 = fma(fma(widen_u8_f32x4(d1b), vs1, vb1), vw, o30)
+            let d1c: u8x16 = shuffle(hi3, [12,13,14,15, 0,0,0,0, 0,0,0,0, 0,0,0,0])
+            o31 = fma(fma(widen_u8_f32x4(d1c), vs1, vb1), vw, o31)
+
+            t = t + 1
+        }
+
+        store(all_out, out_offset, o00)
+        store(all_out, out_offset + 4, o01)
+        store(all_out, out_offset + 8, o02)
+        store(all_out, out_offset + 12, o03)
+        store(all_out, out_offset + 16, o04)
+        store(all_out, out_offset + 20, o05)
+        store(all_out, out_offset + 24, o06)
+        store(all_out, out_offset + 28, o07)
+        store(all_out, out_offset + 32, o08)
+        store(all_out, out_offset + 36, o09)
+        store(all_out, out_offset + 40, o10)
+        store(all_out, out_offset + 44, o11)
+        store(all_out, out_offset + 48, o12)
+        store(all_out, out_offset + 52, o13)
+        store(all_out, out_offset + 56, o14)
+        store(all_out, out_offset + 60, o15)
+        store(all_out, out_offset + 64, o16)
+        store(all_out, out_offset + 68, o17)
+        store(all_out, out_offset + 72, o18)
+        store(all_out, out_offset + 76, o19)
+        store(all_out, out_offset + 80, o20)
+        store(all_out, out_offset + 84, o21)
+        store(all_out, out_offset + 88, o22)
+        store(all_out, out_offset + 92, o23)
+        store(all_out, out_offset + 96, o24)
+        store(all_out, out_offset + 100, o25)
+        store(all_out, out_offset + 104, o26)
+        store(all_out, out_offset + 108, o27)
+        store(all_out, out_offset + 112, o28)
+        store(all_out, out_offset + 116, o29)
+        store(all_out, out_offset + 120, o30)
+        store(all_out, out_offset + 124, o31)
+
+        h = h + 1
+    }
+}
