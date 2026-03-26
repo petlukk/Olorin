@@ -13,3 +13,4 @@ cougar-engine = { path = "../crates/cougar-engine" }
 tokio.workspace = true
 home.workspace = true
 chrono.workspace = true
+serde_json.workspace = true
