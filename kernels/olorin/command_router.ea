@@ -9,7 +9,7 @@
 //                /read(11) /write(12) /ls(13) /json(14) /cpu(15)
 //                /tokens(16) /bench(17) /tasks(18) /recall(19)
 //                /weather(20) /translate(21) /define(22) /summarize(23)
-//                /grep(24) /git(25) /remind(26)
+//                /grep(24) /git(25) /remind(26) /teleport(27)
 // Returns -1 for no match.
 
 const SLASH: i32 = 47
@@ -201,6 +201,12 @@ export func match_command(text: *u8, len: i32, out_match: *mut i32) {
                 // /remi: r=114 e=101 m=109 i=105
                 if hash4 == 114 + 101 * 256 + 109 * 65536 + 105 * 16777216 {
                     out_match[0] = 26
+                    return
+                }
+
+                // /tele: t=116 e=101 l=108 e=101
+                if hash4 == 116 + 101 * 256 + 108 * 65536 + 101 * 16777216 {
+                    out_match[0] = 27
                     return
                 }
             }

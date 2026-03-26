@@ -30,6 +30,7 @@ pub const CMD_SUMMARIZE: i32 = 23;
 pub const CMD_GREP: i32 = 24;
 pub const CMD_GIT: i32 = 25;
 pub const CMD_REMIND: i32 = 26;
+pub const CMD_TELEPORT: i32 = 27;
 /// No match:
 pub const CMD_NONE: i32 = -1;
 
@@ -66,6 +67,7 @@ const ALL_CMD_NAMES: &[(i32, &str)] = &[
     (CMD_GREP, "grep"),
     (CMD_GIT, "git"),
     (CMD_REMIND, "remind"),
+    (CMD_TELEPORT, "teleport"),
 ];
 
 /// Match a slash command using the SIMD kernel.
@@ -151,6 +153,7 @@ pub fn command_name(id: i32) -> Option<&'static str> {
         CMD_GREP => Some("grep"),
         CMD_GIT => Some("git"),
         CMD_REMIND => Some("remind"),
+        CMD_TELEPORT => Some("teleport"),
         _ => None,
     }
 }
