@@ -107,6 +107,33 @@ pub fn xxhash64(data: &[u8], seed: u64) -> u64 {
     avalanche(h)
 }
 
+/// Normalize a byte histogram to unit vector (for cosine similarity).
+pub fn normalize_histogram(hist: &[u8; 256]) -> [f32; 256] {
+    let mut norm = [0.0f32; 256];
+    let mut sum_sq: f32 = 0.0;
+    for i in 0..256 {
+        let v = hist[i] as f32;
+        norm[i] = v;
+        sum_sq += v * v;
+    }
+    let mag = sum_sq.sqrt();
+    if mag > 0.0 {
+        for i in 0..256 {
+            norm[i] /= mag;
+        }
+    }
+    norm
+}
+
+/// Cosine similarity between two normalized 256-dim vectors.
+pub fn cosine_similarity(a: &[f32; 256], b: &[f32; 256]) -> f32 {
+    let mut dot = 0.0f32;
+    for i in 0..256 {
+        dot += a[i] * b[i];
+    }
+    dot
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -158,5 +185,45 @@ mod tests {
         let h1 = xxhash64(data, 42);
         let h2 = xxhash64(data, 42);
         assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn test_normalize_histogram() {
+        let mut hist = [0u8; 256];
+        hist[0] = 3;
+        hist[1] = 4;
+        let norm = normalize_histogram(&hist);
+        // magnitude = sqrt(9 + 16) = 5
+        let eps = 1e-6;
+        assert!((norm[0] - 0.6).abs() < eps);
+        assert!((norm[1] - 0.8).abs() < eps);
+        assert!((norm[2] - 0.0).abs() < eps);
+        // verify unit length
+        let mag_sq: f32 = norm.iter().map(|x| x * x).sum();
+        assert!((mag_sq - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_normalize_histogram_zero() {
+        let hist = [0u8; 256];
+        let norm = normalize_histogram(&hist);
+        for v in &norm {
+            assert_eq!(*v, 0.0);
+        }
+    }
+
+    #[test]
+    fn test_cosine_similarity() {
+        let mut a = [0.0f32; 256];
+        let mut b = [0.0f32; 256];
+        a[0] = 1.0;
+        b[0] = 1.0;
+        // identical unit vectors => similarity 1.0
+        assert!((cosine_similarity(&a, &b) - 1.0).abs() < 1e-6);
+
+        // orthogonal vectors => similarity 0.0
+        let mut c = [0.0f32; 256];
+        c[1] = 1.0;
+        assert!((cosine_similarity(&a, &c)).abs() < 1e-6);
     }
 }

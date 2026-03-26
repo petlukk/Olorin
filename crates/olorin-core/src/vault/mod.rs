@@ -2,6 +2,7 @@
 
 pub mod format;
 pub mod index;
+pub mod search;
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write, Seek, SeekFrom};
@@ -10,6 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use format::{VaultHeader, IndexEntry, HEADER_SIZE, INDEX_ENTRY_SIZE, BLOCK_SIZE};
 use index::{compute_histogram, xxhash64};
+pub use search::SearchResult;
 
 #[derive(thiserror::Error, Debug)]
 pub enum VaultError {
