@@ -1,0 +1,750 @@
+// chacha20_search_v2.ea — Fused ChaCha20 decrypt + multi-needle search + context-line extraction
+
+func rotl16(v: i32x4) -> i32x4 {
+    return (v .<< splat(16)) .| ((v .>> splat(16)) .& splat(65535))
+}
+
+func rotl12(v: i32x4) -> i32x4 {
+    return (v .<< splat(12)) .| ((v .>> splat(20)) .& splat(4095))
+}
+
+func rotl8(v: i32x4) -> i32x4 {
+    return (v .<< splat(8)) .| ((v .>> splat(24)) .& splat(255))
+}
+
+func rotl7(v: i32x4) -> i32x4 {
+    return (v .<< splat(7)) .| ((v .>> splat(25)) .& splat(127))
+}
+
+func chacha20_block(key: *i32, nonce: *i32, counter: i32, out: *mut i32) {
+    let row0_init: i32x4 = [1634760805, 857760878, 2036477234, 1797285236]i32x4
+    let row1_init: i32x4 = load(key, 0)
+    let row2_init: i32x4 = load(key, 4)
+    let n0: i32 = nonce[0]
+    let n1: i32 = nonce[1]
+    let n2: i32 = nonce[2]
+    let row3_init: i32x4 = [counter, n0, n1, n2]i32x4
+    let mut r0: i32x4 = row0_init
+    let mut r1: i32x4 = row1_init
+    let mut r2: i32x4 = row2_init
+    let mut r3: i32x4 = row3_init
+    let mut round: i32 = 0
+    while round < 10 {
+        r0 = r0 .+ r1
+        r3 = rotl16(r3 .^ r0)
+        r2 = r2 .+ r3
+        r1 = rotl12(r1 .^ r2)
+        r0 = r0 .+ r1
+        r3 = rotl8(r3 .^ r0)
+        r2 = r2 .+ r3
+        r1 = rotl7(r1 .^ r2)
+        r1 = shuffle(r1, [1, 2, 3, 0])
+        r2 = shuffle(r2, [2, 3, 0, 1])
+        r3 = shuffle(r3, [3, 0, 1, 2])
+        r0 = r0 .+ r1
+        r3 = rotl16(r3 .^ r0)
+        r2 = r2 .+ r3
+        r1 = rotl12(r1 .^ r2)
+        r0 = r0 .+ r1
+        r3 = rotl8(r3 .^ r0)
+        r2 = r2 .+ r3
+        r1 = rotl7(r1 .^ r2)
+        r1 = shuffle(r1, [3, 0, 1, 2])
+        r2 = shuffle(r2, [2, 3, 0, 1])
+        r3 = shuffle(r3, [1, 2, 3, 0])
+        round = round + 1
+    }
+    store(out, 0, r0 .+ row0_init)
+    store(out, 4, r1 .+ row1_init)
+    store(out, 8, r2 .+ row2_init)
+    store(out, 12, r3 .+ row3_init)
+}
+
+func search_buf_multi(
+    buf: *mut u8, buf_len: i32,
+    needles: *restrict u8, needle_offsets: *restrict i32,
+    needle_lens: *restrict i32, needle_count: i32,
+    matches: *restrict mut i32, needle_ids_out: *restrict mut i32,
+    match_count: i32, max_matches: i32,
+    base_offset: i32
+) -> i32 {
+    let mut mc: i32 = match_count
+    let mut pos: i32 = 0
+    while pos < buf_len {
+        if mc >= max_matches {
+            return mc
+        }
+        let b: u8 = buf[pos]
+        let mut ni: i32 = 0
+        while ni < needle_count {
+            let nlen: i32 = needle_lens[ni]
+            let noff: i32 = needle_offsets[ni]
+            if pos + nlen <= buf_len {
+                let first: u8 = needles[noff]
+                if !(b < first) && !(first < b) {
+                    let mut j: i32 = 1
+                    let mut matched: i32 = 1
+                    while j < nlen {
+                        let bj: u8 = buf[pos + j]
+                        let nj: u8 = needles[noff + j]
+                        if bj < nj {
+                            matched = 0
+                            j = nlen
+                        } else {
+                            if nj < bj {
+                                matched = 0
+                                j = nlen
+                            }
+                        }
+                        j = j + 1
+                    }
+                    if matched == 1 {
+                        if mc < max_matches {
+                            matches[mc] = base_offset + pos
+                            needle_ids_out[mc] = ni
+                            mc = mc + 1
+                        }
+                    }
+                }
+            }
+            ni = ni + 1
+        }
+        pos = pos + 1
+    }
+    return mc
+}
+
+func search_buf_multi_simd(
+    buf: *mut u8, buf_len: i32,
+    needles: *restrict u8, needle_offsets: *restrict i32,
+    needle_lens: *restrict i32, needle_count: i32,
+    unique_fb: *restrict mut u8, unique_count: i32,
+    matches: *restrict mut i32, needle_ids_out: *restrict mut i32,
+    match_count: i32, max_matches: i32,
+    base_offset: i32
+) -> i32 {
+    let mut mc: i32 = match_count
+    let mut chunk_off: i32 = 0
+
+    while chunk_off + 16 <= buf_len {
+        if mc >= max_matches {
+            return mc
+        }
+        let chunk: u8x16 = load(buf, chunk_off)
+
+        let mut bits: i32 = 0
+        let mut fi: i32 = 0
+        while fi < unique_count {
+            bits = bits + movemask(chunk .== splat(unique_fb[fi]))
+            fi = fi + 1
+        }
+
+        if bits == 0 {
+            chunk_off = chunk_off + 16
+        } else {
+            let scan_end: i32 = chunk_off + 16
+            let mut i: i32 = chunk_off
+            while i < scan_end {
+                if mc >= max_matches {
+                    return mc
+                }
+                let b: u8 = buf[i]
+                let mut ni: i32 = 0
+                while ni < needle_count {
+                    let nlen: i32 = needle_lens[ni]
+                    let noff: i32 = needle_offsets[ni]
+                    if i + nlen <= buf_len {
+                        let first: u8 = needles[noff]
+                        if !(b < first) && !(first < b) {
+                            let mut j: i32 = 1
+                            let mut matched: i32 = 1
+                            while j < nlen {
+                                let bj: u8 = buf[i + j]
+                                let nj: u8 = needles[noff + j]
+                                if bj < nj {
+                                    matched = 0
+                                    j = nlen
+                                } else {
+                                    if nj < bj {
+                                        matched = 0
+                                        j = nlen
+                                    }
+                                }
+                                j = j + 1
+                            }
+                            if matched == 1 {
+                                if mc < max_matches {
+                                    matches[mc] = base_offset + i
+                                    needle_ids_out[mc] = ni
+                                    mc = mc + 1
+                                }
+                            }
+                        }
+                    }
+                    ni = ni + 1
+                }
+                i = i + 1
+            }
+            chunk_off = scan_end
+        }
+    }
+
+    let mut ti: i32 = chunk_off
+    while ti < buf_len {
+        if mc >= max_matches {
+            return mc
+        }
+        let tb: u8 = buf[ti]
+        let mut tni: i32 = 0
+        while tni < needle_count {
+            let tnlen: i32 = needle_lens[tni]
+            let tnoff: i32 = needle_offsets[tni]
+            if ti + tnlen <= buf_len {
+                let tfirst: u8 = needles[tnoff]
+                if !(tb < tfirst) && !(tfirst < tb) {
+                    let mut tj: i32 = 1
+                    let mut tmatched: i32 = 1
+                    while tj < tnlen {
+                        let tbj: u8 = buf[ti + tj]
+                        let tnj: u8 = needles[tnoff + tj]
+                        if tbj < tnj {
+                            tmatched = 0
+                            tj = tnlen
+                        } else {
+                            if tnj < tbj {
+                                tmatched = 0
+                                tj = tnlen
+                            }
+                        }
+                        tj = tj + 1
+                    }
+                    if tmatched == 1 {
+                        if mc < max_matches {
+                            matches[mc] = base_offset + ti
+                            needle_ids_out[mc] = tni
+                            mc = mc + 1
+                        }
+                    }
+                }
+            }
+            tni = tni + 1
+        }
+        ti = ti + 1
+    }
+
+    return mc
+}
+
+func search_overlap_multi(
+    overlap_buf: *restrict mut u8, overlap_len: i32,
+    new_buf: *mut u8,
+    needles: *restrict u8, needle_offsets: *restrict i32,
+    needle_lens: *restrict i32, needle_count: i32,
+    max_needle_len: i32,
+    matches: *restrict mut i32, needle_ids_out: *restrict mut i32,
+    match_count: i32, max_matches: i32,
+    overlap_global_offset: i32,
+    temp: *restrict mut u8
+) -> i32 {
+    if overlap_len == 0 {
+        return match_count
+    }
+    let new_bytes: i32 = max_needle_len - 1
+    let mut ci: i32 = 0
+    while ci < overlap_len {
+        temp[ci] = overlap_buf[ci]
+        ci = ci + 1
+    }
+    let mut ni: i32 = 0
+    while ni < new_bytes {
+        temp[overlap_len + ni] = new_buf[ni]
+        ni = ni + 1
+    }
+    let temp_len: i32 = overlap_len + new_bytes
+    return search_buf_multi(temp, temp_len, needles, needle_offsets, needle_lens, needle_count,
+                            matches, needle_ids_out, match_count, max_matches, overlap_global_offset)
+}
+
+func find_line_start(buf: *mut u8, pos: i32, max_scan: i32) -> i32 {
+    let nl_byte: u8 = 10
+    let newline_splat: u8x16 = splat(nl_byte)
+    let mut scan_end: i32 = pos - max_scan
+    if scan_end < 0 {
+        scan_end = 0
+    }
+
+    let mut si: i32 = pos - 1
+    let aligned_start: i32 = (si / 16) * 16
+    while si >= aligned_start && si >= scan_end {
+        if !(buf[si] < nl_byte) && !(nl_byte < buf[si]) {
+            return si + 1
+        }
+        si = si - 1
+    }
+
+    let mut chunk_pos: i32 = aligned_start - 16
+    while chunk_pos >= scan_end {
+        let chunk: u8x16 = load(buf, chunk_pos)
+        let bits: i32 = movemask(chunk .== newline_splat)
+        if bits != 0 {
+            let mut ci: i32 = chunk_pos + 15
+            while ci >= chunk_pos && ci >= scan_end {
+                if !(buf[ci] < nl_byte) && !(nl_byte < buf[ci]) {
+                    return ci + 1
+                }
+                ci = ci - 1
+            }
+        }
+        chunk_pos = chunk_pos - 16
+    }
+
+    while si >= scan_end {
+        if !(buf[si] < nl_byte) && !(nl_byte < buf[si]) {
+            return si + 1
+        }
+        si = si - 1
+    }
+
+    return scan_end
+}
+
+func find_line_end(buf: *mut u8, pos: i32, buf_len: i32, max_scan: i32) -> i32 {
+    let nl_byte: u8 = 10
+    let newline_splat: u8x16 = splat(nl_byte)
+    let scan_limit: i32 = pos + max_scan
+    let mut scan_pos: i32 = pos
+    while scan_pos + 16 <= buf_len && scan_pos < scan_limit {
+        let chunk: u8x16 = load(buf, scan_pos)
+        let bits: i32 = movemask(chunk .== newline_splat)
+        if bits != 0 {
+            let mut ci: i32 = scan_pos
+            while ci < scan_pos + 16 {
+                if !(buf[ci] < nl_byte) && !(nl_byte < buf[ci]) {
+                    return ci
+                }
+                ci = ci + 1
+            }
+        }
+        scan_pos = scan_pos + 16
+    }
+    let mut si: i32 = scan_pos
+    while si < buf_len && si < scan_limit {
+        if !(buf[si] < nl_byte) && !(nl_byte < buf[si]) {
+            return si
+        }
+        si = si + 1
+    }
+    return buf_len
+}
+
+func extract_line(
+    buf: *mut u8, buf_len: i32, match_pos: i32,
+    max_line_len: i32,
+    lines_buf: *restrict mut u8, lines_buf_cap: i32, write_pos: i32,
+    line_offsets: *restrict mut i32, line_lens: *restrict mut i32,
+    line_idx: i32
+) -> i32 {
+    let ls: i32 = find_line_start(buf, match_pos, max_line_len)
+    let le: i32 = find_line_end(buf, match_pos, buf_len, max_line_len)
+    let mut line_len: i32 = le - ls
+    if line_len > max_line_len {
+        line_len = max_line_len
+    }
+    if write_pos + line_len > lines_buf_cap {
+        return 0
+    }
+    let mut ci: i32 = 0
+    while ci < line_len {
+        lines_buf[write_pos + ci] = buf[ls + ci]
+        ci = ci + 1
+    }
+    line_offsets[line_idx] = write_pos
+    line_lens[line_idx] = line_len
+    return 1
+}
+
+export func chacha20_search_v2(
+    key: *restrict i32, nonce: *restrict i32, ctr_init: i32,
+    ct_u8: *restrict u8, len: i32,
+    ks_i32: *restrict mut i32, ks_u8: *restrict mut u8,
+    ct_i32: *restrict i32,
+    pt_buf: *mut u8, pt_i32: *mut i32,
+    overlap: *restrict mut u8,
+    needles: *restrict u8, needle_offsets: *restrict i32,
+    needle_lens: *restrict i32, needle_count: i32,
+    lines_buf: *restrict mut u8, lines_buf_cap: i32,
+    line_offsets: *restrict mut i32, line_lens: *restrict mut i32,
+    match_offsets: *restrict mut i32, needle_ids: *restrict mut i32,
+    max_matches: i32, max_line_len: i32, window_size: i32,
+    match_count: *restrict mut i32, lines_written: *restrict mut i32
+) {
+    match_count[0] = 0
+    lines_written[0] = 0
+    if needle_count <= 0 {
+        return
+    }
+    if needle_count > 64 {
+        return
+    }
+    if len <= 0 {
+        return
+    }
+
+    let row0_init: i32x4 = [1634760805, 857760878, 2036477234, 1797285236]i32x4
+    let row1_init: i32x4 = load(key, 0)
+    let row2_init: i32x4 = load(key, 4)
+    let n0: i32 = nonce[0]
+    let n1: i32 = nonce[1]
+    let n2: i32 = nonce[2]
+
+    let mut max_nlen: i32 = 0
+    let mut nli: i32 = 0
+    while nli < needle_count {
+        if needle_lens[nli] > max_nlen {
+            max_nlen = needle_lens[nli]
+        }
+        nli = nli + 1
+    }
+    let overlap_save_len: i32 = max_nlen - 1
+
+    // Build unique first-bytes into ks_u8
+    let mut unique_count: i32 = 0
+    let mut ubi: i32 = 0
+    while ubi < needle_count {
+        let fb: u8 = needles[needle_offsets[ubi]]
+        let mut found: i32 = 0
+        let mut uj: i32 = 0
+        while uj < unique_count {
+            if !(ks_u8[uj] < fb) && !(fb < ks_u8[uj]) {
+                found = 1
+                uj = unique_count
+            }
+            uj = uj + 1
+        }
+        if found == 0 {
+            ks_u8[unique_count] = fb
+            unique_count = unique_count + 1
+        }
+        ubi = ubi + 1
+    }
+
+    let mut global_offset: i32 = 0
+    let mut ct_elem_off: i32 = 0
+    let mut ctr: i32 = ctr_init
+    let mut mc: i32 = 0
+    let mut lw: i32 = 0
+    let mut write_pos: i32 = 0
+    let mut overlap_len: i32 = 0
+    let overlap_temp: *restrict mut u8 = ks_u8
+
+    while global_offset < len {
+        let mut wsize: i32 = window_size
+        if wsize > len - global_offset {
+            wsize = len - global_offset
+        }
+
+        // Phase 1: Decrypt window
+        let mut fill_off: i32 = 0
+        let mut fill_eoff: i32 = 0
+
+        // Tier 1: 4-block ILP (256B chunks)
+        while fill_off + 256 <= wsize {
+            prefetch(ct_i32, ct_elem_off + 64)
+            let r3a_init: i32x4 = [ctr, n0, n1, n2]i32x4
+            let r3b_init: i32x4 = [ctr + 1, n0, n1, n2]i32x4
+            let r3c_init: i32x4 = [ctr + 2, n0, n1, n2]i32x4
+            let r3d_init: i32x4 = [ctr + 3, n0, n1, n2]i32x4
+            let mut a0: i32x4 = row0_init
+            let mut a1: i32x4 = row1_init
+            let mut a2: i32x4 = row2_init
+            let mut a3: i32x4 = r3a_init
+            let mut b0: i32x4 = row0_init
+            let mut b1: i32x4 = row1_init
+            let mut b2: i32x4 = row2_init
+            let mut b3: i32x4 = r3b_init
+            let mut c0: i32x4 = row0_init
+            let mut c1: i32x4 = row1_init
+            let mut c2: i32x4 = row2_init
+            let mut c3: i32x4 = r3c_init
+            let mut d0: i32x4 = row0_init
+            let mut d1: i32x4 = row1_init
+            let mut d2: i32x4 = row2_init
+            let mut d3: i32x4 = r3d_init
+            let mut round: i32 = 0
+            while round < 10 {
+                a0 = a0 .+ a1
+                b0 = b0 .+ b1
+                c0 = c0 .+ c1
+                d0 = d0 .+ d1
+                a3 = rotl16(a3 .^ a0)
+                b3 = rotl16(b3 .^ b0)
+                c3 = rotl16(c3 .^ c0)
+                d3 = rotl16(d3 .^ d0)
+                a2 = a2 .+ a3
+                b2 = b2 .+ b3
+                c2 = c2 .+ c3
+                d2 = d2 .+ d3
+                a1 = rotl12(a1 .^ a2)
+                b1 = rotl12(b1 .^ b2)
+                c1 = rotl12(c1 .^ c2)
+                d1 = rotl12(d1 .^ d2)
+                a0 = a0 .+ a1
+                b0 = b0 .+ b1
+                c0 = c0 .+ c1
+                d0 = d0 .+ d1
+                a3 = rotl8(a3 .^ a0)
+                b3 = rotl8(b3 .^ b0)
+                c3 = rotl8(c3 .^ c0)
+                d3 = rotl8(d3 .^ d0)
+                a2 = a2 .+ a3
+                b2 = b2 .+ b3
+                c2 = c2 .+ c3
+                d2 = d2 .+ d3
+                a1 = rotl7(a1 .^ a2)
+                b1 = rotl7(b1 .^ b2)
+                c1 = rotl7(c1 .^ c2)
+                d1 = rotl7(d1 .^ d2)
+                a1 = shuffle(a1, [1, 2, 3, 0])
+                b1 = shuffle(b1, [1, 2, 3, 0])
+                c1 = shuffle(c1, [1, 2, 3, 0])
+                d1 = shuffle(d1, [1, 2, 3, 0])
+                a2 = shuffle(a2, [2, 3, 0, 1])
+                b2 = shuffle(b2, [2, 3, 0, 1])
+                c2 = shuffle(c2, [2, 3, 0, 1])
+                d2 = shuffle(d2, [2, 3, 0, 1])
+                a3 = shuffle(a3, [3, 0, 1, 2])
+                b3 = shuffle(b3, [3, 0, 1, 2])
+                c3 = shuffle(c3, [3, 0, 1, 2])
+                d3 = shuffle(d3, [3, 0, 1, 2])
+                a0 = a0 .+ a1
+                b0 = b0 .+ b1
+                c0 = c0 .+ c1
+                d0 = d0 .+ d1
+                a3 = rotl16(a3 .^ a0)
+                b3 = rotl16(b3 .^ b0)
+                c3 = rotl16(c3 .^ c0)
+                d3 = rotl16(d3 .^ d0)
+                a2 = a2 .+ a3
+                b2 = b2 .+ b3
+                c2 = c2 .+ c3
+                d2 = d2 .+ d3
+                a1 = rotl12(a1 .^ a2)
+                b1 = rotl12(b1 .^ b2)
+                c1 = rotl12(c1 .^ c2)
+                d1 = rotl12(d1 .^ d2)
+                a0 = a0 .+ a1
+                b0 = b0 .+ b1
+                c0 = c0 .+ c1
+                d0 = d0 .+ d1
+                a3 = rotl8(a3 .^ a0)
+                b3 = rotl8(b3 .^ b0)
+                c3 = rotl8(c3 .^ c0)
+                d3 = rotl8(d3 .^ d0)
+                a2 = a2 .+ a3
+                b2 = b2 .+ b3
+                c2 = c2 .+ c3
+                d2 = d2 .+ d3
+                a1 = rotl7(a1 .^ a2)
+                b1 = rotl7(b1 .^ b2)
+                c1 = rotl7(c1 .^ c2)
+                d1 = rotl7(d1 .^ d2)
+                a1 = shuffle(a1, [3, 0, 1, 2])
+                b1 = shuffle(b1, [3, 0, 1, 2])
+                c1 = shuffle(c1, [3, 0, 1, 2])
+                d1 = shuffle(d1, [3, 0, 1, 2])
+                a2 = shuffle(a2, [2, 3, 0, 1])
+                b2 = shuffle(b2, [2, 3, 0, 1])
+                c2 = shuffle(c2, [2, 3, 0, 1])
+                d2 = shuffle(d2, [2, 3, 0, 1])
+                a3 = shuffle(a3, [1, 2, 3, 0])
+                b3 = shuffle(b3, [1, 2, 3, 0])
+                c3 = shuffle(c3, [1, 2, 3, 0])
+                d3 = shuffle(d3, [1, 2, 3, 0])
+                round = round + 1
+            }
+
+            store(pt_i32, fill_eoff, load(ct_i32, ct_elem_off) .^ (a0 .+ row0_init))
+            store(pt_i32, fill_eoff + 4, load(ct_i32, ct_elem_off + 4) .^ (a1 .+ row1_init))
+            store(pt_i32, fill_eoff + 8, load(ct_i32, ct_elem_off + 8) .^ (a2 .+ row2_init))
+            store(pt_i32, fill_eoff + 12, load(ct_i32, ct_elem_off + 12) .^ (a3 .+ r3a_init))
+            store(pt_i32, fill_eoff + 16, load(ct_i32, ct_elem_off + 16) .^ (b0 .+ row0_init))
+            store(pt_i32, fill_eoff + 20, load(ct_i32, ct_elem_off + 20) .^ (b1 .+ row1_init))
+            store(pt_i32, fill_eoff + 24, load(ct_i32, ct_elem_off + 24) .^ (b2 .+ row2_init))
+            store(pt_i32, fill_eoff + 28, load(ct_i32, ct_elem_off + 28) .^ (b3 .+ r3b_init))
+            store(pt_i32, fill_eoff + 32, load(ct_i32, ct_elem_off + 32) .^ (c0 .+ row0_init))
+            store(pt_i32, fill_eoff + 36, load(ct_i32, ct_elem_off + 36) .^ (c1 .+ row1_init))
+            store(pt_i32, fill_eoff + 40, load(ct_i32, ct_elem_off + 40) .^ (c2 .+ row2_init))
+            store(pt_i32, fill_eoff + 44, load(ct_i32, ct_elem_off + 44) .^ (c3 .+ r3c_init))
+            store(pt_i32, fill_eoff + 48, load(ct_i32, ct_elem_off + 48) .^ (d0 .+ row0_init))
+            store(pt_i32, fill_eoff + 52, load(ct_i32, ct_elem_off + 52) .^ (d1 .+ row1_init))
+            store(pt_i32, fill_eoff + 56, load(ct_i32, ct_elem_off + 56) .^ (d2 .+ row2_init))
+            store(pt_i32, fill_eoff + 60, load(ct_i32, ct_elem_off + 60) .^ (d3 .+ r3d_init))
+
+            fill_off = fill_off + 256
+            fill_eoff = fill_eoff + 64
+            ct_elem_off = ct_elem_off + 64
+            ctr = ctr + 4
+        }
+
+        // Tier 2: Single-block (64B chunks)
+        while fill_off + 64 <= wsize {
+            let row3_init: i32x4 = [ctr, n0, n1, n2]i32x4
+            let mut r0: i32x4 = row0_init
+            let mut r1: i32x4 = row1_init
+            let mut r2: i32x4 = row2_init
+            let mut r3: i32x4 = row3_init
+            let mut round: i32 = 0
+            while round < 10 {
+                r0 = r0 .+ r1
+                r3 = rotl16(r3 .^ r0)
+                r2 = r2 .+ r3
+                r1 = rotl12(r1 .^ r2)
+                r0 = r0 .+ r1
+                r3 = rotl8(r3 .^ r0)
+                r2 = r2 .+ r3
+                r1 = rotl7(r1 .^ r2)
+                r1 = shuffle(r1, [1, 2, 3, 0])
+                r2 = shuffle(r2, [2, 3, 0, 1])
+                r3 = shuffle(r3, [3, 0, 1, 2])
+                r0 = r0 .+ r1
+                r3 = rotl16(r3 .^ r0)
+                r2 = r2 .+ r3
+                r1 = rotl12(r1 .^ r2)
+                r0 = r0 .+ r1
+                r3 = rotl8(r3 .^ r0)
+                r2 = r2 .+ r3
+                r1 = rotl7(r1 .^ r2)
+                r1 = shuffle(r1, [3, 0, 1, 2])
+                r2 = shuffle(r2, [2, 3, 0, 1])
+                r3 = shuffle(r3, [1, 2, 3, 0])
+                round = round + 1
+            }
+
+            store(pt_i32, fill_eoff, load(ct_i32, ct_elem_off) .^ (r0 .+ row0_init))
+            store(pt_i32, fill_eoff + 4, load(ct_i32, ct_elem_off + 4) .^ (r1 .+ row1_init))
+            store(pt_i32, fill_eoff + 8, load(ct_i32, ct_elem_off + 8) .^ (r2 .+ row2_init))
+            store(pt_i32, fill_eoff + 12, load(ct_i32, ct_elem_off + 12) .^ (r3 .+ row3_init))
+
+            fill_off = fill_off + 64
+            fill_eoff = fill_eoff + 16
+            ct_elem_off = ct_elem_off + 16
+            ctr = ctr + 1
+        }
+
+        // Tier 3: Sub-block tail
+        if fill_off < wsize {
+            chacha20_block(key, nonce, ctr, ks_i32)
+            let remaining: i32 = wsize - fill_off
+            let mut chunk_off: i32 = 0
+
+            while chunk_off + 16 <= remaining {
+                let ct_chunk: u8x16 = load(ct_u8, global_offset + fill_off + chunk_off)
+                let ks_chunk: u8x16 = load(ks_u8, chunk_off)
+                let pt_chunk: u8x16 = ct_chunk .^ ks_chunk
+                store(pt_buf, fill_off + chunk_off, pt_chunk)
+                chunk_off = chunk_off + 16
+            }
+
+            let tail_count: i32 = remaining - chunk_off
+            if tail_count > 0 {
+                let ct_tail: u8x16 = load_masked(ct_u8, global_offset + fill_off + chunk_off, tail_count)
+                let ks_tail: u8x16 = load_masked(ks_u8, chunk_off, tail_count)
+                store_masked(pt_buf, fill_off + chunk_off, ct_tail .^ ks_tail, tail_count)
+            }
+
+            ctr = ctr + 1
+        }
+
+        // Phase 2: Search overlap
+        let overlap_base: i32 = global_offset - overlap_len
+        mc = search_overlap_multi(overlap, overlap_len, pt_buf,
+                                  needles, needle_offsets, needle_lens, needle_count,
+                                  max_nlen, match_offsets, needle_ids,
+                                  mc, max_matches, overlap_base, overlap_temp)
+
+        // Phase 2.5: Rebuild unique first-bytes into ks_u8
+        let mut ufb_count: i32 = 0
+        let mut ufbi: i32 = 0
+        while ufbi < needle_count {
+            let ufb: u8 = needles[needle_offsets[ufbi]]
+            let mut ufound: i32 = 0
+            let mut ufj: i32 = 0
+            while ufj < ufb_count {
+                if !(ks_u8[ufj] < ufb) && !(ufb < ks_u8[ufj]) {
+                    ufound = 1
+                    ufj = ufb_count
+                }
+                ufj = ufj + 1
+            }
+            if ufound == 0 {
+                ks_u8[ufb_count] = ufb
+                ufb_count = ufb_count + 1
+            }
+            ufbi = ufbi + 1
+        }
+
+        // Phase 3: Multi-needle SIMD search
+        let old_mc: i32 = mc
+        mc = search_buf_multi_simd(pt_buf, wsize,
+                                   needles, needle_offsets, needle_lens, needle_count,
+                                   ks_u8, ufb_count,
+                                   match_offsets, needle_ids,
+                                   mc, max_matches, global_offset)
+
+        // Phase 4: Extract lines for new matches
+        let mut ei: i32 = old_mc
+        while ei < mc {
+            let mpos: i32 = match_offsets[ei] - global_offset
+            if mpos >= 0 {
+                if mpos < wsize {
+                    if extract_line(pt_buf, wsize, mpos, max_line_len,
+                                   lines_buf, lines_buf_cap, write_pos,
+                                   line_offsets, line_lens, lw) == 1 {
+                        write_pos = write_pos + line_lens[lw]
+                        lw = lw + 1
+                    }
+                }
+            }
+            ei = ei + 1
+        }
+
+        // Phase 5: Save overlap
+        if overlap_save_len > 0 {
+            if wsize >= overlap_save_len {
+                let save_start: i32 = wsize - overlap_save_len
+                let mut si: i32 = 0
+                while si < overlap_save_len {
+                    overlap[si] = pt_buf[save_start + si]
+                    si = si + 1
+                }
+                overlap_len = overlap_save_len
+            }
+        }
+
+        // Phase 6: Zero pt_buf (security — plaintext must not persist)
+        let zero_vec: i32x4 = [0, 0, 0, 0]i32x4
+        let mut zi: i32 = 0
+        let zero_elems: i32 = wsize / 16
+        while zi < zero_elems {
+            store(pt_i32, zi * 4, zero_vec)
+            zi = zi + 1
+        }
+        let mut zbi: i32 = zero_elems * 16
+        while zbi < wsize {
+            pt_buf[zbi] = 0
+            zbi = zbi + 1
+        }
+
+        global_offset = global_offset + wsize
+    }
+
+    // Zero overlap on exit (may contain plaintext from last window)
+    let mut oi: i32 = 0
+    while oi < overlap_len {
+        overlap[oi] = 0
+        oi = oi + 1
+    }
+
+    match_count[0] = mc
+    lines_written[0] = lw
+}

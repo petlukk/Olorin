@@ -1,0 +1,8 @@
+[package]
+name = "eachacha"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+libloading.workspace = true
+thiserror.workspace = true

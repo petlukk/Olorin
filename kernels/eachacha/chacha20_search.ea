@@ -1,0 +1,583 @@
+// chacha20_search.ea — Fused ChaCha20 decrypt + scalar search kernel
+// Decrypts ciphertext into a 256-byte working buffer, searches for a needle,
+// handles overlap between iterations for boundary matches, zeroes buffer after.
+
+// Rotation helpers — identical to chacha20_fused.ea
+func rotl16(v: i32x4) -> i32x4 {
+    return (v .<< splat(16)) .| ((v .>> splat(16)) .& splat(65535))
+}
+
+func rotl12(v: i32x4) -> i32x4 {
+    return (v .<< splat(12)) .| ((v .>> splat(20)) .& splat(4095))
+}
+
+func rotl8(v: i32x4) -> i32x4 {
+    return (v .<< splat(8)) .| ((v .>> splat(24)) .& splat(255))
+}
+
+func rotl7(v: i32x4) -> i32x4 {
+    return (v .<< splat(7)) .| ((v .>> splat(25)) .& splat(127))
+}
+
+// Internal single-block function for tail handling
+func chacha20_block(key: *i32, nonce: *i32, counter: i32, out: *mut i32) {
+    let row0_init: i32x4 = [1634760805, 857760878, 2036477234, 1797285236]i32x4
+    let row1_init: i32x4 = load(key, 0)
+    let row2_init: i32x4 = load(key, 4)
+    let n0: i32 = nonce[0]
+    let n1: i32 = nonce[1]
+    let n2: i32 = nonce[2]
+    let row3_init: i32x4 = [counter, n0, n1, n2]i32x4
+    let mut r0: i32x4 = row0_init
+    let mut r1: i32x4 = row1_init
+    let mut r2: i32x4 = row2_init
+    let mut r3: i32x4 = row3_init
+    let mut round: i32 = 0
+    while round < 10 {
+        r0 = r0 .+ r1
+        r3 = rotl16(r3 .^ r0)
+        r2 = r2 .+ r3
+        r1 = rotl12(r1 .^ r2)
+        r0 = r0 .+ r1
+        r3 = rotl8(r3 .^ r0)
+        r2 = r2 .+ r3
+        r1 = rotl7(r1 .^ r2)
+        r1 = shuffle(r1, [1, 2, 3, 0])
+        r2 = shuffle(r2, [2, 3, 0, 1])
+        r3 = shuffle(r3, [3, 0, 1, 2])
+        r0 = r0 .+ r1
+        r3 = rotl16(r3 .^ r0)
+        r2 = r2 .+ r3
+        r1 = rotl12(r1 .^ r2)
+        r0 = r0 .+ r1
+        r3 = rotl8(r3 .^ r0)
+        r2 = r2 .+ r3
+        r1 = rotl7(r1 .^ r2)
+        r1 = shuffle(r1, [3, 0, 1, 2])
+        r2 = shuffle(r2, [2, 3, 0, 1])
+        r3 = shuffle(r3, [1, 2, 3, 0])
+        round = round + 1
+    }
+    store(out, 0, r0 .+ row0_init)
+    store(out, 4, r1 .+ row1_init)
+    store(out, 8, r2 .+ row2_init)
+    store(out, 12, r3 .+ row3_init)
+}
+
+// Scalar byte-by-byte search of a buffer for needle.
+// Writes global offsets of matches into matches array, returns updated match_count.
+// Overlapping matches are reported (resume from p+1 after each match).
+func search_buf(
+    buf: *restrict mut u8, buf_len: i32,
+    needle: *restrict u8, needle_len: i32,
+    matches: *restrict mut i32, match_count: i32, max_matches: i32,
+    base_offset: i32
+) -> i32 {
+    let mut mc: i32 = match_count
+    let limit: i32 = buf_len - needle_len + 1
+    let mut p: i32 = 0
+    while p < limit {
+        if mc >= max_matches {
+            return mc
+        }
+        // Compare needle against buf[p..p+needle_len]
+        let mut ni: i32 = 0
+        let mut matched: i32 = 1
+        while ni < needle_len {
+            let a: u8 = buf[p + ni]
+            let b: u8 = needle[ni]
+            // u8 == not guaranteed; use !(a<b) && !(b<a)
+            if a < b {
+                matched = 0
+                ni = needle_len
+            } else {
+                if b < a {
+                    matched = 0
+                    ni = needle_len
+                } else {
+                    ni = ni + 1
+                }
+            }
+        }
+        if matched > 0 {
+            matches[mc] = base_offset + p
+            mc = mc + 1
+        }
+        p = p + 1
+    }
+    return mc
+}
+
+// Search boundary region between iterations for cross-boundary matches.
+// Copies overlap_buf + first (needle_len-1) bytes of new_buf into temp,
+// then scans positions 0..overlap_len-1.
+func search_overlap(
+    overlap_buf: *restrict mut u8, overlap_len: i32,
+    new_buf: *restrict mut u8,
+    needle: *restrict u8, needle_len: i32,
+    matches: *restrict mut i32, match_count: i32, max_matches: i32,
+    overlap_global_offset: i32,
+    temp: *restrict mut u8
+) -> i32 {
+    if overlap_len < 1 {
+        return match_count
+    }
+    // Copy overlap_buf into temp
+    let mut i: i32 = 0
+    while i < overlap_len {
+        temp[i] = overlap_buf[i]
+        i = i + 1
+    }
+    // Copy first (needle_len - 1) bytes of new_buf into temp after overlap
+    let copy_len: i32 = needle_len - 1
+    let mut j: i32 = 0
+    while j < copy_len {
+        temp[overlap_len + j] = new_buf[j]
+        j = j + 1
+    }
+    // Search only positions 0..overlap_len-1 (boundary region)
+    let temp_len: i32 = overlap_len + copy_len
+    return search_buf(temp, temp_len, needle, needle_len, matches, match_count, max_matches, overlap_global_offset)
+}
+
+// SIMD-accelerated search: .== + movemask for first-byte filtering.
+// Same algorithm as glibc memmem / GNU grep: vpcmpeqb + vpmovmskb.
+func search_buf_simd(
+    buf: *mut u8, buf_len: i32,
+    needle: *restrict u8, needle_len: i32,
+    matches: *restrict mut i32, match_count: i32, max_matches: i32,
+    base_offset: i32
+) -> i32 {
+    let mut mc: i32 = match_count
+    let first_byte: u8 = needle[0]
+    let first_splat: u8x16 = splat(first_byte)
+    let mut chunk_off: i32 = 0
+
+    // Process full 16-byte chunks with SIMD first-byte filter
+    while chunk_off + 16 <= buf_len {
+        if mc >= max_matches {
+            return mc
+        }
+        let chunk: u8x16 = load(buf, chunk_off)
+        let bits: i32 = movemask(chunk .== first_splat)
+        if bits == 0 {
+            // No byte in this chunk matches first byte — skip entire chunk
+            chunk_off = chunk_off + 16
+        } else {
+            // Has candidates — scalar scan positions where bits are set
+            let scan_end: i32 = chunk_off + 16
+            let mut i: i32 = chunk_off
+            while i < scan_end {
+                if mc >= max_matches {
+                    return mc
+                }
+                if !(buf[i] < first_byte) && !(first_byte < buf[i]) {
+                    let mut j: i32 = 1
+                    let mut matched: i32 = 1
+                    while j < needle_len {
+                        if i + j >= buf_len {
+                            matched = 0
+                            j = needle_len
+                        } else {
+                            if buf[i + j] < needle[j] {
+                                matched = 0
+                                j = needle_len
+                            } else {
+                                if needle[j] < buf[i + j] {
+                                    matched = 0
+                                    j = needle_len
+                                }
+                            }
+                        }
+                        j = j + 1
+                    }
+                    if matched == 1 {
+                        matches[mc] = base_offset + i
+                        mc = mc + 1
+                    }
+                }
+                i = i + 1
+            }
+            chunk_off = scan_end
+        }
+    }
+
+    // Remaining bytes (< 16) — scalar
+    let limit: i32 = buf_len - needle_len + 1
+    let mut i: i32 = chunk_off
+    while i < limit {
+        if mc >= max_matches {
+            return mc
+        }
+        if !(buf[i] < first_byte) && !(first_byte < buf[i]) {
+            let mut j: i32 = 1
+            let mut matched: i32 = 1
+            while j < needle_len {
+                if buf[i + j] < needle[j] {
+                    matched = 0
+                    j = needle_len
+                } else {
+                    if needle[j] < buf[i + j] {
+                        matched = 0
+                        j = needle_len
+                    }
+                }
+                j = j + 1
+            }
+            if matched == 1 {
+                matches[mc] = base_offset + i
+                mc = mc + 1
+            }
+        }
+        i = i + 1
+    }
+
+    return mc
+}
+
+// Main export: fused ChaCha20 decrypt + search
+export func chacha20_search(
+    key: *restrict i32, nonce: *restrict i32, ctr_init: i32,
+    ct_u8: *restrict u8, len: i32,
+    needle: *restrict u8, needle_len: i32,
+    ks_i32: *restrict mut i32, ks_u8: *restrict mut u8,
+    ct_i32: *restrict i32,
+    pt_buf: *mut u8, pt_i32: *mut i32,
+    overlap: *restrict mut u8,
+    matches: *restrict mut i32, max_matches: i32,
+    match_count: *restrict mut i32
+) {
+    // Early exits
+    if needle_len <= 0 {
+        match_count[0] = 0
+        return
+    }
+    if needle_len > 64 {
+        match_count[0] = 0
+        return
+    }
+    if len <= 0 {
+        match_count[0] = 0
+        return
+    }
+
+    let row0_init: i32x4 = [1634760805, 857760878, 2036477234, 1797285236]i32x4
+    let row1_init: i32x4 = load(key, 0)
+    let row2_init: i32x4 = load(key, 4)
+    let n0: i32 = nonce[0]
+    let n1: i32 = nonce[1]
+    let n2: i32 = nonce[2]
+    let mut offset: i32 = 0
+    let mut elem_off: i32 = 0
+    let mut ctr: i32 = ctr_init
+    let mut mc: i32 = 0
+    let mut overlap_len: i32 = 0
+    // overlap_temp reuses ks_u8 as scratch (safe: ks_i32 only used in Tier 3)
+    let overlap_temp: *restrict mut u8 = ks_u8
+
+    // ---- Tier 1: 4-block ILP hot loop (256 bytes per iteration) ----
+    while offset + 256 <= len {
+        let r3a_init: i32x4 = [ctr, n0, n1, n2]i32x4
+        let r3b_init: i32x4 = [ctr + 1, n0, n1, n2]i32x4
+        let r3c_init: i32x4 = [ctr + 2, n0, n1, n2]i32x4
+        let r3d_init: i32x4 = [ctr + 3, n0, n1, n2]i32x4
+        let mut a0: i32x4 = row0_init
+        let mut a1: i32x4 = row1_init
+        let mut a2: i32x4 = row2_init
+        let mut a3: i32x4 = r3a_init
+        let mut b0: i32x4 = row0_init
+        let mut b1: i32x4 = row1_init
+        let mut b2: i32x4 = row2_init
+        let mut b3: i32x4 = r3b_init
+        let mut c0: i32x4 = row0_init
+        let mut c1: i32x4 = row1_init
+        let mut c2: i32x4 = row2_init
+        let mut c3: i32x4 = r3c_init
+        let mut d0: i32x4 = row0_init
+        let mut d1: i32x4 = row1_init
+        let mut d2: i32x4 = row2_init
+        let mut d3: i32x4 = r3d_init
+        let mut round: i32 = 0
+        while round < 10 {
+            a0 = a0 .+ a1
+            b0 = b0 .+ b1
+            c0 = c0 .+ c1
+            d0 = d0 .+ d1
+            a3 = rotl16(a3 .^ a0)
+            b3 = rotl16(b3 .^ b0)
+            c3 = rotl16(c3 .^ c0)
+            d3 = rotl16(d3 .^ d0)
+            a2 = a2 .+ a3
+            b2 = b2 .+ b3
+            c2 = c2 .+ c3
+            d2 = d2 .+ d3
+            a1 = rotl12(a1 .^ a2)
+            b1 = rotl12(b1 .^ b2)
+            c1 = rotl12(c1 .^ c2)
+            d1 = rotl12(d1 .^ d2)
+            a0 = a0 .+ a1
+            b0 = b0 .+ b1
+            c0 = c0 .+ c1
+            d0 = d0 .+ d1
+            a3 = rotl8(a3 .^ a0)
+            b3 = rotl8(b3 .^ b0)
+            c3 = rotl8(c3 .^ c0)
+            d3 = rotl8(d3 .^ d0)
+            a2 = a2 .+ a3
+            b2 = b2 .+ b3
+            c2 = c2 .+ c3
+            d2 = d2 .+ d3
+            a1 = rotl7(a1 .^ a2)
+            b1 = rotl7(b1 .^ b2)
+            c1 = rotl7(c1 .^ c2)
+            d1 = rotl7(d1 .^ d2)
+            a1 = shuffle(a1, [1, 2, 3, 0])
+            b1 = shuffle(b1, [1, 2, 3, 0])
+            c1 = shuffle(c1, [1, 2, 3, 0])
+            d1 = shuffle(d1, [1, 2, 3, 0])
+            a2 = shuffle(a2, [2, 3, 0, 1])
+            b2 = shuffle(b2, [2, 3, 0, 1])
+            c2 = shuffle(c2, [2, 3, 0, 1])
+            d2 = shuffle(d2, [2, 3, 0, 1])
+            a3 = shuffle(a3, [3, 0, 1, 2])
+            b3 = shuffle(b3, [3, 0, 1, 2])
+            c3 = shuffle(c3, [3, 0, 1, 2])
+            d3 = shuffle(d3, [3, 0, 1, 2])
+            a0 = a0 .+ a1
+            b0 = b0 .+ b1
+            c0 = c0 .+ c1
+            d0 = d0 .+ d1
+            a3 = rotl16(a3 .^ a0)
+            b3 = rotl16(b3 .^ b0)
+            c3 = rotl16(c3 .^ c0)
+            d3 = rotl16(d3 .^ d0)
+            a2 = a2 .+ a3
+            b2 = b2 .+ b3
+            c2 = c2 .+ c3
+            d2 = d2 .+ d3
+            a1 = rotl12(a1 .^ a2)
+            b1 = rotl12(b1 .^ b2)
+            c1 = rotl12(c1 .^ c2)
+            d1 = rotl12(d1 .^ d2)
+            a0 = a0 .+ a1
+            b0 = b0 .+ b1
+            c0 = c0 .+ c1
+            d0 = d0 .+ d1
+            a3 = rotl8(a3 .^ a0)
+            b3 = rotl8(b3 .^ b0)
+            c3 = rotl8(c3 .^ c0)
+            d3 = rotl8(d3 .^ d0)
+            a2 = a2 .+ a3
+            b2 = b2 .+ b3
+            c2 = c2 .+ c3
+            d2 = d2 .+ d3
+            a1 = rotl7(a1 .^ a2)
+            b1 = rotl7(b1 .^ b2)
+            c1 = rotl7(c1 .^ c2)
+            d1 = rotl7(d1 .^ d2)
+            a1 = shuffle(a1, [3, 0, 1, 2])
+            b1 = shuffle(b1, [3, 0, 1, 2])
+            c1 = shuffle(c1, [3, 0, 1, 2])
+            d1 = shuffle(d1, [3, 0, 1, 2])
+            a2 = shuffle(a2, [2, 3, 0, 1])
+            b2 = shuffle(b2, [2, 3, 0, 1])
+            c2 = shuffle(c2, [2, 3, 0, 1])
+            d2 = shuffle(d2, [2, 3, 0, 1])
+            a3 = shuffle(a3, [1, 2, 3, 0])
+            b3 = shuffle(b3, [1, 2, 3, 0])
+            c3 = shuffle(c3, [1, 2, 3, 0])
+            d3 = shuffle(d3, [1, 2, 3, 0])
+            round = round + 1
+        }
+
+        // Decrypt: load ciphertext from ct_i32 at elem_off, XOR with keystream,
+        // store plaintext into pt_i32 at fixed offsets 0..60
+        store(pt_i32, 0, load(ct_i32, elem_off) .^ (a0 .+ row0_init))
+        store(pt_i32, 4, load(ct_i32, elem_off + 4) .^ (a1 .+ row1_init))
+        store(pt_i32, 8, load(ct_i32, elem_off + 8) .^ (a2 .+ row2_init))
+        store(pt_i32, 12, load(ct_i32, elem_off + 12) .^ (a3 .+ r3a_init))
+        store(pt_i32, 16, load(ct_i32, elem_off + 16) .^ (b0 .+ row0_init))
+        store(pt_i32, 20, load(ct_i32, elem_off + 20) .^ (b1 .+ row1_init))
+        store(pt_i32, 24, load(ct_i32, elem_off + 24) .^ (b2 .+ row2_init))
+        store(pt_i32, 28, load(ct_i32, elem_off + 28) .^ (b3 .+ r3b_init))
+        store(pt_i32, 32, load(ct_i32, elem_off + 32) .^ (c0 .+ row0_init))
+        store(pt_i32, 36, load(ct_i32, elem_off + 36) .^ (c1 .+ row1_init))
+        store(pt_i32, 40, load(ct_i32, elem_off + 40) .^ (c2 .+ row2_init))
+        store(pt_i32, 44, load(ct_i32, elem_off + 44) .^ (c3 .+ r3c_init))
+        store(pt_i32, 48, load(ct_i32, elem_off + 48) .^ (d0 .+ row0_init))
+        store(pt_i32, 52, load(ct_i32, elem_off + 52) .^ (d1 .+ row1_init))
+        store(pt_i32, 56, load(ct_i32, elem_off + 56) .^ (d2 .+ row2_init))
+        store(pt_i32, 60, load(ct_i32, elem_off + 60) .^ (d3 .+ r3d_init))
+
+        // Search overlap region (boundary between previous and current buffer)
+        mc = search_overlap(overlap, overlap_len, pt_buf, needle, needle_len,
+                            matches, mc, max_matches,
+                            offset - overlap_len, overlap_temp)
+
+        // Search current buffer
+        mc = search_buf_simd(pt_buf, 256, needle, needle_len,
+                        matches, mc, max_matches, offset)
+
+        // Save last (needle_len - 1) bytes to overlap for next iteration
+        let save_len: i32 = needle_len - 1
+        let save_start: i32 = 256 - save_len
+        let mut si: i32 = 0
+        while si < save_len {
+            overlap[si] = pt_buf[save_start + si]
+            si = si + 1
+        }
+        overlap_len = save_len
+
+        // Zero pt_buf (16 i32x4 stores = 256 bytes)
+        let zero_vec: i32x4 = [0, 0, 0, 0]i32x4
+        store(pt_i32, 0, zero_vec)
+        store(pt_i32, 4, zero_vec)
+        store(pt_i32, 8, zero_vec)
+        store(pt_i32, 12, zero_vec)
+        store(pt_i32, 16, zero_vec)
+        store(pt_i32, 20, zero_vec)
+        store(pt_i32, 24, zero_vec)
+        store(pt_i32, 28, zero_vec)
+        store(pt_i32, 32, zero_vec)
+        store(pt_i32, 36, zero_vec)
+        store(pt_i32, 40, zero_vec)
+        store(pt_i32, 44, zero_vec)
+        store(pt_i32, 48, zero_vec)
+        store(pt_i32, 52, zero_vec)
+        store(pt_i32, 56, zero_vec)
+        store(pt_i32, 60, zero_vec)
+
+        offset = offset + 256
+        elem_off = elem_off + 64
+        ctr = ctr + 4
+    }
+
+    // ---- Tier 2: Single-block loop (64 bytes per iteration) ----
+    while offset + 64 <= len {
+        let row3_init: i32x4 = [ctr, n0, n1, n2]i32x4
+        let mut r0: i32x4 = row0_init
+        let mut r1: i32x4 = row1_init
+        let mut r2: i32x4 = row2_init
+        let mut r3: i32x4 = row3_init
+        let mut round: i32 = 0
+        while round < 10 {
+            r0 = r0 .+ r1
+            r3 = rotl16(r3 .^ r0)
+            r2 = r2 .+ r3
+            r1 = rotl12(r1 .^ r2)
+            r0 = r0 .+ r1
+            r3 = rotl8(r3 .^ r0)
+            r2 = r2 .+ r3
+            r1 = rotl7(r1 .^ r2)
+            r1 = shuffle(r1, [1, 2, 3, 0])
+            r2 = shuffle(r2, [2, 3, 0, 1])
+            r3 = shuffle(r3, [3, 0, 1, 2])
+            r0 = r0 .+ r1
+            r3 = rotl16(r3 .^ r0)
+            r2 = r2 .+ r3
+            r1 = rotl12(r1 .^ r2)
+            r0 = r0 .+ r1
+            r3 = rotl8(r3 .^ r0)
+            r2 = r2 .+ r3
+            r1 = rotl7(r1 .^ r2)
+            r1 = shuffle(r1, [3, 0, 1, 2])
+            r2 = shuffle(r2, [2, 3, 0, 1])
+            r3 = shuffle(r3, [1, 2, 3, 0])
+            round = round + 1
+        }
+
+        // Decrypt into pt_buf at fixed offsets 0..12
+        store(pt_i32, 0, load(ct_i32, elem_off) .^ (r0 .+ row0_init))
+        store(pt_i32, 4, load(ct_i32, elem_off + 4) .^ (r1 .+ row1_init))
+        store(pt_i32, 8, load(ct_i32, elem_off + 8) .^ (r2 .+ row2_init))
+        store(pt_i32, 12, load(ct_i32, elem_off + 12) .^ (r3 .+ row3_init))
+
+        // Search overlap region
+        mc = search_overlap(overlap, overlap_len, pt_buf, needle, needle_len,
+                            matches, mc, max_matches,
+                            offset - overlap_len, overlap_temp)
+
+        // Search current 64-byte buffer
+        mc = search_buf_simd(pt_buf, 64, needle, needle_len,
+                        matches, mc, max_matches, offset)
+
+        // Save last (needle_len - 1) bytes to overlap
+        let save_len: i32 = needle_len - 1
+        let save_start: i32 = 64 - save_len
+        let mut si: i32 = 0
+        while si < save_len {
+            overlap[si] = pt_buf[save_start + si]
+            si = si + 1
+        }
+        overlap_len = save_len
+
+        // Zero pt_buf (4 i32x4 stores = 64 bytes)
+        let zero_vec: i32x4 = [0, 0, 0, 0]i32x4
+        store(pt_i32, 0, zero_vec)
+        store(pt_i32, 4, zero_vec)
+        store(pt_i32, 8, zero_vec)
+        store(pt_i32, 12, zero_vec)
+
+        offset = offset + 64
+        elem_off = elem_off + 16
+        ctr = ctr + 1
+    }
+
+    // ---- Tier 3: Sub-block tail (< 64 bytes) ----
+    if offset < len {
+        chacha20_block(key, nonce, ctr, ks_i32)
+        let remaining: i32 = len - offset
+        let mut chunk_off: i32 = 0
+
+        // Full 16-byte vector chunks within the tail
+        while chunk_off + 16 <= remaining {
+            let ct_chunk: u8x16 = load(ct_u8, offset + chunk_off)
+            let ks_chunk: u8x16 = load(ks_u8, chunk_off)
+            let pt_chunk: u8x16 = ct_chunk .^ ks_chunk
+            store(pt_buf, chunk_off, pt_chunk)
+            chunk_off = chunk_off + 16
+        }
+
+        // Byte-level tail (< 16 bytes)
+        let tail_count: i32 = remaining - chunk_off
+        if tail_count > 0 {
+            let ct_tail: u8x16 = load_masked(ct_u8, offset + chunk_off, tail_count)
+            let ks_tail: u8x16 = load_masked(ks_u8, chunk_off, tail_count)
+            store_masked(pt_buf, chunk_off, ct_tail .^ ks_tail, tail_count)
+        }
+
+        // Search overlap region
+        mc = search_overlap(overlap, overlap_len, pt_buf, needle, needle_len,
+                            matches, mc, max_matches,
+                            offset - overlap_len, overlap_temp)
+
+        // Search the tail buffer
+        mc = search_buf(pt_buf, remaining, needle, needle_len,
+                        matches, mc, max_matches, offset)
+
+        // Zero pt_buf for the tail region
+        let mut zi: i32 = 0
+        while zi < remaining {
+            pt_buf[zi] = 0
+            zi = zi + 1
+        }
+
+    }
+
+    // Zero overlap on exit (unconditional — may contain plaintext from last iteration
+    // even when there's no Tier 3 tail, e.g. input is exact multiple of 64 or 256)
+    let mut oi: i32 = 0
+    while oi < overlap_len {
+        overlap[oi] = 0
+        oi = oi + 1
+    }
+
+    // Zero keystream buffer (ks_i32 may contain ChaCha20 keystream after Tier 3)
+    let ks_zero: i32x4 = [0, 0, 0, 0]i32x4
+    store(ks_i32, 0, ks_zero)
+    store(ks_i32, 4, ks_zero)
+    store(ks_i32, 8, ks_zero)
+    store(ks_i32, 12, ks_zero)
+
+    match_count[0] = mc
+}
