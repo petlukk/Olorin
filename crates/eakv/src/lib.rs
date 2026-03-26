@@ -106,3 +106,22 @@ impl Drop for EakvCache {
         unsafe { eakv_cache_free(self.ptr) }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_create_and_checkpoint() {
+        let mut cache = EakvCache::new(2, 4, 64, 128).expect("create failed");
+        assert_eq!(cache.seq_len(), 0);
+        let cp = cache.checkpoint();
+        assert_eq!(cp, 0);
+    }
+
+    #[test]
+    fn test_restore() {
+        let mut cache = EakvCache::new(2, 4, 64, 128).expect("create failed");
+        cache.restore(0).expect("restore to 0 failed");
+    }
+}
