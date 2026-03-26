@@ -1,0 +1,13 @@
+[package]
+name = "olorin"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "olorin"
+path = "src/main.rs"
+
+[dependencies]
+olorin-core = { path = "../crates/olorin-core" }
+cougar-engine = { path = "../crates/cougar-engine" }
+tokio.workspace = true
