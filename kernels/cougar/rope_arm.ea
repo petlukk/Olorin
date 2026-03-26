@@ -1,0 +1,53 @@
+// rope_arm.ea — RoPE for ARM NEON (f32x4)
+//
+// Same algorithm as rope.ea but with #[cfg(aarch64)].
+// f32x4 is native NEON (128-bit), same width as x86 version.
+//
+// Rotation per pair:
+//   out[2i]   = data[2i] * cos[i] - data[2i+1] * sin[i]
+//   out[2i+1] = data[2i] * sin[i] + data[2i+1] * cos[i]
+
+#[cfg(aarch64)]
+
+export func apply_rope_f32(
+    data: *restrict f32,
+    freqs: *restrict f32,
+    out: *mut f32,
+    head_dim: i32,
+    n_heads: i32
+) {
+    let signs: f32x4 = [-1.0, 1.0, -1.0, 1.0]f32x4
+
+    let mut h: i32 = 0
+    while h < n_heads {
+        let off: i32 = h * head_dim
+        let mut i: i32 = 0
+
+        while i + 4 <= head_dim {
+            let d: f32x4 = load(data, off + i)
+            let f: f32x4 = load(freqs, i)
+
+            let r_dup: f32x4 = shuffle(d, [0, 0, 2, 2])
+            let im_dup: f32x4 = shuffle(d, [1, 1, 3, 3])
+
+            let f_swap: f32x4 = shuffle(f, [1, 0, 3, 2])
+            let f_neg: f32x4 = f_swap .* signs
+
+            store(out, off + i, fma(im_dup, f_neg, r_dup .* f))
+
+            i = i + 4
+        }
+
+        while i + 2 <= head_dim {
+            let r: f32 = data[off + i]
+            let im: f32 = data[off + i + 1]
+            let c: f32 = freqs[i]
+            let s: f32 = freqs[i + 1]
+            out[off + i] = r * c - im * s
+            out[off + i + 1] = r * s + im * c
+            i = i + 2
+        }
+
+        h = h + 1
+    }
+}
