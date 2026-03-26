@@ -1,4 +1,5 @@
 pub mod anthropic;
+pub mod cougar;
 pub mod tool_parse;
 
 use async_trait::async_trait;
@@ -114,5 +115,66 @@ pub trait LlmProvider: Send + Sync {
             }
         }
         Ok(response)
+    }
+}
+
+/// Backend selector: cloud, local, or auto-fallback.
+pub enum Backend {
+    Cloud(anthropic::AnthropicProvider),
+    Local(cougar::CougarProvider),
+    Auto {
+        local: cougar::CougarProvider,
+        cloud: Option<anthropic::AnthropicProvider>,
+    },
+}
+
+impl Backend {
+    pub async fn chat(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDef],
+        system: &str,
+    ) -> crate::error::Result<LlmResponse> {
+        match self {
+            Backend::Cloud(p) => p.chat(messages, tools, system).await,
+            Backend::Local(p) => p.chat(messages, tools, system).await,
+            Backend::Auto { local, cloud } => {
+                match local.chat(messages, tools, system).await {
+                    Ok(resp) => Ok(resp),
+                    Err(e) => match cloud {
+                        Some(c) => {
+                            eprintln!("[olorin] local inference failed: {e}, falling back to cloud");
+                            c.chat(messages, tools, system).await
+                        }
+                        None => Err(e),
+                    },
+                }
+            }
+        }
+    }
+
+    pub async fn chat_stream(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDef],
+        system: &str,
+        on_text: OnTextFn<'_>,
+    ) -> crate::error::Result<LlmResponse> {
+        match self {
+            Backend::Cloud(p) => p.chat_stream(messages, tools, system, on_text).await,
+            Backend::Local(p) => p.chat_stream(messages, tools, system, on_text).await,
+            Backend::Auto { local, cloud } => {
+                match local.chat_stream(messages, tools, system, on_text).await {
+                    Ok(resp) => Ok(resp),
+                    Err(e) => match cloud {
+                        Some(c) => {
+                            eprintln!("[olorin] local inference failed: {e}, falling back to cloud");
+                            c.chat_stream(messages, tools, system, on_text).await
+                        }
+                        None => Err(e),
+                    },
+                }
+            }
+        }
     }
 }
