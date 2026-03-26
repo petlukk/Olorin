@@ -170,6 +170,8 @@ fn load_cougar_model(path: &std::path::Path, max_seq_len: usize) -> Option<Couga
 
 fn run_repl(engine: Option<Arc<CougarEngine>>) {
     use std::io::{self, BufRead, Write};
+    use olorin_core::kernels::command_router as cmd_router;
+
     let stdin = io::stdin();
     let stdout = io::stdout();
 
@@ -181,19 +183,97 @@ fn run_repl(engine: Option<Arc<CougarEngine>>) {
         match stdin.lock().read_line(&mut line) {
             Ok(0) => break,
             Ok(_) => {
-                let prompt = line.trim();
-                if prompt.is_empty() { continue; }
-                if prompt == "/quit" || prompt == "/exit" { break; }
+                let input = line.trim();
+                if input.is_empty() { continue; }
+
+                // Route through SIMD command router
+                let (cmd_id, cmd_arg) = cmd_router::match_command_verified(input.as_bytes());
+
+                if cmd_id == cmd_router::CMD_QUIT {
+                    break;
+                }
+
+                if cmd_id == cmd_router::CMD_HELP {
+                    println!("olorin> Commands:");
+                    println!("  /help     — this message");
+                    println!("  /model    — show/switch backend");
+                    println!("  /teleport — session handoff");
+                    println!("  /time     — current time");
+                    println!("  /shell    — run shell command");
+                    println!("  /quit     — exit");
+                    println!("  (any text) — chat with Cougar");
+                    continue;
+                }
+
+                if cmd_id == cmd_router::CMD_MODEL {
+                    let arg = std::str::from_utf8(cmd_arg).unwrap_or("").trim();
+                    match arg {
+                        "local" => println!("olorin> Backend: local (Cougar)"),
+                        "cloud" => println!("olorin> Backend: cloud (Anthropic)"),
+                        "auto" => println!("olorin> Backend: auto"),
+                        "" => {
+                            println!("olorin> Backend: auto");
+                            if engine.is_some() {
+                                println!("  Local: Cougar BitNet 2B (loaded)");
+                            } else {
+                                println!("  Local: no model loaded");
+                            }
+                        }
+                        other => println!("olorin> Unknown backend '{}'. Use: local|cloud|auto", other),
+                    }
+                    continue;
+                }
+
+                if cmd_id == cmd_router::CMD_TELEPORT {
+                    let target = std::str::from_utf8(cmd_arg).unwrap_or("").trim();
+                    if target.is_empty() {
+                        println!("olorin> Usage: /teleport <whatsapp|web>");
+                    } else {
+                        println!("olorin> Teleporting to {}...", target);
+                    }
+                    continue;
+                }
+
+                if cmd_id == cmd_router::CMD_TIME {
+                    println!("olorin> {}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"));
+                    continue;
+                }
+
+                if cmd_id == cmd_router::CMD_SHELL {
+                    let shell_cmd = std::str::from_utf8(cmd_arg).unwrap_or("").trim();
+                    if shell_cmd.is_empty() {
+                        println!("olorin> Usage: /shell <command>");
+                    } else {
+                        match std::process::Command::new("sh").arg("-c").arg(shell_cmd).output() {
+                            Ok(out) => {
+                                let text = String::from_utf8_lossy(&out.stdout);
+                                let err = String::from_utf8_lossy(&out.stderr);
+                                if !text.is_empty() { print!("{}", text); }
+                                if !err.is_empty() { eprint!("{}", err); }
+                            }
+                            Err(e) => println!("olorin> Shell error: {}", e),
+                        }
+                    }
+                    continue;
+                }
+
+                // Known command but not handled in REPL
+                if cmd_id != cmd_router::CMD_NONE {
+                    let name = cmd_router::command_name(cmd_id).unwrap_or("unknown");
+                    println!("olorin> /{} — not available in REPL mode", name);
+                    continue;
+                }
+
+                // Not a command — send to inference
                 print!("olorin> ");
                 stdout.lock().flush().ok();
                 match &engine {
                     Some(eng) => {
-                        let response = eng.generate_text(prompt, &|tok| {
+                        eng.generate_text(input, &|tok| {
                             print!("{}", tok);
                             stdout.lock().flush().ok();
                         });
                         println!();
-                        let _ = response;
                     }
                     None => println!("No local model loaded."),
                 }

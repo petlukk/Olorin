@@ -12,3 +12,4 @@ olorin-core = { path = "../crates/olorin-core" }
 cougar-engine = { path = "../crates/cougar-engine" }
 tokio.workspace = true
 home.workspace = true
+chrono.workspace = true
