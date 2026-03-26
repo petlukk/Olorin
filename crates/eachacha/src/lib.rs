@@ -3,6 +3,8 @@
 //! Loads `libchacha20.so` at runtime via libloading and calls the
 //! `chacha20_encrypt` symbol. Key must be 32 bytes, nonce 12 bytes.
 
+pub mod search;
+
 use libloading::{Library, Symbol};
 use thiserror::Error;
 
@@ -163,6 +165,78 @@ mod tests {
         // encrypt/decrypt of empty slice doesn't load the .so at all.
         let ct = encrypt(&[], &key, &nonce, &path).unwrap();
         assert!(ct.is_empty());
+    }
+
+    /// RFC 7539 Section 2.4.2 encryption test vector.
+    ///
+    /// Key:   00 01 02 .. 1f  (32 bytes)
+    /// Nonce: 00 00 00 00  00 00 00 4a  00 00 00 00  (12 bytes)
+    /// Counter: 1
+    #[test]
+    fn test_rfc7539_vector() {
+        let path = so_path();
+        if !path.exists() {
+            eprintln!("skipping: {} not found", path.display());
+            return;
+        }
+
+        // Key: 0x00..0x1f
+        let key: [u8; 32] = [
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+            0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+            0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+            0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+        ];
+        // Nonce: 00 00 00 00  4a 00 00 00  00 00 00 00
+        // (u32 words LE: 0x00000000, 0x0000004a, 0x00000000)
+        // Wait — the Python test uses ENC_NONCE_U32 = [0x00000000, 0x4a000000, 0x00000000]
+        // Those are u32 words that get packed LE → bytes.
+        // 0x00000000 → 00 00 00 00
+        // 0x4a000000 → 00 00 00 4a
+        // 0x00000000 → 00 00 00 00
+        let nonce: [u8; 12] = [
+            0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x4a,
+            0x00, 0x00, 0x00, 0x00,
+        ];
+
+        let plaintext = b"Ladies and Gentlemen of the class of '99: \
+If I could offer you only one tip for the future, \
+sunscreen would be it.";
+
+        let expected_ct = hex_to_bytes(
+            "6e2e359a2568f98041ba0728dd0d6981\
+             e97e7aec1d4360c20a27afccfd9fae0b\
+             f91b65c5524733ab8f593dabcd62b357\
+             1639d624e65152ab8f530c359f0861d8\
+             07ca0dbf500d6a6156a38e088a22b65e\
+             52bc514d16ccf806818ce91ab7793736\
+             5af90bbf74a35be6b40b8eedf2785e42\
+             874d",
+        );
+
+        let ct = encrypt(plaintext.as_slice(), &key, &nonce, &path).unwrap();
+        assert_eq!(
+            ct, expected_ct,
+            "RFC 7539 s2.4.2 ciphertext mismatch\ngot:      {}\nexpected: {}",
+            hex_str(&ct),
+            hex_str(&expected_ct),
+        );
+
+        // Verify decrypt round-trip
+        let recovered = decrypt(&ct, &key, &nonce, &path).unwrap();
+        assert_eq!(recovered, plaintext.as_slice());
+    }
+
+    fn hex_to_bytes(hex: &str) -> Vec<u8> {
+        (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    fn hex_str(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
     }
 
     #[test]
