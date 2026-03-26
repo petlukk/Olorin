@@ -1,4 +1,5 @@
 mod repl;
+mod repl_commands;
 
 use std::env;
 use std::io::{self, BufRead, Write};
@@ -183,7 +184,7 @@ fn load_cougar_model(path: &std::path::Path, max_seq_len: usize) -> Option<Couga
 fn run_repl(engine: Option<Arc<CougarEngine>>) {
     let stdin = io::stdin();
     let stdout = io::stdout();
-    let repl = OlorinRepl { engine };
+    let mut repl = OlorinRepl::new(engine);
 
     println!("[Olorin] Type a message (Ctrl+D to exit):");
     loop {
