@@ -7,5 +7,6 @@ pub mod llm;
 pub mod persist;
 pub mod recall;
 pub mod safety;
+pub mod session;
 pub mod tools;
 pub mod vault;

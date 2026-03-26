@@ -2,6 +2,7 @@ use crate::channel::Channel;
 use crate::error::Result;
 use crate::kernels::command_router as cmd_router;
 use crate::llm::{ContentBlock, Message, Role, StopReason, ToolDef};
+use crate::session::SessionToken;
 use std::time::Instant;
 
 use super::{Agent, TurnTiming};
@@ -52,6 +53,40 @@ impl Agent {
                 Ok(true)
             }
             _ => Ok(true),
+        }
+    }
+
+    /// Handle the /teleport command: create a session token and save it.
+    pub(crate) async fn handle_teleport(&mut self, target: &str, channel: &dyn Channel) {
+        let olorin_dir = match home::home_dir() {
+            Some(h) => h.join(".olorin"),
+            None => {
+                channel.send("[Olorin] Cannot determine home directory.").await;
+                return;
+            }
+        };
+        if let Err(e) = std::fs::create_dir_all(&olorin_dir) {
+            channel
+                .send(&format!("[Olorin] Failed to create ~/.olorin: {e}"))
+                .await;
+            return;
+        }
+        let vault_id = format!("{}_{}", target, self.config.agent_name.to_lowercase());
+        let token = SessionToken::new(target, &vault_id, &self.config.model);
+        let session_path = olorin_dir.join("session.json");
+        match token.save(&session_path) {
+            Ok(()) => {
+                channel
+                    .send(&format!(
+                        "[Olorin] Session token saved. Ready to continue on {target}."
+                    ))
+                    .await;
+            }
+            Err(e) => {
+                channel
+                    .send(&format!("[Olorin] Failed to save session token: {e}"))
+                    .await;
+            }
         }
     }
 

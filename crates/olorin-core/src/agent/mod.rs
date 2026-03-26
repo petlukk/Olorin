@@ -170,14 +170,11 @@ impl Agent {
             // Handle /teleport <target>
             if cmd_id == cmd_router::CMD_TELEPORT {
                 let target = String::from_utf8_lossy(cmd_arg);
-                let target = target.trim();
+                let target = target.trim().to_string();
                 if target.is_empty() {
                     channel.send("[Olorin] Usage: /teleport <whatsapp|web>").await;
                 } else {
-                    channel.send(&format!(
-                        "[Olorin] Teleporting to {}... (session handoff not yet wired)",
-                        target
-                    )).await;
+                    self.handle_teleport(&target, channel).await;
                 }
                 continue;
             }
