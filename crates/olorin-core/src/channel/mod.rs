@@ -1,4 +1,5 @@
 pub mod gateway;
+#[cfg(feature = "repl-fancy")]
 pub mod repl;
 pub mod types;
 pub mod wa_loop;

@@ -20,11 +20,12 @@ libloading.workspace = true
 libc.workspace = true
 home.workspace = true
 chrono.workspace = true
-rustyline.workspace = true
+rustyline = { workspace = true, optional = true }
 
 [features]
 default = ["whatsapp"]
 whatsapp = []
+repl-fancy = ["rustyline"]
 
 [dev-dependencies]
 tempfile = "3.27.0"
