@@ -81,6 +81,7 @@ fn compile_kernel(
     src: &Path,
     output_stem: &str,
     out_dir: &Path,
+    is_arm: bool,
 ) -> Option<PathBuf> {
     let so_path = out_dir.join(format!("lib{output_stem}.so"));
     let mut cmd = Command::new(ea);
@@ -89,6 +90,11 @@ fn compile_kernel(
         .arg("--opt-level=3")
         .arg("-o")
         .arg(&so_path);
+    if is_arm {
+        cmd.arg("--target-triple=aarch64-unknown-linux-gnu");
+        cmd.arg("--dotprod");
+        cmd.env("CC", "aarch64-linux-gnu-gcc");
+    }
 
     match cmd.output() {
         Ok(output) if output.status.success() => Some(so_path),
@@ -190,7 +196,7 @@ fn main() {
         // Try compile
         let compiled = ea_compiler
             .as_ref()
-            .and_then(|ea| compile_kernel(ea, &ea_file, out_stem, &out_dir));
+            .and_then(|ea| compile_kernel(ea, &ea_file, out_stem, &out_dir, is_arm));
 
         let so_path = if let Some(p) = compiled {
             p

@@ -66,7 +66,9 @@ fn main() {
                     .arg("-o")
                     .arg(out_so.to_str().unwrap());
                 if is_arm {
-                    cmd.arg("--target=aarch64");
+                    cmd.arg("--target-triple=aarch64-unknown-linux-gnu");
+                    cmd.arg("--dotprod");
+                    cmd.env("CC", "aarch64-linux-gnu-gcc");
                 }
                 match cmd.status() {
                     Ok(s) if s.success() => Some(out_so.clone()),
