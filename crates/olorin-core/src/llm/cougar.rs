@@ -1,3 +1,4 @@
+use super::tool_parse::{extract_tool_calls, parse_tool_call_json, StrDetectResult, StringToolCallDetector};
 use super::{ContentBlock, LlmProvider, LlmResponse, Message, OnTextFn, Role, StopReason, ToolDef};
 use crate::error::{Error, Result};
 use async_trait::async_trait;
@@ -82,13 +83,40 @@ impl CougarProvider {
 }
 
 /// Format conversation messages into a Qwen/ChatML-style prompt string.
-fn format_chat_prompt(messages: &[Message], system: &str) -> String {
+/// When `tools` is non-empty, appends tool definitions to the system message
+/// so the model knows how to emit `<tool_call>` blocks.
+fn format_chat_prompt(messages: &[Message], tools: &[ToolDef], system: &str) -> String {
     let mut out = String::with_capacity(2048);
-    if !system.is_empty() {
+
+    // System message — always present when tools are provided.
+    let has_system = !system.is_empty() || !tools.is_empty();
+    if has_system {
         out.push_str("<|im_start|>system\n");
-        out.push_str(system);
+        if !system.is_empty() {
+            out.push_str(system);
+        }
+        if !tools.is_empty() {
+            if !system.is_empty() {
+                out.push_str("\n\n");
+            }
+            out.push_str("# Tools\n\nYou have access to the following tools:\n");
+            for tool in tools {
+                out.push_str("\n## ");
+                out.push_str(&tool.name);
+                out.push('\n');
+                out.push_str(&tool.description);
+                out.push_str("\nParameters: ");
+                out.push_str(&tool.input_schema.to_string());
+                out.push('\n');
+            }
+            out.push_str(
+                "\nWhen you need to call a tool, use this format:\n\
+                 <tool_call>{\"name\": \"tool_name\", \"arguments\": {\"key\": \"value\"}}</tool_call>\n",
+            );
+        }
         out.push_str("<|im_end|>\n");
     }
+
     for msg in messages {
         let role_str = match msg.role {
             Role::User => "user",
@@ -101,7 +129,11 @@ fn format_chat_prompt(messages: &[Message], system: &str) -> String {
             match block {
                 ContentBlock::Text { text } => out.push_str(text),
                 ContentBlock::ToolUse { name, input, .. } => {
-                    out.push_str(&format!("[tool_use: {} {}]", name, input));
+                    // Re-serialize tool calls so the model sees its own format.
+                    out.push_str("<tool_call>");
+                    let obj = serde_json::json!({"name": name, "arguments": input});
+                    out.push_str(&obj.to_string());
+                    out.push_str("</tool_call>");
                 }
                 ContentBlock::ToolResult { content, .. } => {
                     out.push_str(content);
@@ -119,10 +151,11 @@ impl LlmProvider for CougarProvider {
     async fn chat(
         &self,
         messages: &[Message],
-        _tools: &[ToolDef],
+        tools: &[ToolDef],
         system: &str,
     ) -> Result<LlmResponse> {
-        let prompt = format_chat_prompt(messages, system);
+        let prompt = format_chat_prompt(messages, tools, system);
+        let has_tools = !tools.is_empty();
         let bundle = Arc::clone(&self.bundle);
         let max_tokens = self.max_tokens;
         let max_seq_len = self.max_seq_len;
@@ -150,28 +183,32 @@ impl LlmProvider for CougarProvider {
         .map_err(|e| Error::Llm(format!("inference task panicked: {e}")))?
         .map_err(Error::Llm)?;
 
-        let stop_reason = StopReason::EndTurn;
+        // Post-process: extract tool calls from the generated text.
+        if has_tools {
+            return Ok(extract_tool_calls(&text));
+        }
         Ok(LlmResponse {
             content: vec![ContentBlock::Text { text }],
-            stop_reason,
+            stop_reason: StopReason::EndTurn,
         })
     }
 
     async fn chat_stream(
         &self,
         messages: &[Message],
-        _tools: &[ToolDef],
+        tools: &[ToolDef],
         system: &str,
         on_text: OnTextFn<'_>,
     ) -> Result<LlmResponse> {
-        let prompt = format_chat_prompt(messages, system);
+        let prompt = format_chat_prompt(messages, tools, system);
+        let has_tools = !tools.is_empty();
         let bundle = Arc::clone(&self.bundle);
         let max_tokens = self.max_tokens;
         let max_seq_len = self.max_seq_len;
         let temperature = self.temperature;
         let repetition_penalty = self.repetition_penalty;
 
-        // Channel for streaming tokens from the blocking task
+        // Channel for streaming tokens from the blocking task.
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
         let handle = tokio::task::spawn_blocking(move || -> std::result::Result<Vec<u32>, String> {
@@ -198,10 +235,48 @@ impl LlmProvider for CougarProvider {
             Ok(generated.to_vec())
         });
 
-        let mut full_text = String::new();
+        let mut content_blocks: Vec<ContentBlock> = Vec::new();
+        let mut streamed_text = String::new();
+        let mut detector = StringToolCallDetector::new(8192);
+
         while let Some(piece) = rx.recv().await {
-            on_text(&piece);
-            full_text.push_str(&piece);
+            if !has_tools {
+                on_text(&piece);
+                streamed_text.push_str(&piece);
+                continue;
+            }
+            // Feed through tool-call detector.
+            match detector.feed(&piece) {
+                StrDetectResult::Text(t) => {
+                    on_text(&t);
+                    streamed_text.push_str(&t);
+                }
+                StrDetectResult::Buffering => {}
+                StrDetectResult::ToolCall(body) => {
+                    // Flush any accumulated text as a content block.
+                    if !streamed_text.is_empty() {
+                        content_blocks.push(ContentBlock::Text {
+                            text: std::mem::take(&mut streamed_text),
+                        });
+                    }
+                    if let Some(block) = parse_tool_call_json(&body) {
+                        content_blocks.push(block);
+                    }
+                }
+                StrDetectResult::Aborted(buf) => {
+                    // Failed capture — stream the raw text.
+                    on_text(&buf);
+                    streamed_text.push_str(&buf);
+                }
+            }
+        }
+
+        // Flush any leftover from the detector.
+        if has_tools {
+            if let Some(leftover) = detector.finish() {
+                on_text(&leftover);
+                streamed_text.push_str(&leftover);
+            }
         }
 
         handle
@@ -209,9 +284,29 @@ impl LlmProvider for CougarProvider {
             .map_err(|e| Error::Llm(format!("inference task panicked: {e}")))?
             .map_err(Error::Llm)?;
 
+        // Determine stop reason and final content.
+        if !streamed_text.is_empty() {
+            content_blocks.push(ContentBlock::Text {
+                text: streamed_text,
+            });
+        }
+        if content_blocks.is_empty() {
+            content_blocks.push(ContentBlock::Text {
+                text: String::new(),
+            });
+        }
+        let has_tool_use = content_blocks
+            .iter()
+            .any(|b| matches!(b, ContentBlock::ToolUse { .. }));
+        let stop_reason = if has_tool_use {
+            StopReason::ToolUse
+        } else {
+            StopReason::EndTurn
+        };
+
         Ok(LlmResponse {
-            content: vec![ContentBlock::Text { text: full_text }],
-            stop_reason: StopReason::EndTurn,
+            content: content_blocks,
+            stop_reason,
         })
     }
 }
@@ -226,7 +321,7 @@ mod tests {
             role: Role::User,
             content: vec![ContentBlock::text("hello")],
         }];
-        let prompt = format_chat_prompt(&msgs, "");
+        let prompt = format_chat_prompt(&msgs, &[], "");
         assert!(!prompt.contains("system"));
         assert!(prompt.contains("<|im_start|>user\nhello<|im_end|>"));
         assert!(prompt.ends_with("<|im_start|>assistant\n"));
@@ -238,7 +333,7 @@ mod tests {
             role: Role::User,
             content: vec![ContentBlock::text("hi")],
         }];
-        let prompt = format_chat_prompt(&msgs, "You are helpful.");
+        let prompt = format_chat_prompt(&msgs, &[], "You are helpful.");
         assert!(prompt.starts_with("<|im_start|>system\nYou are helpful.<|im_end|>\n"));
         assert!(prompt.contains("<|im_start|>user\nhi<|im_end|>"));
     }
@@ -259,7 +354,7 @@ mod tests {
                 content: vec![ContentBlock::text("And 3+3?")],
             },
         ];
-        let prompt = format_chat_prompt(&msgs, "Be concise.");
+        let prompt = format_chat_prompt(&msgs, &[], "Be concise.");
         let expected_parts = [
             "<|im_start|>system\nBe concise.<|im_end|>\n",
             "<|im_start|>user\nWhat is 2+2?<|im_end|>\n",
@@ -278,7 +373,7 @@ mod tests {
             role: Role::User,
             content: vec![ContentBlock::tool_result("id1", "file contents here")],
         }];
-        let prompt = format_chat_prompt(&msgs, "");
+        let prompt = format_chat_prompt(&msgs, &[], "");
         assert!(prompt.contains("file contents here"));
     }
 
@@ -292,8 +387,74 @@ mod tests {
                 input: serde_json::json!({"path": "/tmp/x"}),
             }],
         }];
-        let prompt = format_chat_prompt(&msgs, "");
+        let prompt = format_chat_prompt(&msgs, &[], "");
+        assert!(prompt.contains("<tool_call>"));
         assert!(prompt.contains("read_file"));
         assert!(prompt.contains("/tmp/x"));
+        assert!(prompt.contains("</tool_call>"));
     }
+
+    #[test]
+    fn format_chat_with_tools() {
+        let tools = vec![
+            ToolDef {
+                name: "read_file".into(),
+                description: "Read a file from disk.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"}
+                    },
+                    "required": ["path"]
+                }),
+            },
+            ToolDef {
+                name: "write_file".into(),
+                description: "Write content to a file.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "content": {"type": "string"}
+                    },
+                    "required": ["path", "content"]
+                }),
+            },
+        ];
+        let msgs = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::text("List files")],
+        }];
+        let prompt = format_chat_prompt(&msgs, &tools, "You are an assistant.");
+
+        // System block should contain both system prompt and tool definitions.
+        assert!(prompt.contains("You are an assistant."));
+        assert!(prompt.contains("# Tools"));
+        assert!(prompt.contains("## read_file"));
+        assert!(prompt.contains("Read a file from disk."));
+        assert!(prompt.contains("## write_file"));
+        assert!(prompt.contains("Write content to a file."));
+        assert!(prompt.contains("<tool_call>"));
+        assert!(prompt.contains("</tool_call>"));
+        // User message is still present.
+        assert!(prompt.contains("<|im_start|>user\nList files<|im_end|>"));
+    }
+
+    #[test]
+    fn format_tools_without_system_prompt() {
+        let tools = vec![ToolDef {
+            name: "search".into(),
+            description: "Search the web.".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+        }];
+        let msgs = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::text("find rust docs")],
+        }];
+        let prompt = format_chat_prompt(&msgs, &tools, "");
+        // Should still have a system block with tools.
+        assert!(prompt.contains("<|im_start|>system\n# Tools"));
+        assert!(prompt.contains("## search"));
+    }
+
 }

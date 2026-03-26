@@ -124,128 +124,334 @@ impl ToolCallDetector {
     }
 }
 
+/// String-based `<tool_call>` / `</tool_call>` detector for decoded text streams.
+/// Works on string fragments (token pieces) rather than token IDs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum SState { Normal, MaybeTag, Capturing }
+
+const OPEN_TAG: &str = "<tool_call>";
+const CLOSE_TAG: &str = "</tool_call>";
+
+#[derive(Debug, PartialEq)]
+pub enum StrDetectResult {
+    Text(String),
+    Buffering,
+    ToolCall(String),
+    Aborted(String),
+}
+
+pub struct StringToolCallDetector {
+    state: SState,
+    tag_buf: String,
+    capture_buf: String,
+    flush_buf: String,
+    max_capture: usize,
+}
+
+impl StringToolCallDetector {
+    pub fn new(max_capture: usize) -> Self {
+        Self { state: SState::Normal, tag_buf: String::new(),
+               capture_buf: String::new(), flush_buf: String::new(), max_capture }
+    }
+
+    pub fn feed(&mut self, piece: &str) -> StrDetectResult {
+        match self.state {
+            SState::Normal => self.feed_normal(piece),
+            SState::MaybeTag => self.feed_maybe_tag(piece),
+            SState::Capturing => self.feed_capturing(piece),
+        }
+    }
+
+    pub fn finish(&mut self) -> Option<String> {
+        let mut lo = std::mem::take(&mut self.tag_buf);
+        if !self.capture_buf.is_empty() {
+            lo.push_str(OPEN_TAG);
+            lo.push_str(&std::mem::take(&mut self.capture_buf));
+        }
+        self.state = SState::Normal;
+        if lo.is_empty() { None } else { Some(lo) }
+    }
+
+    fn feed_normal(&mut self, piece: &str) -> StrDetectResult {
+        self.flush_buf.push_str(piece);
+        if let Some(pos) = self.flush_buf.find(OPEN_TAG) {
+            let before = self.flush_buf[..pos].to_string();
+            let remainder = self.flush_buf[pos + OPEN_TAG.len()..].to_string();
+            self.flush_buf.clear();
+            self.state = SState::Capturing;
+            self.capture_buf = remainder;
+            if let Some(result) = self.try_close_tag() {
+                if before.is_empty() { return result; }
+                if let StrDetectResult::ToolCall(body) = result {
+                    self.flush_buf = format!("{OPEN_TAG}{body}{CLOSE_TAG}");
+                }
+                return StrDetectResult::Text(before);
+            }
+            return if before.is_empty() { StrDetectResult::Buffering }
+                   else { StrDetectResult::Text(before) };
+        }
+        let plen = partial_tag_match(&self.flush_buf, OPEN_TAG);
+        if plen > 0 {
+            let split = self.flush_buf.len() - plen;
+            let before = self.flush_buf[..split].to_string();
+            self.tag_buf = self.flush_buf[split..].to_string();
+            self.flush_buf.clear();
+            self.state = SState::MaybeTag;
+            return if before.is_empty() { StrDetectResult::Buffering }
+                   else { StrDetectResult::Text(before) };
+        }
+        StrDetectResult::Text(std::mem::take(&mut self.flush_buf))
+    }
+
+    fn feed_maybe_tag(&mut self, piece: &str) -> StrDetectResult {
+        self.tag_buf.push_str(piece);
+        if let Some(pos) = self.tag_buf.find(OPEN_TAG) {
+            let before = self.tag_buf[..pos].to_string();
+            self.capture_buf = self.tag_buf[pos + OPEN_TAG.len()..].to_string();
+            self.tag_buf.clear();
+            self.state = SState::Capturing;
+            if let Some(result) = self.try_close_tag() { return result; }
+            return if before.is_empty() { StrDetectResult::Buffering }
+                   else { StrDetectResult::Text(before) };
+        }
+        if partial_tag_match(&self.tag_buf, OPEN_TAG) == self.tag_buf.len() {
+            return StrDetectResult::Buffering;
+        }
+        self.state = SState::Normal;
+        StrDetectResult::Text(std::mem::take(&mut self.tag_buf))
+    }
+
+    fn feed_capturing(&mut self, piece: &str) -> StrDetectResult {
+        self.capture_buf.push_str(piece);
+        if self.capture_buf.len() > self.max_capture {
+            self.state = SState::Normal;
+            return StrDetectResult::Aborted(std::mem::take(&mut self.capture_buf));
+        }
+        self.try_close_tag().unwrap_or(StrDetectResult::Buffering)
+    }
+
+    fn try_close_tag(&mut self) -> Option<StrDetectResult> {
+        let pos = self.capture_buf.find(CLOSE_TAG)?;
+        let body = self.capture_buf[..pos].trim().to_string();
+        self.capture_buf.clear();
+        self.state = SState::Normal;
+        Some(StrDetectResult::ToolCall(body))
+    }
+}
+
+/// Parse a tool-call JSON body into a `ContentBlock::ToolUse`.
+/// Expected format: `{"name": "tool_name", "arguments": {...}}`
+pub fn parse_tool_call_json(json_str: &str) -> Option<super::ContentBlock> {
+    let v: serde_json::Value = serde_json::from_str(json_str).ok()?;
+    let name = v.get("name")?.as_str()?.to_string();
+    let arguments = v.get("arguments")?.clone();
+    let id = format!("tc_{:08x}", fxhash(json_str));
+    Some(super::ContentBlock::ToolUse { id, name, input: arguments })
+}
+
+/// Extract tool calls from completed generation text (non-streaming path).
+pub fn extract_tool_calls(text: &str) -> super::LlmResponse {
+    let mut detector = StringToolCallDetector::new(8192);
+    let mut blocks: Vec<super::ContentBlock> = Vec::new();
+    let mut plain = String::new();
+    let mut result = detector.feed(text);
+    loop {
+        match result {
+            StrDetectResult::Text(t) => plain.push_str(&t),
+            StrDetectResult::Buffering => {}
+            StrDetectResult::ToolCall(body) => {
+                if !plain.is_empty() {
+                    blocks.push(super::ContentBlock::Text { text: std::mem::take(&mut plain) });
+                }
+                if let Some(block) = parse_tool_call_json(&body) {
+                    blocks.push(block);
+                }
+            }
+            StrDetectResult::Aborted(buf) => plain.push_str(&buf),
+        }
+        let next = detector.feed("");
+        if matches!(next, StrDetectResult::Text(ref t) if t.is_empty()) {
+            break;
+        }
+        result = next;
+    }
+    if let Some(leftover) = detector.finish() {
+        plain.push_str(&leftover);
+    }
+    if !plain.is_empty() {
+        blocks.push(super::ContentBlock::Text { text: plain });
+    }
+    if blocks.is_empty() {
+        blocks.push(super::ContentBlock::Text { text: String::new() });
+    }
+    let has_tool_use = blocks.iter().any(|b| matches!(b, super::ContentBlock::ToolUse { .. }));
+    super::LlmResponse {
+        content: blocks,
+        stop_reason: if has_tool_use { super::StopReason::ToolUse } else { super::StopReason::EndTurn },
+    }
+}
+
+fn fxhash(s: &str) -> u32 {
+    let mut h: u32 = 0;
+    for b in s.bytes() {
+        h = h.wrapping_mul(0x01000193) ^ (b as u32);
+    }
+    h
+}
+
+/// Returns how many trailing bytes of `text` are a prefix of `tag`.
+fn partial_tag_match(text: &str, tag: &str) -> usize {
+    let text_bytes = text.as_bytes();
+    let tag_bytes = tag.as_bytes();
+    // Check suffixes of text from longest to shortest.
+    let max_check = text_bytes.len().min(tag_bytes.len() - 1);
+    for len in (1..=max_check).rev() {
+        let suffix = &text_bytes[text_bytes.len() - len..];
+        if tag_bytes.starts_with(suffix) {
+            return len;
+        }
+    }
+    0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn make_detector(max_capture: usize) -> ToolCallDetector {
-        ToolCallDetector::new(vec![10, 20, 30], vec![40, 50, 60], max_capture)
+    fn det(max: usize) -> ToolCallDetector {
+        ToolCallDetector::new(vec![10, 20, 30], vec![40, 50, 60], max)
     }
 
     #[test]
-    fn normal_tokens_pass_through() {
-        let mut d = make_detector(512);
+    fn tok_normal_pass_through() {
+        let mut d = det(512);
         assert_eq!(d.feed(1), DetectResult::Text(1));
-        assert_eq!(d.feed(2), DetectResult::Text(2));
         assert_eq!(d.feed(99), DetectResult::Text(99));
-        assert_eq!(d.state, DetectorState::Normal);
     }
 
     #[test]
-    fn open_tag_triggers_capture() {
-        let mut d = make_detector(512);
-        // Feed the first two tokens of the open pattern — still Normal.
+    fn tok_open_triggers_capture() {
+        let mut d = det(512);
         assert_eq!(d.feed(10), DetectResult::Text(10));
         assert_eq!(d.feed(20), DetectResult::Text(20));
-        // Third token completes the open pattern → TagOpen and state = Capturing.
         assert_eq!(d.feed(30), DetectResult::TagOpen);
         assert_eq!(d.state, DetectorState::Capturing);
     }
 
     #[test]
-    fn capture_then_close_produces_tool_call() {
-        let mut d = make_detector(512);
-        // Open tag.
-        d.feed(10);
-        d.feed(20);
-        d.feed(30);
-        assert_eq!(d.state, DetectorState::Capturing);
-
-        // Body tokens.
+    fn tok_capture_close_produces_tool_call() {
+        let mut d = det(512);
+        for t in [10, 20, 30] { d.feed(t); }
         assert_eq!(d.feed(100), DetectResult::Captured);
         assert_eq!(d.feed(200), DetectResult::Captured);
+        for t in [40, 50] { assert_eq!(d.feed(t), DetectResult::Captured); }
+        assert_eq!(d.feed(60), DetectResult::ToolCall(vec![100, 200]));
+    }
 
-        // Close tag tokens — first two are Captured, last one completes.
-        assert_eq!(d.feed(40), DetectResult::Captured);
-        assert_eq!(d.feed(50), DetectResult::Captured);
-        let result = d.feed(60);
-        // Body is everything before the close pattern [40,50,60].
-        assert_eq!(result, DetectResult::ToolCall(vec![100, 200]));
+    #[test]
+    fn tok_runaway_aborts() {
+        let mut d = det(5);
+        for t in [10, 20, 30] { d.feed(t); }
+        for i in 1..=4 { assert_eq!(d.feed(i), DetectResult::Captured); }
+        assert!(matches!(d.feed(5), DetectResult::Aborted(_)));
+    }
+
+    #[test]
+    fn tok_nested_open_ignored() {
+        let mut d = det(512);
+        for t in [10, 20, 30] { d.feed(t); }
+        for t in [10, 20, 30] { assert_eq!(d.feed(t), DetectResult::Captured); }
+        for t in [40, 50] { d.feed(t); }
+        assert_eq!(d.feed(60), DetectResult::ToolCall(vec![10, 20, 30]));
+    }
+
+    #[test]
+    fn tok_resets_after_complete() {
+        let mut d = det(512);
+        for t in [10, 20, 30, 100, 40, 50, 60] { d.feed(t); }
         assert_eq!(d.state, DetectorState::Complete);
+        assert_eq!(d.feed(7), DetectResult::Text(7));
+    }
+
+    // --- StringToolCallDetector tests ---
+
+    #[test]
+    fn str_normal_text() {
+        let mut d = StringToolCallDetector::new(4096);
+        assert_eq!(d.feed("hello"), StrDetectResult::Text("hello".into()));
     }
 
     #[test]
-    fn runaway_capture_aborts() {
-        // max_capture = 5: abort once 5 tokens have been captured.
-        let mut d = make_detector(5);
-        // Open tag.
-        d.feed(10);
-        d.feed(20);
-        d.feed(30);
-
-        // Four tokens — still within limit.
-        assert_eq!(d.feed(1), DetectResult::Captured);
-        assert_eq!(d.feed(2), DetectResult::Captured);
-        assert_eq!(d.feed(3), DetectResult::Captured);
-        assert_eq!(d.feed(4), DetectResult::Captured);
-        // Fifth token hits max_capture.
-        let result = d.feed(5);
-        assert!(matches!(result, DetectResult::Aborted(_)));
-        assert_eq!(d.state, DetectorState::Normal);
+    fn str_single_piece_tool_call() {
+        let mut d = StringToolCallDetector::new(4096);
+        let r = d.feed(r#"<tool_call>{"name":"foo","arguments":{}}</tool_call>"#);
+        assert_eq!(r, StrDetectResult::ToolCall(r#"{"name":"foo","arguments":{}}"#.into()));
     }
 
     #[test]
-    fn nested_open_tag_ignored_during_capture() {
-        let mut d = make_detector(512);
-        // Enter capturing state.
-        d.feed(10);
-        d.feed(20);
-        d.feed(30);
-
-        // Feed the open pattern again inside capture — it should all be Captured.
-        assert_eq!(d.feed(10), DetectResult::Captured);
-        assert_eq!(d.feed(20), DetectResult::Captured);
-        assert_eq!(d.feed(30), DetectResult::Captured);
-        // Still capturing.
-        assert_eq!(d.state, DetectorState::Capturing);
-
-        // Now close properly.
-        d.feed(40);
-        d.feed(50);
-        let result = d.feed(60);
-        // Body should include the nested open-pattern tokens; close pattern [40,50,60] stripped.
+    fn str_multi_piece_tool_call() {
+        let mut d = StringToolCallDetector::new(4096);
+        assert_eq!(d.feed("Sure "), StrDetectResult::Text("Sure ".into()));
+        assert_eq!(d.feed("<tool"), StrDetectResult::Buffering);
+        assert_eq!(d.feed("_call>"), StrDetectResult::Buffering);
+        assert_eq!(d.feed(r#"{"name":"x","arguments":{"a":1}}"#), StrDetectResult::Buffering);
         assert_eq!(
-            result,
-            DetectResult::ToolCall(vec![10, 20, 30])
+            d.feed("</tool_call>"),
+            StrDetectResult::ToolCall(r#"{"name":"x","arguments":{"a":1}}"#.into()),
         );
     }
 
     #[test]
-    fn partial_open_pattern_then_mismatch_flushes() {
-        let mut d = make_detector(512);
-        // Start of open pattern.
-        assert_eq!(d.feed(10), DetectResult::Text(10));
-        assert_eq!(d.feed(20), DetectResult::Text(20));
-        // Mismatch — should just be Text, not TagOpen.
-        assert_eq!(d.feed(99), DetectResult::Text(99));
-        assert_eq!(d.state, DetectorState::Normal);
+    fn str_partial_tag_mismatch_flushes() {
+        let mut d = StringToolCallDetector::new(4096);
+        assert_eq!(d.feed("<tool"), StrDetectResult::Buffering);
+        assert_eq!(d.feed("box>"), StrDetectResult::Text("<toolbox>".into()));
     }
 
     #[test]
-    fn resets_after_tool_call() {
-        let mut d = make_detector(512);
-        // Full open→body→close cycle.
-        d.feed(10);
-        d.feed(20);
-        d.feed(30);
-        d.feed(100);
-        d.feed(40);
-        d.feed(50);
-        d.feed(60);
-        assert_eq!(d.state, DetectorState::Complete);
+    fn str_text_before_tool_call() {
+        let mut d = StringToolCallDetector::new(4096);
+        let r = d.feed(r#"Help.<tool_call>{"name":"f","arguments":{}}</tool_call>"#);
+        assert_eq!(r, StrDetectResult::Text("Help.".into()));
+        assert_eq!(d.feed(""), StrDetectResult::ToolCall(r#"{"name":"f","arguments":{}}"#.into()));
+    }
 
-        // Next token should trigger reset and return Text.
-        assert_eq!(d.feed(7), DetectResult::Text(7));
-        assert_eq!(d.state, DetectorState::Normal);
+    #[test]
+    fn str_abort_and_finish() {
+        let mut d = StringToolCallDetector::new(20);
+        d.feed("<tool_call>");
+        assert!(matches!(d.feed("this is way too long for the limit"), StrDetectResult::Aborted(_)));
+
+        let mut d2 = StringToolCallDetector::new(4096);
+        d2.feed("<tool");
+        assert_eq!(d2.finish(), Some("<tool".into()));
+    }
+
+    // --- extract_tool_calls integration tests ---
+
+    #[test]
+    fn extract_with_text_and_tool() {
+        let text = "I'll help.\n<tool_call>{\"name\":\"read\",\"arguments\":{\"p\":1}}</tool_call>";
+        let r = extract_tool_calls(text);
+        assert_eq!(r.stop_reason, super::super::StopReason::ToolUse);
+        assert_eq!(r.content.len(), 2);
+        assert!(matches!(&r.content[0], super::super::ContentBlock::Text { .. }));
+        assert!(matches!(&r.content[1], super::super::ContentBlock::ToolUse { name, .. } if name == "read"));
+    }
+
+    #[test]
+    fn extract_plain_text() {
+        let r = extract_tool_calls("Just text, no tools.");
+        assert_eq!(r.stop_reason, super::super::StopReason::EndTurn);
+        assert_eq!(r.content.len(), 1);
+    }
+
+    #[test]
+    fn extract_tool_only() {
+        let text = r#"<tool_call>{"name":"s","arguments":{"q":"r"}}</tool_call>"#;
+        let r = extract_tool_calls(text);
+        assert_eq!(r.stop_reason, super::super::StopReason::ToolUse);
+        assert_eq!(r.content.len(), 1);
+        assert!(matches!(&r.content[0], super::super::ContentBlock::ToolUse { name, .. } if name == "s"));
     }
 }
