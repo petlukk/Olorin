@@ -47,13 +47,22 @@ fn main() {
     // Mode dispatch
     if serve {
         println!("[Olorin] Starting web UI on port {}...", port);
+        let web = olorin_core::channel::web::WebChannel::new(port);
+        let handler = move |prompt: &str, on_token: &dyn Fn(&str)| -> String {
+            on_token(prompt);
+            format!("[Olorin] Echo: {}", prompt)
+        };
+        if let Err(e) = web.run(handler) {
+            eprintln!("[Olorin] Web server error: {}", e);
+        }
+        return;
     }
 
     if whatsapp {
         println!("[Olorin] WhatsApp bridge not yet connected.");
     }
 
-    if interactive || (!serve && !whatsapp) {
+    if interactive || !whatsapp {
         println!("[Olorin] Interactive mode.");
         println!("[Olorin] Ready. (REPL not yet wired — use --serve for web UI)");
     }
