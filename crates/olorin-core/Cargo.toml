@@ -23,7 +23,5 @@ chrono.workspace = true
 rustyline.workspace = true
 
 [features]
-default = ["local", "whatsapp"]
-local = []
+default = ["whatsapp"]
 whatsapp = []
-cloud-only = []

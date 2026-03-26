@@ -3,12 +3,6 @@ use crate::safety::shell_guard::{self, ShellPolicy};
 use std::env;
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum Backend {
-    Anthropic,
-    Local,
-}
-
 #[derive(Debug, Clone)]
 pub struct Config {
     pub api_key: String,
@@ -20,33 +14,17 @@ pub struct Config {
     pub identity: Option<String>,
     /// Allowed HTTP hosts. Empty = allow all.
     pub allowed_hosts: Vec<String>,
-    pub backend: Backend,
-    pub model_path: Option<String>,
     pub ctx_size: usize,
-    pub batch_size: usize,
-    pub threads: usize,
-    pub mlock: bool,
     pub shell_policy: ShellPolicy,
 }
 
 impl Config {
     /// Load configuration from environment variables.
     pub fn from_env() -> Result<Self> {
-        let backend = match env::var("OLORIN_BACKEND").as_deref() {
-            Ok("local") => Backend::Local,
-            _ => Backend::Anthropic,
-        };
-
-        let api_key = if backend == Backend::Anthropic {
-            env::var("ANTHROPIC_API_KEY")
-                .map_err(|_| Error::Config("ANTHROPIC_API_KEY not set".into()))?
-                .trim()
-                .to_string()
-        } else {
-            env::var("ANTHROPIC_API_KEY").unwrap_or_default()
-                .trim()
-                .to_string()
-        };
+        let api_key = env::var("ANTHROPIC_API_KEY")
+            .map_err(|_| Error::Config("ANTHROPIC_API_KEY not set".into()))?
+            .trim()
+            .to_string();
 
         let model = env::var("ANTHROPIC_MODEL")
             .unwrap_or_else(|_| "claude-sonnet-4-20250514".into());
@@ -65,37 +43,10 @@ impl Config {
         let identity = load_identity();
         let allowed_hosts = load_allowed_hosts();
 
-        let model_path = env::var("OLORIN_MODEL_PATH").ok().or_else(|| {
-            home::home_dir().map(|h| {
-                h.join(".olorin/models/qwen2.5-3b-instruct-q4_k_m.gguf")
-                    .to_string_lossy()
-                    .into_owned()
-            })
-        });
-
         let ctx_size = env::var("OLORIN_CTX_SIZE")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(2048);
-
-        let batch_size = env::var("OLORIN_BATCH_SIZE")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(512);
-
-        let threads = env::var("OLORIN_THREADS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or_else(|| {
-                std::thread::available_parallelism()
-                    .map(|n| n.get())
-                    .unwrap_or(4)
-            });
-
-        let mlock = env::var("OLORIN_MLOCK")
-            .ok()
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
 
         let shell_policy = shell_guard::load_shell_policy();
 
@@ -107,12 +58,7 @@ impl Config {
             command_prefix,
             identity,
             allowed_hosts,
-            backend,
-            model_path,
             ctx_size,
-            batch_size,
-            threads,
-            mlock,
             shell_policy,
         })
     }
