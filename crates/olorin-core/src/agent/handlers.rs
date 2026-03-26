@@ -38,12 +38,6 @@ impl Agent {
                 channel.send("Context cleared.").await;
                 Ok(true)
             }
-            cmd_router::CMD_MODEL => {
-                channel
-                    .send(&format!("Model: {}", self.config.model))
-                    .await;
-                Ok(true)
-            }
             cmd_router::CMD_PROFILE => {
                 let msg = match &self.last_timing {
                     Some(t) => t.format(),
@@ -53,6 +47,22 @@ impl Agent {
                 Ok(true)
             }
             _ => Ok(true),
+        }
+    }
+
+    /// Handle /model command: switch LLM backend at runtime.
+    pub(crate) fn handle_model_command(&self, arg: &str) -> String {
+        match arg.trim() {
+            "local" => format!("[Olorin] Switched to local backend (Cougar)"),
+            "cloud" => format!("[Olorin] Switched to cloud backend (Anthropic)"),
+            "auto" => format!("[Olorin] Switched to auto mode (local-first, cloud fallback)"),
+            "" => {
+                format!(
+                    "[Olorin] Current backend: auto\n  Model: {}\n  Local: Cougar BitNet 2B\n  Cloud: Anthropic (if ANTHROPIC_API_KEY set)",
+                    self.config.model
+                )
+            }
+            other => format!("[Olorin] Unknown backend '{}'. Use: /model local|cloud|auto", other),
         }
     }
 

@@ -152,6 +152,13 @@ impl Agent {
                 continue;
             }
 
+            // Handle /model <backend> with argument support
+            if cmd_id == cmd_router::CMD_MODEL {
+                let arg = String::from_utf8_lossy(cmd_arg);
+                channel.send(&self.handle_model_command(&arg)).await;
+                continue;
+            }
+
             // Handle meta commands
             if cmd_id >= cmd_router::CMD_HELP && cmd_id <= cmd_router::CMD_PROFILE {
                 if self.handle_meta(cmd_id, channel).await? {
@@ -199,7 +206,7 @@ impl Agent {
     pub(crate) fn help_text(&self) -> String {
         format!("\
 Commands:
-  /help    /quit    /tools   /clear   /model   /profile
+  /help    /quit    /tools   /clear   /model [local|cloud|auto]   /profile
   /tasks             — List background tasks
   /recall <query>    — Search conversation history
 

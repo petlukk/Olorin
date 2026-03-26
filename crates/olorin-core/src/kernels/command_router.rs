@@ -190,6 +190,13 @@ mod tests {
     }
 
     #[test]
+    fn test_verified_model_with_arg() {
+        let (id, arg) = match_command_verified(b"/model local");
+        assert_eq!(id, CMD_MODEL);
+        assert_eq!(arg, b"local");
+    }
+
+    #[test]
     fn test_profile() {
         assert_eq!(match_command(b"/profile"), CMD_PROFILE);
     }
