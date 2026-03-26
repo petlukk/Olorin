@@ -17,6 +17,7 @@ pub struct OlorinRepl {
     pub engine: Option<Arc<CougarEngine>>,
     safety: SafetyLayer,
     pub(crate) vault: Option<Vault>,
+    pub(crate) backend_mode: String,
 }
 
 impl OlorinRepl {
@@ -27,6 +28,7 @@ impl OlorinRepl {
             engine,
             safety,
             vault,
+            backend_mode: "auto".to_string(),
         }
     }
 
@@ -187,5 +189,64 @@ impl OlorinRepl {
                 .ok();
             vault.flush().ok();
         }
+    }
+
+    /// Like `generate_streaming` but sends tokens via callback and returns the full response.
+    /// Used by the web channel so every request gets safety + recall + vault persistence.
+    pub fn generate_for_web(&mut self, prompt: &str, on_token: &dyn Fn(&str)) -> String {
+        let context = if let Some(ref mut vault) = self.vault {
+            let results = vault.search(prompt, 3).unwrap_or_default();
+            if results.is_empty() {
+                String::new()
+            } else {
+                let ctx: Vec<String> = results
+                    .iter()
+                    .map(|r| String::from_utf8_lossy(&r.text).to_string())
+                    .collect();
+                format!("\n[Recall context]\n{}\n", ctx.join("\n---\n"))
+            }
+        } else {
+            String::new()
+        };
+
+        let full_prompt = if context.is_empty() {
+            prompt.to_string()
+        } else {
+            format!("{}{}", context, prompt)
+        };
+
+        let response = match &self.engine {
+            Some(eng) => {
+                let resp = eng.generate_text(&full_prompt, on_token);
+
+                let scan = self.safety.scan_output(&resp);
+                if scan.is_blocked() {
+                    let warn = format!(
+                        "\n[Safety] Warning: output {}",
+                        scan.block_reason().unwrap_or("flagged")
+                    );
+                    on_token(&warn);
+                }
+
+                resp
+            }
+            None => {
+                let msg = "No local model loaded.";
+                on_token(msg);
+                msg.to_string()
+            }
+        };
+
+        if let Some(ref mut vault) = self.vault {
+            vault
+                .append_message(&format!("User: {}\n", prompt))
+                .ok();
+            vault
+                .append_message(&format!("Olorin: {}\n", response))
+                .ok();
+            vault.flush().ok();
+        }
+
+        response
     }
 }

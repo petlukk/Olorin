@@ -4,7 +4,7 @@ mod repl_commands;
 use std::env;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use repl::{OlorinRepl, ReplAction};
 
@@ -69,17 +69,17 @@ fn main() {
 
     if serve {
         println!("[Olorin] Starting web UI on port {}...", port);
+        let repl = Mutex::new(OlorinRepl::new(engine.clone()));
         let web = olorin_core::channel::web::WebChannel::new(port);
-        let engine_ref = engine.clone();
         let handler = move |prompt: &str, on_token: &dyn Fn(&str)| -> String {
-            match engine_ref {
-                Some(ref eng) => eng.generate_text(prompt, on_token),
-                None => {
-                    let msg =
-                        "[Olorin] No local model loaded. Set --model or use --backend cloud.";
-                    on_token(msg);
-                    msg.to_string()
+            let mut repl = repl.lock().unwrap();
+            match repl.process(prompt) {
+                ReplAction::Quit => "Goodbye.".to_string(),
+                ReplAction::Print(msg) => {
+                    on_token(&msg);
+                    msg
                 }
+                ReplAction::Generate(p) => repl.generate_for_web(&p, on_token),
             }
         };
         if let Err(e) = web.run(handler) {
