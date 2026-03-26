@@ -1,6 +1,6 @@
 //! FFI layer for Eä SIMD kernels.
 //!
-//! Kernels are embedded in the binary and extracted to ~/.eaclaw/lib/
+//! Kernels are embedded in the binary and extracted to ~/.olorin/lib/
 //! on first run. Functions are loaded at runtime via libloading.
 //! Call `init()` once at startup before using any kernel function.
 
@@ -75,7 +75,7 @@ pub fn init() -> Result<(), String> {
 fn kernel_dir() -> Result<PathBuf, String> {
     let base = home::home_dir()
         .ok_or_else(|| "cannot determine home directory".to_string())?;
-    Ok(base.join(".eaclaw").join("lib").join(format!("v{}", embedded::VERSION)))
+    Ok(base.join(".olorin").join("lib").join(format!("v{}", embedded::VERSION)))
 }
 
 fn extract_kernels() -> Result<PathBuf, String> {
@@ -141,7 +141,7 @@ fn load_kernels(lib_dir: &PathBuf) -> Result<KernelTable, String> {
     #[cfg(not(target_arch = "x86_64"))]
     let (search, search_variant) = (load("search")?, "neon");
 
-    eprintln!("eaclaw kernels: search={search_variant}");
+    eprintln!("olorin kernels: search={search_variant}");
 
     unsafe {
         let sym = |lib: &Library, name: &[u8]| -> Result<usize, String> {

@@ -5,7 +5,7 @@
 //! - `safe`: block destructive, warn on write operations
 //! - `strict`: only allow read-only commands
 //!
-//! Configure via `EACLAW_SHELL_POLICY=safe` or `~/.eaclaw/shell_policy`.
+//! Configure via `OLORIN_SHELL_POLICY=safe` or `~/.olorin/shell_policy`.
 
 /// Policy mode for shell command execution.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -57,10 +57,10 @@ impl ShellGuard {
             (_, CommandRisk::Allow) => Ok(()),
             (ShellPolicy::Safe, CommandRisk::Write) => Ok(()),
             (ShellPolicy::Strict, CommandRisk::Write) => {
-                Err("blocked (strict mode): write operation. Set EACLAW_SHELL_POLICY=safe to allow.".to_string())
+                Err("blocked (strict mode): write operation. Set OLORIN_SHELL_POLICY=safe to allow.".to_string())
             }
             (_, CommandRisk::Destructive) => {
-                Err("blocked: destructive command. Set EACLAW_SHELL_POLICY=open to override.".to_string())
+                Err("blocked: destructive command. Set OLORIN_SHELL_POLICY=open to override.".to_string())
             }
         }
     }
@@ -367,18 +367,18 @@ fn worst_risk(a: CommandRisk, b: CommandRisk) -> CommandRisk {
 
 /// Load shell policy from env var or config file.
 pub fn load_shell_policy() -> ShellPolicy {
-    if let Ok(val) = std::env::var("EACLAW_SHELL_POLICY") {
+    if let Ok(val) = std::env::var("OLORIN_SHELL_POLICY") {
         return match val.to_lowercase().as_str() {
             "open" => ShellPolicy::Open,
             "safe" => ShellPolicy::Safe,
             "strict" => ShellPolicy::Strict,
             _ => {
-                eprintln!("warning: unknown EACLAW_SHELL_POLICY={val}, defaulting to 'safe'");
+                eprintln!("warning: unknown OLORIN_SHELL_POLICY={val}, defaulting to 'safe'");
                 ShellPolicy::Safe
             }
         };
     }
-    if let Some(dir) = home::home_dir().map(|h| h.join(".eaclaw")) {
+    if let Some(dir) = home::home_dir().map(|h| h.join(".olorin")) {
         let path = dir.join("shell_policy");
         if let Ok(content) = std::fs::read_to_string(&path) {
             return match content.trim().to_lowercase().as_str() {

@@ -1,6 +1,6 @@
 //! Append-only JSONL persistence for conversation history.
 //!
-//! Each group gets a `history.jsonl` file under `~/.eaclaw/groups/{jid}/`.
+//! Each group gets a `history.jsonl` file under `~/.olorin/groups/{jid}/`.
 //! On startup, replay into VectorStore. During runtime, append-only writes.
 
 use crate::channel::types::InboundMessage;
@@ -113,14 +113,14 @@ pub fn group_dir(jid: &str) -> Result<PathBuf> {
         '@' | '.' | ':' => '_',
         c => c,
     }).collect();
-    Ok(base.join(".eaclaw").join("groups").join(safe_name))
+    Ok(base.join(".olorin").join("groups").join(safe_name))
 }
 
-/// List all registered group JIDs (directories under ~/.eaclaw/groups/).
+/// List all registered group JIDs (directories under ~/.olorin/groups/).
 pub fn list_groups() -> Result<Vec<String>> {
     let base = home::home_dir()
         .ok_or_else(|| Error::Config("cannot determine home directory".into()))?;
-    let groups_dir = base.join(".eaclaw").join("groups");
+    let groups_dir = base.join(".olorin").join("groups");
     if !groups_dir.exists() {
         return Ok(Vec::new());
     }

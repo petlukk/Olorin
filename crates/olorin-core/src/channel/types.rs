@@ -45,27 +45,27 @@ mod tests {
 
     #[test]
     fn test_trigger_at_mention() {
-        assert!(matches_trigger("hey @eaclaw help me", "eaclaw"));
+        assert!(matches_trigger("hey @olorin help me", "olorin"));
     }
 
     #[test]
     fn test_trigger_bang() {
-        assert!(matches_trigger("!eaclaw what time is it", "eaclaw"));
+        assert!(matches_trigger("!olorin what time is it", "olorin"));
     }
 
     #[test]
     fn test_trigger_start() {
-        assert!(matches_trigger("eaclaw do something", "eaclaw"));
+        assert!(matches_trigger("olorin do something", "olorin"));
     }
 
     #[test]
     fn test_trigger_case_insensitive() {
-        assert!(matches_trigger("@EACLAW hello", "eaclaw"));
+        assert!(matches_trigger("@OLORIN hello", "olorin"));
     }
 
     #[test]
     fn test_trigger_no_match() {
-        assert!(!matches_trigger("hello world", "eaclaw"));
+        assert!(!matches_trigger("hello world", "olorin"));
     }
 
     #[test]

@@ -32,7 +32,7 @@ pub struct Config {
 impl Config {
     /// Load configuration from environment variables.
     pub fn from_env() -> Result<Self> {
-        let backend = match env::var("EACLAW_BACKEND").as_deref() {
+        let backend = match env::var("OLORIN_BACKEND").as_deref() {
             Ok("local") => Backend::Local,
             _ => Backend::Anthropic,
         };
@@ -52,7 +52,7 @@ impl Config {
             .unwrap_or_else(|_| "claude-sonnet-4-20250514".into());
 
         let agent_name = env::var("AGENT_NAME")
-            .unwrap_or_else(|_| "eaclaw".into());
+            .unwrap_or_else(|_| "olorin".into());
 
         let max_turns = env::var("MAX_TURNS")
             .ok()
@@ -65,25 +65,25 @@ impl Config {
         let identity = load_identity();
         let allowed_hosts = load_allowed_hosts();
 
-        let model_path = env::var("EACLAW_MODEL_PATH").ok().or_else(|| {
+        let model_path = env::var("OLORIN_MODEL_PATH").ok().or_else(|| {
             home::home_dir().map(|h| {
-                h.join(".eaclaw/models/qwen2.5-3b-instruct-q4_k_m.gguf")
+                h.join(".olorin/models/qwen2.5-3b-instruct-q4_k_m.gguf")
                     .to_string_lossy()
                     .into_owned()
             })
         });
 
-        let ctx_size = env::var("EACLAW_CTX_SIZE")
+        let ctx_size = env::var("OLORIN_CTX_SIZE")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(2048);
 
-        let batch_size = env::var("EACLAW_BATCH_SIZE")
+        let batch_size = env::var("OLORIN_BATCH_SIZE")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(512);
 
-        let threads = env::var("EACLAW_THREADS")
+        let threads = env::var("OLORIN_THREADS")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or_else(|| {
@@ -92,7 +92,7 @@ impl Config {
                     .unwrap_or(4)
             });
 
-        let mlock = env::var("EACLAW_MLOCK")
+        let mlock = env::var("OLORIN_MLOCK")
             .ok()
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
@@ -118,9 +118,9 @@ impl Config {
     }
 }
 
-/// Load identity from EACLAW_IDENTITY env var path or ~/.eaclaw/identity.md.
+/// Load identity from OLORIN_IDENTITY env var path or ~/.olorin/identity.md.
 fn load_identity() -> Option<String> {
-    let path = if let Ok(p) = env::var("EACLAW_IDENTITY") {
+    let path = if let Ok(p) = env::var("OLORIN_IDENTITY") {
         PathBuf::from(p)
     } else {
         dirs()?.join("identity.md")
@@ -128,10 +128,10 @@ fn load_identity() -> Option<String> {
     std::fs::read_to_string(&path).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
-/// Load allowed hosts from EACLAW_ALLOWED_HOSTS env var (comma-separated)
-/// or ~/.eaclaw/allowed_hosts.txt (one per line).
+/// Load allowed hosts from OLORIN_ALLOWED_HOSTS env var (comma-separated)
+/// or ~/.olorin/allowed_hosts.txt (one per line).
 fn load_allowed_hosts() -> Vec<String> {
-    if let Ok(hosts) = env::var("EACLAW_ALLOWED_HOSTS") {
+    if let Ok(hosts) = env::var("OLORIN_ALLOWED_HOSTS") {
         return hosts
             .split(',')
             .map(|h| h.trim().to_lowercase())
@@ -150,7 +150,7 @@ fn load_allowed_hosts() -> Vec<String> {
     Vec::new()
 }
 
-/// Returns ~/.eaclaw/ directory path.
+/// Returns ~/.olorin/ directory path.
 fn dirs() -> Option<PathBuf> {
-    home::home_dir().map(|h| h.join(".eaclaw"))
+    home::home_dir().map(|h| h.join(".olorin"))
 }

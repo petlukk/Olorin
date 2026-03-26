@@ -17,14 +17,14 @@ use crate::tools::ToolRegistry;
 use std::sync::Arc;
 
 const WA_SYSTEM_PROMPT: &str = "\
-You are eaclaw, an AI assistant in a WhatsApp group. \
+You are Olorin, an AI assistant in a WhatsApp group. \
 Be concise — WhatsApp messages should be short and readable. \
 You have access to tools. Use them when they help answer the question. \
 Reply in the same language the user writes in.";
 
 /// Print a status line to stderr (visible in the terminal).
 fn status(msg: &str) {
-    eprintln!("[eaclaw] {msg}");
+    eprintln!("[olorin] {msg}");
 }
 
 /// Run the WhatsApp agent loop.
@@ -126,7 +126,7 @@ pub async fn run(
                         channel.send(&processed.jid, &response_text).await;
                         gateway.record_response(&processed.jid, &response_text);
                         eprintln!(
-                            "  → [{jid}] eaclaw: {text}",
+                            "  → [{jid}] olorin: {text}",
                             jid = short_jid(&processed.jid),
                             text = truncate(&response_text, 120),
                         );
@@ -207,7 +207,7 @@ pub async fn run(
                 gateway.record_response(&processed.jid, &response_text);
 
                 eprintln!(
-                    "  → [{jid}] eaclaw: {text}",
+                    "  → [{jid}] olorin: {text}",
                     jid = short_jid(&processed.jid),
                     text = truncate(&response_text, 120),
                 );
@@ -218,7 +218,7 @@ pub async fn run(
     Ok(())
 }
 
-/// Strip trigger prefix (@eaclaw, !eaclaw, or "eaclaw ") from message text.
+/// Strip trigger prefix (@olorin, !olorin, or "olorin ") from message text.
 fn strip_trigger<'a>(text: &'a str, trigger: &str) -> &'a str {
     let lower = text.to_lowercase();
     let trig = trigger.to_lowercase();

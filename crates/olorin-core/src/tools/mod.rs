@@ -46,7 +46,7 @@ pub fn check_host(allowed_hosts: &[String], url: &str) -> Result<()> {
         Ok(())
     } else {
         Err(crate::error::Error::Tool(format!(
-            "host '{host}' not in allowed list. Set EACLAW_ALLOWED_HOSTS or ~/.eaclaw/allowed_hosts.txt"
+            "host '{host}' not in allowed list. Set OLORIN_ALLOWED_HOSTS or ~/.olorin/allowed_hosts.txt"
         )))
     }
 }

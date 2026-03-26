@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 const BASE_SYSTEM_PROMPT: &str = "\
-You are eaclaw, a high-performance AI assistant. \
+You are Olorin, a high-performance AI assistant. \
 You have access to tools that you can use to help the user. \
 Be concise and helpful. Use tools when they would help answer the user's question.";
 
