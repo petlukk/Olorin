@@ -40,6 +40,7 @@ impl Tool for BenchTool {
             "vault" => bench_vault(),
             "search" => bench_search(),
             "jl" => bench_jl(),
+            "all" => bench_all(),
             _ => Err(crate::error::Error::Tool(format!(
                 "unknown target '{target}'"
             ))),
@@ -71,7 +72,7 @@ pub fn bench_safety() -> crate::error::Result<String> {
     let gb_per_sec = bytes_per_sec / 1e9;
 
     Ok(format!(
-        "Safety scan ({} B input, {} iterations):\n  Per call: {:.0} ns\n  Throughput: {:.2} GB/s\n  Total: {:.1} ms",
+        "─── safety (fused_safety — SIMD byte classifier + leak + injection, single pass) ───\n  {} B input, {} iterations\n  Per call: {:.0} ns\n  Throughput: {:.2} GB/s\n  Total: {:.1} ms",
         input.len(),
         iterations,
         per_call_ns,
@@ -146,11 +147,10 @@ pub fn bench_recall() -> crate::error::Result<String> {
     let total_mem_kb = (mem_per_vec * 1024) as f64 / 1024.0;
 
     Ok(format!(
-        "Recall benchmark (JL-projected {}-dim, 1024 entries):\n\
+        "─── recall (JL 256→64, NEON batch_cosine, 1024 vecs = 256 KB) ───\n\
          Insert:\n  Per insert: {:.1} us\n  1024 inserts: {:.1} ms\n\
          Recall (top-5 from 1024):\n  Per recall: {:.1} us\n  {} recalls: {:.1} ms\n\
          Memory: {:.0} KB for 1024 vectors ({} B/vec)",
-        crate::kernels::search::JL_DIM,
         per_insert_us,
         per_insert_us * 1024.0 / 1000.0,
         per_recall_us,
@@ -190,7 +190,7 @@ pub fn bench_router() -> crate::error::Result<String> {
     let per_call_ns = elapsed.as_nanos() as f64 / total_calls as f64;
 
     Ok(format!(
-        "Command router ({} commands × {} iterations):\n  Per call: {:.0} ns\n  Total calls: {}\n  Total: {:.1} ms",
+        "─── router (command_router — SIMD hash lookup, 2-stage verified) ───\n  {} commands × {} iterations\n  Per call: {:.0} ns\n  Total calls: {}\n  Total: {:.1} ms",
         commands.len(),
         iterations,
         per_call_ns,
@@ -304,4 +304,18 @@ pub fn bench_jl() -> crate::error::Result<String> {
         "─── jl (turbo_rotate FWHT + sign-flip → jl_project 256→{}) ───\n  Per projection: {:.0} ns\n  Throughput: {:.1}M projections/s\n  {} iterations",
         JL_DIM, per_ns, per_sec / 1e6, iterations
     ))
+}
+
+pub fn bench_all() -> crate::error::Result<String> {
+    let start = std::time::Instant::now();
+    let mut results = Vec::new();
+    results.push(bench_safety()?);
+    results.push(bench_router()?);
+    results.push(bench_recall()?);
+    results.push(bench_vault()?);
+    results.push(bench_search()?);
+    results.push(bench_jl()?);
+    let total = start.elapsed();
+    results.push(format!("─── summary ───\n  6 benchmarks completed in {:.1} s", total.as_secs_f64()));
+    Ok(results.join("\n\n"))
 }
