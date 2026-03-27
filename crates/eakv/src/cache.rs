@@ -373,14 +373,6 @@ impl EakvCache {
         self.seq_len = v;
     }
 
-    pub(crate) fn data_buf(&self) -> &[u8] {
-        &self.data_buf
-    }
-
-    pub(crate) fn data_buf_mut(&mut self) -> &mut [u8] {
-        &mut self.data_buf
-    }
-
     pub(crate) fn kv_slice(&self, layer: i32, kv_idx: i32) -> KvSlice {
         self.kv[layer as usize * 2 + kv_idx as usize]
     }
