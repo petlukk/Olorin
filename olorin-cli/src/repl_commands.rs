@@ -378,7 +378,7 @@ impl OlorinRepl {
 
     pub(crate) fn handle_bench(&self, arg: &str) -> String {
         if arg.is_empty() {
-            return "Usage: /bench <target>\nTargets: safety, router, recall, vault".into();
+            return "Usage: /bench <target>\nTargets: safety, router, recall, vault, search".into();
         }
         use olorin_core::tools::bench_tool;
         match arg.trim() {
@@ -386,7 +386,8 @@ impl OlorinRepl {
             "router" => bench_tool::bench_router().unwrap_or_else(|e| format!("error: {e}")),
             "recall" => bench_tool::bench_recall().unwrap_or_else(|e| format!("error: {e}")),
             "vault" => bench_tool::bench_vault().unwrap_or_else(|e| format!("error: {e}")),
-            other => format!("Unknown target '{other}'. Use: safety, router, recall, vault"),
+            "search" => bench_tool::bench_search().unwrap_or_else(|e| format!("error: {e}")),
+            other => format!("Unknown target '{other}'. Use: safety, router, recall, vault, search"),
         }
     }
 

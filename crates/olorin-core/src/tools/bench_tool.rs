@@ -38,6 +38,7 @@ impl Tool for BenchTool {
             "router" => bench_router(),
             "recall" => bench_recall(),
             "vault" => bench_vault(),
+            "search" => bench_search(),
             _ => Err(crate::error::Error::Tool(format!(
                 "unknown target '{target}'"
             ))),
@@ -235,5 +236,44 @@ pub fn bench_vault() -> crate::error::Result<String> {
     Ok(format!(
         "─── vault (eachacha — SIMD ChaCha20, 4-round interleaved) ───\n  Encrypt: {:.0} ns/4KB\n  Decrypt: {:.0} ns/4KB\n  Throughput: {:.1} GB/s\n  {} iterations",
         enc_ns, dec_ns, throughput, iterations
+    ))
+}
+
+pub fn bench_search() -> crate::error::Result<String> {
+    use crate::kernels::search::{batch_cosine, top_k, JL_DIM};
+
+    let n_vecs = 1024;
+    let iterations = 1000;
+
+    let mut vecs = vec![0.0f32; n_vecs * JL_DIM];
+    let mut val = 1.0f32;
+    for v in vecs.iter_mut() {
+        val = (val * 1.1 + 0.3) % 2.0 - 1.0;
+        *v = val;
+    }
+
+    let mut query = vec![0.0f32; JL_DIM];
+    for (i, q) in query.iter_mut().enumerate() {
+        *q = (i as f32 * 0.1).sin();
+    }
+    let query_norm = query.iter().map(|x| x * x).sum::<f32>().sqrt();
+
+    for _ in 0..10 {
+        let scores = batch_cosine(&query, query_norm, &vecs, JL_DIM, n_vecs);
+        let _ = top_k(&scores, 5);
+    }
+
+    let start = std::time::Instant::now();
+    for _ in 0..iterations {
+        let scores = batch_cosine(&query, query_norm, &vecs, JL_DIM, n_vecs);
+        let _ = top_k(&scores, 5);
+    }
+    let elapsed = start.elapsed();
+    let per_search_us = elapsed.as_micros() as f64 / iterations as f64;
+    let searches_per_sec = iterations as f64 / elapsed.as_secs_f64();
+
+    Ok(format!(
+        "─── search (search kernel — NEON/AVX batch dot, branchless top-k) ───\n  Per search: {:.1} µs  ({} × {}-dim vectors)\n  Throughput: {:.0}K searches/s\n  {} iterations",
+        per_search_us, n_vecs, JL_DIM, searches_per_sec / 1000.0, iterations
     ))
 }
