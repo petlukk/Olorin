@@ -1,6 +1,5 @@
 use super::Tool;
 use async_trait::async_trait;
-use tokio::process::Command;
 
 pub struct GitTool;
 
@@ -50,10 +49,10 @@ impl Tool for GitTool {
             ));
         }
 
-        let output = Command::new("git")
-            .args(&parts)
-            .output()
-            .await
+        let mut argv = vec!["git"];
+        argv.extend_from_slice(&parts);
+
+        let output = crate::exec::run(&argv)
             .map_err(|e| crate::error::Error::Tool(format!("failed to execute git: {e}")))?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -71,10 +70,9 @@ impl Tool for GitTool {
         }
 
         if result.is_empty() {
-            result.push_str(&format!("(exit code: {})", output.status.code().unwrap_or(-1)));
+            result.push_str(&format!("(exit code: {})", output.exit_code));
         }
 
-        // Truncate large output
         let max_len = 32 * 1024;
         if result.len() > max_len {
             let mut end = max_len;

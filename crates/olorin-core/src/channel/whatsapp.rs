@@ -1,20 +1,15 @@
 //! WhatsApp channel via a bridge subprocess (whatsmeow or similar).
 //!
-//! The bridge binary handles the WhatsApp Web protocol.
-//! We communicate via JSON lines on stdin/stdout:
-//!
-//! Inbound:  {"type":"message","jid":"...","sender":"...","sender_name":"...","text":"...","timestamp":N}
-//! Outbound: {"type":"send","jid":"...","text":"..."}
-//! Control:  {"type":"connected"} / {"type":"qr","data":"..."}
+//! Uses exec::spawn (raw fork+exec) instead of std::process::Command
+//! to avoid pidfd@GLIBC_2.39. The bridge binary handles the WhatsApp
+//! Web protocol. Communication via JSON lines on stdin/stdout.
 
 use crate::channel::types::{GroupChannel, InboundMessage};
 use crate::error::{Error, Result};
+use crate::exec;
 use async_trait::async_trait;
-use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, Mutex};
 
 /// WhatsApp channel backed by a bridge subprocess.
@@ -23,38 +18,33 @@ pub struct WhatsAppChannel {
     rx: Mutex<mpsc::Receiver<InboundMessage>>,
     tx_handle: mpsc::Sender<String>,
     connected: Arc<AtomicBool>,
-    _child: Child,
 }
 
 impl WhatsAppChannel {
     /// Start the WhatsApp bridge subprocess and connect.
-    /// `bridge_path` is the path to the bridge binary.
-    /// `session_dir` is the directory for WhatsApp session data.
     pub async fn start(bridge_path: &str, session_dir: &str) -> Result<Self> {
-        let mut child = Command::new(bridge_path)
-            .arg("--session-dir")
-            .arg(session_dir)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
+        let child = exec::spawn(&[bridge_path, "--session-dir", session_dir])
             .map_err(|e| Error::Channel(format!("failed to start bridge: {e}")))?;
 
-        let stdout = child.stdout.take()
-            .ok_or_else(|| Error::Channel("no stdout from bridge".into()))?;
-        let stdin = child.stdin.take()
-            .ok_or_else(|| Error::Channel("no stdin to bridge".into()))?;
-
+        let child = Arc::new(std::sync::Mutex::new(child));
         let (msg_tx, msg_rx) = mpsc::channel::<InboundMessage>(256);
         let (send_tx, mut send_rx) = mpsc::channel::<String>(256);
         let connected = Arc::new(AtomicBool::new(false));
 
         // Reader task: parse JSON lines from bridge stdout
+        let reader_child = child.clone();
         let conn_flag = connected.clone();
-        tokio::spawn(async move {
-            let reader = BufReader::new(stdout);
-            let mut lines = reader.lines();
-            while let Ok(Some(line)) = lines.next_line().await {
+        tokio::task::spawn_blocking(move || {
+            let mut line = String::new();
+            loop {
+                let child = reader_child.lock().unwrap();
+                match child.read_line(&mut line) {
+                    Ok(0) => break, // EOF
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+                drop(child);
+
                 if line.is_empty() {
                     continue;
                 }
@@ -62,37 +52,26 @@ impl WhatsAppChannel {
                     match val.get("type").and_then(|t| t.as_str()) {
                         Some("connected") => {
                             conn_flag.store(true, Ordering::Relaxed);
-                            tracing::info!("WhatsApp bridge connected");
-                        }
-                        Some("qr") => {
-                            // QR code is rendered by the bridge to stderr.
-                            // Log that we received it for debugging.
-                            tracing::info!("QR code received — check terminal for scannable code");
                         }
                         Some("message") => {
                             if let Ok(msg) = serde_json::from_value::<InboundMessage>(val) {
-                                let _ = msg_tx.send(msg).await;
+                                let _ = msg_tx.blocking_send(msg);
                             }
                         }
-                        _ => {
-                            tracing::debug!("bridge: {line}");
-                        }
+                        _ => {}
                     }
                 }
             }
         });
 
         // Writer task: send JSON lines to bridge stdin
-        tokio::spawn(async move {
-            let mut stdin = stdin;
-            while let Some(line) = send_rx.recv().await {
-                if stdin.write_all(line.as_bytes()).await.is_err() {
+        let writer_child = child.clone();
+        tokio::task::spawn_blocking(move || {
+            while let Some(line) = send_rx.blocking_recv() {
+                let child = writer_child.lock().unwrap();
+                if child.write_line(&line).is_err() {
                     break;
                 }
-                if stdin.write_all(b"\n").await.is_err() {
-                    break;
-                }
-                let _ = stdin.flush().await;
             }
         });
 
@@ -101,7 +80,6 @@ impl WhatsAppChannel {
             rx: Mutex::new(msg_rx),
             tx_handle: send_tx,
             connected,
-            _child: child,
         })
     }
 }
@@ -131,6 +109,5 @@ impl GroupChannel for WhatsAppChannel {
 
     async fn disconnect(&self) {
         self.connected.store(false, Ordering::Relaxed);
-        // Bridge process will be killed when _child is dropped
     }
 }

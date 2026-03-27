@@ -104,11 +104,7 @@ impl OlorinRepl {
         if arg.is_empty() {
             return "Usage: /shell <command>".into();
         }
-        match std::process::Command::new("sh")
-            .arg("-c")
-            .arg(arg)
-            .output()
-        {
+        match olorin_core::exec::shell(arg) {
             Ok(out) => {
                 let mut result = String::new();
                 let text = String::from_utf8_lossy(&out.stdout);
@@ -169,11 +165,8 @@ impl OlorinRepl {
         if arg.is_empty() {
             return "Usage: /calc <expression>".into();
         }
-        match std::process::Command::new("python3")
-            .arg("-c")
-            .arg(format!("print({})", arg))
-            .output()
-        {
+        let expr = format!("print({})", arg);
+        match olorin_core::exec::run(&["python3", "-c", &expr]) {
             Ok(out) => {
                 let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
                 if text.is_empty() {
@@ -276,10 +269,7 @@ impl OlorinRepl {
         let parts: Vec<&str> = arg.splitn(2, char::is_whitespace).collect();
         let pattern = parts[0];
         let path = if parts.len() > 1 { parts[1] } else { "." };
-        match std::process::Command::new("grep")
-            .args(["-rn", "--color=never", pattern, path])
-            .output()
-        {
+        match olorin_core::exec::run(&["grep", "-rn", "--color=never", pattern, path]) {
             Ok(out) => {
                 let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
                 if text.is_empty() {
@@ -298,10 +288,9 @@ impl OlorinRepl {
         if arg.is_empty() {
             return "Usage: /git <subcommand> [args]".into();
         }
-        match std::process::Command::new("git")
-            .args(arg.split_whitespace())
-            .output()
-        {
+        let mut argv: Vec<&str> = vec!["git"];
+        argv.extend(arg.split_whitespace());
+        match olorin_core::exec::run(&argv) {
             Ok(out) => {
                 let mut result = String::new();
                 let text = String::from_utf8_lossy(&out.stdout);
@@ -326,10 +315,7 @@ impl OlorinRepl {
         if arg.is_empty() {
             return "Usage: /http <url>".into();
         }
-        match std::process::Command::new("curl")
-            .args(["-sS", "-L", "--max-time", "10", arg])
-            .output()
-        {
+        match olorin_core::exec::run(&["curl", "-sS", "-L", "--max-time", "10", arg]) {
             Ok(out) => {
                 let text = String::from_utf8_lossy(&out.stdout).to_string();
                 let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
@@ -412,10 +398,7 @@ impl OlorinRepl {
             return "Usage: /weather <city>".into();
         }
         let url = format!("https://wttr.in/{}?format=3", arg.replace(' ', "+"));
-        match std::process::Command::new("curl")
-            .args(["-sS", "--max-time", "5", &url])
-            .output()
-        {
+        match olorin_core::exec::run(&["curl", "-sS", "--max-time", "5", &url]) {
             Ok(out) => String::from_utf8_lossy(&out.stdout).trim().to_string(),
             Err(e) => format!("Weather error: {}", e),
         }

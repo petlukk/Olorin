@@ -1,11 +1,9 @@
 use super::Tool;
 use async_trait::async_trait;
-use tokio::process::Command;
 
 pub struct GrepTool;
 
 const MAX_OUTPUT: usize = 32 * 1024;
-const MAX_MATCHES: &str = "200";
 
 #[async_trait]
 impl Tool for GrepTool {
@@ -50,24 +48,23 @@ impl Tool for GrepTool {
         let path = params["path"].as_str().unwrap_or(".");
         let case_insensitive = params["case_insensitive"].as_bool().unwrap_or(false);
 
-        let mut cmd = Command::new("grep");
-        cmd.arg("-rn")
-            .arg("--color=never")
-            .arg(&format!("--max-count={MAX_MATCHES}"));
+        let mut argv: Vec<&str> = vec!["grep", "-rn", "--color=never", "--max-count=200"];
 
         if case_insensitive {
-            cmd.arg("-i");
+            argv.push("-i");
         }
 
+        let glob_flag;
         if let Some(glob) = params["glob"].as_str() {
-            cmd.arg("--include").arg(glob);
+            glob_flag = format!("--include={}", glob);
+            argv.push(&glob_flag);
         }
 
-        cmd.arg("--").arg(pattern).arg(path);
+        argv.push("--");
+        argv.push(pattern);
+        argv.push(path);
 
-        let output = cmd
-            .output()
-            .await
+        let output = crate::exec::run(&argv)
             .map_err(|e| crate::error::Error::Tool(format!("failed to execute grep: {e}")))?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -76,7 +73,6 @@ impl Tool for GrepTool {
             return Ok("No matches found.".to_string());
         }
 
-        // Truncate large output
         let result = if stdout.len() > MAX_OUTPUT {
             let mut end = MAX_OUTPUT;
             while end > 0 && !stdout.is_char_boundary(end) {

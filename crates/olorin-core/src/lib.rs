@@ -2,6 +2,7 @@ pub mod agent;
 pub mod channel;
 pub mod config;
 pub mod error;
+pub mod exec;
 pub mod kernels;
 pub mod llm;
 pub mod persist;

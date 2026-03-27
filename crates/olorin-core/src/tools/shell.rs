@@ -1,8 +1,6 @@
 use super::Tool;
 use crate::safety::shell_guard::ShellGuard;
 use async_trait::async_trait;
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
 
 pub struct ShellTool {
     guard: ShellGuard,
@@ -44,11 +42,7 @@ impl Tool for ShellTool {
 
         self.guard.check(cmd).map_err(|e| crate::error::Error::Tool(e))?;
 
-        let output = Command::new("sh")
-            .arg("-c")
-            .arg(cmd)
-            .output()
-            .await
+        let output = crate::exec::shell(cmd)
             .map_err(|e| crate::error::Error::Tool(format!("failed to execute: {e}")))?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -67,7 +61,7 @@ impl Tool for ShellTool {
         }
 
         if result.is_empty() {
-            result.push_str(&format!("(exit code: {})", output.status.code().unwrap_or(-1)));
+            result.push_str(&format!("(exit code: {})", output.exit_code));
         }
 
         Ok(result)
@@ -88,35 +82,23 @@ impl Tool for ShellTool {
 
         self.guard.check(cmd).map_err(|e| crate::error::Error::Tool(e))?;
 
-        let mut child = Command::new("sh")
-            .arg("-c")
-            .arg(cmd)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
+        let output = crate::exec::shell(cmd)
             .map_err(|e| crate::error::Error::Tool(format!("failed to execute: {e}")))?;
 
-        // Stream stdout line by line
-        if let Some(stdout) = child.stdout.take() {
-            let mut reader = BufReader::new(stdout).lines();
-            while let Some(line) = reader
-                .next_line()
-                .await
-                .map_err(|e| crate::error::Error::Tool(format!("read error: {e}")))?
-            {
-                on_chunk(&line);
-                on_chunk("\n");
-            }
+        let text = String::from_utf8_lossy(&output.stdout);
+        for line in text.lines() {
+            on_chunk(line);
+            on_chunk("\n");
         }
 
-        // Collect stderr after stdout is done
-        let status = child
-            .wait()
-            .await
-            .map_err(|e| crate::error::Error::Tool(format!("wait error: {e}")))?;
+        if !output.stderr.is_empty() {
+            let err = String::from_utf8_lossy(&output.stderr);
+            on_chunk("[stderr] ");
+            on_chunk(&err);
+        }
 
-        if !status.success() {
-            on_chunk(&format!("(exit code: {})", status.code().unwrap_or(-1)));
+        if output.exit_code != 0 {
+            on_chunk(&format!("(exit code: {})", output.exit_code));
         }
 
         Ok(())
