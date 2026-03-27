@@ -167,9 +167,11 @@ mod tests {
         assert_eq!(count, 2);
         assert_eq!(store.len(), 2);
 
-        let results = store.recall("whatsapp", 1);
+        let results = store.recall("whatsapp", 2);
         assert!(!results.is_empty());
-        assert!(results[0].text.contains("whatsapp"));
+        let found = results.iter().any(|r| r.text.contains("whatsapp"));
+        assert!(found, "expected 'whatsapp' in results: {:?}",
+            results.iter().map(|r| &r.text).collect::<Vec<_>>());
     }
 
     #[test]

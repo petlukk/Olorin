@@ -1,0 +1,369 @@
+// JL Projection — Johnson-Lindenstrauss dimensionality reduction.
+//
+// Projects vectors from in_dim to out_dim while preserving distances.
+// Method: sign-flip + FWHT + truncate to first out_dim components.
+//
+// This is a "structured random projection" — equivalent to multiplying
+// by a random orthogonal matrix and keeping the first out_dim rows,
+// but computed in O(d log d) instead of O(d^2).
+//
+// Input:  vec[0..in_dim]   (in_dim must be power of 2)
+//         signs[0..in_dim] (pre-expanded +1.0/-1.0 mask)
+// Output: out[0..out_dim]  (projected vector, scaled by sqrt(in_dim/out_dim))
+//
+// The scaling ensures E[||projected||^2] = ||original||^2.
+//
+// Eä v1.10, x86_64 f32x8, aarch64 f32x4.
+
+// ========== jl_project ==========
+// Full pipeline: sign-flip → FWHT → scale → copy first out_dim elements.
+
+#[cfg(x86_64)]
+export func jl_project(
+    vec: *f32,
+    signs: *f32,
+    in_dim: i32,
+    out_dim: i32,
+    out: *mut f32,
+    scratch: *mut f32
+) {
+    // Copy input to scratch (don't modify original)
+    for i in 0..in_dim step 8 {
+        if i + 8 <= in_dim {
+            let v: f32x8 = load(vec, i)
+            store(scratch, i, v)
+        }
+    }
+    let cp_end: i32 = (in_dim / 8) * 8
+    for i in cp_end..in_dim {
+        scratch[i] = vec[i]
+    }
+
+    // Sign flip
+    for i in 0..in_dim step 8 {
+        if i + 8 <= in_dim {
+            let v: f32x8 = load(scratch, i)
+            let s: f32x8 = load(signs, i)
+            store(scratch, i, v .* s)
+        }
+    }
+    let sf_end: i32 = (in_dim / 8) * 8
+    for i in sf_end..in_dim {
+        let vi: f32 = to_f32(scratch[i])
+        let si: f32 = to_f32(signs[i])
+        scratch[i] = vi * si
+    }
+
+    // FWHT
+    let mut half: i32 = 1
+    for _step in 0..30 {
+        if half >= in_dim {
+        } else {
+            let stride: i32 = half * 2
+            let mut base: i32 = 0
+            for _blk in 0..in_dim {
+                if base >= in_dim {
+                } else {
+                    for j in 0..half step 8 {
+                        if j + 8 <= half {
+                            let a: f32x8 = load(scratch, base + j)
+                            let b: f32x8 = load(scratch, base + j + half)
+                            store(scratch, base + j, a .+ b)
+                            store(scratch, base + j + half, a .- b)
+                        }
+                    }
+                    let se: i32 = (half / 8) * 8
+                    for j in se..half {
+                        let ai: f32 = to_f32(scratch[base + j])
+                        let bi: f32 = to_f32(scratch[base + j + half])
+                        scratch[base + j] = ai + bi
+                        scratch[base + j + half] = ai - bi
+                    }
+                    base = base + stride
+                }
+            }
+            half = half * 2
+        }
+    }
+
+    // Scale by sqrt(in_dim / out_dim) / sqrt(in_dim) = 1 / sqrt(out_dim)
+    // FWHT already includes 1/sqrt(in_dim), and JL needs sqrt(in_dim/out_dim),
+    // so total scale = sqrt(in_dim/out_dim) / sqrt(in_dim) = 1/sqrt(out_dim).
+    // But wait: our FWHT scales by 1/sqrt(in_dim), and JL projection of
+    // d-dim to k-dim needs final vectors scaled by sqrt(d/k).
+    // So: FWHT gives v/sqrt(d), we want v*sqrt(d/k)/sqrt(d) = v/sqrt(k).
+    // Nope: we want the projected vector to preserve norms in expectation.
+    // After FWHT (normalized): entries have variance 1/d * ||x||^2.
+    // Taking k entries and scaling by sqrt(d/k): E[||proj||^2] = ||x||^2.
+    // So scale = sqrt(in_dim / out_dim) applied AFTER the 1/sqrt(in_dim) FWHT.
+    // Combined: multiply each output entry by sqrt(in_dim / out_dim).
+    // But FWHT already did 1/sqrt(in_dim). So the FWHT output has entries
+    // with magnitude ~||x||/sqrt(in_dim). Taking out_dim of them and scaling
+    // by sqrt(in_dim/out_dim) gives norm ~||x||.
+    let scale: f32 = sqrt(to_f32(in_dim) / to_f32(out_dim)) / sqrt(to_f32(in_dim))
+    // Simplifies to: 1/sqrt(out_dim)
+    let vs: f32x8 = splat(scale)
+    for i in 0..out_dim step 8 {
+        if i + 8 <= out_dim {
+            let v: f32x8 = load(scratch, i)
+            store(out, i, v .* vs)
+        }
+    }
+    let out_end: i32 = (out_dim / 8) * 8
+    for i in out_end..out_dim {
+        let vi: f32 = to_f32(scratch[i])
+        out[i] = vi * scale
+    }
+}
+
+#[cfg(aarch64)]
+export func jl_project(
+    vec: *f32,
+    signs: *f32,
+    in_dim: i32,
+    out_dim: i32,
+    out: *mut f32,
+    scratch: *mut f32
+) {
+    // Copy input to scratch
+    for i in 0..in_dim step 4 {
+        if i + 4 <= in_dim {
+            let v: f32x4 = load(vec, i)
+            store(scratch, i, v)
+        }
+    }
+    let cp_end: i32 = (in_dim / 4) * 4
+    for i in cp_end..in_dim {
+        scratch[i] = vec[i]
+    }
+
+    // Sign flip
+    for i in 0..in_dim step 4 {
+        if i + 4 <= in_dim {
+            let v: f32x4 = load(scratch, i)
+            let s: f32x4 = load(signs, i)
+            store(scratch, i, v .* s)
+        }
+    }
+    let sf_end: i32 = (in_dim / 4) * 4
+    for i in sf_end..in_dim {
+        let vi: f32 = to_f32(scratch[i])
+        let si: f32 = to_f32(signs[i])
+        scratch[i] = vi * si
+    }
+
+    // FWHT
+    let mut half: i32 = 1
+    for _step in 0..30 {
+        if half >= in_dim {
+        } else {
+            let stride: i32 = half * 2
+            let mut base: i32 = 0
+            for _blk in 0..in_dim {
+                if base >= in_dim {
+                } else {
+                    for j in 0..half step 4 {
+                        if j + 4 <= half {
+                            let a: f32x4 = load(scratch, base + j)
+                            let b: f32x4 = load(scratch, base + j + half)
+                            store(scratch, base + j, a .+ b)
+                            store(scratch, base + j + half, a .- b)
+                        }
+                    }
+                    let se: i32 = (half / 4) * 4
+                    for j in se..half {
+                        let ai: f32 = to_f32(scratch[base + j])
+                        let bi: f32 = to_f32(scratch[base + j + half])
+                        scratch[base + j] = ai + bi
+                        scratch[base + j + half] = ai - bi
+                    }
+                    base = base + stride
+                }
+            }
+            half = half * 2
+        }
+    }
+
+    // Scale and copy first out_dim entries
+    let scale: f32 = 1.0 / sqrt(to_f32(out_dim))
+    let vs: f32x4 = splat(scale)
+    for i in 0..out_dim step 4 {
+        if i + 4 <= out_dim {
+            let v: f32x4 = load(scratch, i)
+            store(out, i, v .* vs)
+        }
+    }
+    let out_end: i32 = (out_dim / 4) * 4
+    for i in out_end..out_dim {
+        let vi: f32 = to_f32(scratch[i])
+        out[i] = vi * scale
+    }
+}
+
+// ========== jl_project_batch ==========
+// Project n_vecs vectors in-place from in_dim to out_dim.
+// vecs_in:  n_vecs * in_dim floats (input, not modified)
+// vecs_out: n_vecs * out_dim floats (output)
+// scratch:  in_dim floats (temporary workspace)
+
+#[cfg(x86_64)]
+export func jl_project_batch(
+    vecs_in: *f32,
+    signs: *f32,
+    in_dim: i32,
+    out_dim: i32,
+    vecs_out: *mut f32,
+    scratch: *mut f32,
+    n_vecs: i32
+) {
+    let scale: f32 = 1.0 / sqrt(to_f32(out_dim))
+    let vs: f32x8 = splat(scale)
+
+    for v in 0..n_vecs {
+        let in_base: i32 = v * in_dim
+        let out_base: i32 = v * out_dim
+
+        // Copy to scratch
+        for i in 0..in_dim step 8 {
+            if i + 8 <= in_dim {
+                let val: f32x8 = load(vecs_in, in_base + i)
+                store(scratch, i, val)
+            }
+        }
+
+        // Sign flip
+        for i in 0..in_dim step 8 {
+            if i + 8 <= in_dim {
+                let val: f32x8 = load(scratch, i)
+                let s: f32x8 = load(signs, i)
+                store(scratch, i, val .* s)
+            }
+        }
+
+        // FWHT
+        let mut half: i32 = 1
+        for _step in 0..30 {
+            if half >= in_dim {
+            } else {
+                let stride: i32 = half * 2
+                let mut base: i32 = 0
+                for _blk in 0..in_dim {
+                    if base >= in_dim {
+                    } else {
+                        for j in 0..half step 8 {
+                            if j + 8 <= half {
+                                let a: f32x8 = load(scratch, base + j)
+                                let b: f32x8 = load(scratch, base + j + half)
+                                store(scratch, base + j, a .+ b)
+                                store(scratch, base + j + half, a .- b)
+                            }
+                        }
+                        let se: i32 = (half / 8) * 8
+                        for j in se..half {
+                            let ai: f32 = to_f32(scratch[base + j])
+                            let bi: f32 = to_f32(scratch[base + j + half])
+                            scratch[base + j] = ai + bi
+                            scratch[base + j + half] = ai - bi
+                        }
+                        base = base + stride
+                    }
+                }
+                half = half * 2
+            }
+        }
+
+        // Scale and copy first out_dim entries
+        for i in 0..out_dim step 8 {
+            if i + 8 <= out_dim {
+                let val: f32x8 = load(scratch, i)
+                store(vecs_out, out_base + i, val .* vs)
+            }
+        }
+        let out_end: i32 = (out_dim / 8) * 8
+        for i in out_end..out_dim {
+            let vi: f32 = to_f32(scratch[i])
+            vecs_out[out_base + i] = vi * scale
+        }
+    }
+}
+
+#[cfg(aarch64)]
+export func jl_project_batch(
+    vecs_in: *f32,
+    signs: *f32,
+    in_dim: i32,
+    out_dim: i32,
+    vecs_out: *mut f32,
+    scratch: *mut f32,
+    n_vecs: i32
+) {
+    let scale: f32 = 1.0 / sqrt(to_f32(out_dim))
+    let vs: f32x4 = splat(scale)
+
+    for v in 0..n_vecs {
+        let in_base: i32 = v * in_dim
+        let out_base: i32 = v * out_dim
+
+        // Copy to scratch
+        for i in 0..in_dim step 4 {
+            if i + 4 <= in_dim {
+                let val: f32x4 = load(vecs_in, in_base + i)
+                store(scratch, i, val)
+            }
+        }
+
+        // Sign flip
+        for i in 0..in_dim step 4 {
+            if i + 4 <= in_dim {
+                let val: f32x4 = load(scratch, i)
+                let s: f32x4 = load(signs, i)
+                store(scratch, i, val .* s)
+            }
+        }
+
+        // FWHT
+        let mut half: i32 = 1
+        for _step in 0..30 {
+            if half >= in_dim {
+            } else {
+                let stride: i32 = half * 2
+                let mut base: i32 = 0
+                for _blk in 0..in_dim {
+                    if base >= in_dim {
+                    } else {
+                        for j in 0..half step 4 {
+                            if j + 4 <= half {
+                                let a: f32x4 = load(scratch, base + j)
+                                let b: f32x4 = load(scratch, base + j + half)
+                                store(scratch, base + j, a .+ b)
+                                store(scratch, base + j + half, a .- b)
+                            }
+                        }
+                        let se: i32 = (half / 4) * 4
+                        for j in se..half {
+                            let ai: f32 = to_f32(scratch[base + j])
+                            let bi: f32 = to_f32(scratch[base + j + half])
+                            scratch[base + j] = ai + bi
+                            scratch[base + j + half] = ai - bi
+                        }
+                        base = base + stride
+                    }
+                }
+                half = half * 2
+            }
+        }
+
+        // Scale and copy first out_dim entries
+        for i in 0..out_dim step 4 {
+            if i + 4 <= out_dim {
+                let val: f32x4 = load(scratch, i)
+                store(vecs_out, out_base + i, val .* vs)
+            }
+        }
+        let out_end: i32 = (out_dim / 4) * 4
+        for i in out_end..out_dim {
+            let vi: f32 = to_f32(scratch[i])
+            vecs_out[out_base + i] = vi * scale
+        }
+    }
+}

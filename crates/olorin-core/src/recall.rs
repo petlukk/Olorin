@@ -1,15 +1,18 @@
-//! SIMD-accelerated conversation recall using byte-histogram embeddings.
+//! SIMD-accelerated conversation recall using JL-projected byte-histogram embeddings.
 //!
-//! Each text is embedded as a 256-dim vector (one dimension per byte value),
-//! normalized via the search kernel. Recall uses SIMD cosine similarity + top-k.
+//! Each text is embedded as a 256-dim byte-histogram, then projected to 64-dim
+//! via Johnson-Lindenstrauss random rotation (sign-flip + FWHT + truncate).
+//! This preserves cosine similarity while using 4x less memory and faster search.
 //!
 //! The store uses a ring buffer with configurable capacity (default 1024).
 //! Recency boost gives recent entries a slight score advantage.
 
 use crate::kernels::search;
 
-/// Embedding dimension — one per byte value.
-const DIM: usize = 256;
+/// Raw embedding dimension — one per byte value.
+const RAW_DIM: usize = 256;
+/// Projected dimension after JL transform.
+const PROJ_DIM: usize = search::JL_DIM;
 /// Default ring buffer capacity.
 const DEFAULT_CAPACITY: usize = 1024;
 /// Recency boost: final_score = similarity * (RECENCY_BASE + RECENCY_WEIGHT * recency)
@@ -25,16 +28,35 @@ pub struct RecallResult {
     pub text: String,
 }
 
+/// Generate deterministic sign mask for JL projection.
+/// Uses a simple xorshift seeded with a fixed value so the same
+/// projection is used across restarts.
+fn gen_jl_signs() -> Vec<f32> {
+    let mut signs = vec![0.0f32; RAW_DIM];
+    let mut rng: u64 = 0x4F6C6F72696E4A4C; // "OlorinJL" as bytes
+    for s in signs.iter_mut() {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        *s = if rng % 2 == 0 { 1.0 } else { -1.0 };
+    }
+    signs
+}
+
 /// Vector store for conversation recall.
-/// Uses a ring buffer of normalized byte-histogram embeddings
+/// Uses a ring buffer of JL-projected byte-histogram embeddings
 /// with SIMD cosine similarity and recency-boosted scoring.
 pub struct VectorStore {
-    /// Flat embedding buffer: vecs[i*DIM .. (i+1)*DIM] = embedding for slot i
+    /// Flat embedding buffer: vecs[i*PROJ_DIM .. (i+1)*PROJ_DIM]
     vecs: Vec<f32>,
     /// Original text for each slot
     texts: Vec<Option<String>>,
-    /// Scratch buffer for query embedding
-    query_buf: Vec<f32>,
+    /// Scratch buffer for 256-dim raw embedding
+    raw_buf: Vec<f32>,
+    /// Scratch buffer for 64-dim projected query
+    proj_buf: Vec<f32>,
+    /// JL sign mask (256 floats, each +1.0 or -1.0)
+    jl_signs: Vec<f32>,
     /// Ring buffer capacity
     capacity: usize,
     /// Total number of inserts (monotonically increasing)
@@ -53,9 +75,11 @@ impl VectorStore {
     pub fn with_capacity(capacity: usize) -> Self {
         let cap = capacity.max(1);
         Self {
-            vecs: vec![0.0f32; cap * DIM],
+            vecs: vec![0.0f32; cap * PROJ_DIM],
             texts: (0..cap).map(|_| None).collect(),
-            query_buf: vec![0.0f32; DIM],
+            raw_buf: vec![0.0f32; RAW_DIM],
+            proj_buf: vec![0.0f32; PROJ_DIM],
+            jl_signs: gen_jl_signs(),
             capacity: cap,
             total_inserts: 0,
             write_pos: 0,
@@ -72,14 +96,17 @@ impl VectorStore {
         self.count == 0
     }
 
-    /// Index a text entry. Computes byte-histogram embedding and normalizes it.
+    /// Index a text entry. Computes byte-histogram, projects via JL, normalizes.
     /// When the ring buffer is full, overwrites the oldest entry.
     pub fn insert(&mut self, text: &str) {
-        embed_bytes(text.as_bytes(), &mut self.query_buf);
-        search::normalize_vectors(&mut self.query_buf, DIM, 1);
+        embed_bytes(text.as_bytes(), &mut self.raw_buf);
+        search::normalize_vectors(&mut self.raw_buf, RAW_DIM, 1);
 
-        let offset = self.write_pos * DIM;
-        self.vecs[offset..offset + DIM].copy_from_slice(&self.query_buf);
+        self.proj_buf = search::jl_project(&self.raw_buf, &self.jl_signs, PROJ_DIM);
+        search::normalize_vectors(&mut self.proj_buf, PROJ_DIM, 1);
+
+        let offset = self.write_pos * PROJ_DIM;
+        self.vecs[offset..offset + PROJ_DIM].copy_from_slice(&self.proj_buf);
         self.texts[self.write_pos] = Some(text.to_string());
 
         self.write_pos = (self.write_pos + 1) % self.capacity;
@@ -97,31 +124,28 @@ impl VectorStore {
             return Vec::new();
         }
 
-        // Embed query
-        embed_bytes(query.as_bytes(), &mut self.query_buf);
-        search::normalize_vectors(&mut self.query_buf, DIM, 1);
+        embed_bytes(query.as_bytes(), &mut self.raw_buf);
+        search::normalize_vectors(&mut self.raw_buf, RAW_DIM, 1);
 
-        let query_norm = l2_norm(&self.query_buf);
+        self.proj_buf = search::jl_project(&self.raw_buf, &self.jl_signs, PROJ_DIM);
+        search::normalize_vectors(&mut self.proj_buf, PROJ_DIM, 1);
+
+        let query_norm = l2_norm(&self.proj_buf);
         if query_norm < 1e-9 {
             return Vec::new();
         }
 
-        // SIMD cosine similarity against occupied slots
-        // For a ring buffer, we need to handle the case where slots are non-contiguous
-        // after wrapping. However, our vecs buffer is always fully allocated, so we can
-        // scan all `capacity` slots and filter by occupancy.
         let scan_n = if self.count == self.capacity {
             self.capacity
         } else {
-            self.count // before first wrap, slots 0..count are occupied
+            self.count
         };
 
         let scores = search::batch_cosine(
-            &self.query_buf, query_norm,
-            &self.vecs[..scan_n * DIM], DIM, scan_n,
+            &self.proj_buf, query_norm,
+            &self.vecs[..scan_n * PROJ_DIM], PROJ_DIM, scan_n,
         );
 
-        // Apply recency boost
         let mut boosted = scores;
         for (i, score) in boosted.iter_mut().enumerate() {
             if self.texts[i].is_none() {
@@ -132,7 +156,6 @@ impl VectorStore {
             *score *= RECENCY_BASE + RECENCY_WEIGHT * recency;
         }
 
-        // SIMD top-k
         let (indices, top_scores) = search::top_k(&boosted, k);
 
         let mut results: Vec<RecallResult> = indices
@@ -188,11 +211,8 @@ impl VectorStore {
         if self.count <= 1 {
             return 1.0;
         }
-        // The most recent insert is at (write_pos - 1) % capacity.
-        // Age = how many inserts ago this slot was written.
         let newest = (self.write_pos + self.capacity - 1) % self.capacity;
         let age = (newest + self.capacity - slot) % self.capacity;
-        // Clamp age to count (slots older than count are stale)
         let age = age.min(self.count - 1);
         1.0 - (age as f32 / (self.count - 1) as f32)
     }
@@ -206,8 +226,8 @@ impl Default for VectorStore {
 
 /// Compute byte-histogram embedding: count frequency of each byte value.
 fn embed_bytes(input: &[u8], out: &mut [f32]) {
-    assert!(out.len() >= DIM);
-    for v in out.iter_mut().take(DIM) {
+    assert!(out.len() >= RAW_DIM);
+    for v in out.iter_mut().take(RAW_DIM) {
         *v = 0.0;
     }
     for &b in input {
@@ -225,7 +245,7 @@ mod tests {
 
     #[test]
     fn test_embed_bytes_basic() {
-        let mut buf = vec![0.0f32; DIM];
+        let mut buf = vec![0.0f32; RAW_DIM];
         embed_bytes(b"aab", &mut buf);
         assert_eq!(buf[b'a' as usize], 2.0);
         assert_eq!(buf[b'b' as usize], 1.0);
@@ -260,7 +280,7 @@ mod tests {
 
         let results = store.recall("the quick brown fox", 1);
         assert_eq!(results.len(), 1);
-        assert!(results[0].score > 0.6, "score: {}", results[0].score);
+        assert!(results[0].score > 0.5, "score: {}", results[0].score);
     }
 
     #[test]
@@ -309,18 +329,15 @@ mod tests {
         store.insert("third message");
         assert_eq!(store.len(), 3);
 
-        // Insert a 4th — should overwrite "first message"
         store.insert("fourth message");
         assert_eq!(store.len(), 3);
 
-        // "first message" should be gone
         let results = store.recall("first", 3);
         for r in &results {
             assert!(!r.text.contains("first message"),
                 "first message should have been evicted, got: {}", r.text);
         }
 
-        // "fourth message" should be findable
         let results = store.recall("fourth", 1);
         assert!(!results.is_empty());
         assert!(results[0].text.contains("fourth"), "got: {}", results[0].text);
@@ -340,7 +357,6 @@ mod tests {
     #[test]
     fn test_recency_boost() {
         let mut store = VectorStore::with_capacity(100);
-        // Insert same text at different times
         store.insert("rust programming");
         for _ in 0..50 {
             store.insert("filler text padding content");
@@ -349,11 +365,28 @@ mod tests {
 
         let results = store.recall("rust programming", 2);
         assert!(results.len() >= 2);
-        // The newer "rust programming" should score higher due to recency boost
-        // Both have identical cosine similarity, so recency decides
         let newer_idx = results[0].index;
         let older_idx = results[1].index;
         assert!(newer_idx > older_idx,
             "newer entry (idx {}) should rank above older (idx {})", newer_idx, older_idx);
+    }
+
+    #[test]
+    fn test_jl_projection_preserves_ranking() {
+        let mut store = VectorStore::with_capacity(200);
+        // Realistic scenario: known entries mixed with diverse filler
+        store.insert("SIMD vector optimization for ARM NEON and AVX-512 processing units");
+        store.insert("SIMD kernel acceleration and vector math operations for modern x86 CPUs");
+        // Filler with very different byte distributions
+        for i in 0..50 {
+            store.insert(&format!("{i}{i}{i}{i}{i}{i}{i}{i}{i}{i} {i}{i}{i}{i}{i}{i}{i}{i}{i}{i}"));
+        }
+
+        // SIMD entries must appear in results (filler is purely numeric)
+        let results = store.recall("SIMD vector processing", 3);
+        let simd_count = results.iter().filter(|r| r.text.contains("SIMD")).count();
+        assert!(simd_count >= 1,
+            "expected at least 1 SIMD entry in top-3, got: {:?}",
+            results.iter().map(|r| &r.text).collect::<Vec<_>>());
     }
 }

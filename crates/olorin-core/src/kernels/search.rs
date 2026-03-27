@@ -1,5 +1,8 @@
 use super::ffi;
 
+/// JL projection dimension (reduced from 256).
+pub const JL_DIM: usize = 64;
+
 /// Compute dot products of query against n vectors of given dimension.
 pub fn batch_dot(query: &[f32], vecs: &[f32], dim: usize, n_vecs: usize) -> Vec<f32> {
     assert!(query.len() >= dim);
@@ -101,6 +104,53 @@ pub fn top_k(scores: &[f32], k: usize) -> (Vec<i32>, Vec<f32>) {
         );
     }
     (out_indices, out_scores)
+}
+
+/// Apply turbo_rotate (sign-flip + FWHT) in-place.
+pub fn turbo_rotate(vec: &mut [f32], signs: &[f32]) {
+    let dim = vec.len();
+    assert!(signs.len() >= dim);
+    unsafe {
+        ffi::turbo_rotate(vec.as_mut_ptr(), signs.as_ptr(), dim as i32);
+    }
+}
+
+/// Project a single vector from in_dim to out_dim via JL (sign-flip + FWHT + truncate).
+/// Returns the projected vector.
+pub fn jl_project(vec: &[f32], signs: &[f32], out_dim: usize) -> Vec<f32> {
+    let in_dim = vec.len();
+    assert!(signs.len() >= in_dim);
+    let mut out = vec![0.0f32; out_dim];
+    let mut scratch = vec![0.0f32; in_dim];
+    unsafe {
+        ffi::jl_project(
+            vec.as_ptr(), signs.as_ptr(),
+            in_dim as i32, out_dim as i32,
+            out.as_mut_ptr(), scratch.as_mut_ptr(),
+        );
+    }
+    out
+}
+
+/// Project n_vecs vectors from in_dim to out_dim via JL.
+/// vecs_in layout: [v0_0..v0_in, v1_0..v1_in, ...].
+/// Returns flat buffer: [v0_0..v0_out, v1_0..v1_out, ...].
+pub fn jl_project_batch(
+    vecs_in: &[f32], signs: &[f32], in_dim: usize, out_dim: usize, n_vecs: usize,
+) -> Vec<f32> {
+    assert!(vecs_in.len() >= in_dim * n_vecs);
+    assert!(signs.len() >= in_dim);
+    let mut out = vec![0.0f32; out_dim * n_vecs];
+    let mut scratch = vec![0.0f32; in_dim];
+    unsafe {
+        ffi::jl_project_batch(
+            vecs_in.as_ptr(), signs.as_ptr(),
+            in_dim as i32, out_dim as i32,
+            out.as_mut_ptr(), scratch.as_mut_ptr(),
+            n_vecs as i32,
+        );
+    }
+    out
 }
 
 #[cfg(test)]

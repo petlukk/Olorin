@@ -20,7 +20,7 @@ impl Tool for BenchTool {
             "properties": {
                 "target": {
                     "type": "string",
-                    "enum": ["safety", "router"],
+                    "enum": ["safety", "router", "recall"],
                     "description": "What to benchmark"
                 }
             },
@@ -36,6 +36,7 @@ impl Tool for BenchTool {
         match target {
             "safety" => bench_safety(),
             "router" => bench_router(),
+            "recall" => bench_recall(),
             _ => Err(crate::error::Error::Tool(format!(
                 "unknown target '{target}'"
             ))),
@@ -73,6 +74,87 @@ fn bench_safety() -> crate::error::Result<String> {
         per_call_ns,
         gb_per_sec,
         elapsed.as_secs_f64() * 1000.0,
+    ))
+}
+
+fn bench_recall() -> crate::error::Result<String> {
+    use crate::recall::VectorStore;
+
+    let corpus = [
+        "SIMD vector optimization for ARM NEON and AVX-512 processing units and pipelines",
+        "The Rust programming language guarantees memory safety through ownership",
+        "Python machine learning with TensorFlow PyTorch and scikit-learn frameworks",
+        "ChaCha20 is a fast stream cipher used in TLS and WireGuard protocols",
+        "KV-cache compression reduces memory bandwidth requirements for LLM inference",
+        "Johnson-Lindenstrauss lemma preserves pairwise distances under random projection",
+        "Walsh-Hadamard transform is a fast orthogonal transformation used in signal processing",
+        "ARM NEON provides 128-bit SIMD on mobile edge devices like Raspberry Pi",
+        "Quantization reduces neural network model size with minimal quality degradation",
+        "Cosine similarity measures the angle between high-dimensional embedding vectors",
+    ];
+
+    let queries = [
+        "SIMD vector acceleration for CPUs",
+        "Rust memory safety ownership",
+        "stream cipher encryption TLS",
+        "KV cache memory bandwidth LLM",
+        "random projection distance preservation",
+    ];
+
+    // Benchmark insert: fill 1024-entry store
+    let mut store = VectorStore::with_capacity(1024);
+    let insert_iters = 10;
+
+    // Warmup
+    for text in &corpus {
+        store.insert(text);
+    }
+    store.clear();
+
+    let start = Instant::now();
+    for _ in 0..insert_iters {
+        store.clear();
+        for i in 0..1024 {
+            store.insert(corpus[i % corpus.len()]);
+        }
+    }
+    let insert_elapsed = start.elapsed();
+    let per_insert_us = insert_elapsed.as_micros() as f64 / (insert_iters * 1024) as f64;
+
+    // Benchmark recall: search filled store
+    let recall_iters = 1000;
+
+    // Warmup
+    for q in &queries {
+        let _ = store.recall(q, 5);
+    }
+
+    let start = Instant::now();
+    for _ in 0..recall_iters {
+        for q in &queries {
+            let _ = store.recall(q, 5);
+        }
+    }
+    let recall_elapsed = start.elapsed();
+    let total_recalls = recall_iters * queries.len();
+    let per_recall_us = recall_elapsed.as_micros() as f64 / total_recalls as f64;
+
+    let mem_per_vec = std::mem::size_of::<f32>() * crate::kernels::search::JL_DIM;
+    let total_mem_kb = (mem_per_vec * 1024) as f64 / 1024.0;
+
+    Ok(format!(
+        "Recall benchmark (JL-projected {}-dim, 1024 entries):\n\
+         Insert:\n  Per insert: {:.1} us\n  1024 inserts: {:.1} ms\n\
+         Recall (top-5 from 1024):\n  Per recall: {:.1} us\n  {} recalls: {:.1} ms\n\
+         Memory: {:.0} KB for 1024 vectors ({} B/vec)",
+        crate::kernels::search::JL_DIM,
+        per_insert_us,
+        per_insert_us * 1024.0 / 1000.0,
+        per_recall_us,
+        total_recalls,
+        recall_elapsed.as_secs_f64() * 1000.0,
+        total_mem_kb,
+        mem_per_vec,
     ))
 }
 
