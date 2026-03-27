@@ -202,12 +202,8 @@ pub fn bench_router() -> crate::error::Result<String> {
 pub fn bench_vault() -> crate::error::Result<String> {
     use crate::vault::{EachachaCrypto, VaultCrypto};
 
-    let lib_dir = crate::kernels::ffi::kernel_dir()
-        .map_err(|e| crate::error::Error::Tool(e))?;
-    let lib_path = lib_dir.join("libchacha20.so");
-    if !lib_path.exists() {
-        return Ok("─── vault (eachacha — SIMD ChaCha20, 4-round interleaved) ───\n  skipped: libchacha20.so not available".into());
-    }
+    let lib_path = crate::vault::find_chacha_lib()
+        .ok_or_else(|| crate::error::Error::Tool("libchacha20.so not found".into()))?;
     let crypto = EachachaCrypto::new(lib_path);
 
     let data = vec![0x42u8; 4096];
