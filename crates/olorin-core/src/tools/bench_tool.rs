@@ -39,6 +39,7 @@ impl Tool for BenchTool {
             "recall" => bench_recall(),
             "vault" => bench_vault(),
             "search" => bench_search(),
+            "jl" => bench_jl(),
             _ => Err(crate::error::Error::Tool(format!(
                 "unknown target '{target}'"
             ))),
@@ -275,5 +276,32 @@ pub fn bench_search() -> crate::error::Result<String> {
     Ok(format!(
         "─── search (search kernel — NEON/AVX batch dot, branchless top-k) ───\n  Per search: {:.1} µs  ({} × {}-dim vectors)\n  Throughput: {:.0}K searches/s\n  {} iterations",
         per_search_us, n_vecs, JL_DIM, searches_per_sec / 1000.0, iterations
+    ))
+}
+
+pub fn bench_jl() -> crate::error::Result<String> {
+    use crate::kernels::search::{jl_project, JL_DIM};
+
+    let in_dim = 256;
+    let iterations = 100_000;
+
+    let vec: Vec<f32> = (0..in_dim).map(|i| (i as f32 * 0.1).sin()).collect();
+    let signs: Vec<f32> = (0..in_dim).map(|i| if i % 3 == 0 { -1.0 } else { 1.0 }).collect();
+
+    for _ in 0..100 {
+        let _ = jl_project(&vec, &signs, JL_DIM);
+    }
+
+    let start = std::time::Instant::now();
+    for _ in 0..iterations {
+        let _ = jl_project(&vec, &signs, JL_DIM);
+    }
+    let elapsed = start.elapsed();
+    let per_ns = elapsed.as_nanos() as f64 / iterations as f64;
+    let per_sec = iterations as f64 / elapsed.as_secs_f64();
+
+    Ok(format!(
+        "─── jl (turbo_rotate FWHT + sign-flip → jl_project 256→{}) ───\n  Per projection: {:.0} ns\n  Throughput: {:.1}M projections/s\n  {} iterations",
+        JL_DIM, per_ns, per_sec / 1e6, iterations
     ))
 }
