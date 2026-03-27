@@ -95,6 +95,16 @@ impl WebChannel {
                         body.len()
                     );
                 }
+                ("GET", "/api/system") => {
+                    let body = build_system_info_json();
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                         Access-Control-Allow-Origin: *\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                }
                 ("POST", "/api/generate") => {
                     let content_len = parse_content_length(req);
                     let header_end = req.find("\r\n\r\n").unwrap_or(n) + 4;
@@ -269,6 +279,77 @@ fn escape_json(s: &str) -> String {
     out
 }
 
+/// Build JSON for GET /api/system by reading procfs/sysfs.
+fn build_system_info_json() -> String {
+    let cpu_percent = read_cpu_percent().unwrap_or(0);
+    let cpu_temp = read_cpu_temp(); // Option<u32>, null if unavailable
+    let (mem_used, mem_total) = read_memory().unwrap_or((0, 0));
+    let os = std::env::consts::OS;
+    let arch = std::env::consts::ARCH;
+    let uptime = read_uptime().unwrap_or(0);
+
+    let temp_str = match cpu_temp {
+        Some(t) => t.to_string(),
+        None => "null".to_string(),
+    };
+    format!(
+        "{{\"cpu_percent\":{cpu_percent},\"cpu_temp\":{temp_str},\
+         \"memory_used_mb\":{mem_used},\"memory_total_mb\":{mem_total},\
+         \"os\":\"{os}\",\"arch\":\"{arch}\",\"uptime_seconds\":{uptime}}}"
+    )
+}
+
+fn read_cpu_percent() -> Option<u32> {
+    // Read /proc/stat twice with 100ms gap, compute delta
+    let read_stat = || -> Option<(u64, u64)> {
+        let s = std::fs::read_to_string("/proc/stat").ok()?;
+        let line = s.lines().next()?;
+        let vals: Vec<u64> = line.split_whitespace().skip(1)
+            .filter_map(|v| v.parse().ok()).collect();
+        if vals.len() < 4 { return None; }
+        let idle = vals[3];
+        let total: u64 = vals.iter().sum();
+        Some((idle, total))
+    };
+    let (idle1, total1) = read_stat()?;
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    let (idle2, total2) = read_stat()?;
+    let d_idle = idle2.saturating_sub(idle1);
+    let d_total = total2.saturating_sub(total1);
+    if d_total == 0 { return Some(0); }
+    Some((100 * (d_total - d_idle) / d_total) as u32)
+}
+
+fn read_cpu_temp() -> Option<u32> {
+    let s = std::fs::read_to_string(
+        "/sys/class/thermal/thermal_zone0/temp",
+    ).ok()?;
+    let millideg: u32 = s.trim().parse().ok()?;
+    Some(millideg / 1000)
+}
+
+fn read_memory() -> Option<(u64, u64)> {
+    let s = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let mut total_kb = 0u64;
+    let mut available_kb = 0u64;
+    for line in s.lines() {
+        if line.starts_with("MemTotal:") {
+            total_kb = line.split_whitespace().nth(1)?.parse().ok()?;
+        } else if line.starts_with("MemAvailable:") {
+            available_kb = line.split_whitespace().nth(1)?.parse().ok()?;
+        }
+    }
+    let total_mb = total_kb / 1024;
+    let used_mb = total_mb - (available_kb / 1024);
+    Some((used_mb, total_mb))
+}
+
+fn read_uptime() -> Option<u64> {
+    let s = std::fs::read_to_string("/proc/uptime").ok()?;
+    let secs: f64 = s.split_whitespace().next()?.parse().ok()?;
+    Some(secs as u64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -329,6 +410,19 @@ mod tests {
     fn test_parse_content_length_missing() {
         let req = "GET / HTTP/1.1\r\n\r\n";
         assert_eq!(parse_content_length(req), 0);
+    }
+
+    #[test]
+    fn test_system_info_json_shape() {
+        let json = build_system_info_json();
+        assert!(json.contains("\"cpu_percent\""));
+        assert!(json.contains("\"memory_used_mb\""));
+        assert!(json.contains("\"memory_total_mb\""));
+        assert!(json.contains("\"os\""));
+        assert!(json.contains("\"arch\""));
+        assert!(json.contains("\"uptime_seconds\""));
+        // cpu_temp may be null
+        assert!(json.contains("\"cpu_temp\""));
     }
 
     #[test]
