@@ -82,7 +82,7 @@ pub fn init() -> Result<(), String> {
     Ok(())
 }
 
-fn kernel_dir() -> Result<PathBuf, String> {
+pub(crate) fn kernel_dir() -> Result<PathBuf, String> {
     let base = home::home_dir()
         .ok_or_else(|| "cannot determine home directory".to_string())?;
     Ok(base.join(".olorin").join("lib").join(embedded::VERSION))

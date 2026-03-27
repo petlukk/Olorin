@@ -1,5 +1,3 @@
-use olorin_core::kernels::command_router as cmd_router;
-
 use super::repl::OlorinRepl;
 
 impl OlorinRepl {
@@ -380,23 +378,14 @@ impl OlorinRepl {
 
     pub(crate) fn handle_bench(&self, arg: &str) -> String {
         if arg.is_empty() {
-            return "Usage: /bench <target>".into();
+            return "Usage: /bench <target>\nTargets: safety, router, recall".into();
         }
-        match arg {
-            "router" => {
-                let input = b"/help";
-                let start = std::time::Instant::now();
-                for _ in 0..10000 {
-                    let _ = cmd_router::match_command_verified(input);
-                }
-                let elapsed = start.elapsed();
-                format!(
-                    "SIMD router: 10k iterations in {:?} ({:.0} ns/call)",
-                    elapsed,
-                    elapsed.as_nanos() as f64 / 10000.0
-                )
-            }
-            other => format!("Unknown bench target '{}'. Available: router", other),
+        use olorin_core::tools::bench_tool;
+        match arg.trim() {
+            "safety" => bench_tool::bench_safety().unwrap_or_else(|e| format!("error: {e}")),
+            "router" => bench_tool::bench_router().unwrap_or_else(|e| format!("error: {e}")),
+            "recall" => bench_tool::bench_recall().unwrap_or_else(|e| format!("error: {e}")),
+            other => format!("Unknown target '{other}'. Use: safety, router, recall"),
         }
     }
 

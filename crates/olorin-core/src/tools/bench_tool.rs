@@ -11,7 +11,7 @@ impl Tool for BenchTool {
     }
 
     fn description(&self) -> &str {
-        "Run a quick microbenchmark. Targets: safety, router."
+        "Run a quick microbenchmark. Targets: safety, router, recall, vault, search, jl, all."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -20,7 +20,7 @@ impl Tool for BenchTool {
             "properties": {
                 "target": {
                     "type": "string",
-                    "enum": ["safety", "router", "recall"],
+                    "enum": ["safety", "router", "recall", "vault", "search", "jl", "all"],
                     "description": "What to benchmark"
                 }
             },
@@ -44,7 +44,7 @@ impl Tool for BenchTool {
     }
 }
 
-fn bench_safety() -> crate::error::Result<String> {
+pub fn bench_safety() -> crate::error::Result<String> {
     use crate::safety::SafetyLayer;
 
     let input = "Hello, this is a normal user message for benchmarking purposes. ".repeat(16);
@@ -77,7 +77,7 @@ fn bench_safety() -> crate::error::Result<String> {
     ))
 }
 
-fn bench_recall() -> crate::error::Result<String> {
+pub fn bench_recall() -> crate::error::Result<String> {
     use crate::recall::VectorStore;
 
     let corpus = [
@@ -158,7 +158,7 @@ fn bench_recall() -> crate::error::Result<String> {
     ))
 }
 
-fn bench_router() -> crate::error::Result<String> {
+pub fn bench_router() -> crate::error::Result<String> {
     use crate::kernels::command_router;
 
     let commands: &[&[u8]] = &[
