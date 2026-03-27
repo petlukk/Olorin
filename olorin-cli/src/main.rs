@@ -70,10 +70,12 @@ fn main() {
     if serve {
         println!("[Olorin] Starting web UI on port {}...", port);
         let quant: String = engine.as_ref().map(|e| e.quant_type_str().to_string()).unwrap_or("unknown".into());
-        let repl = Mutex::new(OlorinRepl::new(engine.clone(), &quant));
+        let repl_arc = Arc::new(Mutex::new(OlorinRepl::new(engine.clone(), &quant)));
         let web = olorin_core::channel::web::WebChannel::new(port);
+
+        let repl_for_handler = Arc::clone(&repl_arc);
         let handler = move |req: &olorin_core::channel::web::GenerateRequest, on_token: &dyn Fn(&str)| -> String {
-            let mut repl = repl.lock().unwrap();
+            let mut repl = repl_for_handler.lock().unwrap();
             // Apply recall level from web slider if set (>= 0)
             if let Some(level) = req.recall_level {
                 if level >= 0 {
@@ -89,7 +91,18 @@ fn main() {
                 ReplAction::Generate(p) => repl.generate_for_web(&p, on_token),
             }
         };
-        if let Err(e) = web.run(handler) {
+
+        let repl_for_cmd = Arc::clone(&repl_arc);
+        let cmd_handler = move |cmd: &str| -> (String, bool) {
+            let mut repl = repl_for_cmd.lock().unwrap();
+            match repl.process(cmd) {
+                ReplAction::Quit => ("Cannot quit from web UI.".to_string(), false),
+                ReplAction::Print(msg) => (msg, true),
+                ReplAction::Generate(_) => ("Use the chat tile for generation.".to_string(), false),
+            }
+        };
+
+        if let Err(e) = web.run(handler, cmd_handler) {
             eprintln!("[Olorin] Web server error: {}", e);
         }
         return;

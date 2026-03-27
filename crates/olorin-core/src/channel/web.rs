@@ -35,9 +35,11 @@ impl WebChannel {
 
     /// Start the HTTP server. Blocks until shutdown.
     /// `on_prompt` receives (request, token_callback) and returns the final response.
-    pub fn run<F>(&self, on_prompt: F) -> std::io::Result<()>
+    /// `on_command` receives a REPL command string and returns (output, success).
+    pub fn run<F, C>(&self, on_prompt: F, on_command: C) -> std::io::Result<()>
     where
         F: Fn(&GenerateRequest, &dyn Fn(&str)) -> String + Send + Sync,
+        C: Fn(&str) -> (String, bool) + Send + Sync,
     {
         let listener = TcpListener::bind(format!("0.0.0.0:{}", self.port))?;
         println!("[Olorin] Web UI listening on http://0.0.0.0:{}", self.port);
@@ -182,6 +184,33 @@ impl WebChannel {
                     let _ = write!(
                         stream,
                         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                }
+                ("POST", "/api/command") => {
+                    let content_len = parse_content_length(req);
+                    let header_end = req.find("\r\n\r\n").unwrap_or(n) + 4;
+                    let already = n - header_end;
+                    let mut body_buf = vec![0u8; content_len];
+                    if already > 0 && already <= content_len {
+                        body_buf[..already].copy_from_slice(&buf[header_end..n]);
+                    }
+                    if already < content_len {
+                        let _ = stream.read_exact(&mut body_buf[already..]);
+                    }
+                    let body_str = std::str::from_utf8(&body_buf).unwrap_or("");
+                    let command = extract_json_string(body_str, "command").unwrap_or_default();
+
+                    let (output, success) = on_command(&command);
+                    let escaped_output = escape_json(&output);
+                    let body = format!(
+                        "{{\"output\":\"{escaped_output}\",\"success\":{success}}}"
+                    );
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                         Access-Control-Allow-Origin: *\r\n\
                          Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
                         body.len()
                     );
@@ -423,6 +452,20 @@ mod tests {
         assert!(json.contains("\"uptime_seconds\""));
         // cpu_temp may be null
         assert!(json.contains("\"cpu_temp\""));
+    }
+
+    #[test]
+    fn test_parse_command_request() {
+        let body = r#"{"command":"/recall 5"}"#;
+        let cmd = extract_json_string(body, "command").unwrap();
+        assert_eq!(cmd, "/recall 5");
+    }
+
+    #[test]
+    fn test_parse_command_request_empty() {
+        let body = r#"{}"#;
+        let cmd = extract_json_string(body, "command");
+        assert!(cmd.is_none());
     }
 
     #[test]
