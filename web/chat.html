@@ -41,7 +41,7 @@ body{background:var(--crust);color:var(--text);font-family:'Inter',system-ui,san
 .repl-body{flex:1;overflow-y:auto;padding:12px;font:13px/1.6 'JetBrains Mono',monospace;min-height:0}
 .repl-line{margin-bottom:4px}
 .repl-prompt{color:var(--mauve)}
-.repl-output{color:var(--subtext1);padding-left:2px}
+.repl-output{color:var(--subtext1);padding-left:16px}
 .repl-success{color:var(--green)}
 .repl-muted{color:var(--overlay0)}
 .repl-input-line{display:flex;align-items:center;padding:8px 12px;border-top:1px solid var(--surface0);background:var(--mantle);font:13px 'JetBrains Mono',monospace}
@@ -89,7 +89,7 @@ function createChatTile(id){
   const body=el('div','chat-body');body.id='chat-body-'+id;t.appendChild(body);
   const area=el('div','chat-input-area');
   const box=el('div','chat-input-box');
-  const inp=el('input','chat-input');inp.placeholder='Message olorin...';inp.autocomplete='off';
+  const inp=el('input','chat-input');inp.placeholder='Message Olorin...';inp.autocomplete='off';
   inp.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendChat(id,body,inp)}});
   const btn=el('button','chat-send','↑');btn.onclick=()=>sendChat(id,body,inp);
   box.appendChild(inp);box.appendChild(btn);area.appendChild(box);t.appendChild(area);
