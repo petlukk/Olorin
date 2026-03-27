@@ -69,7 +69,8 @@ fn main() {
 
     if serve {
         println!("[Olorin] Starting web UI on port {}...", port);
-        let repl = Mutex::new(OlorinRepl::new(engine.clone()));
+        let quant: String = engine.as_ref().map(|e| e.quant_type_str().to_string()).unwrap_or("unknown".into());
+        let repl = Mutex::new(OlorinRepl::new(engine.clone(), &quant));
         let web = olorin_core::channel::web::WebChannel::new(port);
         let handler = move |prompt: &str, on_token: &dyn Fn(&str)| -> String {
             let mut repl = repl.lock().unwrap();
@@ -108,6 +109,19 @@ pub(crate) struct CougarEngine {
 }
 
 impl CougarEngine {
+    pub fn quant_type_str(&self) -> &str {
+        let idx = self.gguf.tensor_map.get("blk.0.attn_q.weight")
+            .or_else(|| self.gguf.tensor_map.get("blk.0.attn_qkv.weight"));
+        match idx {
+            Some(&i) => match self.gguf.tensors[i].dtype {
+                36 => "I2S",
+                12 | 14 => "Q4K",
+                _ => "unknown",
+            },
+            None => "unknown",
+        }
+    }
+
     pub fn generate_text(&self, prompt: &str, on_token: &dyn Fn(&str)) -> String {
         let model = match cougar_engine::model::BitNetModel::from_gguf(&self.gguf) {
             Ok(m) => m,
@@ -126,32 +140,60 @@ impl CougarEngine {
             }
         };
 
-        let chat_prompt = format!(
-            "<|im_start|>system\nYou are Olorin, a helpful AI assistant.\n<|im_end|>\n\
-             <|im_start|>user\n{}\n<|im_end|>\n\
-             <|im_start|>assistant\n",
-            prompt
-        );
-        let tokens = tokenizer.encode(&chat_prompt);
+        use cougar_engine::model::QuantType;
+        let is_q4k = model.quant_type == QuantType::Q4K;
+
+        // Chat template depends on model family:
+        // - Llama 3: <|start_header_id|>...<|end_header_id|>
+        // - Qwen/ChatML: <|im_start|>...<|im_end|>
+        // - BitNet (base model): no template, raw prompt
+        let mut tokens = vec![tokenizer.bos_id];
+        if is_q4k {
+            // Detect Qwen vs Llama by checking if tokenizer knows ChatML tokens
+            let has_chatml = tokenizer.token_to_id("<|im_start|>").is_some();
+            let chat = if has_chatml {
+                // Qwen-style ChatML
+                format!(
+                    "<|im_start|>user\n{prompt}<|im_end|>\n\
+                     <|im_start|>assistant\n"
+                )
+            } else {
+                // Llama 3 Instruct
+                format!(
+                    "<|start_header_id|>user<|end_header_id|>\n\n\
+                     {prompt}<|eot_id|>\
+                     <|start_header_id|>assistant<|end_header_id|>\n\n"
+                )
+            };
+            tokens.extend(tokenizer.encode(&chat));
+        } else {
+            // BitNet: base model, no chat template
+            tokens.extend(tokenizer.encode(prompt));
+        }
+
+        let tok_ref = &tokenizer;
         let output = Arc::new(std::sync::Mutex::new(Vec::<u32>::new()));
         let output_ref = output.clone();
-        let tok_ref = &tokenizer;
 
-        let (generated, _prefill_ms, _decode_ms) =
-            cougar_engine::forward::InferenceState::generate(
-                &model,
-                &tokens,
-                256,
-                0.7,
-                1.1,
-                tokenizer.eos_id,
-                self.max_seq_len,
-                |tok_id| {
-                    let text = tok_ref.decode(&[tok_id]);
-                    on_token(&text);
-                    output_ref.lock().unwrap().push(tok_id);
-                },
+        let on_tok = |tok_id: u32| {
+            let text = tok_ref.decode(&[tok_id]);
+            on_token(&text);
+            output_ref.lock().unwrap().push(tok_id);
+        };
+
+        let generated = if is_q4k {
+            let (gen, _, _) = cougar_engine::forward_llama::generate(
+                &model, &tokens, 256, 0.7, 1.1,
+                tokenizer.eos_id, self.max_seq_len, on_tok,
             );
+            gen
+        } else {
+            let (gen, _, _) = cougar_engine::forward::InferenceState::generate(
+                &model, &tokens, 256, 0.7, 1.1,
+                tokenizer.eos_id, self.max_seq_len, on_tok,
+            );
+            gen
+        };
 
         let gen_tokens: Vec<u32> = generated[tokens.len()..].to_vec();
         tokenizer.decode(&gen_tokens)
@@ -184,7 +226,8 @@ fn load_cougar_model(path: &std::path::Path, max_seq_len: usize) -> Option<Couga
 fn run_repl(engine: Option<Arc<CougarEngine>>) {
     let stdin = io::stdin();
     let stdout = io::stdout();
-    let mut repl = OlorinRepl::new(engine);
+    let quant: String = engine.as_ref().map(|e| e.quant_type_str().to_string()).unwrap_or("unknown".into());
+    let mut repl = OlorinRepl::new(engine, &quant);
 
     println!("[Olorin] Type a message (Ctrl+D to exit):");
     loop {

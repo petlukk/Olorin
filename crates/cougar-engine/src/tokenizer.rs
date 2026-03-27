@@ -127,6 +127,11 @@ impl Tokenizer {
         Ok(Tokenizer { vocab, token_to_id, scores, bos_id, eos_id })
     }
 
+    /// Look up a token string in the vocabulary. Returns None if not found.
+    pub fn token_to_id(&self, token: &str) -> Option<u32> {
+        self.token_to_id.get(token.as_bytes()).copied()
+    }
+
     pub fn encode(&self, text: &str) -> Vec<u32> {
         if text.is_empty() {
             return Vec::new();

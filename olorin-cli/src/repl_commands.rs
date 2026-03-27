@@ -133,7 +133,21 @@ impl OlorinRepl {
 
     pub(crate) fn handle_recall(&mut self, arg: &str) -> String {
         if arg.is_empty() {
-            return "Usage: /recall <query>".into();
+            return format!(
+                "Recall level: {} (top_k={}, min_score={:.2})\n\
+                 Usage: /recall <0-10> to set level, /recall <query> to search",
+                self.recall.level, self.recall.top_k, self.recall.min_score
+            );
+        }
+        // If arg is a number 0-10, set recall level
+        if let Ok(level) = arg.parse::<u8>() {
+            if level <= 10 {
+                self.recall = super::repl::RecallConfig::from_level(level);
+                return format!(
+                    "Recall level set to {} (top_k={}, min_score={:.2})",
+                    self.recall.level, self.recall.top_k, self.recall.min_score
+                );
+            }
         }
         match self.vault {
             Some(ref mut vault) => {

@@ -13,22 +13,60 @@ pub enum ReplAction {
     Generate(String),
 }
 
+/// Recall level controls how much vault context is injected into prompts.
+/// 0 = no recall (pure inference), 10 = deep recall (full history search).
+/// Auto-detected at startup based on model capability.
+pub struct RecallConfig {
+    pub level: u8,        // 0-10
+    pub top_k: usize,     // how many vault blocks to retrieve
+    pub min_score: f32,   // minimum similarity threshold
+}
+
+impl RecallConfig {
+    /// Auto-configure based on model type.
+    /// Small/base models get minimal recall; large instruct models get full.
+    pub fn auto_detect(quant_type: &str) -> Self {
+        match quant_type {
+            "I2S" => Self { level: 0, top_k: 0, min_score: 1.0 },    // BitNet: no recall
+            "Q4K" => Self { level: 3, top_k: 2, min_score: 0.3 },    // Llama 3B: light recall
+            _     => Self { level: 5, top_k: 3, min_score: 0.2 },    // default
+        }
+    }
+
+    pub fn from_level(level: u8) -> Self {
+        let level = level.min(10);
+        if level == 0 {
+            return Self { level: 0, top_k: 0, min_score: 1.0 };
+        }
+        Self {
+            level,
+            top_k: (level as usize + 1) / 2,           // 1→1, 3→2, 5→3, 7→4, 10→5
+            min_score: 0.5 - (level as f32 * 0.04),     // 1→0.46, 5→0.30, 10→0.10
+        }
+    }
+}
+
 pub struct OlorinRepl {
     pub engine: Option<Arc<CougarEngine>>,
     safety: SafetyLayer,
     pub(crate) vault: Option<Vault>,
     pub(crate) backend_mode: String,
+    pub(crate) recall: RecallConfig,
 }
 
 impl OlorinRepl {
-    pub fn new(engine: Option<Arc<CougarEngine>>) -> Self {
+    pub fn new(engine: Option<Arc<CougarEngine>>, model_quant: &str) -> Self {
         let safety = SafetyLayer::with_capacity(8192);
         let vault = Self::open_vault();
+        let recall = RecallConfig::auto_detect(model_quant);
+        eprintln!("[Olorin] Recall level: {} (top_k={}, min_score={:.2})",
+            recall.level, recall.top_k, recall.min_score);
         Self {
             engine,
             safety,
             vault,
             backend_mode: "auto".to_string(),
+            recall,
         }
     }
 
@@ -129,24 +167,33 @@ impl OlorinRepl {
         }
     }
 
+    /// Build recall context based on current recall level.
+    fn recall_context(&mut self, prompt: &str) -> String {
+        if self.recall.level == 0 || self.recall.top_k == 0 {
+            return String::new();
+        }
+        let vault = match self.vault {
+            Some(ref mut v) => v,
+            None => return String::new(),
+        };
+        let results = vault.search(prompt, self.recall.top_k).unwrap_or_default();
+        let filtered: Vec<_> = results
+            .iter()
+            .filter(|r| r.score >= self.recall.min_score)
+            .collect();
+        if filtered.is_empty() {
+            return String::new();
+        }
+        let ctx: Vec<String> = filtered
+            .iter()
+            .map(|r| String::from_utf8_lossy(&r.text).to_string())
+            .collect();
+        format!("\n[Recall context]\n{}\n", ctx.join("\n---\n"))
+    }
+
     pub fn generate_streaming(&mut self, prompt: &str) {
         let stdout = io::stdout();
-
-        // Recall context from vault
-        let context = if let Some(ref mut vault) = self.vault {
-            let results = vault.search(prompt, 3).unwrap_or_default();
-            if results.is_empty() {
-                String::new()
-            } else {
-                let ctx: Vec<String> = results
-                    .iter()
-                    .map(|r| String::from_utf8_lossy(&r.text).to_string())
-                    .collect();
-                format!("\n[Recall context]\n{}\n", ctx.join("\n---\n"))
-            }
-        } else {
-            String::new()
-        };
+        let context = self.recall_context(prompt);
 
         let full_prompt = if context.is_empty() {
             prompt.to_string()
@@ -199,20 +246,7 @@ impl OlorinRepl {
     /// Like `generate_streaming` but sends tokens via callback and returns the full response.
     /// Used by the web channel so every request gets safety + recall + vault persistence.
     pub fn generate_for_web(&mut self, prompt: &str, on_token: &dyn Fn(&str)) -> String {
-        let context = if let Some(ref mut vault) = self.vault {
-            let results = vault.search(prompt, 3).unwrap_or_default();
-            if results.is_empty() {
-                String::new()
-            } else {
-                let ctx: Vec<String> = results
-                    .iter()
-                    .map(|r| String::from_utf8_lossy(&r.text).to_string())
-                    .collect();
-                format!("\n[Recall context]\n{}\n", ctx.join("\n---\n"))
-            }
-        } else {
-            String::new()
-        };
+        let context = self.recall_context(prompt);
 
         let full_prompt = if context.is_empty() {
             prompt.to_string()
