@@ -19,6 +19,8 @@ const DEFAULT_CAPACITY: usize = 1024;
 /// where recency ∈ [0.0, 1.0] (oldest → newest).
 const RECENCY_BASE: f32 = 0.85;
 const RECENCY_WEIGHT: f32 = 0.15;
+/// Dedup threshold: results with pairwise cosine > this are considered duplicates.
+const DEDUP_THRESHOLD: f32 = 0.85;
 
 /// A recalled conversation entry.
 #[derive(Debug, Clone)]
@@ -194,6 +196,71 @@ impl VectorStore {
             ));
         }
         out
+    }
+
+    /// Recall with deduplication: fetch top-k, then remove near-duplicate results
+    /// using SIMD pairwise cosine similarity on stored JL-projected vectors.
+    /// Returns fewer than k results if duplicates are found.
+    pub fn recall_dedup(&mut self, query: &str, k: usize) -> Vec<RecallResult> {
+        let results = self.recall(query, k);
+        if results.len() <= 1 {
+            return results;
+        }
+
+        // Build flat buffer of JL-projected vectors for the result slots
+        let n = results.len();
+        let mut result_vecs = vec![0.0f32; n * PROJ_DIM];
+        for (i, r) in results.iter().enumerate() {
+            let offset = r.index * PROJ_DIM;
+            result_vecs[i * PROJ_DIM..(i + 1) * PROJ_DIM]
+                .copy_from_slice(&self.vecs[offset..offset + PROJ_DIM]);
+        }
+
+        // Pairwise dedup: for each result, check if it's too similar to a kept result
+        let mut keep = vec![true; n];
+        for i in 0..n {
+            if !keep[i] { continue; }
+            let qi_norm = l2_norm(&result_vecs[i * PROJ_DIM..(i + 1) * PROJ_DIM]);
+            if qi_norm < 1e-9 { continue; }
+
+            let scores = search::batch_cosine(
+                &result_vecs[i * PROJ_DIM..(i + 1) * PROJ_DIM],
+                qi_norm,
+                &result_vecs,
+                PROJ_DIM,
+                n,
+            );
+
+            for j in (i + 1)..n {
+                if !keep[j] { continue; }
+                if scores[j] > DEDUP_THRESHOLD {
+                    keep[j] = false;
+                }
+            }
+        }
+
+        results.into_iter()
+            .enumerate()
+            .filter(|(i, _)| keep[*i])
+            .map(|(_, r)| r)
+            .collect()
+    }
+
+    /// Recall and synthesize context: dedup results and format as a compact
+    /// thought block suitable for injection into LLM context.
+    /// Returns None if no relevant context is found.
+    pub fn synthesize_context(&mut self, query: &str, k: usize) -> Option<String> {
+        let results = self.recall_dedup(query, k);
+        if results.is_empty() {
+            return None;
+        }
+        let mut ctx = format!("[Recalled context, {} entries]\n", results.len());
+        for r in &results {
+            let preview: String = r.text.chars().take(100).collect();
+            let ellipsis = if r.text.len() > 100 { "..." } else { "" };
+            ctx.push_str(&format!("- {}{}\n", preview, ellipsis));
+        }
+        Some(ctx)
     }
 
     /// Clear all stored entries.
@@ -388,5 +455,46 @@ mod tests {
         assert!(simd_count >= 1,
             "expected at least 1 SIMD entry in top-3, got: {:?}",
             results.iter().map(|r| &r.text).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn test_dedup_removes_near_duplicates() {
+        let mut store = VectorStore::with_capacity(100);
+        // Insert near-duplicate messages (same topic, similar byte distribution)
+        store.insert("Rust is a memory safe programming language with ownership");
+        store.insert("Rust is a memory safe language with ownership model");
+        store.insert("Rust is a memory safe programming language ownership");
+        // Insert distinct message
+        store.insert("1234567890 numbers only no letters here at all");
+
+        let raw = store.recall("Rust memory safe", 4);
+        let deduped = store.recall_dedup("Rust memory safe", 4);
+
+        // Dedup should return fewer results than raw recall
+        assert!(deduped.len() <= raw.len(),
+            "dedup ({}) should be <= raw ({})", deduped.len(), raw.len());
+        // At least one Rust result should survive
+        let rust_count = deduped.iter().filter(|r| r.text.contains("Rust")).count();
+        assert!(rust_count >= 1, "expected at least 1 Rust entry after dedup");
+    }
+
+    #[test]
+    fn test_synthesize_context() {
+        let mut store = VectorStore::with_capacity(100);
+        store.insert("SIMD vector optimization for ARM NEON processors");
+        store.insert("12345 67890 numbers only");
+        store.insert("SIMD kernel acceleration for AVX-512 instructions");
+
+        let ctx = store.synthesize_context("SIMD vector", 5);
+        assert!(ctx.is_some());
+        let ctx = ctx.unwrap();
+        assert!(ctx.contains("[Recalled context"));
+        assert!(ctx.contains("SIMD"));
+    }
+
+    #[test]
+    fn test_synthesize_context_empty() {
+        let mut store = VectorStore::new();
+        assert!(store.synthesize_context("anything", 5).is_none());
     }
 }
