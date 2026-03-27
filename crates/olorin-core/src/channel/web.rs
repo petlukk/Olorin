@@ -418,7 +418,15 @@ mod tests {
     fn test_chat_html_embedded() {
         assert!(!CHAT_HTML.is_empty());
         assert!(CHAT_HTML.contains("<!DOCTYPE html>"));
+        // Tiling UI markers
+        assert!(CHAT_HTML.contains("hyprbar"));
+        assert!(CHAT_HTML.contains("/api/system"));
+        assert!(CHAT_HTML.contains("/api/command"));
         assert!(CHAT_HTML.contains("/api/generate"));
+        assert!(CHAT_HTML.contains("altKey")); // keybind references
+        // Line count gate
+        let lines = CHAT_HTML.lines().count();
+        assert!(lines <= 500, "chat.html is {lines} lines — max 500");
     }
 
     #[test]
