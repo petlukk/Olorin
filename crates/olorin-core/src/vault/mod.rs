@@ -52,27 +52,33 @@ impl VaultCrypto for EachachaCrypto {
     }
 }
 
-/// XOR-based crypto for tests (deterministic, not secure).
-pub struct XorCrypto;
-
-impl VaultCrypto for XorCrypto {
-    fn encrypt(&self, plaintext: &[u8], key: &[u8; 32], nonce: &[u8; 12]) -> Result<Vec<u8>, String> {
-        Ok(xor_bytes(plaintext, key, nonce))
+/// Find `libchacha20.so` — checks build-time path first, then `~/.olorin/lib/`.
+pub fn find_chacha_lib() -> Option<PathBuf> {
+    // Build-time path set by olorin-core build.rs
+    if let Some(p) = option_env!("CHACHA_LIB_PATH") {
+        let path = PathBuf::from(p);
+        if path.is_file() {
+            return Some(path);
+        }
     }
-
-    fn decrypt(&self, ciphertext: &[u8], key: &[u8; 32], nonce: &[u8; 12]) -> Result<Vec<u8>, String> {
-        Ok(xor_bytes(ciphertext, key, nonce))
+    // Runtime: search extracted kernels in ~/.olorin/lib/
+    let home = home::home_dir()?;
+    let lib_base = home.join(".olorin/lib");
+    if !lib_base.is_dir() {
+        return None;
     }
-}
-
-fn xor_bytes(data: &[u8], key: &[u8; 32], nonce: &[u8; 12]) -> Vec<u8> {
-    let mut stream = [0u8; 44];
-    stream[..32].copy_from_slice(key);
-    stream[32..].copy_from_slice(nonce);
-    data.iter()
-        .enumerate()
-        .map(|(i, &b)| b ^ stream[i % 44])
-        .collect()
+    let mut best: Option<(PathBuf, std::time::SystemTime)> = None;
+    for entry in std::fs::read_dir(&lib_base).ok()? {
+        let entry = entry.ok()?;
+        let so = entry.path().join("libchacha20.so");
+        if so.is_file() {
+            let mtime = so.metadata().ok()?.modified().ok()?;
+            if best.as_ref().map_or(true, |(_, t)| mtime > *t) {
+                best = Some((so, mtime));
+            }
+        }
+    }
+    best.map(|(p, _)| p)
 }
 
 fn derive_nonce(seed: &[u8; 12], counter: u32) -> [u8; 12] {
@@ -297,12 +303,17 @@ mod tests {
         [0x42u8; 32]
     }
 
+    fn test_crypto() -> Box<dyn VaultCrypto> {
+        let lib = find_chacha_lib().expect("libchacha20.so not found — build with ea compiler");
+        Box::new(EachachaCrypto::new(lib))
+    }
+
     #[test]
     fn test_vault_create_and_append() {
         let path = tmp_path("create_and_append.vault");
         let _ = fs::remove_file(&path);
 
-        let mut vault = Vault::create(&path, &test_key(), Box::new(XorCrypto)).unwrap();
+        let mut vault = Vault::create(&path, &test_key(), test_crypto()).unwrap();
         assert_eq!(vault.block_count(), 0);
 
         vault.append_message("hello world").unwrap();
@@ -321,7 +332,7 @@ mod tests {
         let path = tmp_path("roundtrip.vault");
         let _ = fs::remove_file(&path);
 
-        let mut vault = Vault::create(&path, &test_key(), Box::new(XorCrypto)).unwrap();
+        let mut vault = Vault::create(&path, &test_key(), test_crypto()).unwrap();
         let msg = "the ring goes south";
         vault.append_message(msg).unwrap();
         vault.flush().unwrap();
@@ -338,7 +349,7 @@ mod tests {
         let _ = fs::remove_file(&path);
 
         {
-            let mut vault = Vault::create(&path, &test_key(), Box::new(XorCrypto)).unwrap();
+            let mut vault = Vault::create(&path, &test_key(), test_crypto()).unwrap();
             vault.append_message("block one").unwrap();
             vault.flush().unwrap();
             vault.append_message("block two").unwrap();
@@ -347,7 +358,7 @@ mod tests {
         }
 
         {
-            let mut vault = Vault::open(&path, &test_key(), Box::new(XorCrypto)).unwrap();
+            let mut vault = Vault::open(&path, &test_key(), test_crypto()).unwrap();
             assert_eq!(vault.block_count(), 2);
 
             let b0 = vault.decrypt_block(0).unwrap();
@@ -365,7 +376,7 @@ mod tests {
         let path = tmp_path("auto_flush.vault");
         let _ = fs::remove_file(&path);
 
-        let mut vault = Vault::create(&path, &test_key(), Box::new(XorCrypto)).unwrap();
+        let mut vault = Vault::create(&path, &test_key(), test_crypto()).unwrap();
         let big_msg = "x".repeat(BLOCK_SIZE + 100);
         vault.append_message(&big_msg).unwrap();
         assert_eq!(vault.block_count(), 1);
@@ -381,7 +392,7 @@ mod tests {
         let path = tmp_path("last_hash.vault");
         let _ = fs::remove_file(&path);
 
-        let mut vault = Vault::create(&path, &test_key(), Box::new(XorCrypto)).unwrap();
+        let mut vault = Vault::create(&path, &test_key(), test_crypto()).unwrap();
         assert!(vault.last_block_hash().is_none());
 
         vault.append_message("data").unwrap();
@@ -399,13 +410,13 @@ mod tests {
         let _ = fs::remove_file(&path);
 
         {
-            let mut vault = Vault::create(&path, &test_key(), Box::new(XorCrypto)).unwrap();
+            let mut vault = Vault::create(&path, &test_key(), test_crypto()).unwrap();
             vault.append_message("first").unwrap();
             vault.flush().unwrap();
         }
 
         {
-            let mut vault = Vault::open(&path, &test_key(), Box::new(XorCrypto)).unwrap();
+            let mut vault = Vault::open(&path, &test_key(), test_crypto()).unwrap();
             assert_eq!(vault.block_count(), 1);
             vault.append_message("second").unwrap();
             vault.flush().unwrap();
@@ -413,7 +424,7 @@ mod tests {
         }
 
         {
-            let mut vault = Vault::open(&path, &test_key(), Box::new(XorCrypto)).unwrap();
+            let mut vault = Vault::open(&path, &test_key(), test_crypto()).unwrap();
             assert_eq!(vault.block_count(), 2);
             let b0 = vault.decrypt_block(0).unwrap();
             assert_eq!(b0, b"first");

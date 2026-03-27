@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use olorin_core::kernels::command_router as cmd_router;
 use olorin_core::safety::SafetyLayer;
-use olorin_core::vault::{Vault, XorCrypto};
+use olorin_core::vault::{Vault, EachachaCrypto, find_chacha_lib};
 
 use crate::CougarEngine;
 
@@ -82,7 +82,8 @@ impl OlorinRepl {
         let mut key = [0u8; 32];
         key.copy_from_slice(seed);
 
-        let crypto = Box::new(XorCrypto);
+        let lib = find_chacha_lib()?;
+        let crypto = Box::new(EachachaCrypto::new(lib.clone()));
         if vault_path.exists() {
             match Vault::open(&vault_path, &key, crypto) {
                 Ok(v) => {
@@ -94,7 +95,7 @@ impl OlorinRepl {
                 }
                 Err(e) => {
                     eprintln!("[Olorin] Vault open failed: {e} — creating new");
-                    Vault::create(&vault_path, &key, Box::new(XorCrypto)).ok()
+                    Vault::create(&vault_path, &key, Box::new(EachachaCrypto::new(lib))).ok()
                 }
             }
         } else {

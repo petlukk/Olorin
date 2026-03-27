@@ -110,12 +110,17 @@ mod tests {
         [0x42u8; 32]
     }
 
+    fn test_crypto() -> Box<dyn VaultCrypto> {
+        let lib = find_chacha_lib().expect("libchacha20.so not found — build with ea compiler");
+        Box::new(EachachaCrypto::new(lib))
+    }
+
     #[test]
     fn test_vault_search_empty() {
         let path = tmp_path("search_empty.vault");
         let _ = fs::remove_file(&path);
 
-        let mut vault = Vault::create(&path, &test_key(), Box::new(XorCrypto)).unwrap();
+        let mut vault = Vault::create(&path, &test_key(), test_crypto()).unwrap();
         let results = vault.search("anything", 5).unwrap();
         assert!(results.is_empty());
 
@@ -127,7 +132,7 @@ mod tests {
         let path = tmp_path("search_relevant.vault");
         let _ = fs::remove_file(&path);
 
-        let mut vault = Vault::create(&path, &test_key(), Box::new(XorCrypto)).unwrap();
+        let mut vault = Vault::create(&path, &test_key(), test_crypto()).unwrap();
 
         vault.append_message("stars planets galaxies nebula cosmos astronomy telescope").unwrap();
         vault.flush().unwrap();
@@ -157,7 +162,7 @@ mod tests {
         let path = tmp_path("search_recency.vault");
         let _ = fs::remove_file(&path);
 
-        let mut vault = Vault::create(&path, &test_key(), Box::new(XorCrypto)).unwrap();
+        let mut vault = Vault::create(&path, &test_key(), test_crypto()).unwrap();
 
         let content = "identical content for recency test abcdefg";
         vault.append_message(content).unwrap();
@@ -180,7 +185,7 @@ mod tests {
         let path = tmp_path("decrypt_last_n.vault");
         let _ = fs::remove_file(&path);
 
-        let mut vault = Vault::create(&path, &test_key(), Box::new(XorCrypto)).unwrap();
+        let mut vault = Vault::create(&path, &test_key(), test_crypto()).unwrap();
         for i in 0..5 {
             vault.append_message(&format!("block number {}", i)).unwrap();
             vault.flush().unwrap();
@@ -202,7 +207,7 @@ mod tests {
         let path = tmp_path("decrypt_last_n_empty.vault");
         let _ = fs::remove_file(&path);
 
-        let mut vault = Vault::create(&path, &test_key(), Box::new(XorCrypto)).unwrap();
+        let mut vault = Vault::create(&path, &test_key(), test_crypto()).unwrap();
         let blocks = vault.decrypt_last_n(5).unwrap();
         assert!(blocks.is_empty());
 

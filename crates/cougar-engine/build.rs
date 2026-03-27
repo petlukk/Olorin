@@ -1,27 +1,59 @@
 use std::collections::hash_map::DefaultHasher;
 use std::fs;
 use std::hash::{Hash, Hasher};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+fn find_ea() -> PathBuf {
+    if let Ok(out) = Command::new("which").arg("ea").output() {
+        if out.status.success() {
+            let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !p.is_empty() {
+                return PathBuf::from(p);
+            }
+        }
+    }
+    panic!("ea compiler not found in PATH — build eacompute first");
+}
+
+fn compile_kernel(
+    ea: &Path,
+    ea_file: &Path,
+    so_path: &Path,
+    is_arm: bool,
+) {
+    let mut cmd = Command::new(ea);
+    cmd.arg(ea_file)
+        .arg("--lib")
+        .arg("--opt-level=3")
+        .arg("-o")
+        .arg(so_path);
+    if is_arm {
+        cmd.arg("--target-triple=aarch64-unknown-linux-gnu");
+        cmd.arg("--dotprod");
+        cmd.env("CC", "aarch64-linux-gnu-gcc");
+    }
+    let output = cmd.output()
+        .unwrap_or_else(|e| panic!("failed to run ea on {}: {e}", ea_file.display()));
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr);
+        panic!("ea compile failed for {}:\n{}", ea_file.display(), err);
+    }
+}
 
 fn main() {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     let workspace_root = Path::new(&manifest_dir).parent().unwrap().parent().unwrap();
+    let kernel_src_dir = workspace_root.join("kernels/cougar");
+    let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
 
     let target = std::env::var("TARGET").unwrap_or_default();
     let is_arm = target.starts_with("aarch64");
 
-    // Try prebuilt dir first, then fall back to compiling with ea
-    let prebuilt_dir = if is_arm {
-        workspace_root.join("kernels/prebuilt/arm")
-    } else {
-        workspace_root.join("kernels/prebuilt/x86")
-    };
-
-    let kernel_src_dir = workspace_root.join("kernels/cougar");
-    let out_dir = std::env::var("OUT_DIR").unwrap();
-
     println!("cargo:rerun-if-changed={}", kernel_src_dir.display());
     println!("cargo:rustc-link-lib=dl");
+
+    let ea = find_ea();
 
     let kernels = [
         "bitnet_activate", "bitnet_fused_attn", "bitnet_i2s", "bitnet_i8dot",
@@ -29,78 +61,36 @@ fn main() {
         "q4k_quant", "q4k_dot", "q6k_dot", "rope",
     ];
 
-    // Find ea compiler
-    let ea_cmd = find_ea_compiler();
-
     let mut hasher = DefaultHasher::new();
     let mut code = String::new();
     let mut files_list = Vec::new();
 
     for name in &kernels {
-        let so_name = format!("lib{}.so", name);
-        let out_so = Path::new(&out_dir).join(&so_name);
-
-        // Strategy: prebuilt → compile → skip
-        let resolved = if prebuilt_dir.join(&so_name).exists() {
-            let src = prebuilt_dir.join(&so_name);
-            fs::copy(&src, &out_so).ok();
-            Some(out_so.clone())
-        } else if let Some(ref ea) = ea_cmd {
-            // Try to compile from .ea source
-            let ea_stem = if is_arm {
-                let arm_name = format!("{}_arm", name);
-                if kernel_src_dir.join(format!("{}.ea", arm_name)).exists() {
-                    arm_name
-                } else {
-                    name.to_string()
-                }
+        let ea_stem = if is_arm {
+            let arm_name = format!("{name}_arm");
+            if kernel_src_dir.join(format!("{arm_name}.ea")).exists() {
+                arm_name
             } else {
                 name.to_string()
-            };
-            let ea_file = kernel_src_dir.join(format!("{}.ea", ea_stem));
-            if ea_file.exists() {
-                let mut cmd = std::process::Command::new(ea);
-                cmd.arg(ea_file.to_str().unwrap())
-                    .arg("--lib")
-                    .arg("--opt-level=3")
-                    .arg("-o")
-                    .arg(out_so.to_str().unwrap());
-                if is_arm {
-                    cmd.arg("--target-triple=aarch64-unknown-linux-gnu");
-                    cmd.arg("--dotprod");
-                    cmd.env("CC", "aarch64-linux-gnu-gcc");
-                }
-                match cmd.status() {
-                    Ok(s) if s.success() => Some(out_so.clone()),
-                    _ => {
-                        println!("cargo:warning=failed to compile {}", ea_stem);
-                        None
-                    }
-                }
-            } else {
-                None
             }
         } else {
-            None
+            name.to_string()
         };
 
-        if let Some(ref path) = resolved {
-            if let Ok(bytes) = fs::read(path) {
-                bytes.hash(&mut hasher);
-                let const_name = name.to_uppercase();
-                code.push_str(&format!(
-                    "pub const {}: &[u8] = include_bytes!(\"{}\");\n",
-                    const_name,
-                    path.display(),
-                ));
-                files_list.push((so_name.clone(), const_name));
-            }
-        } else {
-            println!("cargo:warning=kernel {} not available — will load at runtime", name);
-            let const_name = name.to_uppercase();
-            code.push_str(&format!("pub const {}: &[u8] = &[];\n", const_name));
-            files_list.push((so_name.clone(), const_name));
-        }
+        let ea_file = kernel_src_dir.join(format!("{ea_stem}.ea"));
+        let so_name = format!("lib{name}.so");
+        let so_path = out_dir.join(&so_name);
+        compile_kernel(&ea, &ea_file, &so_path, is_arm);
+
+        let bytes = fs::read(&so_path)
+            .unwrap_or_else(|e| panic!("cannot read {so_name}: {e}"));
+        bytes.hash(&mut hasher);
+        let const_name = name.to_uppercase();
+        code.push_str(&format!(
+            "pub const {const_name}: &[u8] = include_bytes!(\"{}\");\n",
+            so_path.display(),
+        ));
+        files_list.push((so_name, const_name));
     }
 
     let hash = format!("{:012x}", hasher.finish());
@@ -115,20 +105,6 @@ fn main() {
     }
     code.push_str("];\n");
 
-    let out_path = Path::new(&out_dir).join("embedded_kernels.rs");
+    let out_path = out_dir.join("embedded_kernels.rs");
     fs::write(&out_path, code).unwrap();
-}
-
-fn find_ea_compiler() -> Option<String> {
-    // Check PATH
-    if std::process::Command::new("ea").arg("--version").output().is_ok() {
-        return Some("ea".into());
-    }
-    // Check known location
-    let known = "/root/dev/eacompute/target/release/ea";
-    if Path::new(known).exists() {
-        return Some(known.into());
-    }
-    println!("cargo:warning=ea compiler not found, using prebuilt kernels or empty stubs");
-    None
 }

@@ -79,8 +79,8 @@ void eakv_quantize_row(const float *src, void *dst, int64_t k) {
         for (int j = 0; j < 32; j++) {
             int lo = (int)(0.5f + (x[j] - min_val) * id);
             int hi = (int)(0.5f + (x[j + 32] - min_val) * id);
-            if (lo < 0) lo = 0; if (lo > 15) lo = 15;
-            if (hi < 0) hi = 0; if (hi > 15) hi = 15;
+            if (lo < 0) { lo = 0; } if (lo > 15) { lo = 15; }
+            if (hi < 0) { hi = 0; } if (hi > 15) { hi = 15; }
             blocks[i].qs[j] = (uint8_t)(lo | (hi << 4));
         }
 #endif

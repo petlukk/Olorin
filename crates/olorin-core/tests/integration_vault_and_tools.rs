@@ -8,7 +8,7 @@
 
 #[test]
 fn test_vault_full_lifecycle() {
-    use olorin_core::vault::{Vault, XorCrypto};
+    use olorin_core::vault::{Vault, EachachaCrypto, find_chacha_lib};
 
     let dir = tempfile::tempdir().unwrap();
     let vault_path = dir.path().join("lifecycle.vault");
@@ -16,7 +16,7 @@ fn test_vault_full_lifecycle() {
 
     // Phase 1: Create vault and write a conversation
     {
-        let mut vault = Vault::create(&vault_path, &key, Box::new(XorCrypto)).unwrap();
+        let mut vault = Vault::create(&vault_path, &key, Box::new(EachachaCrypto::new(find_chacha_lib().expect("libchacha20.so not found")))).unwrap();
 
         vault.append_message("User: How do I optimize x86 SIMD code for AVX-512?").unwrap();
         vault.append_message("Olorin: Use 512-bit registers with zmm0-zmm31. Key intrinsics include _mm512_fmadd_ps for fused multiply-add.").unwrap();
@@ -36,7 +36,7 @@ fn test_vault_full_lifecycle() {
 
     // Phase 2: Reopen and search
     {
-        let mut vault = Vault::open(&vault_path, &key, Box::new(XorCrypto)).unwrap();
+        let mut vault = Vault::open(&vault_path, &key, Box::new(EachachaCrypto::new(find_chacha_lib().expect("libchacha20.so not found")))).unwrap();
         assert_eq!(vault.block_count(), 3);
 
         let results = vault.search("AVX-512 SIMD optimization x86", 3).unwrap();
@@ -61,7 +61,7 @@ fn test_vault_full_lifecycle() {
 
     // Phase 3: Reopen, append, search again
     {
-        let mut vault = Vault::open(&vault_path, &key, Box::new(XorCrypto)).unwrap();
+        let mut vault = Vault::open(&vault_path, &key, Box::new(EachachaCrypto::new(find_chacha_lib().expect("libchacha20.so not found")))).unwrap();
         vault.append_message("User: Back to x86 — what about cache line alignment?").unwrap();
         vault.append_message("Olorin: x86 cache lines are 64 bytes. Align to 64-byte boundaries.").unwrap();
         vault.flush().unwrap();
@@ -75,7 +75,7 @@ fn test_vault_full_lifecycle() {
 
     // Phase 4: decrypt_last_n for /teleport greeting
     {
-        let mut vault = Vault::open(&vault_path, &key, Box::new(XorCrypto)).unwrap();
+        let mut vault = Vault::open(&vault_path, &key, Box::new(EachachaCrypto::new(find_chacha_lib().expect("libchacha20.so not found")))).unwrap();
         let last = vault.decrypt_last_n(2).unwrap();
         assert_eq!(last.len(), 2);
         let block2 = String::from_utf8_lossy(&last[0]);
