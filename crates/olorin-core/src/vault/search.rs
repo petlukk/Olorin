@@ -1,13 +1,20 @@
-//! Vault search — cosine similarity over byte histograms with recency boost.
+//! Vault search — SIMD cosine similarity over byte histograms with recency boost.
 
 use super::{Vault, VaultError};
-use super::index::{compute_histogram, normalize_histogram, cosine_similarity, xxhash64};
+use super::index::{compute_histogram, normalize_histogram, xxhash64};
+use crate::kernels::search;
+
+const DIM: usize = 256;
 
 /// A single search result with score and decrypted plaintext.
 pub struct SearchResult {
     pub block_index: usize,
     pub score: f32,
     pub text: Vec<u8>,
+}
+
+fn l2_norm(v: &[f32]) -> f32 {
+    v.iter().map(|x| x * x).sum::<f32>().sqrt()
 }
 
 impl Vault {
@@ -18,50 +25,59 @@ impl Vault {
             return Ok(vec![]);
         }
 
-        // 1. Compute query histogram and normalize
+        let n = self.index.len();
+
+        // Compute and normalize query histogram
         let query_hist = compute_histogram(query.as_bytes());
-        let query_norm = normalize_histogram(&query_hist);
+        let mut query_norm = normalize_histogram(&query_hist);
+        search::normalize_vectors(&mut query_norm, DIM, 1);
+        let qnorm = l2_norm(&query_norm);
 
-        // 2. Score each block
-        let mut scored: Vec<(usize, f32)> = Vec::with_capacity(self.index.len());
-        for (i, entry) in self.index.iter().enumerate() {
-            let block_norm = normalize_histogram(&entry.histogram);
-            let similarity = cosine_similarity(&query_norm, &block_norm);
-
-            // Apply recency boost: score = similarity * (0.85 + 0.15 * recency)
-            // recency is 0.0 for oldest, 1.0 for newest
-            let recency = if self.index.len() <= 1 {
-                1.0
-            } else {
-                i as f32 / (self.index.len() - 1) as f32
-            };
-            let boosted = similarity * (0.85 + 0.15 * recency);
-
-            if boosted > 0.01 {
-                scored.push((i, boosted));
-            }
+        if qnorm < 1e-9 {
+            return Ok(vec![]);
         }
 
-        // 3. Sort by score descending, take top-k
-        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        scored.truncate(top_k);
+        // Build flat buffer of normalized block histograms for SIMD batch search
+        let mut vecs = vec![0.0f32; n * DIM];
+        for (i, entry) in self.index.iter().enumerate() {
+            let norm = normalize_histogram(&entry.histogram);
+            vecs[i * DIM..(i + 1) * DIM].copy_from_slice(&norm);
+        }
+        search::normalize_vectors(&mut vecs, DIM, n);
 
-        // 4. Decrypt matched blocks
+        // SIMD batch cosine similarity
+        let mut scores = search::batch_cosine(&query_norm, qnorm, &vecs, DIM, n);
+
+        // Apply recency boost
+        for (i, score) in scores.iter_mut().enumerate() {
+            let recency = if n <= 1 {
+                1.0
+            } else {
+                i as f32 / (n - 1) as f32
+            };
+            *score *= 0.85 + 0.15 * recency;
+        }
+
+        // SIMD top-k
+        let (indices, top_scores) = search::top_k(&scores, top_k);
+
+        // Collect, sort, and decrypt
+        let mut scored: Vec<(usize, f32)> = indices
+            .into_iter()
+            .zip(top_scores)
+            .filter(|(_, s)| *s > 0.01)
+            .map(|(idx, s)| (idx as usize, s))
+            .collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
         let mut results = Vec::with_capacity(scored.len());
         for (block_idx, score) in scored {
             let plaintext = self.decrypt_block(block_idx)?;
-
-            // Integrity already verified inside decrypt_block, but double-check hash
             let actual_hash = xxhash64(&plaintext, 0);
             if actual_hash != self.index[block_idx].xxhash {
                 return Err(VaultError::IntegrityFailed(block_idx));
             }
-
-            results.push(SearchResult {
-                block_index: block_idx,
-                score,
-                text: plaintext,
-            });
+            results.push(SearchResult { block_index: block_idx, score, text: plaintext });
         }
 
         Ok(results)
@@ -113,28 +129,22 @@ mod tests {
 
         let mut vault = Vault::create(&path, &test_key(), Box::new(XorCrypto)).unwrap();
 
-        // Block 0: astronomy topic
         vault.append_message("stars planets galaxies nebula cosmos astronomy telescope").unwrap();
         vault.flush().unwrap();
 
-        // Block 1: cooking topic
         vault.append_message("recipe flour sugar butter eggs bake oven kitchen cooking").unwrap();
         vault.flush().unwrap();
 
-        // Block 2: astronomy again
         vault.append_message("star constellation orbit planet astronomy celestial moon").unwrap();
         vault.flush().unwrap();
 
         let results = vault.search("stars planets astronomy cosmos", 3).unwrap();
         assert!(!results.is_empty());
 
-        // The astronomy blocks (0 or 2) should rank higher than cooking (1)
-        // Block 2 has recency boost so it should be first
         let top = &results[0];
         assert!(top.block_index == 0 || top.block_index == 2,
             "expected astronomy block, got block {}", top.block_index);
 
-        // Cooking block should not be the top result
         if results.len() >= 2 {
             assert!(results[0].score >= results[1].score);
         }
@@ -149,7 +159,6 @@ mod tests {
 
         let mut vault = Vault::create(&path, &test_key(), Box::new(XorCrypto)).unwrap();
 
-        // Write identical content in two blocks
         let content = "identical content for recency test abcdefg";
         vault.append_message(content).unwrap();
         vault.flush().unwrap();
@@ -159,7 +168,6 @@ mod tests {
         let results = vault.search(content, 2).unwrap();
         assert_eq!(results.len(), 2);
 
-        // Newer block (index 1) should score higher due to recency boost
         assert_eq!(results[0].block_index, 1);
         assert_eq!(results[1].block_index, 0);
         assert!(results[0].score > results[1].score);
@@ -183,7 +191,6 @@ mod tests {
         assert_eq!(last2[0], b"block number 3");
         assert_eq!(last2[1], b"block number 4");
 
-        // Request more than available
         let all = vault.decrypt_last_n(100).unwrap();
         assert_eq!(all.len(), 5);
 

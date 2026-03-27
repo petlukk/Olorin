@@ -1,0 +1,8 @@
+# Compiled benchmark binaries
+bench_search_baseline
+bench_search_jl
+bench_recall_e2e
+test_turbo_rotate
+test_jl_project
+bench_eakv_snr
+test_eakv_rotated

@@ -38,6 +38,8 @@ fn main() {
         "fused_safety",
         "search",
         "search_avx512",
+        "turbo_rotate",
+        "jl_project",
     ];
 
     let ea = find_ea();

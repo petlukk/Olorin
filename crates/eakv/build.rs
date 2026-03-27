@@ -18,6 +18,7 @@ fn main() {
         "fused_v_sum.o",
         "fused_v_sum_64.o",
         "fused_attention.o",
+        "turbo_rotate.o",
     ];
 
     // Build the core C library (llama_bridge.c is excluded — it requires ggml.h

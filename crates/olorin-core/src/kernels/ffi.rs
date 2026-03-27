@@ -25,6 +25,11 @@ type BatchL2Fn = unsafe extern "C" fn(*const f32, *const f32, i32, i32, *mut f32
 type NormalizeFn = unsafe extern "C" fn(*mut f32, i32, i32);
 type ThresholdFn = unsafe extern "C" fn(*const f32, i32, f32, *mut i32, *mut i32);
 type TopKFn = unsafe extern "C" fn(*const f32, i32, i32, *mut i32, *mut f32);
+type SignFlipFn = unsafe extern "C" fn(*mut f32, *const f32, i32);
+type FwhtFn = unsafe extern "C" fn(*mut f32, i32);
+type TurboRotateFn = unsafe extern "C" fn(*mut f32, *const f32, i32);
+type JlProjectFn = unsafe extern "C" fn(*const f32, *const f32, i32, i32, *mut f32, *mut f32);
+type JlProjectBatchFn = unsafe extern "C" fn(*const f32, *const f32, i32, i32, *mut f32, *mut f32, i32);
 
 struct KernelTable {
     _libs: Vec<Library>,
@@ -41,6 +46,11 @@ struct KernelTable {
     normalize_vectors: NormalizeFn,
     threshold_filter: ThresholdFn,
     top_k: TopKFn,
+    sign_flip: SignFlipFn,
+    fwht_inplace: FwhtFn,
+    turbo_rotate: TurboRotateFn,
+    jl_project: JlProjectFn,
+    jl_project_batch: JlProjectBatchFn,
 }
 
 // SAFETY: KernelTable holds function pointers and library handles.
@@ -99,6 +109,8 @@ fn extract_kernels() -> Result<PathBuf, String> {
         ("libfused_safety.so", embedded::FUSED_SAFETY),
         ("libsearch.so", embedded::SEARCH),
         ("libsearch_avx512.so", embedded::SEARCH_AVX512),
+        ("libturbo_rotate.so", embedded::TURBO_ROTATE),
+        ("libjl_project.so", embedded::JL_PROJECT),
     ];
 
     for (name, data) in kernels {
@@ -141,6 +153,9 @@ fn load_kernels(lib_dir: &PathBuf) -> Result<KernelTable, String> {
     #[cfg(not(target_arch = "x86_64"))]
     let (search, search_variant) = (load("search")?, "neon");
 
+    let turbo_rotate_lib = load("turbo_rotate")?;
+    let jl_project_lib = load("jl_project")?;
+
     eprintln!("olorin kernels: search={search_variant}");
 
     unsafe {
@@ -177,9 +192,20 @@ fn load_kernels(lib_dir: &PathBuf) -> Result<KernelTable, String> {
                 sym(&search, b"threshold_filter\0")?),
             top_k: std::mem::transmute(
                 sym(&search, b"top_k\0")?),
+            sign_flip: std::mem::transmute(
+                sym(&turbo_rotate_lib, b"sign_flip\0")?),
+            fwht_inplace: std::mem::transmute(
+                sym(&turbo_rotate_lib, b"fwht_inplace\0")?),
+            turbo_rotate: std::mem::transmute(
+                sym(&turbo_rotate_lib, b"turbo_rotate\0")?),
+            jl_project: std::mem::transmute(
+                sym(&jl_project_lib, b"jl_project\0")?),
+            jl_project_batch: std::mem::transmute(
+                sym(&jl_project_lib, b"jl_project_batch\0")?),
             _libs: vec![
                 byte_classifier, json_scanner, command_router,
                 leak_scanner, sanitizer, fused_safety, search,
+                turbo_rotate_lib, jl_project_lib,
             ],
         };
         Ok(table)
@@ -256,4 +282,30 @@ pub unsafe fn top_k(
     scores: *const f32, n: i32, k_val: i32, out_indices: *mut i32, out_scores: *mut f32,
 ) {
     (k().top_k)(scores, n, k_val, out_indices, out_scores);
+}
+
+pub unsafe fn sign_flip(vec: *mut f32, signs: *const f32, dim: i32) {
+    (k().sign_flip)(vec, signs, dim);
+}
+
+pub unsafe fn fwht_inplace(vec: *mut f32, dim: i32) {
+    (k().fwht_inplace)(vec, dim);
+}
+
+pub unsafe fn turbo_rotate(vec: *mut f32, signs: *const f32, dim: i32) {
+    (k().turbo_rotate)(vec, signs, dim);
+}
+
+pub unsafe fn jl_project(
+    vec: *const f32, signs: *const f32, in_dim: i32, out_dim: i32,
+    out: *mut f32, scratch: *mut f32,
+) {
+    (k().jl_project)(vec, signs, in_dim, out_dim, out, scratch);
+}
+
+pub unsafe fn jl_project_batch(
+    vecs: *const f32, signs: *const f32, in_dim: i32, out_dim: i32,
+    out: *mut f32, scratch: *mut f32, n_vecs: i32,
+) {
+    (k().jl_project_batch)(vecs, signs, in_dim, out_dim, out, scratch, n_vecs);
 }

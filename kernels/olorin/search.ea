@@ -29,8 +29,8 @@ export func batch_dot(
         // Scalar tail
         let simd_end: i32 = (dim / 8) * 8
         for i in simd_end..dim {
-            let qi: f32 = to_f32(to_i32(query[i]))
-            let di: f32 = to_f32(to_i32(vecs[base + i]))
+            let qi: f32 = to_f32(query[i])
+            let di: f32 = to_f32(vecs[base + i])
             score = score + qi * di
         }
         out_scores[v] = score
@@ -57,8 +57,8 @@ export func batch_dot(
         let mut score: f32 = reduce_add(acc)
         let simd_end: i32 = (dim / 4) * 4
         for i in simd_end..dim {
-            let qi: f32 = to_f32(to_i32(query[i]))
-            let di: f32 = to_f32(to_i32(vecs[base + i]))
+            let qi: f32 = to_f32(query[i])
+            let di: f32 = to_f32(vecs[base + i])
             score = score + qi * di
         }
         out_scores[v] = score
@@ -92,8 +92,8 @@ export func batch_cosine(
         let mut norm_sum: f32 = reduce_add(norm_acc)
         let simd_end: i32 = (dim / 8) * 8
         for i in simd_end..dim {
-            let qi: f32 = to_f32(to_i32(query[i]))
-            let di: f32 = to_f32(to_i32(vecs[base + i]))
+            let qi: f32 = to_f32(query[i])
+            let di: f32 = to_f32(vecs[base + i])
             dot_sum = dot_sum + qi * di
             norm_sum = norm_sum + di * di
         }
@@ -130,8 +130,8 @@ export func batch_cosine(
         let mut norm_sum: f32 = reduce_add(norm_acc)
         let simd_end: i32 = (dim / 4) * 4
         for i in simd_end..dim {
-            let qi: f32 = to_f32(to_i32(query[i]))
-            let di: f32 = to_f32(to_i32(vecs[base + i]))
+            let qi: f32 = to_f32(query[i])
+            let di: f32 = to_f32(vecs[base + i])
             dot_sum = dot_sum + qi * di
             norm_sum = norm_sum + di * di
         }
@@ -169,8 +169,8 @@ export func batch_l2(
         let mut dist: f32 = reduce_add(acc)
         let simd_end: i32 = (dim / 8) * 8
         for i in simd_end..dim {
-            let qi: f32 = to_f32(to_i32(query[i]))
-            let di: f32 = to_f32(to_i32(vecs[base + i]))
+            let qi: f32 = to_f32(query[i])
+            let di: f32 = to_f32(vecs[base + i])
             let diff: f32 = qi - di
             dist = dist + diff * diff
         }
@@ -199,8 +199,8 @@ export func batch_l2(
         let mut dist: f32 = reduce_add(acc)
         let simd_end: i32 = (dim / 4) * 4
         for i in simd_end..dim {
-            let qi: f32 = to_f32(to_i32(query[i]))
-            let di: f32 = to_f32(to_i32(vecs[base + i]))
+            let qi: f32 = to_f32(query[i])
+            let di: f32 = to_f32(vecs[base + i])
             let diff: f32 = qi - di
             dist = dist + diff * diff
         }
@@ -228,7 +228,7 @@ export func normalize_vectors(
         let mut norm_sq: f32 = reduce_add(acc)
         let simd_end: i32 = (dim / 8) * 8
         for i in simd_end..dim {
-            let di: f32 = to_f32(to_i32(vecs[base + i]))
+            let di: f32 = to_f32(vecs[base + i])
             norm_sq = norm_sq + di * di
         }
         if norm_sq > 0.0 {
@@ -241,7 +241,7 @@ export func normalize_vectors(
                 }
             }
             for i in simd_end..dim {
-                let di: f32 = to_f32(to_i32(vecs[base + i]))
+                let di: f32 = to_f32(vecs[base + i])
                 vecs[base + i] = di * inv_norm
             }
         }
@@ -265,7 +265,7 @@ export func normalize_vectors(
         let mut norm_sq: f32 = reduce_add(acc)
         let simd_end: i32 = (dim / 4) * 4
         for i in simd_end..dim {
-            let di: f32 = to_f32(to_i32(vecs[base + i]))
+            let di: f32 = to_f32(vecs[base + i])
             norm_sq = norm_sq + di * di
         }
         if norm_sq > 0.0 {
@@ -278,7 +278,7 @@ export func normalize_vectors(
                 }
             }
             for i in simd_end..dim {
-                let di: f32 = to_f32(to_i32(vecs[base + i]))
+                let di: f32 = to_f32(vecs[base + i])
                 vecs[base + i] = di * inv_norm
             }
         }

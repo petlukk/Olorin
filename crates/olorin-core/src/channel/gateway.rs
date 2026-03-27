@@ -103,11 +103,9 @@ impl Gateway {
             tracing::warn!(error = %e, "failed to persist message");
         }
 
-        // Get recent context via recall
-        let context = agent.store.recall(&msg.text, 10);
-        let context_text: Vec<String> = context.iter()
-            .map(|r| r.text.clone())
-            .collect();
+        // Synthesize context: recall with dedup for compact LLM injection
+        let context_text = agent.store.synthesize_context(&msg.text, 10)
+            .into_iter().collect::<Vec<_>>();
 
         Some(ProcessedMessage {
             jid: msg.jid.clone(),
