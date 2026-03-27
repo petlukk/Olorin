@@ -217,7 +217,7 @@ document.addEventListener('keydown',e=>{
   else if(e.key>='1'&&e.key<='9'){e.preventDefault();const i=parseInt(e.key)-1;if(i<tiles.length)focusTile(tiles[i].id)}
   else if(e.key==='ArrowRight'||e.key==='ArrowLeft'){
     e.preventDefault();const idx=tiles.findIndex(t=>t.id===focusedId);if(idx<0)return;
-    const next=e.key==='ArrowRight'?(idx+1)%tiles.length:(idx-1+tiles.length)%tiles.length;
+    const next=e.key==='ArrowLeft'?(idx+1)%tiles.length:(idx-1+tiles.length)%tiles.length;
     focusTile(tiles[next].id);
   }
 });
