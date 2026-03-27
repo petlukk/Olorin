@@ -49,6 +49,9 @@ pub struct Q4KLayerWeights {
     pub wv: *const u8,
     pub wv_block_bytes: usize,
     pub wo: *const u8,
+    pub q_bias: *const f32, // nullable: Qwen has QKV biases, Llama does not
+    pub k_bias: *const f32,
+    pub v_bias: *const f32,
     pub ffn_norm: *const f32,
     pub w_gate: *const u8,
     pub w_up: *const u8,
@@ -111,6 +114,13 @@ fn tensor_ptr<T>(gguf: &GgufFile, name: &str) -> Result<*const T, String> {
         .tensor_data(name)
         .ok_or_else(|| format!("missing tensor: {name}"))?;
     Ok(data.as_ptr() as *const T)
+}
+
+/// Like tensor_ptr but returns null if tensor doesn't exist (optional biases).
+fn tensor_ptr_opt<T>(gguf: &GgufFile, name: &str) -> *const T {
+    gguf.tensor_data(name)
+        .map(|d| d.as_ptr() as *const T)
+        .unwrap_or(std::ptr::null())
 }
 
 fn get_meta_u32(gguf: &GgufFile, key: &str) -> Option<u32> {
@@ -236,10 +246,13 @@ impl BitNetModel {
                 let (w_gate, _) = load_q4k_tensor(gguf, &format!("{prefix}.ffn_gate.weight"))?;
                 let (w_up, _) = load_q4k_tensor(gguf, &format!("{prefix}.ffn_up.weight"))?;
                 let (w_down, _, w_down_bb) = load_qk_tensor(gguf, &format!("{prefix}.ffn_down.weight"))?;
+                let q_bias = tensor_ptr_opt::<f32>(gguf, &format!("{prefix}.attn_q.bias"));
+                let k_bias = tensor_ptr_opt::<f32>(gguf, &format!("{prefix}.attn_k.bias"));
+                let v_bias = tensor_ptr_opt::<f32>(gguf, &format!("{prefix}.attn_v.bias"));
                 q4k_layers.push(Q4KLayerWeights {
                     attn_norm, wq, wk,
                     wv, wv_block_bytes: wv_bb,
-                    wo,
+                    wo, q_bias, k_bias, v_bias,
                     ffn_norm, w_gate, w_up,
                     w_down, w_down_block_bytes: w_down_bb,
                 });

@@ -13,6 +13,15 @@ use crate::threadpool::ThreadPool;
 const Q4K_BLOCK_BYTES: usize = 144;
 const Q6K_BLOCK_BYTES: usize = 210;
 
+/// Add bias vector to output buffer. No-op if bias is null (Llama models).
+#[inline]
+fn add_bias(buf: &mut [f32], bias: *const f32, n: usize) {
+    if bias.is_null() { return; }
+    for i in 0..n {
+        buf[i] += unsafe { *bias.add(i) };
+    }
+}
+
 pub struct LlamaState {
     pool: ThreadPool,
     x: Vec<f32>,
@@ -144,6 +153,11 @@ impl LlamaState {
             }
         }
 
+        // QKV bias (Qwen models — null for Llama)
+        add_bias(&mut self.q, lw.q_bias, h);
+        add_bias(&mut self.k, lw.k_bias, kv);
+        add_bias(&mut self.v, lw.v_bias, kv);
+
         // RoPE + KV cache
         build_rope_freqs(&mut self.rope_freqs, hd, pos, model.rope_theta);
         apply_rope(&mut self.q, &self.rope_freqs, hd, nh);
@@ -274,6 +288,9 @@ impl LlamaState {
                     q4k_matmul_mt(lw.wv, h_rs, h_nb, self.x_q8_qs.as_ptr(), self.x_q8_d.as_ptr(), self.x_q8_bsums.as_ptr(), &mut self.v, kv, &self.pool);
                 }
             });
+            add_bias(&mut self.q, lw.q_bias, h);
+            add_bias(&mut self.k, lw.k_bias, kv);
+            add_bias(&mut self.v, lw.v_bias, kv);
             build_rope_freqs(&mut self.rope_freqs, hd, pos, model.rope_theta);
             apply_rope(&mut self.q, &self.rope_freqs, hd, nh);
             apply_rope(&mut self.k, &self.rope_freqs, hd, nkv);
@@ -359,7 +376,10 @@ impl LlamaState {
                 q4k_gemm_mt(lw.wv, h_rs, h_nb, &bq_h, &mut vs_all, kv, &self.pool);
             }
             for t in 0..n {
-                let (q, k) = (&mut qs_all[t*h..(t+1)*h], &mut ks_all[t*kv..(t+1)*kv]);
+                let (q, k, v) = (&mut qs_all[t*h..(t+1)*h], &mut ks_all[t*kv..(t+1)*kv], &mut vs_all[t*kv..(t+1)*kv]);
+                add_bias(q, lw.q_bias, h);
+                add_bias(k, lw.k_bias, kv);
+                add_bias(v, lw.v_bias, kv);
                 build_rope_freqs(&mut self.rope_freqs, hd, t, model.rope_theta);
                 apply_rope(q, &self.rope_freqs, hd, nh);
                 apply_rope(k, &self.rope_freqs, hd, nkv);
