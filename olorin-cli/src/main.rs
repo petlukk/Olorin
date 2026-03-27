@@ -72,9 +72,15 @@ fn main() {
         let quant: String = engine.as_ref().map(|e| e.quant_type_str().to_string()).unwrap_or("unknown".into());
         let repl = Mutex::new(OlorinRepl::new(engine.clone(), &quant));
         let web = olorin_core::channel::web::WebChannel::new(port);
-        let handler = move |prompt: &str, on_token: &dyn Fn(&str)| -> String {
+        let handler = move |req: &olorin_core::channel::web::GenerateRequest, on_token: &dyn Fn(&str)| -> String {
             let mut repl = repl.lock().unwrap();
-            match repl.process(prompt) {
+            // Apply recall level from web slider if set (>= 0)
+            if let Some(level) = req.recall_level {
+                if level >= 0 {
+                    repl.recall = repl::RecallConfig::from_level(level as u8);
+                }
+            }
+            match repl.process(&req.prompt) {
                 ReplAction::Quit => "Goodbye.".to_string(),
                 ReplAction::Print(msg) => {
                     on_token(&msg);

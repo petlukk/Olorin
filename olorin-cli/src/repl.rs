@@ -28,8 +28,8 @@ impl RecallConfig {
     pub fn auto_detect(quant_type: &str) -> Self {
         match quant_type {
             "I2S" => Self { level: 0, top_k: 0, min_score: 1.0 },    // BitNet: no recall
-            "Q4K" => Self { level: 3, top_k: 2, min_score: 0.3 },    // Llama 3B: light recall
-            _     => Self { level: 5, top_k: 3, min_score: 0.2 },    // default
+            "Q4K" => Self { level: 0, top_k: 0, min_score: 1.0 },    // Llama 3B: no recall (too small)
+            _     => Self { level: 5, top_k: 3, min_score: 0.2 },    // large models / cloud
         }
     }
 

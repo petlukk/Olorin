@@ -195,7 +195,7 @@ impl BitNetModel {
             match first_weight {
                 Some(&idx) => match gguf.tensors[idx].dtype {
                     36 => QuantType::I2S,
-                    12 => QuantType::Q4K,
+                    12 | 14 => QuantType::Q4K, // Q4_K or Q6_K (same forward path)
                     dt => return Err(format!("unsupported weight quant type: {dt}")),
                 },
                 None => return Err("cannot find weight tensor to detect quant type".into()),

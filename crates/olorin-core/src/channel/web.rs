@@ -13,6 +13,7 @@ const CHAT_HTML: &str = include_str!("../../../../web/chat.html");
 pub struct GenerateRequest {
     pub prompt: String,
     pub max_tokens: Option<usize>,
+    pub recall_level: Option<i8>, // -1 = auto, 0-10 = explicit
 }
 
 /// Model info returned by GET /api/model.
@@ -33,10 +34,10 @@ impl WebChannel {
     }
 
     /// Start the HTTP server. Blocks until shutdown.
-    /// `on_prompt` receives (prompt, token_callback) and returns the final response.
+    /// `on_prompt` receives (request, token_callback) and returns the final response.
     pub fn run<F>(&self, on_prompt: F) -> std::io::Result<()>
     where
-        F: Fn(&str, &dyn Fn(&str)) -> String + Send + Sync,
+        F: Fn(&GenerateRequest, &dyn Fn(&str)) -> String + Send + Sync,
     {
         let listener = TcpListener::bind(format!("0.0.0.0:{}", self.port))?;
         println!("[Olorin] Web UI listening on http://0.0.0.0:{}", self.port);
@@ -125,7 +126,7 @@ impl WebChannel {
                         // Use a RefCell so the Fn closure can borrow stream mutably.
                         let stream_cell = std::cell::RefCell::new(&mut stream);
 
-                        let _response = on_prompt(&req.prompt, &|token: &str| {
+                        let _response = on_prompt(&req, &|token: &str| {
                             gen_count.set(gen_count.get() + 1);
                             let elapsed = gen_start.elapsed().as_secs_f64();
                             let count = gen_count.get();
@@ -192,7 +193,8 @@ impl WebChannel {
 pub fn parse_generate_request(body: &str) -> GenerateRequest {
     let prompt = extract_json_string(body, "prompt").unwrap_or_default();
     let max_tokens = extract_json_number(body, "max_tokens").map(|v| v as usize);
-    GenerateRequest { prompt, max_tokens }
+    let recall_level = extract_json_number(body, "recall_level").map(|v| v as i8);
+    GenerateRequest { prompt, max_tokens, recall_level }
 }
 
 fn parse_content_length(req: &str) -> usize {
