@@ -154,12 +154,33 @@ async function sendCommand(id,body,input){
   const cmdLine=el('div','repl-line');
   const p=span('repl-prompt','olorin ▸ ');cmdLine.appendChild(p);cmdLine.appendChild(document.createTextNode(text));
   body.appendChild(cmdLine);
-  try{
-    const res=await fetch('/api/command',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({command:text})});
-    const d=await res.json();
-    const out=el('div','repl-line '+(d.success?'repl-success':'repl-output'));out.textContent=d.output||'(no output)';
-    body.appendChild(out);
-  }catch(e){const err=el('div','repl-line repl-output');err.textContent='error: '+e.message;body.appendChild(err);}
+  if(text.startsWith('/')){
+    try{
+      const res=await fetch('/api/command',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({command:text})});
+      const d=await res.json();
+      const out=el('div','repl-line '+(d.success?'repl-success':'repl-output'));out.textContent=d.output||'(no output)';
+      body.appendChild(out);
+    }catch(e){const err=el('div','repl-line repl-output');err.textContent='error: '+e.message;body.appendChild(err);}
+  }else{
+    const out=el('div','repl-line repl-output');out.textContent='';body.appendChild(out);
+    try{
+      const res=await fetch('/api/generate',{method:'POST',
+        body:JSON.stringify({prompt:text,temperature:0.7,repetition_penalty:1.1,max_tokens:512,recall_level:-1})});
+      const reader=res.body.getReader(),dec=new TextDecoder();let buf='';
+      while(true){
+        const{done,value}=await reader.read();if(done)break;
+        buf+=dec.decode(value,{stream:true});const lines=buf.split('\n');buf=lines.pop();
+        for(const line of lines){
+          if(!line.startsWith('data: '))continue;const payload=line.slice(6);
+          if(payload==='[DONE]')continue;
+          try{const ev=JSON.parse(payload);out.textContent+=ev.token;
+            document.getElementById('hb-tps').textContent=ev.tps.toFixed(1);
+          }catch(e){}
+        }
+        body.scrollTop=body.scrollHeight;
+      }
+    }catch(e){out.textContent+=' [error: '+e.message+']';}
+  }
   const sep=el('div','repl-line repl-muted');sep.textContent='─────';body.appendChild(sep);
   body.scrollTop=body.scrollHeight;
 }
