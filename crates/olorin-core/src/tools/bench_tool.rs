@@ -37,6 +37,7 @@ impl Tool for BenchTool {
             "safety" => bench_safety(),
             "router" => bench_router(),
             "recall" => bench_recall(),
+            "vault" => bench_vault(),
             _ => Err(crate::error::Error::Tool(format!(
                 "unknown target '{target}'"
             ))),
@@ -193,5 +194,46 @@ pub fn bench_router() -> crate::error::Result<String> {
         per_call_ns,
         total_calls,
         elapsed.as_secs_f64() * 1000.0,
+    ))
+}
+
+pub fn bench_vault() -> crate::error::Result<String> {
+    use crate::vault::{EachachaCrypto, VaultCrypto};
+
+    let lib_dir = crate::kernels::ffi::kernel_dir()
+        .map_err(|e| crate::error::Error::Tool(e))?;
+    let lib_path = lib_dir.join("libchacha20.so");
+    let crypto = EachachaCrypto::new(lib_path);
+
+    let data = vec![0x42u8; 4096];
+    let key: [u8; 32] = [0xAB; 32];
+    let nonce: [u8; 12] = [0xCD; 12];
+    let iterations = 10_000;
+
+    // Warmup
+    for _ in 0..100 {
+        let enc = crypto.encrypt(&data, &key, &nonce).map_err(|e| crate::error::Error::Tool(e))?;
+        let _ = crypto.decrypt(&enc, &key, &nonce);
+    }
+
+    let start = std::time::Instant::now();
+    for _ in 0..iterations {
+        let _ = crypto.encrypt(&data, &key, &nonce);
+    }
+    let enc_elapsed = start.elapsed();
+    let enc_ns = enc_elapsed.as_nanos() as f64 / iterations as f64;
+
+    let encrypted = crypto.encrypt(&data, &key, &nonce).map_err(|e| crate::error::Error::Tool(e))?;
+    let start = std::time::Instant::now();
+    for _ in 0..iterations {
+        let _ = crypto.decrypt(&encrypted, &key, &nonce);
+    }
+    let dec_elapsed = start.elapsed();
+    let dec_ns = dec_elapsed.as_nanos() as f64 / iterations as f64;
+    let throughput = data.len() as f64 * iterations as f64 / enc_elapsed.as_secs_f64() / 1e9;
+
+    Ok(format!(
+        "─── vault (eachacha — SIMD ChaCha20, 4-round interleaved) ───\n  Encrypt: {:.0} ns/4KB\n  Decrypt: {:.0} ns/4KB\n  Throughput: {:.1} GB/s\n  {} iterations",
+        enc_ns, dec_ns, throughput, iterations
     ))
 }
