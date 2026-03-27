@@ -135,8 +135,6 @@ dependencies = [
 name = "eakv"
 version = "0.5.0"
 dependencies = [
- "cc",
- "libc",
  "libloading",
 ]
 
