@@ -2,6 +2,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+static void gen_jl_signs(float *signs) {
+    uint64_t rng = 0x4F6C6F72696E4A4CULL; /* "OlorinJL" */
+    for (int i = 0; i < 64; i++) {
+        rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
+        signs[i] = (rng % 2 == 0) ? 1.0f : -1.0f;
+    }
+}
+
 static size_t block_size(int max_groups) {
     return (size_t)max_groups * 32
          + (size_t)max_groups * sizeof(float)
@@ -47,6 +55,8 @@ eakv_cache_t *eakv_cache_create(int n_layers, int n_kv_heads,
         }
     }
 
+    gen_jl_signs(c->jl_signs);
+
     return c;
 }
 
@@ -70,8 +80,10 @@ int eakv_cache_load_raw(eakv_cache_t *cache, const float *data, int seq_len) {
     int n_groups_per_head = seq_len * gpd;
     int elems_per_lkv = nh * seq_len * hd;
 
+    int head_elems = seq_len * hd;
     int32_t *tmp = malloc(n_groups_per_head * 32 * sizeof(int32_t));
-    if (!tmp) return EAKV_ERR_ALLOC;
+    float *rot_buf = malloc((size_t)head_elems * sizeof(float));
+    if (!tmp || !rot_buf) { free(tmp); free(rot_buf); return EAKV_ERR_ALLOC; }
 
     for (int l = 0; l < cache->n_layers; l++) {
         for (int kv = 0; kv < 2; kv++) {
@@ -79,10 +91,13 @@ int eakv_cache_load_raw(eakv_cache_t *cache, const float *data, int seq_len) {
             eakv_kv_data_t *d = &cache->kv[l * 2 + kv];
 
             for (int h = 0; h < nh; h++) {
-                const float *src = lkv_src + h * seq_len * hd;
+                const float *src = lkv_src + h * head_elems;
                 int group_base = h * gph;
 
-                q4_quantize_split_f32(src, tmp,
+                memcpy(rot_buf, src, (size_t)head_elems * sizeof(float));
+                rotate_groups(rot_buf, cache->jl_signs, n_groups_per_head);
+
+                q4_quantize_split_f32(rot_buf, tmp,
                                        d->scales + group_base,
                                        d->biases + group_base,
                                        n_groups_per_head);
@@ -96,6 +111,7 @@ int eakv_cache_load_raw(eakv_cache_t *cache, const float *data, int seq_len) {
 
     cache->seq_len = seq_len;
     free(tmp);
+    free(rot_buf);
     return EAKV_OK;
 }
 
@@ -127,16 +143,21 @@ int eakv_cache_append(eakv_cache_t *cache, const float *data,
     int gph = cache->max_seq_len * gpd;  /* groups per head in buffer */
     int n_groups_per_head = n_tokens * gpd;
 
+    int head_elems = n_tokens * hd;
     int32_t *tmp = malloc(n_groups_per_head * 32 * sizeof(int32_t));
-    if (!tmp) return EAKV_ERR_ALLOC;
+    float *rot_buf = malloc((size_t)head_elems * sizeof(float));
+    if (!tmp || !rot_buf) { free(tmp); free(rot_buf); return EAKV_ERR_ALLOC; }
 
     eakv_kv_data_t *d = &cache->kv[layer * 2 + kv_idx];
 
     for (int h = 0; h < nh; h++) {
-        const float *src = data + h * n_tokens * hd;
+        const float *src = data + h * head_elems;
         int group_base = h * gph + cache->seq_len * gpd;
 
-        q4_quantize_split_f32(src, tmp,
+        memcpy(rot_buf, src, (size_t)head_elems * sizeof(float));
+        rotate_groups(rot_buf, cache->jl_signs, n_groups_per_head);
+
+        q4_quantize_split_f32(rot_buf, tmp,
                                d->scales + group_base,
                                d->biases + group_base,
                                n_groups_per_head);
@@ -147,6 +168,7 @@ int eakv_cache_append(eakv_cache_t *cache, const float *data,
     }
 
     free(tmp);
+    free(rot_buf);
     return EAKV_OK;
 }
 

@@ -23,6 +23,8 @@ struct eakv_cache {
 
     void *data_buf;        /* single flat allocation for all layer data */
     eakv_kv_data_t *kv;   /* indexed views: kv[layer * 2 + kv_idx] */
+
+    float jl_signs[64];   /* TurboQuant sign mask (+1/-1) for pre-rotation */
 };
 
 /* Ea kernel declarations (linked from .o files) */
@@ -85,6 +87,25 @@ extern void q4_v_sum_gqa_64_f32(
     float *all_out, int32_t seq_len,
     int32_t n_q_heads, int32_t n_kv_heads,
     int32_t groups_per_head);
+
+/* TurboQuant rotation kernels (from turbo_rotate.ea) */
+extern void turbo_rotate(float *vec, const float *signs, int32_t dim);
+extern void fwht_inplace(float *vec, int32_t dim);
+extern void sign_flip(float *vec, const float *signs, int32_t dim);
+
+/* Apply turbo_rotate to each 64-element group in buf */
+static inline void rotate_groups(float *buf, const float *signs, int n_groups) {
+    for (int g = 0; g < n_groups; g++)
+        turbo_rotate(buf + g * 64, signs, 64);
+}
+
+/* Inverse of turbo_rotate: fwht then sign_flip (opposite order) */
+static inline void inverse_rotate_groups(float *buf, const float *signs, int n_groups) {
+    for (int g = 0; g < n_groups; g++) {
+        fwht_inplace(buf + g * 64, 64);
+        sign_flip(buf + g * 64, signs, 64);
+    }
+}
 
 extern int32_t q4_validate(
     const float *scales, const float *biases,
