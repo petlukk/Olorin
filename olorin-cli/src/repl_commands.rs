@@ -158,13 +158,17 @@ impl OlorinRepl {
                 }
                 let mut out = String::from("Recall results:\n");
                 for (i, r) in results.iter().enumerate() {
-                    let text = String::from_utf8_lossy(&r.text);
-                    let preview: String = text.chars().take(120).collect();
+                    let preview = if r.lines.is_empty() {
+                        "(no matching lines)".to_string()
+                    } else {
+                        r.lines.iter().take(3).cloned().collect::<Vec<_>>().join(" | ")
+                    };
+                    let truncated: String = preview.chars().take(120).collect();
                     out.push_str(&format!(
                         "  [{}] (score {:.2}) {}\n",
                         i + 1,
                         r.score,
-                        preview
+                        truncated
                     ));
                 }
                 out.trim_end().to_string()

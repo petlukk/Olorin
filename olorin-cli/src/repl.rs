@@ -187,9 +187,9 @@ impl OlorinRepl {
         }
         let ctx: Vec<String> = filtered
             .iter()
-            .map(|r| String::from_utf8_lossy(&r.text).to_string())
+            .flat_map(|r| r.lines.iter().cloned())
             .collect();
-        format!("\n[Recall context]\n{}\n", ctx.join("\n---\n"))
+        format!("\n[Recall context]\n{}\n", ctx.join("\n"))
     }
 
     pub fn generate_streaming(&mut self, prompt: &str) {
