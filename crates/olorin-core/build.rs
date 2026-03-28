@@ -63,6 +63,11 @@ fn main() {
     let chacha_abs = fs::canonicalize(&chacha_so).unwrap();
     println!("cargo:rustc-env=CHACHA_LIB_PATH={}", chacha_abs.display());
 
+    // Compile chacha20_search_v2 for fused vault search.
+    let search_v2_ea = eachacha_dir.join("chacha20_search_v2.ea");
+    let search_v2_so = out_dir.join("libchacha20_search_v2.so");
+    compile_kernel(&ea, &search_v2_ea, &search_v2_so, is_arm);
+
     // Compile olorin kernels.
     let kernels = [
         "byte_classifier",
@@ -93,6 +98,19 @@ fn main() {
         code.push_str(&format!(
             "pub const {}: &[u8] = include_bytes!(\"{}\");\n",
             name.to_uppercase(),
+            abs.display(),
+        ));
+    }
+
+    // Embed chacha20_search_v2 (compiled from eachacha dir above)
+    {
+        let abs = fs::canonicalize(&search_v2_so)
+            .unwrap_or_else(|e| panic!("cannot resolve chacha20_search_v2: {e}"));
+        let bytes = fs::read(&abs)
+            .unwrap_or_else(|e| panic!("cannot read chacha20_search_v2: {e}"));
+        bytes.hash(&mut hasher);
+        code.push_str(&format!(
+            "pub const CHACHA20_SEARCH_V2: &[u8] = include_bytes!(\"{}\");\n",
             abs.display(),
         ));
     }
