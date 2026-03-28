@@ -30,6 +30,21 @@ type FwhtFn = unsafe extern "C" fn(*mut f32, i32);
 type TurboRotateFn = unsafe extern "C" fn(*mut f32, *const f32, i32);
 type JlProjectFn = unsafe extern "C" fn(*const f32, *const f32, i32, i32, *mut f32, *mut f32);
 type JlProjectBatchFn = unsafe extern "C" fn(*const f32, *const f32, i32, i32, *mut f32, *mut f32, i32);
+type SearchV2Fn = unsafe extern "C" fn(
+    *const i32, *const i32, i32,        // key, nonce, ctr_init
+    *const u8, i32,                      // ct_u8, len
+    *mut i32, *mut u8,                   // ks_i32, ks_u8
+    *const i32,                          // ct_i32
+    *mut u8, *mut i32,                   // pt_buf, pt_i32
+    *mut u8,                             // overlap
+    *const u8, *const i32,               // needles, needle_offsets
+    *const i32, i32,                     // needle_lens, needle_count
+    *mut u8, i32,                        // lines_buf, lines_buf_cap
+    *mut i32, *mut i32,                  // line_offsets, line_lens
+    *mut i32, *mut i32,                  // match_offsets, needle_ids
+    i32, i32, i32,                       // max_matches, max_line_len, window_size
+    *mut i32, *mut i32,                  // match_count, lines_written
+);
 
 struct KernelTable {
     _libs: Vec<Library>,
@@ -51,6 +66,7 @@ struct KernelTable {
     turbo_rotate: TurboRotateFn,
     jl_project: JlProjectFn,
     jl_project_batch: JlProjectBatchFn,
+    chacha20_search_v2: SearchV2Fn,
 }
 
 // SAFETY: KernelTable holds function pointers and library handles.
@@ -111,6 +127,7 @@ fn extract_kernels() -> Result<PathBuf, String> {
         ("libsearch_avx512.so", embedded::SEARCH_AVX512),
         ("libturbo_rotate.so", embedded::TURBO_ROTATE),
         ("libjl_project.so", embedded::JL_PROJECT),
+        ("libchacha20_search_v2.so", embedded::CHACHA20_SEARCH_V2),
     ];
 
     for (name, data) in kernels {
@@ -155,6 +172,7 @@ fn load_kernels(lib_dir: &PathBuf) -> Result<KernelTable, String> {
 
     let turbo_rotate_lib = load("turbo_rotate")?;
     let jl_project_lib = load("jl_project")?;
+    let chacha20_search_v2_lib = load("chacha20_search_v2")?;
 
     eprintln!("olorin kernels: search={search_variant}");
 
@@ -202,10 +220,12 @@ fn load_kernels(lib_dir: &PathBuf) -> Result<KernelTable, String> {
                 sym(&jl_project_lib, b"jl_project\0")?),
             jl_project_batch: std::mem::transmute(
                 sym(&jl_project_lib, b"jl_project_batch\0")?),
+            chacha20_search_v2: std::mem::transmute(
+                sym(&chacha20_search_v2_lib, b"chacha20_search_v2\0")?),
             _libs: vec![
                 byte_classifier, json_scanner, command_router,
                 leak_scanner, sanitizer, fused_safety, search,
-                turbo_rotate_lib, jl_project_lib,
+                turbo_rotate_lib, jl_project_lib, chacha20_search_v2_lib,
             ],
         };
         Ok(table)
@@ -308,4 +328,37 @@ pub unsafe fn jl_project_batch(
     out: *mut f32, scratch: *mut f32, n_vecs: i32,
 ) {
     (k().jl_project_batch)(vecs, signs, in_dim, out_dim, out, scratch, n_vecs);
+}
+
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn chacha20_search_v2(
+    key: *const i32, nonce: *const i32, ctr_init: i32,
+    ct_u8: *const u8, len: i32,
+    ks_i32: *mut i32, ks_u8: *mut u8,
+    ct_i32: *const i32,
+    pt_buf: *mut u8, pt_i32: *mut i32,
+    overlap: *mut u8,
+    needles: *const u8, needle_offsets: *const i32,
+    needle_lens: *const i32, needle_count: i32,
+    lines_buf: *mut u8, lines_buf_cap: i32,
+    line_offsets: *mut i32, line_lens: *mut i32,
+    match_offsets: *mut i32, needle_ids: *mut i32,
+    max_matches: i32, max_line_len: i32, window_size: i32,
+    match_count: *mut i32, lines_written: *mut i32,
+) {
+    (k().chacha20_search_v2)(
+        key, nonce, ctr_init,
+        ct_u8, len,
+        ks_i32, ks_u8,
+        ct_i32,
+        pt_buf, pt_i32,
+        overlap,
+        needles, needle_offsets,
+        needle_lens, needle_count,
+        lines_buf, lines_buf_cap,
+        line_offsets, line_lens,
+        match_offsets, needle_ids,
+        max_matches, max_line_len, window_size,
+        match_count, lines_written,
+    );
 }
