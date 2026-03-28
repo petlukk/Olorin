@@ -1,16 +1,19 @@
 //! Vault search — SIMD cosine similarity over byte histograms with recency boost.
+//! Uses fused ChaCha20 decrypt+search: plaintext never exists in memory.
 
 use super::{Vault, VaultError};
-use super::index::{compute_histogram, normalize_histogram, xxhash64};
+use super::index::{compute_histogram, normalize_histogram};
 use crate::kernels::search;
 
 const DIM: usize = 256;
 
-/// A single search result with score and decrypted plaintext.
+/// A single search result with score and matched context lines.
+/// Only lines matching the query are returned — the full block
+/// is never decrypted to memory.
 pub struct SearchResult {
     pub block_index: usize,
     pub score: f32,
-    pub text: Vec<u8>,
+    pub lines: Vec<String>,
 }
 
 fn l2_norm(v: &[f32]) -> f32 {
@@ -20,6 +23,7 @@ fn l2_norm(v: &[f32]) -> f32 {
 impl Vault {
     /// Search vault for blocks most similar to the query.
     /// Returns top-k results sorted by score (descending).
+    /// Uses fused decrypt+search: only matched context lines are returned.
     pub fn search(&mut self, query: &str, top_k: usize) -> Result<Vec<SearchResult>, VaultError> {
         if self.index.is_empty() {
             return Ok(vec![]);
@@ -61,7 +65,7 @@ impl Vault {
         // SIMD top-k
         let (indices, top_scores) = search::top_k(&scores, top_k);
 
-        // Collect, sort, and decrypt
+        // Collect and sort candidates
         let mut scored: Vec<(usize, f32)> = indices
             .into_iter()
             .zip(top_scores)
@@ -70,20 +74,39 @@ impl Vault {
             .collect();
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
+        // Tokenize query into needles
+        let needle_strs: Vec<&[u8]> = query.split_whitespace()
+            .map(|w| w.as_bytes())
+            .collect();
+
+        // Copy key before the loop to avoid simultaneous mutable/immutable borrows of self
+        let key_copy = *self.key();
+
+        // Fused decrypt+search per block
         let mut results = Vec::with_capacity(scored.len());
         for (block_idx, score) in scored {
-            let plaintext = self.decrypt_block(block_idx)?;
-            let actual_hash = xxhash64(&plaintext, 0);
-            if actual_hash != self.index[block_idx].xxhash {
-                return Err(VaultError::IntegrityFailed(block_idx));
-            }
-            results.push(SearchResult { block_index: block_idx, score, text: plaintext });
+            let (ciphertext, nonce) = self.read_encrypted_block(block_idx)?;
+
+            let fused = self.searcher.search(
+                &ciphertext,
+                &needle_strs,
+                &key_copy,
+                &nonce,
+            ).map_err(|e| VaultError::Crypto(e))?;
+
+            let lines: Vec<String> = fused.context_lines
+                .into_iter()
+                .map(|l| String::from_utf8_lossy(&l).to_string())
+                .collect();
+
+            results.push(SearchResult { block_index: block_idx, score, lines });
         }
 
         Ok(results)
     }
 
     /// Decrypt the last N blocks (for /teleport greeting generation).
+    /// This is an explicit user action — full decrypt is intentional.
     pub fn decrypt_last_n(&mut self, n: usize) -> Result<Vec<Vec<u8>>, VaultError> {
         let start = self.index.len().saturating_sub(n);
         let mut blocks = Vec::with_capacity(n);
@@ -106,17 +129,16 @@ mod tests {
         dir.join(name)
     }
 
-    fn test_key() -> [u8; 32] {
-        [0x42u8; 32]
-    }
+    fn test_key() -> [u8; 32] { [0x42u8; 32] }
 
     fn test_crypto() -> Box<dyn VaultCrypto> {
-        let lib = find_chacha_lib().expect("libchacha20.so not found — build with ea compiler");
+        let lib = find_chacha_lib().expect("libchacha20.so not found");
         Box::new(EachachaCrypto::new(lib))
     }
 
     #[test]
     fn test_vault_search_empty() {
+        crate::kernels::ffi::init().unwrap();
         let path = tmp_path("search_empty.vault");
         let _ = fs::remove_file(&path);
 
@@ -129,6 +151,7 @@ mod tests {
 
     #[test]
     fn test_vault_search_finds_relevant() {
+        crate::kernels::ffi::init().unwrap();
         let path = tmp_path("search_relevant.vault");
         let _ = fs::remove_file(&path);
 
@@ -145,6 +168,7 @@ mod tests {
 
         let results = vault.search("stars planets astronomy cosmos", 3).unwrap();
         assert!(!results.is_empty());
+        assert!(!results[0].lines.is_empty(), "should have context lines");
 
         let top = &results[0];
         assert!(top.block_index == 0 || top.block_index == 2,
@@ -159,6 +183,7 @@ mod tests {
 
     #[test]
     fn test_vault_search_recency_boost() {
+        crate::kernels::ffi::init().unwrap();
         let path = tmp_path("search_recency.vault");
         let _ = fs::remove_file(&path);
 

@@ -41,7 +41,7 @@ fn test_vault_full_lifecycle() {
 
         let results = vault.search("AVX-512 SIMD optimization x86", 3).unwrap();
         assert!(!results.is_empty(), "Search should find results for AVX-512");
-        let top_text = String::from_utf8_lossy(&results[0].text);
+        let top_text = results[0].lines.join(" ");
         assert!(
             top_text.contains("AVX-512") || top_text.contains("x86") || top_text.contains("zmm"),
             "Top result should be about x86: {:.80}", top_text
@@ -50,7 +50,7 @@ fn test_vault_full_lifecycle() {
 
         let arm_results = vault.search("ARM NEON registers 128-bit", 3).unwrap();
         assert!(!arm_results.is_empty());
-        let arm_text = String::from_utf8_lossy(&arm_results[0].text);
+        let arm_text = arm_results[0].lines.join(" ");
         assert!(arm_text.contains("NEON") || arm_text.contains("ARM") || arm_text.contains("128"));
         println!("[vault] Search 'ARM NEON': score={:.3}, match=yes", arm_results[0].score);
 
@@ -68,7 +68,7 @@ fn test_vault_full_lifecycle() {
         assert_eq!(vault.block_count(), 4);
 
         let results = vault.search("x86 cache line 64 bytes alignment", 4).unwrap();
-        let top_text = String::from_utf8_lossy(&results[0].text);
+        let top_text = results[0].lines.join(" ");
         assert!(top_text.contains("cache") || top_text.contains("64"));
         println!("[vault] After append: search 'cache line' score={:.3}", results[0].score);
     }

@@ -5,6 +5,8 @@ pub mod index;
 pub mod search;
 pub mod fused_search;
 
+use fused_search::FusedSearcher;
+
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -108,6 +110,7 @@ pub struct Vault {
     key: [u8; 32],
     nonce_seed: [u8; 12],
     crypto: Box<dyn VaultCrypto>,
+    searcher: FusedSearcher,
 }
 
 impl Vault {
@@ -149,6 +152,7 @@ impl Vault {
             key: *key,
             nonce_seed,
             crypto,
+            searcher: FusedSearcher::new(),
         })
     }
 
@@ -180,6 +184,7 @@ impl Vault {
             key: *key,
             nonce_seed,
             crypto,
+            searcher: FusedSearcher::new(),
         })
     }
 
