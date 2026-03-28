@@ -3,6 +3,7 @@
 pub mod format;
 pub mod index;
 pub mod search;
+pub mod fused_search;
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write, Seek, SeekFrom};
@@ -259,6 +260,34 @@ impl Vault {
         }
 
         Ok(plaintext)
+    }
+
+    /// Read raw encrypted block bytes and derive its nonce.
+    /// Used by fused search — no decryption happens here.
+    pub(crate) fn read_encrypted_block(&mut self, block_index: usize)
+        -> Result<(Vec<u8>, [u8; 12]), VaultError>
+    {
+        if block_index >= self.index.len() {
+            return Err(VaultError::InvalidFormat(
+                format!("block index {} out of range (have {})", block_index, self.index.len()),
+            ));
+        }
+        let entry = &self.index[block_index];
+        let offset = entry.offset;
+        let length = entry.length as usize;
+        let nonce_counter = entry.nonce_counter;
+
+        let mut ciphertext = vec![0u8; length];
+        self.file.seek(SeekFrom::Start(offset))?;
+        self.file.read_exact(&mut ciphertext)?;
+
+        let nonce = derive_nonce(&self.nonce_seed, nonce_counter);
+        Ok((ciphertext, nonce))
+    }
+
+    /// Get the vault encryption key (for fused search).
+    pub(crate) fn key(&self) -> &[u8; 32] {
+        &self.key
     }
 
     /// Get the hash of the last block (for session token integrity).
