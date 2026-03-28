@@ -11,7 +11,7 @@ impl Tool for BenchTool {
     }
 
     fn description(&self) -> &str {
-        "Run a quick microbenchmark. Targets: safety, router, recall, vault, search, jl, all."
+        "Run a quick microbenchmark. Targets: safety, router, recall, vault, search, jl, fused, all."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -20,7 +20,7 @@ impl Tool for BenchTool {
             "properties": {
                 "target": {
                     "type": "string",
-                    "enum": ["safety", "router", "recall", "vault", "search", "jl", "all"],
+                    "enum": ["safety", "router", "recall", "vault", "search", "jl", "fused", "all"],
                     "description": "What to benchmark"
                 }
             },
@@ -40,6 +40,7 @@ impl Tool for BenchTool {
             "vault" => bench_vault(),
             "search" => bench_search(),
             "jl" => bench_jl(),
+            "fused" => bench_fused(),
             "all" => bench_all(),
             _ => Err(crate::error::Error::Tool(format!(
                 "unknown target '{target}'"
@@ -305,6 +306,70 @@ pub fn bench_jl() -> crate::error::Result<String> {
     ))
 }
 
+pub fn bench_fused() -> crate::error::Result<String> {
+    use crate::vault::{Vault, EachachaCrypto, find_chacha_lib};
+    use crate::vault::fused_search::FusedSearcher;
+
+    crate::kernels::ffi::init()
+        .map_err(|e| crate::error::Error::Tool(e))?;
+
+    let lib = find_chacha_lib()
+        .ok_or_else(|| crate::error::Error::Tool("libchacha20.so not found".into()))?;
+    let crypto = Box::new(EachachaCrypto::new(lib));
+
+    let dir = std::env::temp_dir().join("olorin_bench_fused");
+    std::fs::create_dir_all(&dir).ok();
+    let vault_path = dir.join("bench.vault");
+    let _ = std::fs::remove_file(&vault_path);
+
+    let key = [0xABu8; 32];
+    let mut vault = Vault::create(&vault_path, &key, crypto)
+        .map_err(|e| crate::error::Error::Tool(e.to_string()))?;
+
+    // Write a 4 KB block with searchable content
+    let block = "User: How do I optimize x86 SIMD code for AVX-512?\n\
+                 Olorin: Use 512-bit zmm registers. Key intrinsics include _mm512_fmadd_ps.\n"
+        .repeat(30);
+    vault.append_message(&block)
+        .map_err(|e| crate::error::Error::Tool(e.to_string()))?;
+    vault.flush()
+        .map_err(|e| crate::error::Error::Tool(e.to_string()))?;
+
+    let (ciphertext, nonce) = vault.read_encrypted_block(0)
+        .map_err(|e| crate::error::Error::Tool(e.to_string()))?;
+
+    let mut searcher = FusedSearcher::new();
+    let needles: &[&[u8]] = &[b"AVX-512", b"zmm"];
+    let iterations = 10_000;
+
+    // Warmup — stabilize buffers in cache
+    for _ in 0..100 {
+        let _ = searcher.search(&ciphertext, needles, &key, &nonce);
+    }
+
+    let start = Instant::now();
+    for _ in 0..iterations {
+        let _ = searcher.search(&ciphertext, needles, &key, &nonce);
+    }
+    let elapsed = start.elapsed();
+
+    let per_call_us = elapsed.as_micros() as f64 / iterations as f64;
+    let per_call_ns = elapsed.as_nanos() as f64 / iterations as f64;
+    let throughput = ciphertext.len() as f64 * iterations as f64 / elapsed.as_secs_f64() / 1e9;
+
+    let _ = std::fs::remove_file(&vault_path);
+
+    Ok(format!(
+        "─── fused (FusedSearcher — chacha20_search_v2, decrypt+search in SIMD registers) ───\n\
+         \x20 {} B ciphertext, {} needles, {} iterations\n\
+         \x20 Per call: {:.1} µs ({:.0} ns)\n\
+         \x20 Throughput: {:.2} GB/s\n\
+         \x20 Scratch: ~23 KB pre-allocated (L1d resident after warmup)",
+        ciphertext.len(), needles.len(), iterations,
+        per_call_us, per_call_ns, throughput,
+    ))
+}
+
 pub fn bench_all() -> crate::error::Result<String> {
     let start = std::time::Instant::now();
     let mut results = Vec::new();
@@ -314,7 +379,8 @@ pub fn bench_all() -> crate::error::Result<String> {
     results.push(bench_vault()?);
     results.push(bench_search()?);
     results.push(bench_jl()?);
+    results.push(bench_fused()?);
     let total = start.elapsed();
-    results.push(format!("─── summary ───\n  6 benchmarks completed in {:.1} s", total.as_secs_f64()));
+    results.push(format!("─── summary ───\n  7 benchmarks completed in {:.1} s", total.as_secs_f64()));
     Ok(results.join("\n\n"))
 }
