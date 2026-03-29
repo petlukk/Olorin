@@ -87,6 +87,16 @@ impl Object {
     pub fn is_null(&self, key: &str) -> bool {
         matches!(self.get(key), Some(Value::Null))
     }
+
+    /// Iterate over (key, value) pairs in insertion order.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &Value)> {
+        self.keys.iter().zip(self.values.iter()).map(|(k, v)| (k.as_str(), v))
+    }
+
+    /// Return all keys in insertion order.
+    pub fn key_names(&self) -> impl Iterator<Item = &str> {
+        self.keys.iter().map(|k| k.as_str())
+    }
 }
 
 impl Default for Object {
