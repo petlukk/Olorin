@@ -4,7 +4,7 @@ pub enum Error {
     Io(std::io::Error),
     Kernel(&'static str),
     Vault(&'static str),
-    Inference(&'static str),
+    Inference(String),
     Safety(String),
     Json(&'static str),
     Config(String),
