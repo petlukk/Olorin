@@ -3,7 +3,7 @@ use olorin::kernels::ffi;
 
 fn ctx() -> DispatchContext {
     ffi::init().unwrap();
-    DispatchContext::new(None)
+    DispatchContext::new(None, None)
 }
 
 #[test]

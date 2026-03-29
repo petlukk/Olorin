@@ -66,6 +66,8 @@ pub struct DispatchContext {
     last_timing:  Option<handlers::TurnTiming>,
     /// System prompt
     system_prompt: String,
+    /// Recall level: 0 = off, N = top_k for recall context
+    recall_level:  usize,
     /// Max tool-loop turns before stopping
     _max_turns:   usize,
 }
@@ -73,10 +75,11 @@ pub struct DispatchContext {
 impl DispatchContext {
     /// Create a new dispatch context.
     /// `api_key`: optional Anthropic API key for cloud inference.
-    pub fn new(api_key: Option<String>) -> Self {
+    /// `model_arg`: optional model selector ("bitnet", "llama", or path).
+    pub fn new(api_key: Option<String>, model_arg: Option<&str>) -> Self {
         let anthropic = api_key.map(AnthropicClient::new);
         let vault = Self::open_vault();
-        let engine = Self::load_engine();
+        let engine = Self::load_engine(model_arg);
         Self {
             messages:      Vec::new(),
             recall:        VectorStore::new(1024),
@@ -85,13 +88,14 @@ impl DispatchContext {
             anthropic,
             last_timing:   None,
             system_prompt: llm::SYSTEM_PROMPT.to_string(),
+            recall_level:  0,
             _max_turns:    8,
         }
     }
 
-    fn load_engine() -> Option<Engine> {
+    fn load_engine(model_arg: Option<&str>) -> Option<Engine> {
         use crate::inference::generate;
-        let path = generate::find_model()?;
+        let path = generate::resolve_model(model_arg)?;
         eprintln!("[Olorin] Loading model: {}", path.display());
         match Engine::load(&path, 2048) {
             Ok(e) => {
@@ -315,8 +319,13 @@ impl DispatchContext {
             return Err(Response::text("No background tasks."));
         }
         if cmd_id == dispatch::CMD_RECALL {
-            let query = String::from_utf8_lossy(cmd_arg);
-            return Err(Response::text(self.recall.recall_formatted(&query, 5)));
+            let arg = String::from_utf8_lossy(cmd_arg);
+            let arg = arg.trim();
+            if let Ok(level) = arg.parse::<usize>() {
+                self.recall_level = level;
+                return Err(Response::text(format!("Recall level set to {level}.")));
+            }
+            return Err(Response::text(self.recall.recall_formatted(arg, 5)));
         }
         if cmd_id >= dispatch::CMD_TOOL_FIRST && cmd_id <= dispatch::CMD_TOOL_LAST {
             return Err(self.handle_tool_command(cmd_id, cmd_arg));
@@ -341,12 +350,18 @@ impl DispatchContext {
         }
 
         // ── Step 4: Recall ───────────────────────────────────────────
+        let top_k = self.recall_level;
         self.recall.add(input);
-        let session_recall = self.recall.synthesize_context(input, 3);
+
+        if top_k == 0 {
+            return Ok(None);
+        }
+
+        let session_recall = self.recall.synthesize_context(input, top_k);
         let mut recall_text = session_recall.unwrap_or_default();
 
         if let Some(ref mut vault) = self.vault {
-            if let Ok(vault_hits) = vault.search(input, 3) {
+            if let Ok(vault_hits) = vault.search(input, top_k) {
                 for hit in &vault_hits {
                     for line in &hit.lines {
                         if !line.trim().is_empty() {
@@ -396,6 +411,11 @@ impl DispatchContext {
     /// Get last turn timing data.
     pub fn last_timing(&self) -> Option<&handlers::TurnTiming> {
         self.last_timing.as_ref()
+    }
+
+    /// Current recall level.
+    pub fn recall_level(&self) -> usize {
+        self.recall_level
     }
 
     // ── Meta command handling ────────────────────────────────────────────────

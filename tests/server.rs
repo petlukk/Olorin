@@ -41,7 +41,7 @@ fn test_escape_json_backslash() {
 
 #[test]
 fn test_build_system_json_shape() {
-    let json = build_system_json();
+    let json = build_system_json(0);
     assert!(json.contains("\"cpu_temp\""));
     assert!(json.contains("\"memory_used_mb\""));
     assert!(json.contains("\"os\""));

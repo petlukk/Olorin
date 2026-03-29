@@ -9,9 +9,9 @@ use crate::core::router::{DispatchContext, Response};
 // ── REPL entry point ──────────────────────────────────────────────────────────
 
 /// Run the interactive REPL. Blocks until /quit or EOF.
-pub fn run() {
+pub fn run(model_arg: Option<&str>) {
     let api_key = std::env::var("ANTHROPIC_API_KEY").ok();
-    let mut ctx = DispatchContext::new(api_key);
+    let mut ctx = DispatchContext::new(api_key, model_arg);
 
     print_banner();
 

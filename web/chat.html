@@ -236,6 +236,7 @@ function updateSystem(){
     document.getElementById('hb-os').textContent=d.os+' '+d.arch;
     const h=Math.floor(d.uptime_seconds/3600),mi=Math.floor((d.uptime_seconds%3600)/60);
     document.getElementById('hb-uptime').textContent=h+'h '+mi+'m';
+    if(d.recall_level!=null)document.getElementById('hb-recall').textContent=d.recall_level;
   }).catch(()=>{});
 }
 updateSystem();setInterval(updateSystem,3000);

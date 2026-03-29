@@ -12,9 +12,6 @@ const Q6K_QH_OFF: usize = 128;
 const Q6K_SC_OFF: usize = 192;
 const Q6K_D_OFF: usize = 208;
 
-fn n_threads() -> usize {
-    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
-}
 
 /// Dot product of one Q6_K weight row against Q8_K activations.
 pub(crate) unsafe fn q6k_row_dot(
@@ -76,9 +73,9 @@ pub(crate) fn q6k_matmul_mt(
     weight: *const u8, row_stride: usize, n_blocks: usize,
     q8_qs: *const i8, q8_d: *const f32, q8_bsums: *const i32,
     out: &mut [f32], out_dim: usize,
+    pool: &crate::inference::threadpool::ThreadPool,
 ) {
-    let total = n_threads();
-    let n_thr = total.min(out_dim / 4).max(1);
+    let n_thr = pool.thread_count().min(out_dim / 4).max(1);
 
     if n_thr <= 1 {
         let mut scores4 = [0.0f32; 4];
@@ -105,32 +102,29 @@ pub(crate) fn q6k_matmul_mt(
     let qd = SendPtr(q8_d);
     let qb = SendPtr(q8_bsums);
     let o = SendMutPtr(out.as_mut_ptr());
-    std::thread::scope(|s| {
-        for tid in 0..n_thr {
-            let start = tid * chunk;
-            let end = (start + chunk).min(out_dim);
-            if start >= end { continue; }
-            let count = end - start;
-            s.spawn(move || {
-                let out_slice = unsafe { std::slice::from_raw_parts_mut(o.ptr().add(start), count) };
-                let mut scores4 = [0.0f32; 4];
-                let mut r = 0;
-                unsafe {
-                    while r + 4 <= count {
-                        let row = start + r;
-                        q6k_4row_dot(w.ptr().add(row * row_stride), w.ptr().add((row+1) * row_stride),
-                            w.ptr().add((row+2) * row_stride), w.ptr().add((row+3) * row_stride),
-                            n_blocks, qs.ptr(), qd.ptr(), qb.ptr(), &mut scores4);
-                        for j in 0..4 { out_slice[r+j] = scores4[j]; }
-                        r += 4;
-                    }
-                    while r < count {
-                        let row = start + r;
-                        out_slice[r] = q6k_row_dot(w.ptr().add(row * row_stride), n_blocks, qs.ptr(), qd.ptr(), qb.ptr());
-                        r += 1;
-                    }
-                }
-            });
+
+    pool.run(n_thr, move |tid, _n| {
+        let start = tid * chunk;
+        let end = (start + chunk).min(out_dim);
+        if start >= end { return; }
+        let count = end - start;
+        let out_slice = unsafe { std::slice::from_raw_parts_mut(o.ptr().add(start), count) };
+        let mut scores4 = [0.0f32; 4];
+        let mut r = 0;
+        unsafe {
+            while r + 4 <= count {
+                let row = start + r;
+                q6k_4row_dot(w.ptr().add(row * row_stride), w.ptr().add((row+1) * row_stride),
+                    w.ptr().add((row+2) * row_stride), w.ptr().add((row+3) * row_stride),
+                    n_blocks, qs.ptr(), qd.ptr(), qb.ptr(), &mut scores4);
+                for j in 0..4 { out_slice[r+j] = scores4[j]; }
+                r += 4;
+            }
+            while r < count {
+                let row = start + r;
+                out_slice[r] = q6k_row_dot(w.ptr().add(row * row_stride), n_blocks, qs.ptr(), qd.ptr(), qb.ptr());
+                r += 1;
+            }
         }
     });
 }

@@ -36,7 +36,7 @@ impl Engine {
             tokenizer,
             max_seq_len,
             max_tokens: 128,
-            temperature: 0.1,
+            temperature: 0.0,
             top_k: 40,
             top_p: 0.9,
             repetition_penalty: 1.3,
@@ -56,34 +56,17 @@ impl Engine {
 
         let is_q4k = model.quant_type == QuantType::Q4K;
 
-        // Build prompt tokens with chat template
+        // Build prompt tokens — match each model's native format
         let mut tokens = vec![tokenizer.bos_id];
         if is_q4k {
-            let has_chatml = tokenizer.token_to_id("<|im_start|>").is_some();
-            let chat = if has_chatml {
-                format!(
-                    "<|im_start|>system\nYou are Olorin, a concise assistant. \
-                     Answer in one short sentence.<|im_end|>\n\
-                     <|im_start|>user\n{prompt}<|im_end|>\n\
-                     <|im_start|>assistant\n"
-                )
-            } else {
-                format!(
-                    "<|start_header_id|>system<|end_header_id|>\n\n\
-                     You are Olorin, a concise assistant. \
-                     Answer in one short sentence.<|eot_id|>\
-                     <|start_header_id|>user<|end_header_id|>\n\n\
-                     {prompt}<|eot_id|>\
-                     <|start_header_id|>assistant<|end_header_id|>\n\n"
-                )
-            };
+            let chat = format!(
+                "<|start_header_id|>user<|end_header_id|>\n\n\
+                 {prompt}<|eot_id|>\
+                 <|start_header_id|>assistant<|end_header_id|>\n\n"
+            );
             tokens.extend(tokenizer.encode(&chat));
         } else {
-            let full = format!(
-                "You are Olorin, a concise assistant. \
-                 Answer in one short sentence.\n\nQ: {prompt}\nA:"
-            );
-            tokens.extend(tokenizer.encode(&full));
+            tokens.extend(tokenizer.encode(prompt));
         }
 
         let output = Arc::new(std::sync::Mutex::new(Vec::<u32>::new()));
@@ -147,17 +130,20 @@ pub fn find_model() -> Option<PathBuf> {
 pub fn resolve_model(arg: Option<&str>) -> Option<PathBuf> {
     let home = std::env::var("HOME").unwrap_or_default();
     let olorin_models = Path::new(&home).join(".olorin/models");
+    let aliases: &[(&str, &str)] = &[
+        ("bitnet",  "ggml-model-i2_s.gguf"),
+        ("llama",   "Llama-3.2-3B-Instruct-Q4_K_M.gguf"),
+        ("llama8b", "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"),
+    ];
     match arg {
-        Some("bitnet") => {
-            let p = olorin_models.join("ggml-model-i2_s.gguf");
-            p.exists().then_some(p)
-        }
-        Some("llama") => {
-            let p = olorin_models.join("Llama-3.2-3B-Instruct-Q4_K_M.gguf");
-            p.exists().then_some(p)
-        }
-        Some(path) => {
-            let p = PathBuf::from(path);
+        Some(name) => {
+            for &(alias, filename) in aliases {
+                if name == alias {
+                    let p = olorin_models.join(filename);
+                    return p.exists().then_some(p);
+                }
+            }
+            let p = PathBuf::from(name);
             p.exists().then_some(p)
         }
         None => find_model(),

@@ -26,9 +26,9 @@ pub fn get_chat_html() -> String {
 // ── Web server ────────────────────────────────────────────────────────────────
 
 /// Start the web server. Blocks until killed.
-pub fn run(port: u16) {
+pub fn run(port: u16, model_arg: Option<&str>) {
     let api_key = std::env::var("ANTHROPIC_API_KEY").ok();
-    let ctx = Arc::new(Mutex::new(DispatchContext::new(api_key)));
+    let ctx = Arc::new(Mutex::new(DispatchContext::new(api_key, model_arg)));
 
     let addr = format!("0.0.0.0:{port}");
     let listener = TcpListener::bind(&addr).unwrap_or_else(|e| {
@@ -88,7 +88,8 @@ fn handle_connection(stream: &mut std::net::TcpStream, ctx: Arc<Mutex<DispatchCo
             serve_json(stream, r#"{"name":"olorin","backend":"pipe"}"#);
         }
         ("GET", "/api/system") => {
-            let body = build_system_json();
+            let recall_level = ctx.lock().unwrap().recall_level();
+            let body = build_system_json(recall_level);
             serve_json(stream, &body);
         }
         ("POST", "/api/generate") => {
@@ -234,7 +235,7 @@ fn handle_command(
 // ── WhatsApp bridge ───────────────────────────────────────────────────────────
 
 /// Start the WhatsApp bridge subprocess and run the JSONL message loop.
-pub fn run_whatsapp() {
+pub fn run_whatsapp(model_arg: Option<&str>) {
     let bridge_path = find_bridge();
 
     let home        = std::env::var("HOME").unwrap_or_default();
@@ -250,7 +251,7 @@ pub fn run_whatsapp() {
     };
 
     let api_key = std::env::var("ANTHROPIC_API_KEY").ok();
-    let ctx     = Arc::new(Mutex::new(DispatchContext::new(api_key)));
+    let ctx     = Arc::new(Mutex::new(DispatchContext::new(api_key, model_arg)));
 
     eprintln!("[olorin] WhatsApp bridge started (pid={})", child.pid);
     eprintln!("[olorin] Waiting for bridge connection...");
@@ -348,7 +349,7 @@ pub fn find_bridge() -> String {
 
 // ── System info ───────────────────────────────────────────────────────────────
 
-pub fn build_system_json() -> String {
+pub fn build_system_json(recall_level: usize) -> String {
     let (mem_used, mem_total) = read_memory().unwrap_or((0, 0));
     let uptime   = read_uptime().unwrap_or(0);
     let os       = std::env::consts::OS;
@@ -361,7 +362,8 @@ pub fn build_system_json() -> String {
     format!(
         "{{\"cpu_percent\":{cpu_percent},\"cpu_temp\":{cpu_temp},\
          \"memory_used_mb\":{mem_used},\"memory_total_mb\":{mem_total},\
-         \"os\":\"{os}\",\"arch\":\"{arch}\",\"uptime_seconds\":{uptime}}}"
+         \"os\":\"{os}\",\"arch\":\"{arch}\",\"uptime_seconds\":{uptime},\
+         \"recall_level\":{recall_level}}}"
     )
 }
 

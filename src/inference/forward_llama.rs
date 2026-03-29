@@ -10,6 +10,7 @@ use crate::inference::matmul_q6k::q6k_embed_lookup;
 use crate::inference::engine::BitNetModel;
 use crate::inference::cache::{self, EakvCache};
 use crate::inference::ptr::{SendPtr, SendMutPtr};
+use crate::inference::threadpool::ThreadPool;
 
 /// Add bias vector to output buffer. No-op if bias is null (Llama models).
 #[inline]
@@ -19,6 +20,7 @@ pub(crate) fn add_bias(buf: &mut [f32], bias: *const f32, n: usize) {
 }
 
 pub struct LlamaState {
+    pub(crate) pool: ThreadPool,
     pub(crate) x: Vec<f32>,
     x_norm: Vec<f32>,
     x_q8_qs: Vec<i8>,
@@ -81,6 +83,7 @@ impl LlamaState {
             model.head_dim as i32, max_seq_len as i32, kt,
         ).expect("failed to create EakvCache");
         LlamaState {
+            pool: ThreadPool::new(),
             x: vec![0.0; h],
             x_norm: vec![0.0; h],
             x_q8_qs: vec![0; h + 16],
@@ -126,8 +129,8 @@ impl LlamaState {
                 self.x_q8_d.as_mut_ptr(), self.x_q8_bsums.as_mut_ptr(), h as i32);
         }
 
-        // QKV — concurrent dispatch via std::thread::scope
-        let total = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+        // QKV — concurrent dispatch via ThreadPool
+        let total = self.pool.thread_count();
         let wv_bb = lw.wv_block_bytes;
         if total >= 3 {
             let q_t = (total / 2).max(1);
@@ -142,27 +145,21 @@ impl LlamaState {
             let v_out = SendMutPtr(self.v.as_mut_ptr());
             let (wq, wk, wv) = (SendPtr(lw.wq), SendPtr(lw.wk), SendPtr(lw.wv));
             let h_q6k_stride = h_nb * Q6K_BLOCK_BYTES;
-            std::thread::scope(|s| {
-                for tid in 0..q_t {
-                    s.spawn(move || unsafe { q4k_matmul_work(wq.ptr(), h_row_stride, h_nb, q8p.ptr(), q8d.ptr(), q8b.ptr(), q_out.ptr(), h, tid, q_t); });
-                }
-                for tid in 0..k_t {
-                    s.spawn(move || unsafe { q4k_matmul_work(wk.ptr(), h_row_stride, h_nb, q8p.ptr(), q8d.ptr(), q8b.ptr(), k_out.ptr(), kv, tid, k_t); });
-                }
-                for tid in 0..v_t {
-                    s.spawn(move || unsafe {
-                        if wv_bb == Q6K_BLOCK_BYTES { q6k_matmul_work(wv.ptr(), h_q6k_stride, h_nb, q8p.ptr(), q8d.ptr(), q8b.ptr(), v_out.ptr(), kv, tid, v_t); }
-                        else { q4k_matmul_work(wv.ptr(), h_row_stride, h_nb, q8p.ptr(), q8d.ptr(), q8b.ptr(), v_out.ptr(), kv, tid, v_t); }
-                    });
-                }
-            });
+            self.pool.run_split3(
+                q_t, move |tid, _n| unsafe { q4k_matmul_work(wq.ptr(), h_row_stride, h_nb, q8p.ptr(), q8d.ptr(), q8b.ptr(), q_out.ptr(), h, tid, q_t); },
+                k_t, move |tid, _n| unsafe { q4k_matmul_work(wk.ptr(), h_row_stride, h_nb, q8p.ptr(), q8d.ptr(), q8b.ptr(), k_out.ptr(), kv, tid, k_t); },
+                v_t, move |tid, _n| unsafe {
+                    if wv_bb == Q6K_BLOCK_BYTES { q6k_matmul_work(wv.ptr(), h_q6k_stride, h_nb, q8p.ptr(), q8d.ptr(), q8b.ptr(), v_out.ptr(), kv, tid, v_t); }
+                    else { q4k_matmul_work(wv.ptr(), h_row_stride, h_nb, q8p.ptr(), q8d.ptr(), q8b.ptr(), v_out.ptr(), kv, tid, v_t); }
+                },
+            );
         } else {
-            q4k_matmul_mt(lw.wq, h_row_stride, h_nb, self.x_q8_qs.as_ptr(), self.x_q8_d.as_ptr(), self.x_q8_bsums.as_ptr(), &mut self.q, h);
-            q4k_matmul_mt(lw.wk, h_row_stride, h_nb, self.x_q8_qs.as_ptr(), self.x_q8_d.as_ptr(), self.x_q8_bsums.as_ptr(), &mut self.k, kv);
+            q4k_matmul_mt(lw.wq, h_row_stride, h_nb, self.x_q8_qs.as_ptr(), self.x_q8_d.as_ptr(), self.x_q8_bsums.as_ptr(), &mut self.q, h, &self.pool);
+            q4k_matmul_mt(lw.wk, h_row_stride, h_nb, self.x_q8_qs.as_ptr(), self.x_q8_d.as_ptr(), self.x_q8_bsums.as_ptr(), &mut self.k, kv, &self.pool);
             if wv_bb == Q6K_BLOCK_BYTES {
-                q6k_matmul_mt(lw.wv, h_nb * Q6K_BLOCK_BYTES, h_nb, self.x_q8_qs.as_ptr(), self.x_q8_d.as_ptr(), self.x_q8_bsums.as_ptr(), &mut self.v, kv);
+                q6k_matmul_mt(lw.wv, h_nb * Q6K_BLOCK_BYTES, h_nb, self.x_q8_qs.as_ptr(), self.x_q8_d.as_ptr(), self.x_q8_bsums.as_ptr(), &mut self.v, kv, &self.pool);
             } else {
-                q4k_matmul_mt(lw.wv, h_row_stride, h_nb, self.x_q8_qs.as_ptr(), self.x_q8_d.as_ptr(), self.x_q8_bsums.as_ptr(), &mut self.v, kv);
+                q4k_matmul_mt(lw.wv, h_row_stride, h_nb, self.x_q8_qs.as_ptr(), self.x_q8_d.as_ptr(), self.x_q8_bsums.as_ptr(), &mut self.v, kv, &self.pool);
             }
         }
 
@@ -188,7 +185,7 @@ impl LlamaState {
                 self.attn_q8_d.as_mut_ptr(), self.attn_q8_bsums.as_mut_ptr(), h as i32);
         }
         q4k_matmul_mt(lw.wo, h_row_stride, h_nb, self.attn_q8_qs.as_ptr(), self.attn_q8_d.as_ptr(),
-            self.attn_q8_bsums.as_ptr(), &mut self.tmp, h);
+            self.attn_q8_bsums.as_ptr(), &mut self.tmp, h, &self.pool);
         unsafe { ffi::vecadd_f32(x.as_ptr(), self.tmp.as_ptr(), self.attn_out.as_mut_ptr(), h as i32); }
         x[..h].copy_from_slice(&self.attn_out[..h]);
 
@@ -199,19 +196,17 @@ impl LlamaState {
         }
 
         // Fused gate+up+SiLU
-        let q8p = SendPtr(self.x_q8_qs.as_ptr());
-        let q8d = SendPtr(self.x_q8_d.as_ptr());
-        let q8b = SendPtr(self.x_q8_bsums.as_ptr());
-        let h_out = SendMutPtr(self.hidden.as_mut_ptr());
-        let (wg, wu) = (SendPtr(lw.w_gate), SendPtr(lw.w_up));
-        std::thread::scope(|s| {
-            for tid in 0..total {
-                s.spawn(move || unsafe {
-                    q4k_fused_gate_up_silu_work(wg.ptr(), wu.ptr(), h_row_stride, h_nb,
-                        q8p.ptr(), q8d.ptr(), q8b.ptr(), h_out.ptr(), f, tid, total);
-                });
-            }
-        });
+        {
+            let q8p = SendPtr(self.x_q8_qs.as_ptr());
+            let q8d = SendPtr(self.x_q8_d.as_ptr());
+            let q8b = SendPtr(self.x_q8_bsums.as_ptr());
+            let h_out = SendMutPtr(self.hidden.as_mut_ptr());
+            let (wg, wu) = (SendPtr(lw.w_gate), SendPtr(lw.w_up));
+            self.pool.run(total, move |tid, _n| unsafe {
+                q4k_fused_gate_up_silu_work(wg.ptr(), wu.ptr(), h_row_stride, h_nb,
+                    q8p.ptr(), q8d.ptr(), q8b.ptr(), h_out.ptr(), f, tid, total);
+            });
+        }
 
         unsafe {
             ffi::quant_f32_q8k(self.hidden.as_ptr(), self.hidden_q8_qs.as_mut_ptr(),
@@ -219,10 +214,10 @@ impl LlamaState {
         }
         if lw.w_down_block_bytes == Q6K_BLOCK_BYTES {
             q6k_matmul_mt(lw.w_down, f_nb * Q6K_BLOCK_BYTES, f_nb, self.hidden_q8_qs.as_ptr(),
-                self.hidden_q8_d.as_ptr(), self.hidden_q8_bsums.as_ptr(), &mut self.tmp, h);
+                self.hidden_q8_d.as_ptr(), self.hidden_q8_bsums.as_ptr(), &mut self.tmp, h, &self.pool);
         } else {
             q4k_matmul_mt(lw.w_down, f_nb * Q4K_BLOCK_BYTES, f_nb, self.hidden_q8_qs.as_ptr(),
-                self.hidden_q8_d.as_ptr(), self.hidden_q8_bsums.as_ptr(), &mut self.tmp, h);
+                self.hidden_q8_d.as_ptr(), self.hidden_q8_bsums.as_ptr(), &mut self.tmp, h, &self.pool);
         }
         unsafe { ffi::vecadd_f32(x.as_ptr(), self.tmp.as_ptr(), self.attn_out.as_mut_ptr(), h as i32); }
         x[..h].copy_from_slice(&self.attn_out[..h]);
@@ -240,10 +235,10 @@ impl LlamaState {
         }
         if model.output_block_bytes == Q6K_BLOCK_BYTES {
             q6k_matmul_mt(model.output_weight, h_nb * Q6K_BLOCK_BYTES, h_nb, self.x_q8_qs.as_ptr(),
-                self.x_q8_d.as_ptr(), self.x_q8_bsums.as_ptr(), &mut self.logits, model.vocab_size);
+                self.x_q8_d.as_ptr(), self.x_q8_bsums.as_ptr(), &mut self.logits, model.vocab_size, &self.pool);
         } else {
             q4k_matmul_mt(model.output_weight, h_row_stride, h_nb, self.x_q8_qs.as_ptr(),
-                self.x_q8_d.as_ptr(), self.x_q8_bsums.as_ptr(), &mut self.logits, model.vocab_size);
+                self.x_q8_d.as_ptr(), self.x_q8_bsums.as_ptr(), &mut self.logits, model.vocab_size, &self.pool);
         }
     }
 

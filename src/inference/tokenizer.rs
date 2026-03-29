@@ -155,10 +155,19 @@ impl Tokenizer {
                 }
             }
             if !found_special {
-                // Encode next byte
-                let b = remaining.as_bytes()[0];
-                tokens.push(self.token_to_id.get(&vec![b]).copied().unwrap_or(0));
-                remaining = &remaining[1..];
+                // Encode next character (may be multi-byte UTF-8)
+                let ch = remaining.chars().next().unwrap();
+                let ch_len = ch.len_utf8();
+                let ch_bytes = &remaining.as_bytes()[..ch_len];
+                // Try full character first, fall back to byte-by-byte
+                if let Some(&id) = self.token_to_id.get(ch_bytes) {
+                    tokens.push(id);
+                } else {
+                    for &b in ch_bytes {
+                        tokens.push(self.token_to_id.get(&vec![b]).copied().unwrap_or(0));
+                    }
+                }
+                remaining = &remaining[ch_len..];
             }
         }
 
