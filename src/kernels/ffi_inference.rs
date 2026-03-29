@@ -51,6 +51,18 @@ type Q6kDot4RowFn = unsafe extern "C" fn(
     *const i8, *const i8, *const i8, *const i8,
     *const i8, *const i32, *mut f32, i32, f32, f32, f32, f32);
 type ApplyRopeFn = unsafe extern "C" fn(*const f32, *const f32, *mut f32, i32, i32);
+#[allow(clippy::type_complexity)]
+type Q4kGemm4x4Fn = unsafe extern "C" fn(
+    *const u8, *const u8, *const u8, *const u8,           // rw0-3
+    *const i8, *const i8, *const i8, *const i8,            // q8_0-3
+    *const i32, *const i32, *const i32, *const i32,        // bsums_0-3
+    *const u8, *const u8, *const u8, *const u8,            // sc0-3
+    *const u8, *const u8, *const u8, *const u8,            // mn0-3
+    *const f32, *const f32, *const f32, *const f32,        // d_arr0-3
+    *const f32, *const f32, *const f32, *const f32,        // dm_arr0-3
+    *const f32, *const f32, *const f32, *const f32,        // q8d_0-3
+    *mut f32, i32,                                          // scores, n_blocks
+);
 
 // ── Type aliases — KV-cache ───────────────────────────────────────────────────
 
@@ -92,6 +104,7 @@ pub struct KernelTableInference {
     pub q6k_dot_q8k:           Q6kDotQ8kFn,
     pub q6k_dot_q8k_4row:      Q6kDot4RowFn,
     pub apply_rope_f32:        ApplyRopeFn,
+    pub q4k_gemm_4x4:         Q4kGemm4x4Fn,
     pub quantize_simd:         QuantizeSIMDFn,
     pub dequantize_simd:       DequantizeSIMDFn,
     pub fused_k_score:         KScoreMhaFn,
@@ -149,6 +162,7 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
     let q4kd = load("q4k_dot")?;
     let q6kd = load("q6k_dot")?;
     let rope = load("rope")?;
+    let gemm_tile = load("q4k_gemm_tile")?;
 
     let quantize_lib      = load("quantize_simd")?;
     let k_score_lib       = load("fused_k_score")?;
@@ -211,6 +225,7 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
             q6k_dot_q8k:           std::mem::transmute(sym(&q6kd, b"q6k_dot_q8k\0")?),
             q6k_dot_q8k_4row:      std::mem::transmute(sym(&q6kd, b"q6k_dot_q8k_4row\0")?),
             apply_rope_f32:        std::mem::transmute(sym(&rope, b"apply_rope_f32\0")?),
+            q4k_gemm_4x4:         std::mem::transmute(sym(&gemm_tile, b"q4k_gemm_4x4\0")?),
             quantize_simd:         std::mem::transmute(sym(&quantize_lib, b"q4_quantize_split_f32\0")?),
             dequantize_simd:       std::mem::transmute(sym(&deq_lib, deq_sym)?),
             fused_k_score:         std::mem::transmute(sym(&k_score_lib,     b"q4_fused_k_score_multi_f32\0")?),
@@ -225,7 +240,7 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
             validate:              std::mem::transmute(sym(&validate_lib, b"q4_validate\0")?),
             libs: vec![
                 i2s, quant, rms, attn, i8d, act, vadd,
-                q4kq, q4kd, q6kd, rope,
+                q4kq, q4kd, q6kd, rope, gemm_tile,
                 quantize_lib, deq_lib,
                 k_score_lib, k_score_64_lib,
                 k_score_gqa_lib, k_score_gqa64_lib,
@@ -368,6 +383,31 @@ pub unsafe fn q6k_dot_q8k_4row(
         ql0, ql1, ql2, ql3, qh0, qh1, qh2, qh3,
         sc0, sc1, sc2, sc3, q8, bsums,
         scores, n_blocks, d0, d1, d2, d3)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn q4k_gemm_4x4(
+    rw0: *const u8, rw1: *const u8, rw2: *const u8, rw3: *const u8,
+    q8_0: *const i8, q8_1: *const i8, q8_2: *const i8, q8_3: *const i8,
+    bs0: *const i32, bs1: *const i32, bs2: *const i32, bs3: *const i32,
+    sc0: *const u8, sc1: *const u8, sc2: *const u8, sc3: *const u8,
+    mn0: *const u8, mn1: *const u8, mn2: *const u8, mn3: *const u8,
+    d0: *const f32, d1: *const f32, d2: *const f32, d3: *const f32,
+    dm0: *const f32, dm1: *const f32, dm2: *const f32, dm3: *const f32,
+    q8d0: *const f32, q8d1: *const f32, q8d2: *const f32, q8d3: *const f32,
+    scores: *mut f32, n_blocks: i32,
+) {
+    (k().q4k_gemm_4x4)(
+        rw0, rw1, rw2, rw3,
+        q8_0, q8_1, q8_2, q8_3,
+        bs0, bs1, bs2, bs3,
+        sc0, sc1, sc2, sc3,
+        mn0, mn1, mn2, mn3,
+        d0, d1, d2, d3,
+        dm0, dm1, dm2, dm3,
+        q8d0, q8d1, q8d2, q8d3,
+        scores, n_blocks,
+    );
 }
 
 pub unsafe fn apply_rope_f32(

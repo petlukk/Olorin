@@ -1,7 +1,8 @@
 //! GEMM-style batched Q4_K matmul: load weight once, multiply against N tokens.
 
 use crate::kernels::ffi_inference as ffi;
-use crate::inference::matmul_q4k::{q4k_4row_dot, q4k_row_dot, q4k_dual_4row_dot};
+use crate::inference::matmul_q4k::{q4k_4row_dot, q4k_row_dot, q4k_dual_4row_dot, Q4K_BLOCK_BYTES, unpack_q4k_scales};
+use crate::inference::matmul::f16_to_f32;
 use crate::inference::ptr::{SendPtr, SendMutPtr};
 
 fn n_threads() -> usize {
@@ -77,20 +78,71 @@ pub(crate) fn q4k_gemm_mt(
             let ds = &ds;
             let bs = &bs;
             s.spawn(move || {
-                let mut scores = [0.0f32; 4];
+                let mut scores4 = [0.0f32; 4];
+                let mut scores16 = [0.0f32; 16];
+                // Per-row pre-unpacked scale/min/d/dm arrays
+                let mut sc = [vec![0u8; n_blocks * 8], vec![0u8; n_blocks * 8],
+                              vec![0u8; n_blocks * 8], vec![0u8; n_blocks * 8]];
+                let mut mn = [vec![0u8; n_blocks * 8], vec![0u8; n_blocks * 8],
+                              vec![0u8; n_blocks * 8], vec![0u8; n_blocks * 8]];
+                let mut da = [vec![0.0f32; n_blocks], vec![0.0f32; n_blocks],
+                              vec![0.0f32; n_blocks], vec![0.0f32; n_blocks]];
+                let mut dma = [vec![0.0f32; n_blocks], vec![0.0f32; n_blocks],
+                               vec![0.0f32; n_blocks], vec![0.0f32; n_blocks]];
+                let mut sc_tmp = [0u8; 8];
+                let mut mn_tmp = [0u8; 8];
                 let mut r = start;
                 unsafe {
                     while r + 4 <= end {
-                        let w0 = w.ptr().add(r * row_stride);
-                        let w1 = w.ptr().add((r+1) * row_stride);
-                        let w2 = w.ptr().add((r+2) * row_stride);
-                        let w3 = w.ptr().add((r+3) * row_stride);
-                        for t in 0..nt {
-                            q4k_4row_dot(w0, w1, w2, w3, n_blocks,
-                                qs[t] as _, ds[t] as _, bs[t] as _, &mut scores);
+                        let ws = [
+                            w.ptr().add(r * row_stride),
+                            w.ptr().add((r+1) * row_stride),
+                            w.ptr().add((r+2) * row_stride),
+                            w.ptr().add((r+3) * row_stride),
+                        ];
+                        // Pre-unpack for tiled kernel
+                        for ri in 0..4 {
+                            for blk in 0..n_blocks {
+                                let bp = ws[ri].add(blk * Q4K_BLOCK_BYTES);
+                                da[ri][blk] = f16_to_f32(*(bp as *const u16));
+                                dma[ri][blk] = f16_to_f32(*(bp.add(2) as *const u16));
+                                unpack_q4k_scales(
+                                    std::slice::from_raw_parts(bp.add(4), 12),
+                                    &mut sc_tmp, &mut mn_tmp);
+                                sc[ri][blk*8..blk*8+8].copy_from_slice(&sc_tmp);
+                                mn[ri][blk*8..blk*8+8].copy_from_slice(&mn_tmp);
+                            }
+                        }
+                        // Tiled: 4 tokens at a time via SIMD kernel
+                        let mut t = 0;
+                        while t + 4 <= nt {
+                            ffi::q4k_gemm_4x4(
+                                ws[0], ws[1], ws[2], ws[3],
+                                qs[t] as _, qs[t+1] as _, qs[t+2] as _, qs[t+3] as _,
+                                bs[t] as _, bs[t+1] as _, bs[t+2] as _, bs[t+3] as _,
+                                sc[0].as_ptr(), sc[1].as_ptr(), sc[2].as_ptr(), sc[3].as_ptr(),
+                                mn[0].as_ptr(), mn[1].as_ptr(), mn[2].as_ptr(), mn[3].as_ptr(),
+                                da[0].as_ptr(), da[1].as_ptr(), da[2].as_ptr(), da[3].as_ptr(),
+                                dma[0].as_ptr(), dma[1].as_ptr(), dma[2].as_ptr(), dma[3].as_ptr(),
+                                ds[t] as _, ds[t+1] as _, ds[t+2] as _, ds[t+3] as _,
+                                scores16.as_mut_ptr(), n_blocks as i32,
+                            );
+                            // scores16: [r0t0, r0t1, r0t2, r0t3, r1t0, ..., r3t3]
+                            for ri in 0..4 {
+                                for ti in 0..4 {
+                                    *o.ptr().add((t + ti) * out_dim + r + ri) = scores16[ri * 4 + ti];
+                                }
+                            }
+                            t += 4;
+                        }
+                        // Remainder tokens
+                        while t < nt {
+                            q4k_4row_dot(ws[0], ws[1], ws[2], ws[3], n_blocks,
+                                qs[t] as _, ds[t] as _, bs[t] as _, &mut scores4);
                             let base = o.ptr().add(t * out_dim + r);
-                            *base = scores[0]; *base.add(1) = scores[1];
-                            *base.add(2) = scores[2]; *base.add(3) = scores[3];
+                            *base = scores4[0]; *base.add(1) = scores4[1];
+                            *base.add(2) = scores4[2]; *base.add(3) = scores4[3];
+                            t += 1;
                         }
                         r += 4;
                     }
