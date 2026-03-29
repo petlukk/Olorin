@@ -1,0 +1,22 @@
+[package]
+name = "olorin"
+version = "0.6.0"
+edition = "2021"
+
+[[bin]]
+name = "olorin"
+path = "src/main.rs"
+
+[lib]
+name = "olorin"
+path = "src/lib.rs"
+
+[dependencies]
+libc = "0.2"
+libloading = "0.8"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
