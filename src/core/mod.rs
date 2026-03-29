@@ -3,3 +3,7 @@ pub mod session;
 pub mod safety;
 pub mod shell_guard;
 pub mod anthropic;
+pub mod dispatch;
+pub mod handlers;
+pub mod tool_parse;
+pub mod llm;

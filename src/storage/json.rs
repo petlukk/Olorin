@@ -5,6 +5,7 @@
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
+#[derive(Clone, Debug)]
 pub enum Value {
     Str(String),
     I64(i64),
@@ -15,6 +16,7 @@ pub enum Value {
     Object(Box<Object>),
 }
 
+#[derive(Clone, Debug)]
 pub struct Object {
     keys:   Vec<String>,
     values: Vec<Value>,
@@ -337,6 +339,13 @@ pub fn parse(input: &[u8]) -> Result<Object, &'static str> {
 pub fn serialize(obj: &Object) -> String {
     let mut out = String::new();
     write_object(obj, &mut out);
+    out
+}
+
+/// Serialize any Value to a JSON string.
+pub fn serialize_value(val: &Value) -> String {
+    let mut out = String::new();
+    write_value(val, &mut out);
     out
 }
 
