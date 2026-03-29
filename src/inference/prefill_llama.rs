@@ -9,9 +9,23 @@ use crate::inference::matmul_q4k::Q4K_BLOCK_BYTES;
 use crate::inference::matmul_q6k::Q6K_BLOCK_BYTES;
 use crate::inference::engine::BitNetModel;
 use crate::inference::cache;
+/// Opaque pointer wrapper for thread dispatch — all raw pointers cast to usize.
+/// pool.run is synchronous so pointed-to data outlives the dispatch.
+#[derive(Clone, Copy)]
+struct W {
+    xs: usize,      // *const *const f32
+    xs_mut: usize,  // *const *mut f32
+    norm: usize,    // *const f32
+    buf: usize,     // *const f32
+    bq: usize,      // *mut BatchQ8K
+    h: usize,
+    f: usize,
+    n: usize,
+}
 
 impl LlamaState {
     /// GEMM-style batched prefill: load weight once, multiply all tokens.
+    /// Per-token rmsnorm/quantize/vecadd parallelized via ThreadPool.
     pub fn prefill(&mut self, model: &BitNetModel, tokens: &[u32]) {
         let n = tokens.len();
         let (h, hd, nh, nkv, kv, f) = (
@@ -31,13 +45,28 @@ impl LlamaState {
         let (mut attn_all, mut tmp_all, mut hidden_all) = (
             vec![0.0f32; n*h], vec![0.0f32; n*h], vec![0.0f32; n*f],
         );
+        let nt = self.pool.thread_count();
 
         for layer in 0..model.n_layers {
             let lw = &model.q4k_layers[layer];
-            for t in 0..n {
-                unsafe { ffi::rmsnorm_f32(xs[t].as_ptr(), lw.attn_norm, self.x_norm_pub.as_mut_ptr(), h as i32, model.rms_eps); }
-                bq_h.quantize(t, &self.x_norm_pub);
+
+            // ── Parallel rmsnorm + quantize (attn input) ──
+            {
+                let xs_raw: Vec<*const f32> = xs.iter().map(|x| x.as_ptr()).collect();
+                let w = W { xs: xs_raw.as_ptr() as usize, xs_mut: 0, norm: lw.attn_norm as usize, buf: 0, bq: &mut bq_h as *mut BatchQ8K as usize, h, f, n };
+                let eps = model.rms_eps;
+                self.pool.run(nt.min(n), move |tid, nt_used| unsafe {
+                    let mut nbuf = vec![0.0f32; w.h];
+                    let xs = w.xs as *const *const f32;
+                    let mut t = tid;
+                    while t < w.n {
+                        ffi::rmsnorm_f32(*xs.add(t), w.norm as *const f32, nbuf.as_mut_ptr(), w.h as i32, eps);
+                        (*(w.bq as *mut BatchQ8K)).quantize(t, &nbuf);
+                        t += nt_used;
+                    }
+                });
             }
+
             q4k_gemm_mt(lw.wq, h_rs, h_nb, &bq_h, &mut qs_all, h);
             q4k_gemm_mt(lw.wk, h_rs, h_nb, &bq_h, &mut ks_all, kv);
             if lw.wv_block_bytes == Q6K_BLOCK_BYTES {
@@ -45,6 +74,8 @@ impl LlamaState {
             } else {
                 q4k_gemm_mt(lw.wv, h_rs, h_nb, &bq_h, &mut vs_all, kv);
             }
+
+            // ── Attention (sequential — KV-cache dependency) ──
             self.kv_cache.restore(0).unwrap();
             for t in 0..n {
                 let (q, k, v) = (
@@ -68,24 +99,90 @@ impl LlamaState {
                 let attn = &mut attn_all[t*h..(t+1)*h];
                 cache::attention::attention_output(&self.kv_cache, scores, layer as i32, nh as i32, nkv as i32, seq_len as i32, attn);
             }
-            for t in 0..n { bq_h.quantize(t, &attn_all[t*h..(t+1)*h]); }
+
+            // ── Parallel quantize attn output ──
+            {
+                let w = W { xs: 0, xs_mut: 0, norm: 0, buf: attn_all.as_ptr() as usize, bq: &mut bq_h as *mut BatchQ8K as usize, h, f, n };
+                self.pool.run(nt.min(n), move |tid, nt_used| unsafe {
+                    let buf = w.buf as *const f32;
+                    let mut t = tid;
+                    while t < w.n {
+                        (*(w.bq as *mut BatchQ8K)).quantize(t, std::slice::from_raw_parts(buf.add(t * w.h), w.h));
+                        t += nt_used;
+                    }
+                });
+            }
+
             q4k_gemm_mt(lw.wo, h_rs, h_nb, &bq_h, &mut tmp_all, h);
-            for t in 0..n {
-                unsafe { ffi::vecadd_f32(xs[t].as_ptr(), tmp_all[t*h..].as_ptr(), xs[t].as_mut_ptr(), h as i32); }
+
+            // ── Parallel vecadd residual (attn) ──
+            {
+                let xs_raw: Vec<*mut f32> = xs.iter_mut().map(|x| x.as_mut_ptr()).collect();
+                let w = W { xs: 0, xs_mut: xs_raw.as_ptr() as usize, norm: 0, buf: tmp_all.as_ptr() as usize, bq: 0, h, f, n };
+                self.pool.run(nt.min(n), move |tid, nt_used| unsafe {
+                    let xm = w.xs_mut as *const *mut f32;
+                    let buf = w.buf as *const f32;
+                    let mut t = tid;
+                    while t < w.n {
+                        let x = *xm.add(t);
+                        ffi::vecadd_f32(x, buf.add(t * w.h), x, w.h as i32);
+                        t += nt_used;
+                    }
+                });
             }
-            for t in 0..n {
-                unsafe { ffi::rmsnorm_f32(xs[t].as_ptr(), lw.ffn_norm, self.x_norm_pub.as_mut_ptr(), h as i32, model.rms_eps); }
-                bq_h.quantize(t, &self.x_norm_pub);
+
+            // ── Parallel rmsnorm + quantize (ffn input) ──
+            {
+                let xs_raw: Vec<*const f32> = xs.iter().map(|x| x.as_ptr()).collect();
+                let w = W { xs: xs_raw.as_ptr() as usize, xs_mut: 0, norm: lw.ffn_norm as usize, buf: 0, bq: &mut bq_h as *mut BatchQ8K as usize, h, f, n };
+                let eps = model.rms_eps;
+                self.pool.run(nt.min(n), move |tid, nt_used| unsafe {
+                    let mut nbuf = vec![0.0f32; w.h];
+                    let xs = w.xs as *const *const f32;
+                    let mut t = tid;
+                    while t < w.n {
+                        ffi::rmsnorm_f32(*xs.add(t), w.norm as *const f32, nbuf.as_mut_ptr(), w.h as i32, eps);
+                        (*(w.bq as *mut BatchQ8K)).quantize(t, &nbuf);
+                        t += nt_used;
+                    }
+                });
             }
+
             q4k_fused_silu_gemm_mt(lw.w_gate, lw.w_up, h_rs, h_nb, &bq_h, &mut hidden_all, f);
-            for t in 0..n { bq_f.quantize(t, &hidden_all[t*f..(t+1)*f]); }
+
+            // ── Parallel quantize hidden ──
+            {
+                let w = W { xs: 0, xs_mut: 0, norm: 0, buf: hidden_all.as_ptr() as usize, bq: &mut bq_f as *mut BatchQ8K as usize, h, f, n };
+                self.pool.run(nt.min(n), move |tid, nt_used| unsafe {
+                    let buf = w.buf as *const f32;
+                    let mut t = tid;
+                    while t < w.n {
+                        (*(w.bq as *mut BatchQ8K)).quantize(t, std::slice::from_raw_parts(buf.add(t * w.f), w.f));
+                        t += nt_used;
+                    }
+                });
+            }
+
             if lw.w_down_block_bytes == Q6K_BLOCK_BYTES {
                 q6k_gemm_mt(lw.w_down, f_nb * Q6K_BLOCK_BYTES, f_nb, &bq_f, &mut tmp_all, h);
             } else {
                 q4k_gemm_mt(lw.w_down, f_nb * Q4K_BLOCK_BYTES, f_nb, &bq_f, &mut tmp_all, h);
             }
-            for t in 0..n {
-                unsafe { ffi::vecadd_f32(xs[t].as_ptr(), tmp_all[t*h..].as_ptr(), xs[t].as_mut_ptr(), h as i32); }
+
+            // ── Parallel vecadd residual (ffn) ──
+            {
+                let xs_raw: Vec<*mut f32> = xs.iter_mut().map(|x| x.as_mut_ptr()).collect();
+                let w = W { xs: 0, xs_mut: xs_raw.as_ptr() as usize, norm: 0, buf: tmp_all.as_ptr() as usize, bq: 0, h, f, n };
+                self.pool.run(nt.min(n), move |tid, nt_used| unsafe {
+                    let xm = w.xs_mut as *const *mut f32;
+                    let buf = w.buf as *const f32;
+                    let mut t = tid;
+                    while t < w.n {
+                        let x = *xm.add(t);
+                        ffi::vecadd_f32(x, buf.add(t * w.h), x, w.h as i32);
+                        t += nt_used;
+                    }
+                });
             }
         }
         self.x[..h].copy_from_slice(&xs[n - 1]);
