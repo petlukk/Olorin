@@ -141,7 +141,7 @@ pub fn find_model() -> Option<PathBuf> {
     let home = Path::new(&home);
     let paths = [
         home.join(".olorin/models/ggml-model-i2_s.gguf"),
-        home.join(".cougar/models/ggml-model-i2_s.gguf"),
+        home.join(".olorin/models/ggml-model-i2_s.gguf"),
     ];
     paths.into_iter().find(|p| p.exists())
 }
