@@ -16,6 +16,8 @@ use crate::core::handlers;
 use crate::core::llm::{self, ContentBlock, Message};
 use crate::core::safety;
 use crate::recall::VectorStore;
+use crate::storage::vault::Vault;
+use std::path::PathBuf;
 use std::time::Instant;
 
 // ── Public types ─────────────────────────────────────────────────────────────
@@ -40,8 +42,10 @@ impl Response {
 pub struct DispatchContext {
     /// Conversation history
     messages:     Vec<Message>,
-    /// Recall store for conversation search
+    /// Recall store for conversation search (session, in-memory)
     recall:       VectorStore,
+    /// Encrypted vault for persistent conversation storage
+    vault:        Option<Vault>,
     /// Anthropic cloud client (optional — requires API key)
     anthropic:    Option<AnthropicClient>,
     /// Last turn timing
@@ -57,14 +61,23 @@ impl DispatchContext {
     /// `api_key`: optional Anthropic API key for cloud inference.
     pub fn new(api_key: Option<String>) -> Self {
         let anthropic = api_key.map(AnthropicClient::new);
+        let vault = Self::open_vault();
         Self {
             messages:      Vec::new(),
             recall:        VectorStore::new(1024),
+            vault,
             anthropic,
             last_timing:   None,
             system_prompt: llm::SYSTEM_PROMPT.to_string(),
             _max_turns:    8,
         }
+    }
+
+    fn open_vault() -> Option<Vault> {
+        let home = std::env::var("HOME").ok()?;
+        let vault_dir = PathBuf::from(home).join(".olorin").join("vault").join("default");
+        std::fs::create_dir_all(&vault_dir).ok()?;
+        Vault::open(&vault_dir).ok()
     }
 
     /// Create with a custom system prompt.
@@ -152,10 +165,31 @@ impl DispatchContext {
             }
         }
 
-        // ── Step 4: Recall ───────────────────────────────────────────────
-        // Index user message and search for context.
+        // ── Step 4: Recall (sanitized input only) ────────────────────────
+        // Session recall (in-memory)
         self.recall.add(input);
-        let recall_context = self.recall.synthesize_context(input, 3);
+        let session_recall = self.recall.synthesize_context(input, 3);
+        let mut recall_text = session_recall.unwrap_or_default();
+
+        // Vault recall (encrypted history — zero-exposure search)
+        if let Some(ref mut vault) = self.vault {
+            if let Ok(vault_hits) = vault.search(input, 3) {
+                for hit in &vault_hits {
+                    for line in &hit.lines {
+                        if !line.trim().is_empty() {
+                            recall_text.push_str("\n[vault] ");
+                            recall_text.push_str(line);
+                        }
+                    }
+                }
+            }
+        }
+
+        let recall_context = if recall_text.is_empty() {
+            None
+        } else {
+            Some(recall_text)
+        };
 
         // ── Step 5: Inference ────────────────────────────────────────────
         self.messages.push(handlers::user_message(input));
@@ -182,6 +216,10 @@ impl DispatchContext {
                     self.recall.add(&guarded);
                 }
 
+                // ── Step 7: Save to vault (encrypted) ────────────────
+                self.vault_save(b"user", input.as_bytes());
+                self.vault_save(b"assistant", guarded.as_bytes());
+
                 self.messages.push(handlers::assistant_message(&guarded));
                 self.last_timing = Some(handlers::TurnTiming {
                     safety_scan_us: safety_us,
@@ -194,7 +232,14 @@ impl DispatchContext {
         }
     }
 
-    /// Clear conversation history.
+    /// Save a message to the encrypted vault. Silently ignores errors.
+    fn vault_save(&mut self, role: &[u8], content: &[u8]) {
+        if let Some(ref mut vault) = self.vault {
+            let _ = vault.append(role, content);
+        }
+    }
+
+    /// Clear conversation history (session only — vault is persistent).
     pub fn clear(&mut self) {
         self.messages.clear();
         self.recall.clear();
@@ -257,6 +302,9 @@ impl DispatchContext {
                         if scan.blocked {
                             Response::blocked("Tool output blocked by safety scan.")
                         } else {
+                            // Save tool interaction to vault
+                            self.vault_save(b"user", arg_str.as_bytes());
+                            self.vault_save(b"tool", output.as_bytes());
                             Response::text(output)
                         }
                     }
@@ -272,7 +320,12 @@ impl DispatchContext {
     fn execute_intent(&mut self, tool_name: &str, intent: i32, arg_bytes: &[u8]) -> Response {
         let params = dispatch::intent_to_params(intent, arg_bytes);
         match self.execute_tool(tool_name, &params) {
-            Ok(output) => Response::text(output),
+            Ok(output) => {
+                // Save intent interaction to vault
+                self.vault_save(b"user", arg_bytes);
+                self.vault_save(b"tool", output.as_bytes());
+                Response::text(output)
+            }
             Err(e) => Response::text(format!("Tool error: {e}")),
         }
     }
