@@ -6,12 +6,14 @@ pub fn run(args: &str) -> ToolResult {
         return ToolResult { output: "usage: calc <expression>".to_string(), success: false };
     }
     match expr_eval(expr) {
-        Ok(val) => ToolResult { output: val.to_string(), success: true },
+        Ok(val) => ToolResult { output: val, success: true },
         Err(e) => ToolResult { output: format!("calc error: {e}"), success: false },
     }
 }
 
-fn expr_eval(expr: &str) -> Result<i64, String> {
+const SCALE: i64 = 1_000_000;
+
+fn expr_eval(expr: &str) -> Result<String, String> {
     let mut val_stack: Vec<i64> = vec![0i64; 32];
     let mut op_stack: Vec<i32> = vec![0i32; 32];
 
@@ -39,5 +41,19 @@ fn expr_eval(expr: &str) -> Result<i64, String> {
         });
     }
 
-    Ok(out_result)
+    Ok(format_fixed_point(out_result))
+}
+
+fn format_fixed_point(value: i64) -> String {
+    let negative = value < 0;
+    let abs = value.unsigned_abs();
+    let whole = abs / SCALE as u64;
+    let frac = abs % SCALE as u64;
+    if frac == 0 {
+        if negative { format!("-{whole}") } else { format!("{whole}") }
+    } else {
+        let frac_str = format!("{:06}", frac);
+        let trimmed = frac_str.trim_end_matches('0');
+        if negative { format!("-{whole}.{trimmed}") } else { format!("{whole}.{trimmed}") }
+    }
 }

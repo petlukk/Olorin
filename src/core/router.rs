@@ -299,10 +299,8 @@ impl DispatchContext {
                 }
             }
             "time" => {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default();
-                Ok(format!("{}", now.as_secs()))
+                let r = crate::tools::time::run("");
+                Ok(r.output)
             }
             "cpu" => {
                 // Read /proc/loadavg on Linux

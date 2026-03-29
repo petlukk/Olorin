@@ -257,8 +257,11 @@ pub fn extract_math_expr(input: &str) -> String {
 
 // ── Eval expression (SIMD kernel) ────────────────────────────────────────────
 
+const SCALE: i64 = 1_000_000;
+
 /// Evaluate a math expression using the SIMD kernel.
-pub fn eval_expr(expr: &str) -> Result<i64> {
+/// Returns formatted string (kernel uses fixed-point with scale 1_000_000).
+pub fn eval_expr(expr: &str) -> Result<String> {
     let bytes = expr.as_bytes();
     let mut result: i64 = 0;
     let mut error: i32 = 0;
@@ -274,7 +277,21 @@ pub fn eval_expr(expr: &str) -> Result<i64> {
     if error != 0 {
         return Err(Error::Tool(format!("expression error: code {error}")));
     }
-    Ok(result)
+    Ok(format_fixed_point(result))
+}
+
+fn format_fixed_point(value: i64) -> String {
+    let negative = value < 0;
+    let abs = value.unsigned_abs();
+    let whole = abs / SCALE as u64;
+    let frac = abs % SCALE as u64;
+    if frac == 0 {
+        if negative { format!("-{whole}") } else { format!("{whole}") }
+    } else {
+        let frac_str = format!("{:06}", frac);
+        let trimmed = frac_str.trim_end_matches('0');
+        if negative { format!("-{whole}.{trimmed}") } else { format!("{whole}.{trimmed}") }
+    }
 }
 
 #[cfg(test)]
