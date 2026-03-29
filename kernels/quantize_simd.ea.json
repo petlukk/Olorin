@@ -1,5 +1,5 @@
 {
-  "library": "/home/peter/projects/olorin1/target/debug/build/olorin-b8f6e5b7101c0541/out/libquantize_simd.so",
+  "library": "/home/peter/projects/olorin1/target/release/build/olorin-83a3a20f43db2862/out/libquantize_simd.so",
   "exports": [
     {
       "name": "q4_quantize_split_f32",

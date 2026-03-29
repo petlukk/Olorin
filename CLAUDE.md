@@ -58,14 +58,16 @@ Single crate, single binary. No workspace.
 | `interface/server.rs` | Web UI + WhatsApp gateway (std::net, no tokio) |
 | `interface/exec.rs` | Process spawning (fork/exec) |
 | `kernels/ffi.rs` | KernelTable + core/safety/storage FFI wrappers |
-| `kernels/ffi_inference.rs` | Inference + eakv FFI wrappers |
+| `kernels/ffi_inference.rs` | Inference + KV-cache FFI wrappers |
+| `inference/generate.rs` | Public inference API — prompt in, text out |
 | `recall.rs` | VectorStore (session embeddings, SecureBuffer-backed) |
 | `tools/` | 19 built-in tools |
 
 ## The Olorin Pipe
 
-All input follows: Safety -> Slash -> Intent -> Recall -> Infer -> Guard -> Vault -> Response.
-Recall only sees post-safety sanitized input. No exceptions.
+All input follows: Safety -> Slash -> Intent -> Recall -> Infer -> Guard -> Vault save -> Response.
+Recall only sees post-safety sanitized input. All responses saved encrypted to vault. No exceptions.
+All tests in `tests/` — zero `#[cfg(test)]` in `src/`.
 
 ## Kernel Infrastructure
 
