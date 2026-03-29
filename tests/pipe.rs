@@ -68,3 +68,19 @@ fn test_pipe_unknown_command() {
     assert!(!response.blocked);
     assert!(response.text.contains("Unknown command"));
 }
+
+// ── terminal.rs tests ─────────────────────────────────────────────────────────
+
+#[test]
+fn test_dispatch_quit_returns_goodbye() {
+    let mut ctx = ctx();
+    let r = ctx.dispatch("/quit");
+    assert_eq!(r.text, "Goodbye!");
+}
+
+#[test]
+fn test_dispatch_time_returns_something() {
+    let mut ctx = ctx();
+    let r = ctx.dispatch("/time");
+    assert!(!r.text.is_empty());
+}

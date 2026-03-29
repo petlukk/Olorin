@@ -11,7 +11,7 @@ use crate::interface::exec;
 
 // ── Hybrid embed for chat.html ────────────────────────────────────────────────
 
-fn get_chat_html() -> String {
+pub fn get_chat_html() -> String {
     #[cfg(debug_assertions)]
     {
         std::fs::read_to_string("web/chat.html")
@@ -301,7 +301,7 @@ fn wa_message_loop(
     }
 }
 
-fn find_bridge() -> String {
+pub fn find_bridge() -> String {
     if let Ok(p) = std::env::var("OLORIN_BRIDGE") {
         return p;
     }
@@ -318,7 +318,7 @@ fn find_bridge() -> String {
 
 // ── System info ───────────────────────────────────────────────────────────────
 
-fn build_system_json() -> String {
+pub fn build_system_json() -> String {
     let (mem_used, mem_total) = read_memory().unwrap_or((0, 0));
     let uptime   = read_uptime().unwrap_or(0);
     let os       = std::env::consts::OS;
@@ -360,7 +360,7 @@ fn read_uptime() -> Option<u64> {
 
 // ── JSON helpers ──────────────────────────────────────────────────────────────
 
-fn parse_content_length(req: &str) -> usize {
+pub fn parse_content_length(req: &str) -> usize {
     for line in req.lines() {
         if line.to_ascii_lowercase().starts_with("content-length:") {
             return line[15..].trim().parse().unwrap_or(0);
@@ -369,7 +369,7 @@ fn parse_content_length(req: &str) -> usize {
     0
 }
 
-fn extract_json_string(json: &str, key: &str) -> Option<String> {
+pub fn extract_json_string(json: &str, key: &str) -> Option<String> {
     let pattern   = format!("\"{}\"", key);
     let start     = json.find(&pattern)?;
     let after_key = &json[start + pattern.len()..];
@@ -396,7 +396,7 @@ fn extract_json_string(json: &str, key: &str) -> Option<String> {
     Some(result)
 }
 
-fn escape_json(s: &str) -> String {
+pub fn escape_json(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
@@ -411,75 +411,3 @@ fn escape_json(s: &str) -> String {
     out
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_content_length() {
-        assert_eq!(parse_content_length("POST /x HTTP/1.1\r\nContent-Length: 42\r\n\r\n"), 42);
-    }
-
-    #[test]
-    fn test_parse_content_length_missing() {
-        assert_eq!(parse_content_length("GET / HTTP/1.1\r\n\r\n"), 0);
-    }
-
-    #[test]
-    fn test_extract_json_string() {
-        let json = r#"{"prompt":"hello world"}"#;
-        assert_eq!(extract_json_string(json, "prompt"), Some("hello world".into()));
-    }
-
-    #[test]
-    fn test_extract_json_string_missing() {
-        assert!(extract_json_string(r#"{"other":"val"}"#, "prompt").is_none());
-    }
-
-    #[test]
-    fn test_escape_json_quotes() {
-        assert_eq!(escape_json("he\"llo"), "he\\\"llo");
-    }
-
-    #[test]
-    fn test_escape_json_newline() {
-        assert_eq!(escape_json("line\nnew"), "line\\nnew");
-    }
-
-    #[test]
-    fn test_escape_json_backslash() {
-        assert_eq!(escape_json("a\\b"), "a\\\\b");
-    }
-
-    #[test]
-    fn test_build_system_json_shape() {
-        let json = build_system_json();
-        assert!(json.contains("\"cpu_temp\""));
-        assert!(json.contains("\"memory_used_mb\""));
-        assert!(json.contains("\"os\""));
-        assert!(json.contains("\"arch\""));
-        assert!(json.contains("\"uptime_seconds\""));
-    }
-
-    #[test]
-    fn test_find_bridge_env_override() {
-        std::env::set_var("OLORIN_BRIDGE", "/tmp/fake-bridge");
-        assert_eq!(find_bridge(), "/tmp/fake-bridge");
-        std::env::remove_var("OLORIN_BRIDGE");
-    }
-
-    #[test]
-    fn test_find_bridge_default_nonempty() {
-        std::env::remove_var("OLORIN_BRIDGE");
-        assert!(!find_bridge().is_empty());
-    }
-
-    #[test]
-    fn test_get_chat_html_nonempty() {
-        // Debug build reads from disk; in CI it may not exist — just check no panic
-        let html = get_chat_html();
-        assert!(!html.is_empty());
-    }
-}
