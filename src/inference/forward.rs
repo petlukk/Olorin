@@ -213,11 +213,11 @@ impl InferenceState {
 
             let scores = &mut self.attn_scores[..nh * seq_len];
             cache::attention::attention_scores(
-                &self.kv_cache, &self.q, layer as i32, nh as i32, nkv as i32, scores,
+                &self.kv_cache, &self.q, layer as i32, nh as i32, nkv as i32, seq_len as i32, scores,
             );
             softmax_rows(scores, nh, seq_len);
             cache::attention::attention_output(
-                &self.kv_cache, scores, layer as i32, nh as i32, nkv as i32, &mut self.attn_out,
+                &self.kv_cache, scores, layer as i32, nh as i32, nkv as i32, seq_len as i32, &mut self.attn_out,
             );
 
             unsafe {

@@ -48,6 +48,7 @@ impl InferenceState {
             i2s_gemm_mt(lw.wk, lw.wk_scale, &batch_h, &mut ks_all, kv, h, &self.pool);
             i2s_gemm_mt(lw.wv, lw.wv_scale, &batch_h, &mut vs_all, kv, h, &self.pool);
 
+            self.kv_cache.restore(0).unwrap();
             for t in 0..n {
                 let (q, k) = (
                     &mut qs_all[t * h..(t + 1) * h],
@@ -59,13 +60,13 @@ impl InferenceState {
                 let v_slice = &vs_all[t * kv..(t + 1) * kv];
                 self.kv_cache.append(k, layer as i32, 0, 1).unwrap();
                 self.kv_cache.append(v_slice, layer as i32, 1, 1).unwrap();
-                if layer == model.n_layers - 1 { self.kv_cache.advance(1).unwrap(); }
+                self.kv_cache.advance(1).unwrap();
                 let seq_len = t + 1;
                 let scores = &mut self.attn_scores[..nh * seq_len];
-                cache::attention::attention_scores(&self.kv_cache, q, layer as i32, nh as i32, nkv as i32, scores);
+                cache::attention::attention_scores(&self.kv_cache, q, layer as i32, nh as i32, nkv as i32, seq_len as i32, scores);
                 softmax_rows(scores, nh, seq_len);
                 let attn = &mut attn_all[t * h..(t + 1) * h];
-                cache::attention::attention_output(&self.kv_cache, scores, layer as i32, nh as i32, nkv as i32, attn);
+                cache::attention::attention_output(&self.kv_cache, scores, layer as i32, nh as i32, nkv as i32, seq_len as i32, attn);
             }
 
             for t in 0..n {

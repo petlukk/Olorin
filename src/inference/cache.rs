@@ -305,6 +305,7 @@ pub mod attention {
 
     /// Compute attention scores for all query heads against cached K vectors.
     /// `queries`: `[n_q_heads * head_dim]` f32.
+    /// `seq_len`: number of KV positions to attend over (including current token).
     /// `scores_out`: `[n_q_heads * seq_len]` f32.
     pub fn attention_scores(
         cache:      &EakvCache,
@@ -312,6 +313,7 @@ pub mod attention {
         layer:      i32,
         n_q_heads:  i32,
         n_kv_heads: i32,
+        seq_len:    i32,
         scores_out: &mut [f32],
     ) {
         let hd = cache.head_dim();
@@ -339,24 +341,24 @@ pub mod attention {
                 if n_q_heads == n_kv_heads {
                     ki::fused_k_score_64(
                         rot_q.as_ptr(), k_w.as_ptr(), k_s.as_ptr(), k_b.as_ptr(),
-                        scores_out.as_mut_ptr(), cache.seq_len(), n_q_heads, groups_per_head,
+                        scores_out.as_mut_ptr(), seq_len, n_q_heads, groups_per_head,
                     );
                 } else {
                     ki::fused_k_score_gqa_64(
                         rot_q.as_ptr(), k_w.as_ptr(), k_s.as_ptr(), k_b.as_ptr(),
-                        scores_out.as_mut_ptr(), cache.seq_len(),
+                        scores_out.as_mut_ptr(), seq_len,
                         n_q_heads, n_kv_heads, groups_per_head,
                     );
                 }
             } else if n_q_heads == n_kv_heads {
                 ki::fused_k_score(
                     rot_q.as_ptr(), k_w.as_ptr(), k_s.as_ptr(), k_b.as_ptr(),
-                    scores_out.as_mut_ptr(), cache.seq_len(), n_q_heads, groups_per_head,
+                    scores_out.as_mut_ptr(), seq_len, n_q_heads, groups_per_head,
                 );
             } else {
                 ki::fused_k_score_gqa(
                     rot_q.as_ptr(), k_w.as_ptr(), k_s.as_ptr(), k_b.as_ptr(),
-                    scores_out.as_mut_ptr(), cache.seq_len(),
+                    scores_out.as_mut_ptr(), seq_len,
                     n_q_heads, n_kv_heads, groups_per_head,
                 );
             }
@@ -365,6 +367,7 @@ pub mod attention {
 
     /// Compute attention output by summing V vectors weighted by softmax scores.
     /// `weights_in`: `[n_q_heads * seq_len]` f32 (softmax'd).
+    /// `seq_len`: number of KV positions (must match scores dimension).
     /// `output_out`: `[n_q_heads * head_dim]` f32.
     pub fn attention_output(
         cache:      &EakvCache,
@@ -372,6 +375,7 @@ pub mod attention {
         layer:      i32,
         n_q_heads:  i32,
         n_kv_heads: i32,
+        seq_len:    i32,
         output_out: &mut [f32],
     ) {
         let hd = cache.head_dim();
@@ -385,24 +389,24 @@ pub mod attention {
                 if n_q_heads == n_kv_heads {
                     ki::fused_v_sum_64(
                         weights_in.as_ptr(), v_w.as_ptr(), v_s.as_ptr(), v_b.as_ptr(),
-                        output_out.as_mut_ptr(), cache.seq_len(), n_q_heads, groups_per_head,
+                        output_out.as_mut_ptr(), seq_len, n_q_heads, groups_per_head,
                     );
                 } else {
                     ki::fused_v_sum_gqa_64(
                         weights_in.as_ptr(), v_w.as_ptr(), v_s.as_ptr(), v_b.as_ptr(),
-                        output_out.as_mut_ptr(), cache.seq_len(),
+                        output_out.as_mut_ptr(), seq_len,
                         n_q_heads, n_kv_heads, groups_per_head,
                     );
                 }
             } else if n_q_heads == n_kv_heads {
                 ki::fused_v_sum(
                     weights_in.as_ptr(), v_w.as_ptr(), v_s.as_ptr(), v_b.as_ptr(),
-                    output_out.as_mut_ptr(), cache.seq_len(), n_q_heads, groups_per_head,
+                    output_out.as_mut_ptr(), seq_len, n_q_heads, groups_per_head,
                 );
             } else {
                 ki::fused_v_sum_gqa(
                     weights_in.as_ptr(), v_w.as_ptr(), v_s.as_ptr(), v_b.as_ptr(),
-                    output_out.as_mut_ptr(), cache.seq_len(),
+                    output_out.as_mut_ptr(), seq_len,
                     n_q_heads, n_kv_heads, groups_per_head,
                 );
             }

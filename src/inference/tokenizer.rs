@@ -142,36 +142,87 @@ impl Tokenizer {
         let mut tokens: Vec<u32> = Vec::with_capacity(text.len());
         let mut remaining = text;
         while !remaining.is_empty() {
-            // Check if remaining starts with a special token
-            let mut found_special = false;
-            if remaining.starts_with("<|") {
-                if let Some(end) = remaining.find("|>") {
-                    let candidate = &remaining[..end + 2];
+            // Find next special token
+            if let Some(pos) = remaining.find("<|") {
+                // Encode text before the special token
+                if pos > 0 {
+                    tokens.extend(self.encode_segment(remaining[..pos].as_bytes()));
+                }
+                // Try to match a known special token
+                let after = &remaining[pos..];
+                if let Some(end) = after.find("|>") {
+                    let candidate = &after[..end + 2];
                     if let Some(&id) = self.token_to_id.get(candidate.as_bytes()) {
                         tokens.push(id);
-                        remaining = &remaining[candidate.len()..];
-                        found_special = true;
+                        remaining = &after[candidate.len()..];
+                        continue;
                     }
                 }
-            }
-            if !found_special {
-                // Encode next character (may be multi-byte UTF-8)
-                let ch = remaining.chars().next().unwrap();
-                let ch_len = ch.len_utf8();
-                let ch_bytes = &remaining.as_bytes()[..ch_len];
-                // Try full character first, fall back to byte-by-byte
-                if let Some(&id) = self.token_to_id.get(ch_bytes) {
-                    tokens.push(id);
-                } else {
-                    for &b in ch_bytes {
-                        tokens.push(self.token_to_id.get(&vec![b]).copied().unwrap_or(0));
-                    }
-                }
-                remaining = &remaining[ch_len..];
+                // Not a real special token — encode "<|" as text and continue
+                tokens.extend(self.encode_segment(remaining[..pos + 2].as_bytes()));
+                remaining = &remaining[pos + 2..];
+            } else {
+                // No more special tokens — encode the rest
+                tokens.extend(self.encode_segment(remaining.as_bytes()));
+                break;
             }
         }
 
-        // BPE merge loop: O(n^2) per merge, fine for short prompts
+        tokens
+    }
+
+    /// Encode a text segment (no special tokens) using SIMD pre-tokenizer.
+    /// Uses pretokenize kernel for span detection, then direct vocab lookup
+    /// per span (matching llama.cpp ignore_merges behavior for tiktoken).
+    /// Falls back to BPE merge for spans not in vocab.
+    fn encode_segment(&self, bytes: &[u8]) -> Vec<u32> {
+        use crate::kernels::ffi;
+
+        let len = bytes.len();
+        if len == 0 {
+            return Vec::new();
+        }
+
+        let mut flags = vec![0u8; len];
+        let mut boundaries = vec![0u8; len];
+
+        unsafe {
+            ffi::pretokenize(
+                bytes.as_ptr(),
+                flags.as_mut_ptr(),
+                boundaries.as_mut_ptr(),
+                len as i32,
+            );
+        }
+
+        // Collect spans from boundary array
+        let mut tokens: Vec<u32> = Vec::with_capacity(len / 3);
+        let mut span_start = 0;
+        for i in 1..=len {
+            if i == len || boundaries[i] == 1 {
+                let span = &bytes[span_start..i];
+                // Direct vocab lookup (ignore_merges, like llama.cpp for Llama 3)
+                if let Some(&id) = self.token_to_id.get(span) {
+                    tokens.push(id);
+                } else {
+                    tokens.extend(self.bpe_encode_span(span));
+                }
+                span_start = i;
+            }
+        }
+
+        tokens
+    }
+
+    /// BPE merge fallback for spans not found in vocab as a whole token.
+    fn bpe_encode_span(&self, span: &[u8]) -> Vec<u32> {
+        // Start with one token per byte
+        let mut tokens: Vec<u32> = Vec::with_capacity(span.len());
+        for &b in span {
+            tokens.push(self.token_to_id.get(&vec![b]).copied().unwrap_or(0));
+        }
+
+        // BPE merge loop
         loop {
             let mut best_score = f32::NEG_INFINITY;
             let mut best_idx = usize::MAX;
@@ -192,7 +243,6 @@ impl Tokenizer {
                 break;
             }
 
-            // Perform the merge at best_idx
             let mut merged = self.vocab[tokens[best_idx] as usize].clone();
             merged.extend_from_slice(&self.vocab[tokens[best_idx + 1] as usize]);
             let merge_id = self.token_to_id[&merged];

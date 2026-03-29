@@ -176,9 +176,9 @@ impl LlamaState {
 
         let seq_len = pos + 1;
         let scores = &mut self.attn_scores[..nh * seq_len];
-        cache::attention::attention_scores(&self.kv_cache, &self.q, layer as i32, nh as i32, nkv as i32, scores);
+        cache::attention::attention_scores(&self.kv_cache, &self.q, layer as i32, nh as i32, nkv as i32, seq_len as i32, scores);
         softmax_rows(scores, nh, seq_len);
-        cache::attention::attention_output(&self.kv_cache, scores, layer as i32, nh as i32, nkv as i32, &mut self.attn_out);
+        cache::attention::attention_output(&self.kv_cache, scores, layer as i32, nh as i32, nkv as i32, seq_len as i32, &mut self.attn_out);
 
         unsafe {
             ffi::quant_f32_q8k(self.attn_out.as_ptr(), self.attn_q8_qs.as_mut_ptr(),
@@ -262,6 +262,10 @@ impl LlamaState {
                 else { self.logits[idx] *= penalty; }
             }
         }
+    }
+
+    pub fn logits(&self) -> &[f32] {
+        &self.logits
     }
 
     pub fn sample_logits(&self, temperature: f32, top_k: usize, top_p: f32) -> u32 {

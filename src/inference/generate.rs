@@ -50,7 +50,7 @@ impl Engine {
 
     /// Generate text from a prompt. Calls `on_token` for each generated token.
     /// Returns the complete generated text.
-    pub fn generate(&self, prompt: &str, on_token: &dyn Fn(&str)) -> Result<String> {
+    pub fn generate(&self, prompt: &str, system: &str, on_token: &dyn Fn(&str)) -> Result<String> {
         let model = &self.model;
         let tokenizer = &self.tokenizer;
 
@@ -59,11 +59,15 @@ impl Engine {
         // Build prompt tokens — match each model's native format
         let mut tokens = vec![tokenizer.bos_id];
         if is_q4k {
-            let chat = format!(
-                "<|start_header_id|>user<|end_header_id|>\n\n\
-                 {prompt}<|eot_id|>\
-                 <|start_header_id|>assistant<|end_header_id|>\n\n"
-            );
+            let mut chat = String::new();
+            if !system.is_empty() {
+                chat.push_str("<|start_header_id|>system<|end_header_id|>\n\n");
+                chat.push_str(system);
+                chat.push_str("<|eot_id|>");
+            }
+            chat.push_str("<|start_header_id|>user<|end_header_id|>\n\n");
+            chat.push_str(prompt);
+            chat.push_str("<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n");
             tokens.extend(tokenizer.encode(&chat));
         } else {
             tokens.extend(tokenizer.encode(prompt));

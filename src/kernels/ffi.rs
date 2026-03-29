@@ -17,6 +17,7 @@ pub use embedded::KERNEL_COUNT;
 // ── Type aliases ──────────────────────────────────────────────────────────────
 
 type ClassifyBytesFn    = unsafe extern "C" fn(*const u8, *mut u8, i32);
+type PretokenizeFn      = unsafe extern "C" fn(*const u8, *mut u8, *mut u8, i32);
 type ScanPrefixesFn     = unsafe extern "C" fn(*const u8, i32, *mut i32, *mut i32);
 type MatchCommandFn     = unsafe extern "C" fn(*const u8, i32, *mut i32);
 type FusedSafetyFn      = unsafe extern "C" fn(*const u8, i32, *mut i32, *mut i32, *mut i32);
@@ -81,6 +82,7 @@ pub struct KernelTable {
     pub turbo_rotate:             TurboRotateFn,
     pub chacha20_encrypt:         Chacha20EncryptFn,
     pub chacha20_search_v2:       SearchV2Fn,
+    pub pretokenize:              PretokenizeFn,
 }
 
 // SAFETY: KernelTable holds function pointers and library handles.
@@ -169,6 +171,7 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
     let turbo_rotate_lib = load("turbo_rotate")?;
     let chacha20_lib    = load("chacha20")?;
     let chacha20_sv2    = load("chacha20_search_v2")?;
+    let pretokenize_lib = load("pretokenize")?;
 
     // Runtime CPU detection: prefer AVX-512 search kernel if available
     #[cfg(target_arch = "x86_64")]
@@ -237,11 +240,13 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
                 sym(&chacha20_lib, b"chacha20_encrypt\0")?),
             chacha20_search_v2: std::mem::transmute(
                 sym(&chacha20_sv2, b"chacha20_search_v2\0")?),
+            pretokenize: std::mem::transmute(
+                sym(&pretokenize_lib, b"pretokenize\0")?),
             libs: vec![
                 byte_classifier, leak_scanner, sanitizer, command_router,
                 fused_safety, intent_router, expr_eval,
                 zeroize_lib, search, jl_project_lib, turbo_rotate_lib,
-                chacha20_lib, chacha20_sv2,
+                chacha20_lib, chacha20_sv2, pretokenize_lib,
             ],
         };
         Ok(table)
@@ -375,6 +380,12 @@ pub unsafe fn chacha20_encrypt(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub unsafe fn pretokenize(
+    text: *const u8, flags: *mut u8, boundaries: *mut u8, len: i32,
+) {
+    (k().pretokenize)(text, flags, boundaries, len);
+}
+
 pub unsafe fn chacha20_search_v2(
     key: *const i32, nonce: *const i32, ctr_init: i32,
     ct_u8: *const u8, len: i32,

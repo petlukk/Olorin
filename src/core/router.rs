@@ -202,6 +202,10 @@ impl DispatchContext {
         self.messages.push(handlers::user_message(input));
 
         if let Some(engine) = &self.engine {
+            let system = match &recall_context {
+                Some(ctx) => format!("{}\n\n{ctx}", self.system_prompt),
+                None => self.system_prompt.clone(),
+            };
             let prompt = match &recall_context {
                 Some(ctx) => format!("{ctx}\n\n{}", self.last_user_text()),
                 None => self.last_user_text(),
@@ -227,7 +231,7 @@ impl DispatchContext {
                 let _ = tx_ref.send(StreamEvent::Token(token_text.to_string()));
             };
 
-            match engine.generate(&prompt, &on_token) {
+            match engine.generate(&prompt, &system, &on_token) {
                 Ok(_) => {
                     let text = full_text.lock().unwrap().clone();
                     if safety::scan_outbound(text.as_bytes()).blocked {
@@ -548,7 +552,7 @@ impl DispatchContext {
                 Some(ctx) => format!("{ctx}\n\n{}", self.last_user_text()),
                 None => self.last_user_text(),
             };
-            match engine.generate(&prompt, &|_| {}) {
+            match engine.generate(&prompt, &system, &|_| {}) {
                 Ok(text) => return Ok(text),
                 Err(e) => {
                     eprintln!("[olorin] local inference failed: {e}");
