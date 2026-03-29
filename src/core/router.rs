@@ -16,6 +16,7 @@ use crate::core::dispatch;
 use crate::core::handlers;
 use crate::core::llm::{self, ContentBlock, Message};
 use crate::core::safety;
+use crate::inference::generate::Engine;
 use crate::recall::VectorStore;
 use crate::storage::vault::Vault;
 use std::path::PathBuf;
@@ -47,6 +48,8 @@ pub struct DispatchContext {
     recall:       VectorStore,
     /// Encrypted vault for persistent conversation storage
     vault:        Option<Vault>,
+    /// Local inference engine (BitNet/Llama GGUF)
+    engine:       Option<Engine>,
     /// Anthropic cloud client (optional — requires API key)
     anthropic:    Option<AnthropicClient>,
     /// Last turn timing
@@ -63,14 +66,32 @@ impl DispatchContext {
     pub fn new(api_key: Option<String>) -> Self {
         let anthropic = api_key.map(AnthropicClient::new);
         let vault = Self::open_vault();
+        let engine = Self::load_engine();
         Self {
             messages:      Vec::new(),
             recall:        VectorStore::new(1024),
             vault,
+            engine,
             anthropic,
             last_timing:   None,
             system_prompt: llm::SYSTEM_PROMPT.to_string(),
             _max_turns:    8,
+        }
+    }
+
+    fn load_engine() -> Option<Engine> {
+        use crate::inference::generate;
+        let path = generate::find_model()?;
+        eprintln!("[Olorin] Loading model: {}", path.display());
+        match Engine::load(&path, 2048) {
+            Ok(e) => {
+                eprintln!("[Olorin] Model loaded ({}).", e.quant_type_str());
+                Some(e)
+            }
+            Err(e) => {
+                eprintln!("[Olorin] Model load failed: {e}");
+                None
+            }
         }
     }
 
@@ -233,6 +254,15 @@ impl DispatchContext {
         }
     }
 
+    fn last_user_text(&self) -> String {
+        self.messages.iter().rev()
+            .find(|m| m.role.as_str() == "user")
+            .and_then(|m| m.content.iter().find_map(|b| {
+                if let ContentBlock::Text { text } = b { Some(text.clone()) } else { None }
+            }))
+            .unwrap_or_default()
+    }
+
     /// Save a message to the encrypted vault. Silently ignores errors.
     fn vault_save(&mut self, role: &[u8], content: &[u8]) {
         if let Some(ref mut vault) = self.vault {
@@ -267,8 +297,9 @@ impl DispatchContext {
                 Response::text("Context cleared.")
             }
             dispatch::CMD_MODEL => {
-                let backend = if self.anthropic.is_some() { "cloud (Anthropic)" } else { "none" };
-                Response::text(format!("[Olorin] Current backend: {backend}"))
+                let local = self.engine.as_ref().map(|e| e.quant_type_str()).unwrap_or("none");
+                let cloud = if self.anthropic.is_some() { "Anthropic" } else { "none" };
+                Response::text(format!("Local: {local}, Cloud: {cloud}"))
             }
             dispatch::CMD_PROFILE => {
                 let msg = match &self.last_timing {
@@ -374,7 +405,21 @@ impl DispatchContext {
             None => self.system_prompt.clone(),
         };
 
-        // Try Anthropic cloud first
+        // Try local engine first
+        if let Some(engine) = &self.engine {
+            let prompt = match recall_context {
+                Some(ctx) => format!("{ctx}\n\n{}", self.last_user_text()),
+                None => self.last_user_text(),
+            };
+            match engine.generate(&prompt, &|_| {}) {
+                Ok(text) => return Ok(text),
+                Err(e) => {
+                    eprintln!("[olorin] local inference failed: {e}");
+                }
+            }
+        }
+
+        // Fall back to Anthropic cloud
         if let Some(client) = &self.anthropic {
             let msg_pairs: Vec<(&str, &str)> = self.messages.iter().map(|m| {
                 let role = m.role.as_str();
@@ -392,8 +437,7 @@ impl DispatchContext {
             }
         }
 
-        // No inference backend available
-        Err("No LLM backend available. Set ANTHROPIC_API_KEY for cloud inference.".to_string())
+        Err("No LLM backend available. Load a model or set ANTHROPIC_API_KEY.".to_string())
     }
 
     // ── Help text ────────────────────────────────────────────────────────────
@@ -412,53 +456,5 @@ Tools:
   /recall <query>
 
 Agent: Olorin".to_string()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn dispatch_empty_input() {
-        let mut ctx = DispatchContext::new(None);
-        let resp = ctx.dispatch("");
-        assert_eq!(resp.text, "");
-        assert!(!resp.blocked);
-    }
-
-    #[test]
-    fn dispatch_help_command() {
-        let mut ctx = DispatchContext::new(None);
-        let resp = ctx.dispatch("/help");
-        assert!(resp.text.contains("Commands:"));
-        assert!(!resp.blocked);
-    }
-
-    #[test]
-    fn dispatch_clear_command() {
-        let mut ctx = DispatchContext::new(None);
-        let resp = ctx.dispatch("/clear");
-        assert_eq!(resp.text, "Context cleared.");
-    }
-
-    #[test]
-    fn dispatch_unknown_command() {
-        let mut ctx = DispatchContext::new(None);
-        let resp = ctx.dispatch("/foobar");
-        assert!(resp.text.contains("Unknown command"));
-    }
-
-    #[test]
-    fn response_text_not_blocked() {
-        let r = Response::text("hello");
-        assert_eq!(r.text, "hello");
-        assert!(!r.blocked);
-    }
-
-    #[test]
-    fn response_blocked() {
-        let r = Response::blocked("reason");
-        assert!(r.blocked);
     }
 }

@@ -1,4 +1,5 @@
 pub mod engine;
+pub mod generate;
 pub mod gguf;
 pub mod tokenizer;
 pub mod cache;
