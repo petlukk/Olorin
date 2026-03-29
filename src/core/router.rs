@@ -280,39 +280,31 @@ impl DispatchContext {
     // ── Tool execution ───────────────────────────────────────────────────────
 
     /// Execute a tool by name with parameters.
-    /// Tools are stubs until Task 11 is implemented.
     fn execute_tool(
         &self,
         name: &str,
         params: &[(&str, String)],
     ) -> Result<String, String> {
-        // Built-in tools that use SIMD kernels directly
-        match name {
-            "calc" => {
-                let expr = params.iter()
-                    .find(|(k, _)| *k == "expr")
-                    .map(|(_, v)| v.as_str())
-                    .unwrap_or("");
-                match dispatch::eval_expr(expr) {
-                    Ok(result) => Ok(result.to_string()),
-                    Err(e) => Err(format!("{e}")),
-                }
-            }
-            "time" => {
-                let r = crate::tools::time::run("");
-                Ok(r.output)
-            }
-            "cpu" => {
-                // Read /proc/loadavg on Linux
-                match std::fs::read_to_string("/proc/loadavg") {
-                    Ok(load) => Ok(load.trim().to_string()),
-                    Err(_) => Ok("load info unavailable".to_string()),
-                }
-            }
-            _ => {
-                // Stub: tools module not yet implemented (Task 11)
-                Err(format!("tool '{name}' not yet implemented"))
-            }
+        // Calc uses SIMD kernel directly with fixed-point formatting
+        if name == "calc" {
+            let expr = params.iter()
+                .find(|(k, _)| *k == "expr")
+                .map(|(_, v)| v.as_str())
+                .unwrap_or("");
+            return match dispatch::eval_expr(expr) {
+                Ok(result) => Ok(result),
+                Err(e) => Err(format!("{e}")),
+            };
+        }
+
+        // All other tools go through the tool registry
+        let args = params.iter()
+            .map(|(_, v)| v.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        match crate::tools::run_tool(name, &args) {
+            Some(r) => if r.success { Ok(r.output) } else { Err(r.output) },
+            None => Err(format!("unknown tool: {name}")),
         }
     }
 
