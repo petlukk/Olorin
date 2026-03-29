@@ -4,55 +4,6 @@
 
 use crate::core::llm::{ContentBlock, LlmResponse, Message, Role, StopReason};
 use crate::core::tool_parse;
-use crate::kernels::ffi;
-
-// ── Output guard constants ───────────────────────────────────────────────────
-
-pub const ACTION_PASS:           i32 = 0;
-pub const ACTION_TRUNCATE_LINE:  i32 = 1;
-pub const ACTION_BLOCK:          i32 = 2;
-pub const ACTION_REDIRECT_CALC:  i32 = 3;
-pub const DEFAULT_MAX_LEN:       i32 = 4096;
-
-// ── Output guard ─────────────────────────────────────────────────────────────
-
-/// Run the SIMD output guard on response text.
-/// Returns (action, offset) where action determines what to do with the text.
-pub fn guard_output(text: &[u8], max_len: i32) -> (i32, usize) {
-    if text.is_empty() {
-        return (ACTION_PASS, 0);
-    }
-    let mut action: i32 = 0;
-    let mut offset: i32 = 0;
-    unsafe {
-        ffi::guard_output(
-            text.as_ptr(),
-            text.len() as i32,
-            max_len,
-            &mut action,
-            &mut offset,
-        );
-    }
-    (action, offset as usize)
-}
-
-/// Apply the output guard action to a text string.
-/// Returns the processed text (may be truncated, blocked, or passed through).
-pub fn apply_guard(text: &str) -> String {
-    let (action, offset) = guard_output(text.as_bytes(), DEFAULT_MAX_LEN);
-    match action {
-        ACTION_TRUNCATE_LINE => text[..offset].to_string(),
-        ACTION_BLOCK => "unknown".to_string(),
-        ACTION_REDIRECT_CALC => {
-            // Try to evaluate as math expression
-            match crate::core::dispatch::eval_expr(text) {
-                Ok(result) => result.to_string(),
-                Err(_) => text.to_string(),
-            }
-        }
-        _ => text.to_string(), // ACTION_PASS
-    }
-}
 
 // ── Message building ─────────────────────────────────────────────────────────
 

@@ -165,15 +165,45 @@ fn handle_generate(
         return;
     }
 
-    let response = {
-        let mut guard = ctx.lock().unwrap();
-        guard.dispatch(&prompt)
-    };
+    let (tx, rx) = std::sync::mpsc::channel();
 
-    let text = escape_json(&response.text);
-    let _ = write!(stream, "data: {{\"token\":\"{text}\",\"tps\":0.0}}\n\n");
+    let ctx_clone = ctx.clone();
+    let prompt_owned = prompt.to_string();
+    let sender = std::thread::spawn(move || {
+        let mut guard = ctx_clone.lock().unwrap();
+        guard.dispatch_streaming(&prompt_owned, tx);
+    });
+
+    let mut token_count: u64 = 0;
+    let mut decode_start: Option<std::time::Instant> = None;
+
+    for event in rx {
+        match event {
+            crate::core::router::StreamEvent::Token(tok) => {
+                token_count += 1;
+                let start = *decode_start.get_or_insert_with(std::time::Instant::now);
+                let elapsed = start.elapsed().as_secs_f64();
+                let tps = if token_count > 1 && elapsed > 0.0 {
+                    (token_count - 1) as f64 / elapsed
+                } else {
+                    0.0
+                };
+                let escaped = escape_json(&tok);
+                let _ = write!(stream, "data: {{\"token\":\"{escaped}\",\"tps\":{tps:.1}}}\n\n");
+                let _ = stream.flush();
+            }
+            crate::core::router::StreamEvent::Error(msg) => {
+                let escaped = escape_json(&msg);
+                let _ = write!(stream, "data: {{\"error\":\"{escaped}\"}}\n\n");
+                let _ = stream.flush();
+            }
+            crate::core::router::StreamEvent::Done { .. } => break,
+        }
+    }
+
     let _ = write!(stream, "data: [DONE]\n\n");
     let _ = stream.flush();
+    let _ = sender.join();
 }
 
 fn handle_command(
@@ -327,8 +357,9 @@ pub fn build_system_json() -> String {
         Some(t) => t.to_string(),
         None    => "null".to_string(),
     };
+    let cpu_percent = read_cpu_percent().unwrap_or(0);
     format!(
-        "{{\"cpu_percent\":0,\"cpu_temp\":{cpu_temp},\
+        "{{\"cpu_percent\":{cpu_percent},\"cpu_temp\":{cpu_temp},\
          \"memory_used_mb\":{mem_used},\"memory_total_mb\":{mem_total},\
          \"os\":\"{os}\",\"arch\":\"{arch}\",\"uptime_seconds\":{uptime}}}"
     )
@@ -351,6 +382,28 @@ fn read_memory() -> Option<(u64, u64)> {
 fn read_cpu_temp() -> Option<u32> {
     let s = std::fs::read_to_string("/sys/class/thermal/thermal_zone0/temp").ok()?;
     Some(s.trim().parse::<u32>().ok()? / 1000)
+}
+
+fn read_cpu_percent() -> Option<u32> {
+    // Read /proc/stat twice with a short gap to compute delta
+    let parse_idle = |s: &str| -> Option<(u64, u64)> {
+        let line = s.lines().find(|l| l.starts_with("cpu "))?;
+        let vals: Vec<u64> = line.split_whitespace().skip(1)
+            .filter_map(|v| v.parse().ok()).collect();
+        if vals.len() < 4 { return None; }
+        let total: u64 = vals.iter().sum();
+        let idle = vals[3];
+        Some((total, idle))
+    };
+    let s1 = std::fs::read_to_string("/proc/stat").ok()?;
+    let (t1, i1) = parse_idle(&s1)?;
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    let s2 = std::fs::read_to_string("/proc/stat").ok()?;
+    let (t2, i2) = parse_idle(&s2)?;
+    let dt = t2.saturating_sub(t1);
+    let di = i2.saturating_sub(i1);
+    if dt == 0 { return Some(0); }
+    Some((100 * (dt - di) / dt) as u32)
 }
 
 fn read_uptime() -> Option<u64> {

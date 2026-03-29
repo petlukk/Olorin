@@ -30,6 +30,16 @@ pub struct Response {
     pub blocked: bool,
 }
 
+/// Events emitted by streaming dispatch.
+pub enum StreamEvent {
+    /// A single token of output text.
+    Token(String),
+    /// Generation complete. Full text for vault/recall bookkeeping.
+    Done { full_text: String },
+    /// Error during generation.
+    Error(String),
+}
+
 impl Response {
     fn text(s: impl Into<String>) -> Self {
         Self { text: s.into(), blocked: false }
@@ -108,20 +118,20 @@ impl DispatchContext {
         self
     }
 
-    /// The Olorin Pipe — process a single input through the 6-step pipeline.
+    /// The Olorin Pipe — process a single input through the pipeline.
     ///
     /// ```text
     /// raw input
     ///     |
-    ///     +- 1. Safety Scan → BLOCK if dangerous
+    ///     +- 1. Safety Scan (inbound) → BLOCK if dangerous
     ///     +- 2. Slash Command? → tools direct
     ///     +- 3. Intent Router → kernel (calc/time/cpu/weather)
     ///     +- 4. Recall → vault context
     ///     +- 5. Inference → generate tokens
-    ///     +- 6. Output Guard → truncate/block
+    ///     +- 6. Leak Scan (outbound) + ChatML Trim
     ///     |
     ///     v
-    /// Response
+    /// Response → vault save
     /// ```
     pub fn dispatch(&mut self, input: &str) -> Response {
         let input = input.trim();
@@ -130,51 +140,194 @@ impl DispatchContext {
         }
 
         let safety_start = Instant::now();
-
-        // ── Step 1: Safety Scan ──────────────────────────────────────────
-        let scan = safety::scan(input.as_bytes());
+        let recall_context = match self.pre_inference(input) {
+            Err(early) => return early,
+            Ok(ctx) => ctx,
+        };
         let safety_us = safety_start.elapsed().as_micros() as u64;
 
+        // ── Inference ────────────────────────────────────────────────
+        self.messages.push(handlers::user_message(input));
+        let response = self.run_inference(&recall_context);
+
+        match response {
+            Ok(text) => {
+                if safety::scan_outbound(text.as_bytes()).blocked {
+                    return Response::blocked("Response blocked: potential secret leak.");
+                }
+                self.finalize_response(input, &text);
+                self.last_timing = Some(handlers::TurnTiming {
+                    safety_scan_us: safety_us,
+                    llm_call_ms: 0,
+                    tool_execs: vec![],
+                });
+                Response::text(text)
+            }
+            Err(e) => Response::text(format!("LLM error: {e}")),
+        }
+    }
+
+    /// Streaming variant of the Olorin Pipe.
+    /// Tokens stream via `tx` as they are generated. ChatML hallucinations
+    /// trigger early stop. Outbound leak scan runs on the complete text.
+    pub fn dispatch_streaming(
+        &mut self,
+        input: &str,
+        tx: std::sync::mpsc::Sender<StreamEvent>,
+    ) {
+        let input = input.trim();
+        if input.is_empty() {
+            let _ = tx.send(StreamEvent::Done { full_text: String::new() });
+            return;
+        }
+
+        let recall_context = match self.pre_inference(input) {
+            Err(resp) => {
+                if resp.blocked {
+                    let _ = tx.send(StreamEvent::Error(resp.text.clone()));
+                } else {
+                    let _ = tx.send(StreamEvent::Token(resp.text.clone()));
+                }
+                let _ = tx.send(StreamEvent::Done { full_text: resp.text });
+                return;
+            }
+            Ok(ctx) => ctx,
+        };
+
+        // ── Streaming Inference ──────────────────────────────────────
+        self.messages.push(handlers::user_message(input));
+
+        if let Some(engine) = &self.engine {
+            let prompt = match &recall_context {
+                Some(ctx) => format!("{ctx}\n\n{}", self.last_user_text()),
+                None => self.last_user_text(),
+            };
+
+            let full_text = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+            let full_ref = full_text.clone();
+            let tx_ref = tx.clone();
+            let stopped = std::sync::Arc::new(
+                std::sync::atomic::AtomicBool::new(false),
+            );
+            let stopped_ref = stopped.clone();
+
+            let on_token = move |token_text: &str| {
+                if stopped_ref.load(std::sync::atomic::Ordering::Relaxed) {
+                    return;
+                }
+                if safety::is_chatml_hallucination(token_text) {
+                    stopped_ref.store(true, std::sync::atomic::Ordering::Relaxed);
+                    return;
+                }
+                full_ref.lock().unwrap().push_str(token_text);
+                let _ = tx_ref.send(StreamEvent::Token(token_text.to_string()));
+            };
+
+            match engine.generate(&prompt, &on_token) {
+                Ok(_) => {
+                    let text = full_text.lock().unwrap().clone();
+                    if safety::scan_outbound(text.as_bytes()).blocked {
+                        let _ = tx.send(StreamEvent::Error(
+                            "Response blocked: potential secret leak.".to_string(),
+                        ));
+                        let _ = tx.send(StreamEvent::Done {
+                            full_text: String::new(),
+                        });
+                        return;
+                    }
+                    self.finalize_response(input, &text);
+                    let _ = tx.send(StreamEvent::Done { full_text: text });
+                    return;
+                }
+                Err(e) => eprintln!("[olorin] local inference failed: {e}"),
+            }
+        }
+
+        // Cloud fallback — not streamable, send as single token
+        if let Some(client) = &self.anthropic {
+            let system = match &recall_context {
+                Some(ctx) => format!("{}\n\n{ctx}", self.system_prompt),
+                None => self.system_prompt.clone(),
+            };
+            let msg_pairs: Vec<(&str, &str)> = self.messages.iter().map(|m| {
+                let role = m.role.as_str();
+                let text: &str = m.content.iter().find_map(|b| {
+                    if let ContentBlock::Text { text } = b {
+                        Some(text.as_str())
+                    } else {
+                        None
+                    }
+                }).unwrap_or("");
+                (role, text)
+            }).collect();
+
+            match client.generate(&system, &msg_pairs) {
+                Ok(text) => {
+                    if safety::scan_outbound(text.as_bytes()).blocked {
+                        let _ = tx.send(StreamEvent::Error(
+                            "Response blocked: potential secret leak.".to_string(),
+                        ));
+                        let _ = tx.send(StreamEvent::Done {
+                            full_text: String::new(),
+                        });
+                        return;
+                    }
+                    let _ = tx.send(StreamEvent::Token(text.clone()));
+                    self.finalize_response(input, &text);
+                    let _ = tx.send(StreamEvent::Done { full_text: text });
+                    return;
+                }
+                Err(e) => eprintln!("[olorin] cloud inference failed: {e}"),
+            }
+        }
+
+        let msg = "No LLM backend available. Load a model or set ANTHROPIC_API_KEY."
+            .to_string();
+        let _ = tx.send(StreamEvent::Error(msg));
+        let _ = tx.send(StreamEvent::Done {
+            full_text: String::new(),
+        });
+    }
+
+    /// Steps 1-4: safety scan, slash, intent, recall.
+    /// Returns Ok(recall_context) to continue to inference,
+    /// or Err(Response) for early exit (command, tool, blocked).
+    fn pre_inference(&mut self, input: &str) -> Result<Option<String>, Response> {
+        // ── Step 1: Safety Scan ──────────────────────────────────────
+        let scan = safety::scan(input.as_bytes());
         if scan.blocked {
             let details: Vec<String> = scan.details.iter().map(|w| {
                 format!("  - {} at position {}", w.pattern, w.position)
             }).collect();
-            return Response::blocked(format!(
+            return Err(Response::blocked(format!(
                 "Input blocked:\n{}", details.join("\n")
-            ));
+            )));
         }
 
-        // ── Step 2: Slash Command ────────────────────────────────────────
+        // ── Step 2: Slash Command ────────────────────────────────────
         let input_bytes = input.as_bytes();
         let (cmd_id, cmd_arg) = dispatch::match_command(input_bytes);
 
-        // Meta commands
         if cmd_id >= dispatch::CMD_HELP && cmd_id <= dispatch::CMD_PROFILE {
-            return self.handle_meta(cmd_id);
+            return Err(self.handle_meta(cmd_id));
         }
-
         if cmd_id == dispatch::CMD_TASKS {
-            return Response::text("No background tasks.");
+            return Err(Response::text("No background tasks."));
         }
-
         if cmd_id == dispatch::CMD_RECALL {
             let query = String::from_utf8_lossy(cmd_arg);
-            return Response::text(self.recall.recall_formatted(&query, 5));
+            return Err(Response::text(self.recall.recall_formatted(&query, 5)));
         }
-
-        // Tool commands
         if cmd_id >= dispatch::CMD_TOOL_FIRST && cmd_id <= dispatch::CMD_TOOL_LAST {
-            return self.handle_tool_command(cmd_id, cmd_arg);
+            return Err(self.handle_tool_command(cmd_id, cmd_arg));
         }
-
-        // Unknown slash command
         if input.starts_with('/') && cmd_id == dispatch::CMD_NONE {
-            return Response::text(format!(
+            return Err(Response::text(format!(
                 "Unknown command: {input}. Type /help for available commands."
-            ));
+            )));
         }
 
-        // ── Step 3: Intent Router ────────────────────────────────────────
+        // ── Step 3: Intent Router ────────────────────────────────────
         let (intent, arg_start, arg_len) = dispatch::classify_intent(input_bytes);
         if intent != dispatch::INTENT_NONE {
             if let Some(tool_name) = dispatch::intent_to_tool_name(intent) {
@@ -183,17 +336,15 @@ impl DispatchContext {
                 } else {
                     &[]
                 };
-                return self.execute_intent(tool_name, intent, arg_bytes);
+                return Err(self.execute_intent(tool_name, intent, arg_bytes));
             }
         }
 
-        // ── Step 4: Recall (sanitized input only) ────────────────────────
-        // Session recall (in-memory)
+        // ── Step 4: Recall ───────────────────────────────────────────
         self.recall.add(input);
         let session_recall = self.recall.synthesize_context(input, 3);
         let mut recall_text = session_recall.unwrap_or_default();
 
-        // Vault recall (encrypted history — zero-exposure search)
         if let Some(ref mut vault) = self.vault {
             if let Ok(vault_hits) = vault.search(input, 3) {
                 for hit in &vault_hits {
@@ -207,51 +358,17 @@ impl DispatchContext {
             }
         }
 
-        let recall_context = if recall_text.is_empty() {
-            None
-        } else {
-            Some(recall_text)
-        };
+        Ok(if recall_text.is_empty() { None } else { Some(recall_text) })
+    }
 
-        // ── Step 5: Inference ────────────────────────────────────────────
-        self.messages.push(handlers::user_message(input));
-        let response = self.run_inference(&recall_context);
-
-        let llm_ms = match &response {
-            Ok(_) => 0, // timing would be set inside run_inference
-            Err(_) => 0,
-        };
-
-        match response {
-            Ok(text) => {
-                // ── Step 6: Output Guard ─────────────────────────────────
-                let guarded = handlers::apply_guard(&text);
-
-                // Safety scan on output
-                let output_scan = safety::scan(guarded.as_bytes());
-                if output_scan.blocked {
-                    return Response::blocked("LLM response blocked by safety scan.");
-                }
-
-                // Index assistant response for recall
-                if !guarded.trim().is_empty() {
-                    self.recall.add(&guarded);
-                }
-
-                // ── Step 7: Save to vault (encrypted) ────────────────
-                self.vault_save(b"user", input.as_bytes());
-                self.vault_save(b"assistant", guarded.as_bytes());
-
-                self.messages.push(handlers::assistant_message(&guarded));
-                self.last_timing = Some(handlers::TurnTiming {
-                    safety_scan_us: safety_us,
-                    llm_call_ms: llm_ms,
-                    tool_execs: vec![],
-                });
-                Response::text(guarded)
-            }
-            Err(e) => Response::text(format!("LLM error: {e}")),
+    /// Post-inference bookkeeping: recall index + vault save + message history.
+    fn finalize_response(&mut self, input: &str, text: &str) {
+        if !text.trim().is_empty() {
+            self.recall.add(text);
         }
+        self.vault_save(b"user", input.as_bytes());
+        self.vault_save(b"assistant", text.as_bytes());
+        self.messages.push(handlers::assistant_message(text));
     }
 
     fn last_user_text(&self) -> String {

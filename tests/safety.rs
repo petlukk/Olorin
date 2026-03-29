@@ -42,3 +42,53 @@ fn test_safety_empty_input() {
     assert!(!result.has_leak);
     assert!(result.details.is_empty());
 }
+
+#[test]
+fn test_outbound_allows_injection_patterns() {
+    ffi::init().unwrap();
+    let result = safety::scan_outbound(b"assistant: here is your answer");
+    assert!(!result.blocked);
+}
+
+#[test]
+fn test_outbound_blocks_api_key_leak() {
+    ffi::init().unwrap();
+    let result = safety::scan_outbound(b"Your key is sk-ant-api03-xxxxxxxxxxxxxxxxxxxx");
+    assert!(result.blocked);
+    assert!(result.has_leak);
+}
+
+#[test]
+fn test_outbound_allows_normal_text() {
+    ffi::init().unwrap();
+    let result = safety::scan_outbound(b"The weather in Stockholm is 12C and sunny.");
+    assert!(!result.blocked);
+}
+
+#[test]
+fn test_chatml_detects_inst_tag() {
+    assert!(safety::is_chatml_hallucination("[INST]"));
+    assert!(safety::is_chatml_hallucination("[/INST]"));
+}
+
+#[test]
+fn test_chatml_detects_special_tokens() {
+    assert!(safety::is_chatml_hallucination("<|im_start|>"));
+    assert!(safety::is_chatml_hallucination("<|im_end|>"));
+    assert!(safety::is_chatml_hallucination("<|end_header_id|>"));
+    assert!(safety::is_chatml_hallucination("<|eot_id|>"));
+}
+
+#[test]
+fn test_chatml_detects_role_headers() {
+    assert!(safety::is_chatml_hallucination("user:"));
+    assert!(safety::is_chatml_hallucination("assistant:"));
+    assert!(safety::is_chatml_hallucination("system:"));
+}
+
+#[test]
+fn test_chatml_allows_normal_text() {
+    assert!(!safety::is_chatml_hallucination("Hello"));
+    assert!(!safety::is_chatml_hallucination("The system works"));
+    assert!(!safety::is_chatml_hallucination("42"));
+}

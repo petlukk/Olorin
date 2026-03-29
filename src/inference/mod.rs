@@ -4,6 +4,7 @@ pub mod gguf;
 pub mod tokenizer;
 pub mod cache;
 pub(crate) mod ptr;
+pub mod threadpool;
 pub mod matmul;
 pub mod matmul_q4k;
 pub mod matmul_q6k;

@@ -95,6 +95,56 @@ pub fn scan(input: &[u8]) -> ScanResult {
     }
 }
 
+/// Outbound safety scan — only checks for secret leaks.
+/// Injection patterns are expected in LLM output (ChatML headers etc.)
+/// and must NOT trigger blocking.
+pub fn scan_outbound(input: &[u8]) -> ScanResult {
+    if input.is_empty() {
+        return ScanResult { blocked: false, has_leak: false, details: Vec::new() };
+    }
+
+    let len = input.len() as i32;
+    let n_blocks = (input.len() + 15) / 16;
+
+    let mut inject_masks = vec![0i32; n_blocks];
+    let mut leak_masks   = vec![0i32; n_blocks];
+    let mut n_out        = 0i32;
+
+    unsafe {
+        ffi::scan_safety_fused(
+            input.as_ptr(),
+            len,
+            inject_masks.as_mut_ptr(),
+            leak_masks.as_mut_ptr(),
+            &mut n_out,
+        );
+    }
+
+    let mut details = Vec::new();
+
+    // Only verify leak candidates — skip injection entirely
+    let mut checked = std::collections::HashSet::new();
+    for_each_candidate(&leak_masks, n_out as usize, |pos| {
+        if checked.insert(pos) {
+            verify_leak_at(input, pos, &mut details);
+        }
+    });
+    let leak_simd_covered = (input.len() / 16) * 16;
+    for pos in leak_simd_covered..input.len() {
+        if checked.insert(pos) {
+            verify_leak_at(input, pos, &mut details);
+        }
+    }
+
+    let has_leak = !details.is_empty();
+
+    ScanResult {
+        blocked: has_leak,
+        has_leak,
+        details,
+    }
+}
+
 // ── Injection patterns ────────────────────────────────────────────────────────
 
 const INJECTION_PATTERNS: &[(&[u8], &str)] = &[
@@ -203,6 +253,40 @@ fn verify_leak_at(text: &[u8], pos: usize, out: &mut Vec<SafetyWarning>) {
             return;
         }
     }
+}
+
+// ── ChatML hallucination detection ───────────────────────────────────────────
+
+const CHATML_PATTERNS: &[&[u8]] = &[
+    b"<|im_start|>",
+    b"<|im_end|>",
+    b"<|end_header_id|>",
+    b"<|start_header_id|>",
+    b"<|eot_id|>",
+    b"<|",
+    b"[INST]",
+    b"[/INST]",
+    b"user:",
+    b"assistant:",
+    b"system:",
+];
+
+/// Returns true if the token looks like a ChatML/prompt header hallucination.
+/// Used for aggressive trimming during streaming: if true, stop generation.
+pub fn is_chatml_hallucination(token: &str) -> bool {
+    let lower = token.as_bytes();
+    for pat in CHATML_PATTERNS {
+        if lower.len() >= pat.len() {
+            let matches = lower[..pat.len()]
+                .iter()
+                .zip(pat.iter())
+                .all(|(a, b)| a.to_ascii_lowercase() == b.to_ascii_lowercase());
+            if matches {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

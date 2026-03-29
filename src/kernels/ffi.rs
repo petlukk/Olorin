@@ -21,7 +21,6 @@ type ScanPrefixesFn     = unsafe extern "C" fn(*const u8, i32, *mut i32, *mut i3
 type MatchCommandFn     = unsafe extern "C" fn(*const u8, i32, *mut i32);
 type FusedSafetyFn      = unsafe extern "C" fn(*const u8, i32, *mut i32, *mut i32, *mut i32);
 type ClassifyIntentFn   = unsafe extern "C" fn(*const u8, i32, *mut i32, *mut i32, *mut i32);
-type GuardOutputFn      = unsafe extern "C" fn(*const u8, i32, i32, *mut i32, *mut i32);
 type EvalExprFn         = unsafe extern "C" fn(*const u8, i32, *mut i64, *mut i32, *mut i64, *mut i32);
 type ZeroizeFn          = unsafe extern "C" fn(*mut u8, i32);
 type BatchDotFn         = unsafe extern "C" fn(*const f32, *const f32, i32, i32, *mut f32);
@@ -67,7 +66,6 @@ pub struct KernelTable {
     pub match_command:            MatchCommandFn,
     pub scan_safety_fused:        FusedSafetyFn,
     pub classify_intent:          ClassifyIntentFn,
-    pub guard_output:             GuardOutputFn,
     pub eval_expr:                EvalExprFn,
     pub zeroize:                  ZeroizeFn,
     pub batch_dot:                BatchDotFn,
@@ -165,7 +163,6 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
     let command_router  = load("command_router")?;
     let fused_safety    = load("fused_safety")?;
     let intent_router   = load("intent_router")?;
-    let output_guard    = load("output_guard")?;
     let expr_eval       = load("expr_eval")?;
     let zeroize_lib     = load("zeroize")?;
     let jl_project_lib  = load("jl_project")?;
@@ -210,8 +207,6 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
                 sym(&fused_safety, b"scan_safety_fused\0")?),
             classify_intent: std::mem::transmute(
                 sym(&intent_router, b"classify_intent\0")?),
-            guard_output: std::mem::transmute(
-                sym(&output_guard, b"guard_output\0")?),
             eval_expr: std::mem::transmute(
                 sym(&expr_eval, b"eval_expr\0")?),
             zeroize: std::mem::transmute(
@@ -244,7 +239,7 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
                 sym(&chacha20_sv2, b"chacha20_search_v2\0")?),
             libs: vec![
                 byte_classifier, leak_scanner, sanitizer, command_router,
-                fused_safety, intent_router, output_guard, expr_eval,
+                fused_safety, intent_router, expr_eval,
                 zeroize_lib, search, jl_project_lib, turbo_rotate_lib,
                 chacha20_lib, chacha20_sv2,
             ],
@@ -287,13 +282,6 @@ pub unsafe fn classify_intent(
     out_intent: *mut i32, out_arg_start: *mut i32, out_arg_len: *mut i32,
 ) {
     (k().classify_intent)(text, len, out_intent, out_arg_start, out_arg_len);
-}
-
-pub unsafe fn guard_output(
-    text: *const u8, len: i32, max_len: i32,
-    out_action: *mut i32, out_offset: *mut i32,
-) {
-    (k().guard_output)(text, len, max_len, out_action, out_offset);
 }
 
 pub unsafe fn eval_expr(

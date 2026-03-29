@@ -39,7 +39,7 @@ Single crate, single binary. No workspace.
 | `core/anthropic.rs` | Cloud fallback via curl subprocess |
 | `core/llm.rs` | Message types, ChatML formatting |
 | `core/dispatch.rs` | Command routing + intent classification |
-| `core/handlers.rs` | LLM turn handling + output guard |
+| `core/handlers.rs` | LLM turn handling + message building |
 | `core/tool_parse.rs` | Streaming tool_call XML detector |
 | `inference/engine.rs` | BitNet/Llama model loading |
 | `inference/forward.rs` | BitNet forward pass |
@@ -65,7 +65,7 @@ Single crate, single binary. No workspace.
 
 ## The Olorin Pipe
 
-All input follows: Safety -> Slash -> Intent -> Recall -> Infer -> Guard -> Vault save -> Response.
+All input follows: Safety -> Slash -> Intent -> Recall -> Infer -> Vault save -> Response.
 Recall only sees post-safety sanitized input. All responses saved encrypted to vault. No exceptions.
 All tests in `tests/` — zero `#[cfg(test)]` in `src/`.
 

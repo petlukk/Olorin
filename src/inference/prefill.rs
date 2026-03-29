@@ -44,9 +44,9 @@ impl InferenceState {
                 batch_h.quantize(t, &self.x_norm);
             }
 
-            i2s_gemm_mt(lw.wq, lw.wq_scale, &batch_h, &mut qs_all, h, h);
-            i2s_gemm_mt(lw.wk, lw.wk_scale, &batch_h, &mut ks_all, kv, h);
-            i2s_gemm_mt(lw.wv, lw.wv_scale, &batch_h, &mut vs_all, kv, h);
+            i2s_gemm_mt(lw.wq, lw.wq_scale, &batch_h, &mut qs_all, h, h, &self.pool);
+            i2s_gemm_mt(lw.wk, lw.wk_scale, &batch_h, &mut ks_all, kv, h, &self.pool);
+            i2s_gemm_mt(lw.wv, lw.wv_scale, &batch_h, &mut vs_all, kv, h, &self.pool);
 
             for t in 0..n {
                 let (q, k) = (
@@ -77,7 +77,7 @@ impl InferenceState {
                 }
                 batch_h.quantize(t, &attn_all[t * h..(t + 1) * h]);
             }
-            i2s_gemm_mt(lw.wo, lw.wo_scale, &batch_h, &mut tmp_all, h, h);
+            i2s_gemm_mt(lw.wo, lw.wo_scale, &batch_h, &mut tmp_all, h, h, &self.pool);
 
             for t in 0..n {
                 unsafe {
@@ -101,6 +101,7 @@ impl InferenceState {
                 lw.w_gate, lw.w_gate_scale,
                 lw.w_up, lw.w_up_scale,
                 &batch_h, &mut hidden_all, f, h,
+                &self.pool,
             );
 
             for t in 0..n {
@@ -115,6 +116,7 @@ impl InferenceState {
             i2s_gemm_mt(
                 lw.w_down, lw.w_down_scale, &batch_f,
                 &mut tmp_all, h, f,
+                &self.pool,
             );
 
             for t in 0..n {
@@ -148,6 +150,7 @@ impl InferenceState {
                     &model.embed_weight_i8, &model.embed_row_scales,
                     &self.x_norm, &mut self.logits,
                     model.vocab_size, h,
+                    &self.pool,
                 );
             }
         }
@@ -156,6 +159,7 @@ impl InferenceState {
             &model.embed_weight_i8, &model.embed_row_scales,
             &self.x_norm, &mut self.logits,
             model.vocab_size, h,
+            &self.pool,
         );
     }
 }

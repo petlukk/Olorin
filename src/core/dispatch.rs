@@ -46,11 +46,12 @@ pub const CMD_TOOL_FIRST: i32 = CMD_TIME;
 pub const CMD_TOOL_LAST:  i32 = CMD_REMIND;
 
 // Intent constants from classify_intent kernel
-pub const INTENT_NONE:    i32 = 0;
-pub const INTENT_CALC:    i32 = 1;
-pub const INTENT_TIME:    i32 = 2;
-pub const INTENT_CPU:     i32 = 3;
-pub const INTENT_WEATHER: i32 = 4;
+// Kernel: 0=CALC, 1=TIME, 2=CPU, 3=WEATHER, -1=NONE
+pub const INTENT_NONE:    i32 = -1;
+pub const INTENT_CALC:    i32 = 0;
+pub const INTENT_TIME:    i32 = 1;
+pub const INTENT_CPU:     i32 = 2;
+pub const INTENT_WEATHER: i32 = 3;
 
 /// Full command names for two-stage verification.
 const ALL_CMD_NAMES: &[(i32, &str)] = &[
@@ -152,8 +153,30 @@ pub fn intent_to_params(intent: i32, arg_bytes: &[u8]) -> Vec<(&'static str, Str
             let expr = extract_math_expr(arg_str);
             vec![("expr", expr)]
         }
+        INTENT_WEATHER => {
+            // Kernel returns full input — extract city after keyword
+            let city = extract_after_keyword(arg_str, &["weather", "väder"]);
+            vec![("city", city)]
+        }
         _ => vec![],
     }
+}
+
+/// Extract the text after a keyword, stripping common prepositions.
+fn extract_after_keyword(input: &str, keywords: &[&str]) -> String {
+    let lower = input.to_ascii_lowercase();
+    for kw in keywords {
+        if let Some(pos) = lower.find(kw) {
+            let after = input[pos + kw.len()..].trim();
+            // Strip "in" / "i" prepositions
+            let after = after.strip_prefix("in ").or_else(|| after.strip_prefix("i "))
+                .unwrap_or(after).trim();
+            if !after.is_empty() {
+                return after.to_string();
+            }
+        }
+    }
+    input.to_string()
 }
 
 // ── Tool parameter building ─────────────────────────────────────────────────

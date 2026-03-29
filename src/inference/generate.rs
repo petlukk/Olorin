@@ -12,7 +12,10 @@ use crate::inference::gguf::GgufFile;
 use crate::inference::tokenizer::Tokenizer;
 
 pub struct Engine {
-    gguf: GgufFile,
+    /// Backing GGUF data — must outlive model (raw pointers into mmap).
+    _gguf: GgufFile,
+    model: BitNetModel,
+    tokenizer: Tokenizer,
     max_seq_len: usize,
     pub max_tokens: usize,
     pub temperature: f32,
@@ -22,11 +25,15 @@ pub struct Engine {
 }
 
 impl Engine {
-    /// Load a GGUF model from disk.
+    /// Load a GGUF model from disk. Parses weights and tokenizer once.
     pub fn load(path: &Path, max_seq_len: usize) -> Result<Self> {
         let gguf = GgufFile::open(path)?;
+        let model = BitNetModel::from_gguf(&gguf)?;
+        let tokenizer = Tokenizer::from_gguf(&gguf)?;
         Ok(Engine {
-            gguf,
+            _gguf: gguf,
+            model,
+            tokenizer,
             max_seq_len,
             max_tokens: 128,
             temperature: 0.1,
@@ -38,23 +45,14 @@ impl Engine {
 
     /// Detect quantization type of the loaded model.
     pub fn quant_type_str(&self) -> &str {
-        let idx = self.gguf.tensor_map.get("blk.0.attn_q.weight")
-            .or_else(|| self.gguf.tensor_map.get("blk.0.attn_qkv.weight"));
-        match idx {
-            Some(&i) => match self.gguf.tensors[i].dtype {
-                36 => "I2S",
-                12 | 14 => "Q4K",
-                _ => "unknown",
-            },
-            None => "unknown",
-        }
+        self.model.quant_type_str()
     }
 
     /// Generate text from a prompt. Calls `on_token` for each generated token.
     /// Returns the complete generated text.
     pub fn generate(&self, prompt: &str, on_token: &dyn Fn(&str)) -> Result<String> {
-        let model = BitNetModel::from_gguf(&self.gguf)?;
-        let tokenizer = Tokenizer::from_gguf(&self.gguf)?;
+        let model = &self.model;
+        let tokenizer = &self.tokenizer;
 
         let is_q4k = model.quant_type == QuantType::Q4K;
 
@@ -88,12 +86,11 @@ impl Engine {
             tokens.extend(tokenizer.encode(&full));
         }
 
-        let tok_ref = &tokenizer;
         let output = Arc::new(std::sync::Mutex::new(Vec::<u32>::new()));
         let output_ref = output.clone();
 
         let on_tok = |tok_id: u32| {
-            let text = tok_ref.decode(&[tok_id]);
+            let text = tokenizer.decode(&[tok_id]);
             on_token(&text);
             output_ref.lock().unwrap().push(tok_id);
         };

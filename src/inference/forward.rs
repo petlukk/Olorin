@@ -6,8 +6,10 @@ use crate::inference::matmul::{embed_f16_lookup, i8_output_matmul_mt, ternary_ma
 use crate::inference::matmul::i8_output_matmul_speculative;
 use crate::inference::engine::BitNetModel;
 use crate::inference::cache::{self, EakvCache};
+use crate::inference::threadpool::ThreadPool;
 
 pub struct InferenceState {
+    pub(crate) pool: ThreadPool,
     pub(crate) x: Vec<f32>,
     pub(crate) x_norm: Vec<f32>,
     pub(crate) x_quant: Vec<i8>,
@@ -147,6 +149,7 @@ impl InferenceState {
             model.head_dim as i32, max_seq_len as i32, kt,
         ).expect("failed to create EakvCache");
         InferenceState {
+            pool: ThreadPool::new(),
             x: vec![0.0; h],
             x_norm: vec![0.0; h],
             x_quant: vec![0; h + 12],
@@ -199,6 +202,7 @@ impl InferenceState {
                 lw.wk, lw.wk_scale, &mut self.k, kv,
                 lw.wv, lw.wv_scale, &mut self.v,
                 self.x_quant.as_ptr(), act_scale, act_sum, h,
+                &self.pool,
             );
             build_rope_freqs(&mut self.rope_freqs, hd, pos, model.rope_theta);
             apply_rope(&mut self.q, &self.rope_freqs, hd, nh);
@@ -233,6 +237,7 @@ impl InferenceState {
             ternary_matmul_mt(
                 lw.wo, self.attn_out_quant.as_ptr(), attn_scale, attn_sum, lw.wo_scale,
                 &mut self.tmp, h, h,
+                &self.pool,
             );
             unsafe {
                 ffi::vecadd_f32(
@@ -261,6 +266,7 @@ impl InferenceState {
                 self.x_quant.as_ptr(), ffn_scale, ffn_sum,
                 &mut self.gate, &mut self.up,
                 f, h,
+                &self.pool,
             );
             unsafe {
                 ffi::squared_relu_mul_f32(
@@ -283,6 +289,7 @@ impl InferenceState {
             ternary_matmul_mt(
                 lw.w_down, self.hidden_quant.as_ptr(), down_scale, down_sum, lw.w_down_scale,
                 &mut self.tmp, h, f,
+                &self.pool,
             );
             unsafe {
                 ffi::vecadd_f32(
@@ -314,6 +321,7 @@ impl InferenceState {
                     &model.embed_weight_i8, &model.embed_row_scales,
                     &self.x_norm, &mut self.logits,
                     model.vocab_size, h,
+                    &self.pool,
                 );
             }
         }
@@ -322,6 +330,7 @@ impl InferenceState {
             &model.embed_weight_i8, &model.embed_row_scales,
             &self.x_norm, &mut self.logits,
             model.vocab_size, h,
+            &self.pool,
         );
     }
 
