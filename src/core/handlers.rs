@@ -1,7 +1,6 @@
 //! LLM message handling and output post-processing.
 //!
-//! Synchronous — no async/tokio. Handles LLM turn logic, output guard,
-//! and tool execution loops.
+//! Handles LLM turn logic, output guard, and tool execution loops.
 
 use crate::core::llm::{ContentBlock, LlmResponse, Message, Role, StopReason};
 use crate::core::tool_parse;

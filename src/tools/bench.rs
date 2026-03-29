@@ -190,7 +190,7 @@ fn bench_vault() -> Result<String, String> {
     let throughput = 4096.0 * iterations as f64 / enc_elapsed.as_secs_f64() / 1e9;
 
     Ok(format!(
-        "─── vault (eachacha — SIMD ChaCha20, 4-round interleaved) ───\n  Encrypt: {:.0} ns/4KB\n  Decrypt: {:.0} ns/4KB\n  Throughput: {:.1} GB/s\n  {} iterations",
+        "─── vault (SIMD ChaCha20, 4-round interleaved) ───\n  Encrypt: {:.0} ns/4KB\n  Decrypt: {:.0} ns/4KB\n  Throughput: {:.1} GB/s\n  {} iterations",
         enc_ns, dec_ns, throughput, iterations
     ))
 }

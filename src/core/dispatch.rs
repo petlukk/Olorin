@@ -2,7 +2,7 @@
 //!
 //! Builds tool name + params from SIMD-classified command IDs and intent IDs.
 //! Two-stage matching: SIMD hash → full name verification.
-//! Synchronous — no async.
+//! Synchronous.
 
 use crate::error::{Error, Result};
 use crate::kernels::ffi;

@@ -8,7 +8,8 @@
 //!   5. Inference → generate tokens
 //!   6. Output guard → truncate/block
 //!
-//! Synchronous — no async/tokio.
+//! Every channel (REPL, Web UI, WhatsApp) enters here. Every response exits here.
+//! All messages saved to encrypted vault. No exceptions.
 
 use crate::core::anthropic::AnthropicClient;
 use crate::core::dispatch;
@@ -132,7 +133,7 @@ impl DispatchContext {
         }
 
         if cmd_id == dispatch::CMD_TASKS {
-            return Response::text("No background tasks. (Task system not yet available.)");
+            return Response::text("No background tasks.");
         }
 
         if cmd_id == dispatch::CMD_RECALL {

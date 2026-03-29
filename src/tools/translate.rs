@@ -15,8 +15,7 @@ pub fn run(args: &str) -> ToolResult {
         return ToolResult { output: "usage: translate <lang> <text>".to_string(), success: false };
     }
 
-    // Use LibreTranslate or a free API via curl if available; otherwise fall back to stub.
-    // Try lingva.ml (no API key needed)
+    // lingva.ml (no API key needed)
     let url = format!(
         "https://lingva.ml/api/v1/en/{}/{}", 
         lang.to_lowercase(),

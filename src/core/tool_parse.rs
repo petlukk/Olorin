@@ -1,7 +1,7 @@
 //! Token-level `<tool_call>` / `</tool_call>` detector.
 //!
 //! State machine that detects tool_call XML tags in streaming text output.
-//! Works on string fragments (decoded token pieces). No async, no serde.
+//! Works on string fragments (decoded token pieces).
 
 use crate::storage::json::{self, Object, Value};
 use crate::core::llm::{ContentBlock, LlmResponse, StopReason};

@@ -1,4 +1,4 @@
-//! FFI layer for Eä SIMD kernels — cougar inference + eakv KV-cache.
+//! FFI layer for Eä SIMD kernels — inference + KV-cache.
 //!
 //! Initialized by `ffi::init()` via `init_from(&dir)`.
 //! Call `ffi::init()` at startup; these wrappers are then available.
@@ -7,7 +7,7 @@ use libloading::{Library, Symbol};
 use std::path::Path;
 use std::sync::OnceLock;
 
-// ── Type aliases — cougar ─────────────────────────────────────────────────────
+// ── Type aliases — inference ──────────────────────────────────────────────────
 
 type I2DotI8Fn = unsafe extern "C" fn(*const u8, *const i8, i32) -> i32;
 type I2DotI8_4RowFn = unsafe extern "C" fn(
@@ -52,7 +52,7 @@ type Q6kDot4RowFn = unsafe extern "C" fn(
     *const i8, *const i32, *mut f32, i32, f32, f32, f32, f32);
 type ApplyRopeFn = unsafe extern "C" fn(*const f32, *const f32, *mut f32, i32, i32);
 
-// ── Type aliases — eakv ───────────────────────────────────────────────────────
+// ── Type aliases — KV-cache ───────────────────────────────────────────────────
 
 type QuantizeSIMDFn   = unsafe extern "C" fn(*const f32, *mut i32, *mut f32, *mut f32, i32);
 type DequantizeSIMDFn = unsafe extern "C" fn(*const u8, *const f32, *const f32, *mut f32, i32);
@@ -237,7 +237,7 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
     }
 }
 
-// ── Public wrappers — cougar ──────────────────────────────────────────────────
+// ── Public wrappers — inference ───────────────────────────────────────────────
 
 pub unsafe fn i2_dot_i8(weights: *const u8, activations: *const i8, n: i32) -> i32 {
     (k().i2_dot_i8)(weights, activations, n)
@@ -376,7 +376,7 @@ pub unsafe fn apply_rope_f32(
     (k().apply_rope_f32)(data, freqs, out, head_dim, n_heads)
 }
 
-// ── Public wrappers — eakv ────────────────────────────────────────────────────
+// ── Public wrappers — KV-cache ────────────────────────────────────────────────
 
 pub unsafe fn quantize_simd(
     src: *const f32, weights_out: *mut i32,

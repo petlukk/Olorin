@@ -73,7 +73,6 @@ const ALLOW_COMMANDS: &[&str] = &[
     "man", "help", "info",
     "test", "[",
     "true", "false",
-    "eastat",
 ];
 
 const WRITE_COMMANDS: &[&str] = &[

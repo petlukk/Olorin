@@ -1,6 +1,6 @@
 //! Session state — tracks active conversation channel, vault, model, and TTL.
 //!
-//! Serialized as JSON using crate::storage::json (no serde dependency).
+//! Serialized as JSON using crate::storage::json.
 
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};

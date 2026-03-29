@@ -1,4 +1,4 @@
-//! Anthropic API client — curl subprocess, no reqwest.
+//! Anthropic API client via curl subprocess.
 //!
 //! Uses std::process::Command::new("curl") and crate::storage::json for
 //! request building and response parsing.

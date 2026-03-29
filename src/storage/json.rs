@@ -1,6 +1,6 @@
 //! Minimal RFC 8259 JSON parser and serializer.
 //!
-//! No `serde_json`. Recursive descent. Supports objects, arrays, strings
+//! Recursive descent JSON parser. Supports objects, arrays, strings
 //! (with escape sequences), integers, floats, booleans, and null.
 
 // ── Public types ──────────────────────────────────────────────────────────────

@@ -22,7 +22,7 @@ pub struct InferenceState {
     pub(crate) hidden_quant: Vec<i8>,
     pub(crate) logits: Vec<f32>,
     pub(crate) tmp: Vec<f32>,
-    pub(crate) eakv: EakvCache,
+    pub(crate) kv_cache: EakvCache,
     pub(crate) attn_scores: Vec<f32>,
     pub(crate) rope_freqs: Vec<f32>,
     #[allow(dead_code)]
@@ -141,8 +141,8 @@ impl InferenceState {
         let v = model.vocab_size;
         let nh = model.n_heads;
         let kt = cache::KernelTable::init()
-            .expect("eakv kernels not found");
-        let eakv = EakvCache::new(
+            .expect("kv_cache kernels not found");
+        let kv_cache = EakvCache::new(
             model.n_layers as i32, model.n_kv_heads as i32,
             model.head_dim as i32, max_seq_len as i32, kt,
         ).expect("failed to create EakvCache");
@@ -161,7 +161,7 @@ impl InferenceState {
             hidden_quant: vec![0; f + 12],
             logits: vec![0.0; v],
             tmp: vec![0.0; h.max(f)],
-            eakv,
+            kv_cache,
             attn_scores: vec![0.0; nh * max_seq_len],
             rope_freqs: vec![0.0; model.head_dim],
             max_seq_len,
@@ -203,17 +203,17 @@ impl InferenceState {
             build_rope_freqs(&mut self.rope_freqs, hd, pos, model.rope_theta);
             apply_rope(&mut self.q, &self.rope_freqs, hd, nh);
             apply_rope(&mut self.k, &self.rope_freqs, hd, nkv);
-            self.eakv.append(&self.k[..kv], layer as i32, 0, 1).unwrap();
-            self.eakv.append(&self.v[..kv], layer as i32, 1, 1).unwrap();
-            if layer == model.n_layers - 1 { self.eakv.advance(1).unwrap(); }
+            self.kv_cache.append(&self.k[..kv], layer as i32, 0, 1).unwrap();
+            self.kv_cache.append(&self.v[..kv], layer as i32, 1, 1).unwrap();
+            if layer == model.n_layers - 1 { self.kv_cache.advance(1).unwrap(); }
 
             let scores = &mut self.attn_scores[..nh * seq_len];
             cache::attention::attention_scores(
-                &self.eakv, &self.q, layer as i32, nh as i32, nkv as i32, scores,
+                &self.kv_cache, &self.q, layer as i32, nh as i32, nkv as i32, scores,
             );
             softmax_rows(scores, nh, seq_len);
             cache::attention::attention_output(
-                &self.eakv, scores, layer as i32, nh as i32, nkv as i32, &mut self.attn_out,
+                &self.kv_cache, scores, layer as i32, nh as i32, nkv as i32, &mut self.attn_out,
             );
 
             unsafe {

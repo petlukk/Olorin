@@ -1,7 +1,6 @@
 //! Message types and LLM provider abstraction.
 //!
-//! Synchronous — no async/tokio. Uses crate::storage::json instead of serde.
-//! Supports Anthropic (cloud via curl) and local inference (cougar engine).
+//! Supports Anthropic (cloud via curl) and local inference.
 
 use crate::storage::json::{self, Object, Value};
 

@@ -57,15 +57,15 @@ impl InferenceState {
                 apply_rope(q, &self.rope_freqs, hd, nh);
                 apply_rope(k, &self.rope_freqs, hd, nkv);
                 let v_slice = &vs_all[t * kv..(t + 1) * kv];
-                self.eakv.append(k, layer as i32, 0, 1).unwrap();
-                self.eakv.append(v_slice, layer as i32, 1, 1).unwrap();
-                if layer == model.n_layers - 1 { self.eakv.advance(1).unwrap(); }
+                self.kv_cache.append(k, layer as i32, 0, 1).unwrap();
+                self.kv_cache.append(v_slice, layer as i32, 1, 1).unwrap();
+                if layer == model.n_layers - 1 { self.kv_cache.advance(1).unwrap(); }
                 let seq_len = t + 1;
                 let scores = &mut self.attn_scores[..nh * seq_len];
-                cache::attention::attention_scores(&self.eakv, q, layer as i32, nh as i32, nkv as i32, scores);
+                cache::attention::attention_scores(&self.kv_cache, q, layer as i32, nh as i32, nkv as i32, scores);
                 softmax_rows(scores, nh, seq_len);
                 let attn = &mut attn_all[t * h..(t + 1) * h];
-                cache::attention::attention_output(&self.eakv, scores, layer as i32, nh as i32, nkv as i32, attn);
+                cache::attention::attention_output(&self.kv_cache, scores, layer as i32, nh as i32, nkv as i32, attn);
             }
 
             for t in 0..n {

@@ -1,6 +1,6 @@
 //! KV cache — TurboQuant Q4 storage with fused attention kernels.
 //!
-//! Port of eakv/cache.rs. Single flat allocation, per-group Q4 packing.
+//! Single flat allocation, per-group Q4 packing.
 //! Kernels accessed via crate::kernels::ffi and ffi_inference.
 
 use crate::error::{Error, Result};
