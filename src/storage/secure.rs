@@ -33,6 +33,12 @@ impl SecureBuffer {
         unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
     }
 
+    /// Copy `src` into the buffer. Panics if `src.len() != self.len`.
+    pub fn write(&mut self, src: &[u8]) {
+        assert_eq!(src.len(), self.len, "SecureBuffer::write length mismatch");
+        self.as_mut_slice().copy_from_slice(src);
+    }
+
     pub fn len(&self) -> usize { self.len }
     pub fn is_empty(&self) -> bool { self.len == 0 }
 }

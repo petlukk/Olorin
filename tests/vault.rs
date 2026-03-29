@@ -1,6 +1,7 @@
 use olorin::kernels::ffi;
 use olorin::storage::crypto;
 use olorin::storage::secure::SecureBuffer;
+use olorin::storage::vault::Vault;
 
 #[test]
 fn test_chacha20_encrypt_decrypt_roundtrip() {
@@ -22,4 +23,21 @@ fn test_secure_buffer_basics() {
     assert_eq!(buf.len(), 4096);
     buf.as_mut_slice()[0] = 0xFF;
     assert_eq!(buf.as_slice()[0], 0xFF);
+}
+
+#[test]
+fn test_vault_append_and_read() {
+    ffi::init().unwrap();
+    let dir = std::env::temp_dir().join("olorin1_vault_test");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let mut vault = Vault::open(&dir).unwrap();
+    vault.append(b"user", b"hello world").unwrap();
+    vault.append(b"assistant", b"hi there").unwrap();
+
+    let count = vault.block_count();
+    assert_eq!(count, 2);
+
+    std::fs::remove_dir_all(&dir).unwrap();
 }
