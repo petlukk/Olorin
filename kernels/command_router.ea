@@ -1,0 +1,215 @@
+// Command router — hash-based slash command matching.
+//
+// Reads bytes after '/', constructs a simple hash, matches against
+// known command hashes. Handles 2-byte (/ls), 3-byte (/cpu, /git), and
+// 4-byte commands. ~1 KB instructions, runs in registers.
+//
+// Meta commands: /help(0) /quit(1) /tools(2) /clear(3) /model(4) /profile(5)
+// Tool commands: /time(6) /calc(7) /http(8) /shell(9) /memory(10)
+//                /read(11) /write(12) /ls(13) /json(14) /cpu(15)
+//                /tokens(16) /bench(17) /tasks(18) /recall(19)
+//                /weather(20) /translate(21) /define(22) /summarize(23)
+//                /grep(24) /git(25) /remind(26) /teleport(27)
+// Returns -1 for no match.
+
+const SLASH: i32 = 47
+
+export func match_command(text: *u8, len: i32, out_match: *mut i32) {
+    out_match[0] = -1
+
+    if len < 3 {
+        return
+    }
+
+    let b0: u8 = text[0]
+    if b0 != 47 {
+        return
+    }
+
+    // 2-char commands (len >= 3): /ls
+    if len >= 3 {
+        let b1: i32 = to_i32(text[1])
+        let b2: i32 = to_i32(text[2])
+        let hash2: i32 = b1 + b2 * 256
+
+        // /ls: l=108 s=115
+        if hash2 == 108 + 115 * 256 {
+            out_match[0] = 13
+            return
+        }
+
+        // 3-char commands (len >= 4): /cpu
+        if len >= 4 {
+            let b3: i32 = to_i32(text[3])
+            let hash3: i32 = hash2 + b3 * 65536
+
+            // /cpu: c=99 p=112 u=117
+            if hash3 == 99 + 112 * 256 + 117 * 65536 {
+                out_match[0] = 15
+                return
+            }
+
+            // /git: g=103 i=105 t=116
+            if hash3 == 103 + 105 * 256 + 116 * 65536 {
+                out_match[0] = 25
+                return
+            }
+
+            // 4-char commands (len >= 5)
+            if len >= 5 {
+                let b4: i32 = to_i32(text[4])
+                let hash4: i32 = hash3 + b4 * 16777216
+
+                // /help: h=104 e=101 l=108 p=112
+                if hash4 == 104 + 101 * 256 + 108 * 65536 + 112 * 16777216 {
+                    out_match[0] = 0
+                    return
+                }
+
+                // /quit: q=113 u=117 i=105 t=116
+                if hash4 == 113 + 117 * 256 + 105 * 65536 + 116 * 16777216 {
+                    out_match[0] = 1
+                    return
+                }
+
+                // /tool: t=116 o=111 o=111 l=108
+                if hash4 == 116 + 111 * 256 + 111 * 65536 + 108 * 16777216 {
+                    out_match[0] = 2
+                    return
+                }
+
+                // /clea: c=99 l=108 e=101 a=97
+                if hash4 == 99 + 108 * 256 + 101 * 65536 + 97 * 16777216 {
+                    out_match[0] = 3
+                    return
+                }
+
+                // /mode: m=109 o=111 d=100 e=101
+                if hash4 == 109 + 111 * 256 + 100 * 65536 + 101 * 16777216 {
+                    out_match[0] = 4
+                    return
+                }
+
+                // /prof: p=112 r=114 o=111 f=102
+                if hash4 == 112 + 114 * 256 + 111 * 65536 + 102 * 16777216 {
+                    out_match[0] = 5
+                    return
+                }
+
+                // /time: t=116 i=105 m=109 e=101
+                if hash4 == 116 + 105 * 256 + 109 * 65536 + 101 * 16777216 {
+                    out_match[0] = 6
+                    return
+                }
+
+                // /calc: c=99 a=97 l=108 c=99
+                if hash4 == 99 + 97 * 256 + 108 * 65536 + 99 * 16777216 {
+                    out_match[0] = 7
+                    return
+                }
+
+                // /http: h=104 t=116 t=116 p=112
+                if hash4 == 104 + 116 * 256 + 116 * 65536 + 112 * 16777216 {
+                    out_match[0] = 8
+                    return
+                }
+
+                // /shel: s=115 h=104 e=101 l=108
+                if hash4 == 115 + 104 * 256 + 101 * 65536 + 108 * 16777216 {
+                    out_match[0] = 9
+                    return
+                }
+
+                // /memo: m=109 e=101 m=109 o=111
+                if hash4 == 109 + 101 * 256 + 109 * 65536 + 111 * 16777216 {
+                    out_match[0] = 10
+                    return
+                }
+
+                // /read: r=114 e=101 a=97 d=100
+                if hash4 == 114 + 101 * 256 + 97 * 65536 + 100 * 16777216 {
+                    out_match[0] = 11
+                    return
+                }
+
+                // /writ: w=119 r=114 i=105 t=116
+                if hash4 == 119 + 114 * 256 + 105 * 65536 + 116 * 16777216 {
+                    out_match[0] = 12
+                    return
+                }
+
+                // /json: j=106 s=115 o=111 n=110
+                if hash4 == 106 + 115 * 256 + 111 * 65536 + 110 * 16777216 {
+                    out_match[0] = 14
+                    return
+                }
+
+                // /toke: t=116 o=111 k=107 e=101
+                if hash4 == 116 + 111 * 256 + 107 * 65536 + 101 * 16777216 {
+                    out_match[0] = 16
+                    return
+                }
+
+                // /benc: b=98 e=101 n=110 c=99
+                if hash4 == 98 + 101 * 256 + 110 * 65536 + 99 * 16777216 {
+                    out_match[0] = 17
+                    return
+                }
+
+                // /task: t=116 a=97 s=115 k=107
+                if hash4 == 116 + 97 * 256 + 115 * 65536 + 107 * 16777216 {
+                    out_match[0] = 18
+                    return
+                }
+
+                // /reca: r=114 e=101 c=99 a=97
+                if hash4 == 114 + 101 * 256 + 99 * 65536 + 97 * 16777216 {
+                    out_match[0] = 19
+                    return
+                }
+
+                // /weat: w=119 e=101 a=97 t=116
+                if hash4 == 119 + 101 * 256 + 97 * 65536 + 116 * 16777216 {
+                    out_match[0] = 20
+                    return
+                }
+
+                // /tran: t=116 r=114 a=97 n=110
+                if hash4 == 116 + 114 * 256 + 97 * 65536 + 110 * 16777216 {
+                    out_match[0] = 21
+                    return
+                }
+
+                // /defi: d=100 e=101 f=102 i=105
+                if hash4 == 100 + 101 * 256 + 102 * 65536 + 105 * 16777216 {
+                    out_match[0] = 22
+                    return
+                }
+
+                // /summ: s=115 u=117 m=109 m=109
+                if hash4 == 115 + 117 * 256 + 109 * 65536 + 109 * 16777216 {
+                    out_match[0] = 23
+                    return
+                }
+
+                // /grep: g=103 r=114 e=101 p=112
+                if hash4 == 103 + 114 * 256 + 101 * 65536 + 112 * 16777216 {
+                    out_match[0] = 24
+                    return
+                }
+
+                // /remi: r=114 e=101 m=109 i=105
+                if hash4 == 114 + 101 * 256 + 109 * 65536 + 105 * 16777216 {
+                    out_match[0] = 26
+                    return
+                }
+
+                // /tele: t=116 e=101 l=108 e=101
+                if hash4 == 116 + 101 * 256 + 108 * 65536 + 101 * 16777216 {
+                    out_match[0] = 27
+                    return
+                }
+            }
+        }
+    }
+}

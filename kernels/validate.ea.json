@@ -1,0 +1,12 @@
+{
+  "library": "/home/peter/projects/olorin1/target/debug/build/olorin-b8f6e5b7101c0541/out/libvalidate.so",
+  "exports": [
+    {
+      "name": "q4_validate",
+      "args": [{"name": "scales", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "biases", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "scales_bits", "type": "*restrict i32", "direction": "in", "cap": null, "count": null}, {"name": "biases_bits", "type": "*restrict i32", "direction": "in", "cap": null, "count": null}, {"name": "n_groups", "type": "i32", "direction": "in", "cap": null, "count": null}],
+      "return_type": "i32"
+    }
+  ],
+  "structs": [
+  ]
+}

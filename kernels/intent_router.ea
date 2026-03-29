@@ -1,0 +1,261 @@
+// Intent router — SIMD intent classification without slash prefix.
+//
+// Classifies natural-language input into tool intents by pattern matching.
+// CALC uses a state machine for digit-operator-digit patterns.
+// Keywords matched case-insensitively via to_lower on ASCII bytes.
+//
+// Intent IDs:
+//   0 = CALC    — digit(s) operator digit(s)
+//   1 = TIME    — tid, time, clock, klocka
+//   2 = CPU     — cpu, cores, processor
+//   3 = WEATHER — weather, väder
+//  -1 = NONE    — no match
+
+func to_lower(b: i32) -> i32 {
+    if b >= 65 {
+        if b <= 90 {
+            return b + 32
+        }
+    }
+    return b
+}
+
+export func classify_intent(text: *u8, len: i32, out_intent: *mut i32, out_arg_start: *mut i32, out_arg_len: *mut i32) {
+    out_intent[0] = -1
+    out_arg_start[0] = 0
+    out_arg_len[0] = 0
+
+    if len < 1 {
+        return
+    }
+
+    // --- CALC: state machine for digit operator digit ---
+    // state 0: looking for first digit
+    // state 1: found digit, looking for operator
+    // state 2: found operator, looking for digit
+    // state 3: found digit after operator -> MATCH
+    let mut state: i32 = 0
+    let mut i: i32 = 0
+    while i < len {
+        let b: i32 = to_i32(text[i])
+        if state == 0 {
+            if b >= 48 {
+                if b <= 57 {
+                    state = 1
+                }
+            }
+        }
+        if state == 1 {
+            if b == 43 {
+                state = 2
+            }
+            if b == 45 {
+                state = 2
+            }
+            if b == 42 {
+                state = 2
+            }
+            if b == 47 {
+                state = 2
+            }
+            if b == 94 {
+                state = 2
+            }
+            if b == 37 {
+                state = 2
+            }
+        }
+        if state == 2 {
+            if b >= 48 {
+                if b <= 57 {
+                    state = 3
+                }
+            }
+        }
+        i = i + 1
+    }
+    if state == 3 {
+        out_intent[0] = 0
+        out_arg_start[0] = 0
+        out_arg_len[0] = len
+        return
+    }
+
+    // --- TIME: tid(3), time(4), clock(5), klocka(6) ---
+    let mut k: i32 = 0
+    while k < len {
+        // "tid" — t=116 i=105 d=100
+        if k + 3 <= len {
+            if to_lower(to_i32(text[k])) == 116 {
+                if to_lower(to_i32(text[k + 1])) == 105 {
+                    if to_lower(to_i32(text[k + 2])) == 100 {
+                        out_intent[0] = 1
+                        out_arg_start[0] = 0
+                        out_arg_len[0] = len
+                        return
+                    }
+                }
+            }
+        }
+        // "time" — t=116 i=105 m=109 e=101
+        if k + 4 <= len {
+            if to_lower(to_i32(text[k])) == 116 {
+                if to_lower(to_i32(text[k + 1])) == 105 {
+                    if to_lower(to_i32(text[k + 2])) == 109 {
+                        if to_lower(to_i32(text[k + 3])) == 101 {
+                            out_intent[0] = 1
+                            out_arg_start[0] = 0
+                            out_arg_len[0] = len
+                            return
+                        }
+                    }
+                }
+            }
+        }
+        // "clock" — c=99 l=108 o=111 c=99 k=107
+        if k + 5 <= len {
+            if to_lower(to_i32(text[k])) == 99 {
+                if to_lower(to_i32(text[k + 1])) == 108 {
+                    if to_lower(to_i32(text[k + 2])) == 111 {
+                        if to_lower(to_i32(text[k + 3])) == 99 {
+                            if to_lower(to_i32(text[k + 4])) == 107 {
+                                out_intent[0] = 1
+                                out_arg_start[0] = 0
+                                out_arg_len[0] = len
+                                return
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // "klocka" — k=107 l=108 o=111 c=99 k=107 a=97
+        if k + 6 <= len {
+            if to_lower(to_i32(text[k])) == 107 {
+                if to_lower(to_i32(text[k + 1])) == 108 {
+                    if to_lower(to_i32(text[k + 2])) == 111 {
+                        if to_lower(to_i32(text[k + 3])) == 99 {
+                            if to_lower(to_i32(text[k + 4])) == 107 {
+                                if to_lower(to_i32(text[k + 5])) == 97 {
+                                    out_intent[0] = 1
+                                    out_arg_start[0] = 0
+                                    out_arg_len[0] = len
+                                    return
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        k = k + 1
+    }
+
+    // --- CPU: cpu(3), cores(5), processor(9) ---
+    k = 0
+    while k < len {
+        // "cpu" — c=99 p=112 u=117
+        if k + 3 <= len {
+            if to_lower(to_i32(text[k])) == 99 {
+                if to_lower(to_i32(text[k + 1])) == 112 {
+                    if to_lower(to_i32(text[k + 2])) == 117 {
+                        out_intent[0] = 2
+                        out_arg_start[0] = 0
+                        out_arg_len[0] = len
+                        return
+                    }
+                }
+            }
+        }
+        // "cores" — c=99 o=111 r=114 e=101 s=115
+        if k + 5 <= len {
+            if to_lower(to_i32(text[k])) == 99 {
+                if to_lower(to_i32(text[k + 1])) == 111 {
+                    if to_lower(to_i32(text[k + 2])) == 114 {
+                        if to_lower(to_i32(text[k + 3])) == 101 {
+                            if to_lower(to_i32(text[k + 4])) == 115 {
+                                out_intent[0] = 2
+                                out_arg_start[0] = 0
+                                out_arg_len[0] = len
+                                return
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // "processor" — p=112 r=114 o=111 c=99 e=101 s=115 s=115 o=111 r=114
+        if k + 9 <= len {
+            if to_lower(to_i32(text[k])) == 112 {
+                if to_lower(to_i32(text[k + 1])) == 114 {
+                    if to_lower(to_i32(text[k + 2])) == 111 {
+                        if to_lower(to_i32(text[k + 3])) == 99 {
+                            if to_lower(to_i32(text[k + 4])) == 101 {
+                                if to_lower(to_i32(text[k + 5])) == 115 {
+                                    if to_lower(to_i32(text[k + 6])) == 115 {
+                                        if to_lower(to_i32(text[k + 7])) == 111 {
+                                            if to_lower(to_i32(text[k + 8])) == 114 {
+                                                out_intent[0] = 2
+                                                out_arg_start[0] = 0
+                                                out_arg_len[0] = len
+                                                return
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        k = k + 1
+    }
+
+    // --- WEATHER: weather(7), väder(6 bytes UTF-8) ---
+    k = 0
+    while k < len {
+        // "weather" — w=119 e=101 a=97 t=116 h=104 e=101 r=114
+        if k + 7 <= len {
+            if to_lower(to_i32(text[k])) == 119 {
+                if to_lower(to_i32(text[k + 1])) == 101 {
+                    if to_lower(to_i32(text[k + 2])) == 97 {
+                        if to_lower(to_i32(text[k + 3])) == 116 {
+                            if to_lower(to_i32(text[k + 4])) == 104 {
+                                if to_lower(to_i32(text[k + 5])) == 101 {
+                                    if to_lower(to_i32(text[k + 6])) == 114 {
+                                        out_intent[0] = 3
+                                        out_arg_start[0] = 0
+                                        out_arg_len[0] = len
+                                        return
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // "väder" UTF-8: v=118 0xC3=195 0xA4=164 d=100 e=101 r=114
+        // Don't to_lower non-ASCII bytes (195, 164)
+        if k + 6 <= len {
+            if to_lower(to_i32(text[k])) == 118 {
+                if to_i32(text[k + 1]) == 195 {
+                    if to_i32(text[k + 2]) == 164 {
+                        if to_lower(to_i32(text[k + 3])) == 100 {
+                            if to_lower(to_i32(text[k + 4])) == 101 {
+                                if to_lower(to_i32(text[k + 5])) == 114 {
+                                    out_intent[0] = 3
+                                    out_arg_start[0] = 0
+                                    out_arg_len[0] = len
+                                    return
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        k = k + 1
+    }
+}

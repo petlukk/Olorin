@@ -1,0 +1,17 @@
+{
+  "library": "/home/peter/projects/olorin1/target/debug/build/olorin-b8f6e5b7101c0541/out/libquantize_simd.so",
+  "exports": [
+    {
+      "name": "q4_quantize_split_f32",
+      "args": [{"name": "src", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "weights_out", "type": "*mut i32", "direction": "in", "cap": null, "count": null}, {"name": "scales_out", "type": "*mut f32", "direction": "in", "cap": null, "count": null}, {"name": "biases_out", "type": "*mut f32", "direction": "in", "cap": null, "count": null}, {"name": "n_groups", "type": "i32", "direction": "in", "cap": null, "count": null}],
+      "return_type": null
+    },
+    {
+      "name": "q4_quantize_split_validated_f32",
+      "args": [{"name": "src", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "weights_out", "type": "*mut i32", "direction": "in", "cap": null, "count": null}, {"name": "scales_out", "type": "*mut f32", "direction": "in", "cap": null, "count": null}, {"name": "biases_out", "type": "*mut f32", "direction": "in", "cap": null, "count": null}, {"name": "n_groups", "type": "i32", "direction": "in", "cap": null, "count": null}],
+      "return_type": "i32"
+    }
+  ],
+  "structs": [
+  ]
+}

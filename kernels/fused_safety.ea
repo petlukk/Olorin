@@ -1,0 +1,263 @@
+// Fused safety scanner — injection + leak prefix detection in one pass.
+//
+// Single memory traversal: loads curr[i..i+16] and next[i+1..i+17] once,
+// checks all injection two-byte pairs AND all leak two-byte pairs,
+// writes two separate mask arrays.
+//
+// Trades doubled compute per block for halved memory traffic.
+// Both kernels individually fit L1; fused version still fits (~90 vector ops).
+// Eä v1.6: for loops.
+//
+// Injection pairs (case-insensitive via OR 32):
+//   ig di fo yo ac pr sy as us ne up <| |> [i [/
+//
+// Leak pairs (case-sensitive):
+//   sk AK gh gi xo SG se -- AI Be
+
+#[cfg(x86_64)]
+export func scan_safety_fused(
+    text: *u8,
+    len: i32,
+    out_inject_masks: *mut i32,
+    out_leak_masks: *mut i32,
+    out_n_blocks: *mut i32
+) {
+    let v_32: u8x16 = splat(32)
+    let hi: u8x16 = splat(255)
+    let lo: u8x16 = splat(0)
+
+    // --- Shared splats (used by both injection and leak) ---
+    let v_a: u8x16 = splat(97)
+    let v_e: u8x16 = splat(101)
+    let v_i: u8x16 = splat(105)
+    let v_o: u8x16 = splat(111)
+    let v_s: u8x16 = splat(115)
+
+    // --- Injection-only splats ---
+    let v_c: u8x16 = splat(99)
+    let v_d: u8x16 = splat(100)
+    let v_f: u8x16 = splat(102)
+    let v_g_lo: u8x16 = splat(103)
+    let v_n: u8x16 = splat(110)
+    let v_p: u8x16 = splat(112)
+    let v_r: u8x16 = splat(114)
+    let v_u: u8x16 = splat(117)
+    let v_y: u8x16 = splat(121)
+    let v_lt: u8x16 = splat(60)
+    let v_pipe: u8x16 = splat(124)
+    let v_gt: u8x16 = splat(62)
+    let v_lb: u8x16 = splat(91)
+    let v_slash: u8x16 = splat(47)
+
+    // --- Leak-only splats ---
+    let v_k: u8x16 = splat(107)
+    let v_h: u8x16 = splat(104)
+    let v_g: u8x16 = splat(103)
+    let v_x: u8x16 = splat(120)
+    let v_dash: u8x16 = splat(45)
+    let v_A: u8x16 = splat(65)
+    let v_K: u8x16 = splat(75)
+    let v_S: u8x16 = splat(83)
+    let v_G: u8x16 = splat(71)
+    let v_I: u8x16 = splat(73)
+    let v_B: u8x16 = splat(66)
+
+    let mut n_blocks: i32 = 0
+    let n_full: i32 = ((len - 1) / 16) * 16
+
+    for idx in 0..n_full step 16 {
+        if idx + 17 <= len {
+            let curr: u8x16 = load(text, idx)
+            let next: u8x16 = load(text, idx + 1)
+
+            // ========== INJECTION (case-insensitive) ==========
+            let curr_lo: u8x16 = curr .| v_32
+            let next_lo: u8x16 = next .| v_32
+
+            let ci: u8x16 = select(curr_lo .== v_i, hi, lo)
+            let ng: u8x16 = select(next_lo .== v_g_lo, hi, lo)
+            let p_ig: u8x16 = ci .& ng
+
+            let cd: u8x16 = select(curr_lo .== v_d, hi, lo)
+            let ni: u8x16 = select(next_lo .== v_i, hi, lo)
+            let p_di: u8x16 = cd .& ni
+
+            let cf: u8x16 = select(curr_lo .== v_f, hi, lo)
+            let no: u8x16 = select(next_lo .== v_o, hi, lo)
+            let p_fo: u8x16 = cf .& no
+
+            let cy: u8x16 = select(curr_lo .== v_y, hi, lo)
+            let p_yo: u8x16 = cy .& no
+
+            let ca: u8x16 = select(curr_lo .== v_a, hi, lo)
+            let nc: u8x16 = select(next_lo .== v_c, hi, lo)
+            let p_ac: u8x16 = ca .& nc
+
+            let cp: u8x16 = select(curr_lo .== v_p, hi, lo)
+            let nr: u8x16 = select(next_lo .== v_r, hi, lo)
+            let p_pr: u8x16 = cp .& nr
+
+            let cs: u8x16 = select(curr_lo .== v_s, hi, lo)
+            let ny: u8x16 = select(next_lo .== v_y, hi, lo)
+            let p_sy: u8x16 = cs .& ny
+
+            let ns: u8x16 = select(next_lo .== v_s, hi, lo)
+            let p_as: u8x16 = ca .& ns
+
+            let cu: u8x16 = select(curr_lo .== v_u, hi, lo)
+            let p_us: u8x16 = cu .& ns
+
+            let cn: u8x16 = select(curr_lo .== v_n, hi, lo)
+            let ne: u8x16 = select(next_lo .== v_e, hi, lo)
+            let p_ne: u8x16 = cn .& ne
+
+            let np: u8x16 = select(next_lo .== v_p, hi, lo)
+            let p_up: u8x16 = cu .& np
+
+            // Exact pairs
+            let clt: u8x16 = select(curr .== v_lt, hi, lo)
+            let npipe: u8x16 = select(next .== v_pipe, hi, lo)
+            let p_lt_pipe: u8x16 = clt .& npipe
+
+            let cpipe: u8x16 = select(curr .== v_pipe, hi, lo)
+            let ngt: u8x16 = select(next .== v_gt, hi, lo)
+            let p_pipe_gt: u8x16 = cpipe .& ngt
+
+            let clb: u8x16 = select(curr .== v_lb, hi, lo)
+            let p_lb_i: u8x16 = clb .& ni
+            let nslash: u8x16 = select(next .== v_slash, hi, lo)
+            let p_lb_slash: u8x16 = clb .& nslash
+
+            let ih1: u8x16 = p_ig .| p_di .| p_fo .| p_yo
+            let ih2: u8x16 = p_ac .| p_pr .| p_sy .| p_as
+            let ih3: u8x16 = p_us .| p_ne .| p_up
+            let ih4: u8x16 = p_lt_pipe .| p_pipe_gt .| p_lb_i .| p_lb_slash
+            let inject_hits: u8x16 = ih1 .| ih2 .| ih3 .| ih4
+
+            // ========== LEAK (case-sensitive) ==========
+            let c_s_raw: u8x16 = select(curr .== v_s, hi, lo)
+            let n_k: u8x16 = select(next .== v_k, hi, lo)
+            let p_sk: u8x16 = c_s_raw .& n_k
+
+            let c_A: u8x16 = select(curr .== v_A, hi, lo)
+            let n_K: u8x16 = select(next .== v_K, hi, lo)
+            let p_AK: u8x16 = c_A .& n_K
+
+            let c_g: u8x16 = select(curr .== v_g, hi, lo)
+            let n_h: u8x16 = select(next .== v_h, hi, lo)
+            let p_gh: u8x16 = c_g .& n_h
+
+            let n_i_raw: u8x16 = select(next .== v_i, hi, lo)
+            let p_gi: u8x16 = c_g .& n_i_raw
+
+            let c_x: u8x16 = select(curr .== v_x, hi, lo)
+            let n_o_raw: u8x16 = select(next .== v_o, hi, lo)
+            let p_xo: u8x16 = c_x .& n_o_raw
+
+            let c_S: u8x16 = select(curr .== v_S, hi, lo)
+            let n_G: u8x16 = select(next .== v_G, hi, lo)
+            let p_SG: u8x16 = c_S .& n_G
+
+            let n_e_raw: u8x16 = select(next .== v_e, hi, lo)
+            let p_se: u8x16 = c_s_raw .& n_e_raw
+
+            let c_dash: u8x16 = select(curr .== v_dash, hi, lo)
+            let n_dash: u8x16 = select(next .== v_dash, hi, lo)
+            let p_dd: u8x16 = c_dash .& n_dash
+
+            let n_I: u8x16 = select(next .== v_I, hi, lo)
+            let p_AI: u8x16 = c_A .& n_I
+
+            let c_B: u8x16 = select(curr .== v_B, hi, lo)
+            let p_Be: u8x16 = c_B .& n_e_raw
+
+            let lh1: u8x16 = p_sk .| p_AK .| p_gh .| p_gi
+            let lh2: u8x16 = p_xo .| p_SG .| p_se .| p_dd
+            let lh3: u8x16 = p_AI .| p_Be
+            let leak_hits: u8x16 = lh1 .| lh2 .| lh3
+
+            // ========== OUTPUT ==========
+            out_inject_masks[n_blocks] = movemask(inject_hits)
+            out_leak_masks[n_blocks] = movemask(leak_hits)
+            n_blocks = n_blocks + 1
+        }
+    }
+
+    if n_full < len {
+        out_inject_masks[n_blocks] = 0
+        out_leak_masks[n_blocks] = 0
+        n_blocks = n_blocks + 1
+    }
+
+    out_n_blocks[0] = n_blocks
+}
+
+#[cfg(aarch64)]
+export func scan_safety_fused(
+    text: *u8,
+    len: i32,
+    out_inject_masks: *mut i32,
+    out_leak_masks: *mut i32,
+    out_n_blocks: *mut i32
+) {
+    let mut n_blocks: i32 = 0
+    let n_full: i32 = ((len - 1) / 16) * 16
+
+    for idx in 0..n_full step 16 {
+        if idx + 17 <= len {
+            let mut inject_mask: i32 = 0
+            let mut leak_mask: i32 = 0
+            let mut bit: i32 = 1
+            for j in 0..16 {
+                let c: u8 = text[idx + j]
+                let n: u8 = text[idx + j + 1]
+
+                // Injection (case-insensitive via both cases)
+                let mut inj: i32 = 0
+                if (c == 105 || c == 73) && (n == 103 || n == 71) { inj = 1 }
+                if (c == 100 || c == 68) && (n == 105 || n == 73) { inj = 1 }
+                if (c == 102 || c == 70) && (n == 111 || n == 79) { inj = 1 }
+                if (c == 121 || c == 89) && (n == 111 || n == 79) { inj = 1 }
+                if (c == 97 || c == 65) && (n == 99 || n == 67) { inj = 1 }
+                if (c == 112 || c == 80) && (n == 114 || n == 82) { inj = 1 }
+                if (c == 115 || c == 83) && (n == 121 || n == 89) { inj = 1 }
+                if (c == 97 || c == 65) && (n == 115 || n == 83) { inj = 1 }
+                if (c == 117 || c == 85) && (n == 115 || n == 83) { inj = 1 }
+                if (c == 110 || c == 78) && (n == 101 || n == 69) { inj = 1 }
+                if (c == 117 || c == 85) && (n == 112 || n == 80) { inj = 1 }
+                if c == 60 && n == 124 { inj = 1 }
+                if c == 124 && n == 62 { inj = 1 }
+                if c == 91 && (n == 73 || n == 105) { inj = 1 }
+                if c == 91 && n == 47 { inj = 1 }
+                if inj == 1 { inject_mask = inject_mask + bit }
+
+                // Leak (case-sensitive)
+                let mut lk: i32 = 0
+                if c == 115 && n == 107 { lk = 1 }
+                if c == 65 && n == 75 { lk = 1 }
+                if c == 103 && n == 104 { lk = 1 }
+                if c == 103 && n == 105 { lk = 1 }
+                if c == 120 && n == 111 { lk = 1 }
+                if c == 83 && n == 71 { lk = 1 }
+                if c == 115 && n == 101 { lk = 1 }
+                if c == 45 && n == 45 { lk = 1 }
+                if c == 65 && n == 73 { lk = 1 }
+                if c == 66 && n == 101 { lk = 1 }
+                if lk == 1 { leak_mask = leak_mask + bit }
+
+                bit = bit * 2
+            }
+            out_inject_masks[n_blocks] = inject_mask
+            out_leak_masks[n_blocks] = leak_mask
+            n_blocks = n_blocks + 1
+        }
+    }
+
+    if n_full < len {
+        out_inject_masks[n_blocks] = 0
+        out_leak_masks[n_blocks] = 0
+        n_blocks = n_blocks + 1
+    }
+
+    out_n_blocks[0] = n_blocks
+}

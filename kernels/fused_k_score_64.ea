@@ -1,0 +1,153 @@
+// Fused K-score for head_dim=64: dot(query, dequant(K)) per sequence position
+//
+// head_dim=64 = 1 Q4 group per position, 4 f32x16 registers for the query vector.
+
+export func q4_fused_k_score_64_f32(
+    q_vec:        *restrict f32,
+    k_packed:     *restrict u8,
+    k_scales:     *restrict f32,
+    k_biases:     *restrict f32,
+    scores:       *mut f32,
+    seq_len:      i32,
+    group_offset: i32
+) {
+    let mask15: u8x16 = splat(15)
+    let div16: u8x16 = splat(16)
+    let zero16: f32x16 = splat(0.0)
+    let rsqrt_d: f32 = 1.0 / sqrt(to_f32(64))
+
+    let q0: f32x16 = load(q_vec, 0)
+    let q1: f32x16 = load(q_vec, 16)
+    let q2: f32x16 = load(q_vec, 32)
+    let q3: f32x16 = load(q_vec, 48)
+
+    let pairs: i32 = seq_len / 2
+    let mut t: i32 = 0
+    while t < pairs {
+        let t0: i32 = t * 2
+        let t1: i32 = t0 + 1
+        let mut acc_a: f32x16 = zero16
+        let mut acc_b: f32x16 = zero16
+
+        let g0a: i32 = group_offset + t0
+        let vs0a: f32x16 = splat(k_scales[g0a])
+        let vb0a: f32x16 = splat(k_biases[g0a])
+        let wb0a: i32 = g0a * 32
+
+        let p0a: u8x16 = load(k_packed, wb0a)
+        let lo_0a: u8x16 = p0a .& mask15
+        let hi_0a: u8x16 = p0a ./ div16
+        let p1a: u8x16 = load(k_packed, wb0a + 16)
+        let lo_1a: u8x16 = p1a .& mask15
+        let hi_1a: u8x16 = p1a ./ div16
+
+        acc_a = fma(fma(widen_u8_f32x16(lo_0a), vs0a, vb0a), q0, acc_a)
+        acc_a = fma(fma(widen_u8_f32x16(lo_1a), vs0a, vb0a), q1, acc_a)
+        acc_a = fma(fma(widen_u8_f32x16(hi_0a), vs0a, vb0a), q2, acc_a)
+        acc_a = fma(fma(widen_u8_f32x16(hi_1a), vs0a, vb0a), q3, acc_a)
+
+        let g0b: i32 = group_offset + t1
+        let vs0b: f32x16 = splat(k_scales[g0b])
+        let vb0b: f32x16 = splat(k_biases[g0b])
+        let wb0b: i32 = g0b * 32
+
+        let p0b: u8x16 = load(k_packed, wb0b)
+        let lo_0b: u8x16 = p0b .& mask15
+        let hi_0b: u8x16 = p0b ./ div16
+        let p1b: u8x16 = load(k_packed, wb0b + 16)
+        let lo_1b: u8x16 = p1b .& mask15
+        let hi_1b: u8x16 = p1b ./ div16
+
+        acc_b = fma(fma(widen_u8_f32x16(lo_0b), vs0b, vb0b), q0, acc_b)
+        acc_b = fma(fma(widen_u8_f32x16(lo_1b), vs0b, vb0b), q1, acc_b)
+        acc_b = fma(fma(widen_u8_f32x16(hi_0b), vs0b, vb0b), q2, acc_b)
+        acc_b = fma(fma(widen_u8_f32x16(hi_1b), vs0b, vb0b), q3, acc_b)
+
+        scores[t0] = reduce_add(acc_a) * rsqrt_d
+        scores[t1] = reduce_add(acc_b) * rsqrt_d
+        t = t + 1
+    }
+
+    if seq_len / 2 * 2 < seq_len {
+        let last: i32 = seq_len - 1
+        let mut acc: f32x16 = zero16
+
+        let g0: i32 = group_offset + last
+        let vs0: f32x16 = splat(k_scales[g0])
+        let vb0: f32x16 = splat(k_biases[g0])
+        let wb0: i32 = g0 * 32
+
+        let pa: u8x16 = load(k_packed, wb0)
+        let loa: u8x16 = pa .& mask15
+        let hia: u8x16 = pa ./ div16
+        let pb: u8x16 = load(k_packed, wb0 + 16)
+        let lob: u8x16 = pb .& mask15
+        let hib: u8x16 = pb ./ div16
+
+        acc = fma(fma(widen_u8_f32x16(loa), vs0, vb0), q0, acc)
+        acc = fma(fma(widen_u8_f32x16(lob), vs0, vb0), q1, acc)
+        acc = fma(fma(widen_u8_f32x16(hia), vs0, vb0), q2, acc)
+        acc = fma(fma(widen_u8_f32x16(hib), vs0, vb0), q3, acc)
+
+        scores[last] = reduce_add(acc) * rsqrt_d
+    }
+}
+
+// Multi-head variant for head_dim=64
+// q_vecs: n_heads * 64 f32, all_scores: n_heads * seq_len f32
+// groups_per_head: seq_len * 1
+
+export func q4_fused_k_score_multi_64_f32(
+    q_vecs:         *restrict f32,
+    k_packed:       *restrict u8,
+    k_scales:       *restrict f32,
+    k_biases:       *restrict f32,
+    all_scores:     *mut f32,
+    seq_len:        i32,
+    n_heads:        i32,
+    groups_per_head: i32
+) {
+    let mask15: u8x16 = splat(15)
+    let div16: u8x16 = splat(16)
+    let zero16: f32x16 = splat(0.0)
+    let rsqrt_d: f32 = 1.0 / sqrt(to_f32(64))
+
+    let mut h: i32 = 0
+    while h < n_heads {
+        let qbase: i32 = h * 64
+        let q0: f32x16 = load(q_vecs, qbase)
+        let q1: f32x16 = load(q_vecs, qbase + 16)
+        let q2: f32x16 = load(q_vecs, qbase + 32)
+        let q3: f32x16 = load(q_vecs, qbase + 48)
+
+        let group_offset: i32 = h * groups_per_head
+        let score_offset: i32 = h * seq_len
+
+        let mut t: i32 = 0
+        while t < seq_len {
+            let mut acc: f32x16 = zero16
+
+            let g0: i32 = group_offset + t
+            let vs0: f32x16 = splat(k_scales[g0])
+            let vb0: f32x16 = splat(k_biases[g0])
+            let wb0: i32 = g0 * 32
+
+            let p0a: u8x16 = load(k_packed, wb0)
+            let lo0a: u8x16 = p0a .& mask15
+            let hi0a: u8x16 = p0a ./ div16
+            let p0b: u8x16 = load(k_packed, wb0 + 16)
+            let lo0b: u8x16 = p0b .& mask15
+            let hi0b: u8x16 = p0b ./ div16
+
+            acc = fma(fma(widen_u8_f32x16(lo0a), vs0, vb0), q0, acc)
+            acc = fma(fma(widen_u8_f32x16(lo0b), vs0, vb0), q1, acc)
+            acc = fma(fma(widen_u8_f32x16(hi0a), vs0, vb0), q2, acc)
+            acc = fma(fma(widen_u8_f32x16(hi0b), vs0, vb0), q3, acc)
+
+            all_scores[score_offset + t] = reduce_add(acc) * rsqrt_d
+            t = t + 1
+        }
+
+        h = h + 1
+    }
+}

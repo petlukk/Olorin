@@ -1,0 +1,114 @@
+// Q4_1 quantization with SIMD-friendly split packing format
+//
+// Split packing: for 64 values in a group:
+//   byte[k] = quant(value[k+32]) * 16 + quant(value[k])   for k = 0..31
+//   lo nibble stores first 32 values, hi nibble stores last 32 values
+//
+// This layout enables contiguous SIMD loads in the dequantize kernel.
+
+export func q4_quantize_split_f32(
+    src: *restrict f32,
+    weights_out: *mut i32,
+    scales_out: *mut f32,
+    biases_out: *mut f32,
+    n_groups: i32
+) {
+    let half: f32 = to_f32(1) / to_f32(2)
+    let mut g: i32 = 0
+    while g < n_groups {
+        let base: i32 = g * 64
+
+        // Find min/max
+        let mut min_val: f32 = src[base]
+        let mut max_val: f32 = src[base]
+        let mut j: i32 = 1
+        while j < 64 {
+            let v: f32 = src[base + j]
+            if v < min_val { min_val = v }
+            if v > max_val { max_val = v }
+            j = j + 1
+        }
+
+        let range: f32 = max_val - min_val
+        let mut scale: f32 = 1.0
+        let mut inv_scale: f32 = 0.0
+        if range > 0.0 {
+            scale = range / 15.0
+            inv_scale = 15.0 / range
+        }
+
+        scales_out[g] = scale
+        biases_out[g] = min_val
+
+        // Pack with split layout: lo nibble = value[k], hi nibble = value[k+32]
+        let w_base: i32 = g * 32
+        let mut k: i32 = 0
+        while k < 32 {
+            let v_lo: f32 = (src[base + k] - min_val) * inv_scale
+            let v_hi: f32 = (src[base + k + 32] - min_val) * inv_scale
+            let mut q_lo: i32 = to_i32(v_lo + half)
+            let mut q_hi: i32 = to_i32(v_hi + half)
+            q_lo = max(0, min(15, q_lo))
+            q_hi = max(0, min(15, q_hi))
+            weights_out[w_base + k] = q_hi * 16 + q_lo
+            k = k + 1
+        }
+
+        g = g + 1
+    }
+}
+
+// Fused quantize + NaN validation with split packing
+export func q4_quantize_split_validated_f32(
+    src: *restrict f32,
+    weights_out: *mut i32,
+    scales_out: *mut f32,
+    biases_out: *mut f32,
+    n_groups: i32
+) -> i32 {
+    let half: f32 = to_f32(1) / to_f32(2)
+    let mut g: i32 = 0
+    while g < n_groups {
+        let base: i32 = g * 64
+        let mut min_val: f32 = src[base]
+        let mut max_val: f32 = src[base]
+
+        if min_val != min_val { return g + 1 }
+
+        let mut j: i32 = 1
+        while j < 64 {
+            let v: f32 = src[base + j]
+            if v != v { return g + 1 }
+            if v < min_val { min_val = v }
+            if v > max_val { max_val = v }
+            j = j + 1
+        }
+
+        let range: f32 = max_val - min_val
+        let mut scale: f32 = 1.0
+        let mut inv_scale: f32 = 0.0
+        if range > 0.0 {
+            scale = range / 15.0
+            inv_scale = 15.0 / range
+        }
+
+        scales_out[g] = scale
+        biases_out[g] = min_val
+
+        let w_base: i32 = g * 32
+        let mut k: i32 = 0
+        while k < 32 {
+            let v_lo: f32 = (src[base + k] - min_val) * inv_scale
+            let v_hi: f32 = (src[base + k + 32] - min_val) * inv_scale
+            let mut q_lo: i32 = to_i32(v_lo + half)
+            let mut q_hi: i32 = to_i32(v_hi + half)
+            q_lo = max(0, min(15, q_lo))
+            q_hi = max(0, min(15, q_hi))
+            weights_out[w_base + k] = q_hi * 16 + q_lo
+            k = k + 1
+        }
+
+        g = g + 1
+    }
+    return 0
+}

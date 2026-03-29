@@ -1,0 +1,17 @@
+{
+  "library": "/home/peter/projects/olorin1/target/debug/build/olorin-b8f6e5b7101c0541/out/libfused_v_sum.so",
+  "exports": [
+    {
+      "name": "q4_fused_v_sum_f32",
+      "args": [{"name": "weights", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "v_packed", "type": "*restrict u8", "direction": "in", "cap": null, "count": null}, {"name": "v_scales", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "v_biases", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "out_vec", "type": "*mut f32", "direction": "in", "cap": null, "count": null}, {"name": "seq_len", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "group_offset", "type": "i32", "direction": "in", "cap": null, "count": null}],
+      "return_type": null
+    },
+    {
+      "name": "q4_fused_v_sum_multi_f32",
+      "args": [{"name": "all_weights", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "v_packed", "type": "*restrict u8", "direction": "in", "cap": null, "count": null}, {"name": "v_scales", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "v_biases", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "all_out", "type": "*mut f32", "direction": "in", "cap": null, "count": null}, {"name": "seq_len", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "n_heads", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "groups_per_head", "type": "i32", "direction": "in", "cap": null, "count": null}],
+      "return_type": null
+    }
+  ],
+  "structs": [
+  ]
+}

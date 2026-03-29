@@ -1,0 +1,12 @@
+{
+  "library": "/home/peter/projects/olorin1/target/debug/build/olorin-b8f6e5b7101c0541/out/libchacha20_fused.so",
+  "exports": [
+    {
+      "name": "chacha20_encrypt_stats",
+      "args": [{"name": "key", "type": "*restrict i32", "direction": "in", "cap": null, "count": null}, {"name": "nonce", "type": "*restrict i32", "direction": "in", "cap": null, "count": null}, {"name": "counter", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "plaintext", "type": "*restrict u8", "direction": "in", "cap": null, "count": null}, {"name": "ciphertext", "type": "*restrict mut u8", "direction": "in", "cap": null, "count": null}, {"name": "len", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "ks_i32", "type": "*restrict mut i32", "direction": "in", "cap": null, "count": null}, {"name": "ks_u8", "type": "*restrict u8", "direction": "in", "cap": null, "count": null}, {"name": "pt_i32", "type": "*restrict i32", "direction": "in", "cap": null, "count": null}, {"name": "ct_i32", "type": "*restrict mut i32", "direction": "in", "cap": null, "count": null}, {"name": "out_sum", "type": "*mut i64", "direction": "in", "cap": null, "count": null}, {"name": "out_count", "type": "*mut i32", "direction": "in", "cap": null, "count": null}, {"name": "out_min", "type": "*mut u8", "direction": "in", "cap": null, "count": null}, {"name": "out_max", "type": "*mut u8", "direction": "in", "cap": null, "count": null}],
+      "return_type": null
+    }
+  ],
+  "structs": [
+  ]
+}

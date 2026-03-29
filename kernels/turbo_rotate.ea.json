@@ -1,0 +1,37 @@
+{
+  "library": "/home/peter/projects/olorin1/target/debug/build/olorin-b8f6e5b7101c0541/out/libturbo_rotate.so",
+  "exports": [
+    {
+      "name": "sign_flip",
+      "args": [{"name": "vec", "type": "*mut f32", "direction": "in", "cap": null, "count": null}, {"name": "signs", "type": "*f32", "direction": "in", "cap": null, "count": null}, {"name": "dim", "type": "i32", "direction": "in", "cap": null, "count": null}],
+      "return_type": null
+    },
+    {
+      "name": "sign_flip",
+      "args": [{"name": "vec", "type": "*mut f32", "direction": "in", "cap": null, "count": null}, {"name": "signs", "type": "*f32", "direction": "in", "cap": null, "count": null}, {"name": "dim", "type": "i32", "direction": "in", "cap": null, "count": null}],
+      "return_type": null
+    },
+    {
+      "name": "fwht_inplace",
+      "args": [{"name": "vec", "type": "*mut f32", "direction": "in", "cap": null, "count": null}, {"name": "dim", "type": "i32", "direction": "in", "cap": null, "count": null}],
+      "return_type": null
+    },
+    {
+      "name": "fwht_inplace",
+      "args": [{"name": "vec", "type": "*mut f32", "direction": "in", "cap": null, "count": null}, {"name": "dim", "type": "i32", "direction": "in", "cap": null, "count": null}],
+      "return_type": null
+    },
+    {
+      "name": "turbo_rotate",
+      "args": [{"name": "vec", "type": "*mut f32", "direction": "in", "cap": null, "count": null}, {"name": "signs", "type": "*f32", "direction": "in", "cap": null, "count": null}, {"name": "dim", "type": "i32", "direction": "in", "cap": null, "count": null}],
+      "return_type": null
+    },
+    {
+      "name": "turbo_rotate",
+      "args": [{"name": "vec", "type": "*mut f32", "direction": "in", "cap": null, "count": null}, {"name": "signs", "type": "*f32", "direction": "in", "cap": null, "count": null}, {"name": "dim", "type": "i32", "direction": "in", "cap": null, "count": null}],
+      "return_type": null
+    }
+  ],
+  "structs": [
+  ]
+}

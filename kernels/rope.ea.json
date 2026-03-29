@@ -1,0 +1,12 @@
+{
+  "library": "/home/peter/projects/olorin1/target/debug/build/olorin-b8f6e5b7101c0541/out/librope.so",
+  "exports": [
+    {
+      "name": "apply_rope_f32",
+      "args": [{"name": "data", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "freqs", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "out", "type": "*mut f32", "direction": "in", "cap": null, "count": null}, {"name": "head_dim", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "n_heads", "type": "i32", "direction": "in", "cap": null, "count": null}],
+      "return_type": null
+    }
+  ],
+  "structs": [
+  ]
+}

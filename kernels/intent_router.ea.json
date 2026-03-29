@@ -1,0 +1,12 @@
+{
+  "library": "/home/peter/projects/olorin1/target/debug/build/olorin-b8f6e5b7101c0541/out/libintent_router.so",
+  "exports": [
+    {
+      "name": "classify_intent",
+      "args": [{"name": "text", "type": "*u8", "direction": "in", "cap": null, "count": null}, {"name": "len", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "out_intent", "type": "*mut i32", "direction": "in", "cap": null, "count": null}, {"name": "out_arg_start", "type": "*mut i32", "direction": "in", "cap": null, "count": null}, {"name": "out_arg_len", "type": "*mut i32", "direction": "in", "cap": null, "count": null}],
+      "return_type": null
+    }
+  ],
+  "structs": [
+  ]
+}

@@ -1,0 +1,57 @@
+{
+  "library": "/home/peter/projects/olorin1/target/debug/build/olorin-b8f6e5b7101c0541/out/libsearch_avx512.so",
+  "exports": [
+    {
+      "name": "batch_dot",
+      "args": [{"name": "query", "type": "*f32", "direction": "in", "cap": null, "count": null}, {"name": "vecs", "type": "*f32", "direction": "in", "cap": null, "count": null}, {"name": "dim", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "n_vecs", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "out_scores", "type": "*mut f32", "direction": "in", "cap": null, "count": null}],
+      "return_type": null
+    },
+    {
+      "name": "batch_dot",
+      "args": [{"name": "query", "type": "*f32", "direction": "in", "cap": null, "count": null}, {"name": "vecs", "type": "*f32", "direction": "in", "cap": null, "count": null}, {"name": "dim", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "n_vecs", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "out_scores", "type": "*mut f32", "direction": "in", "cap": null, "count": null}],
+      "return_type": null
+    },
+    {
+      "name": "batch_cosine",
+      "args": [{"name": "query", "type": "*f32", "direction": "in", "cap": null, "count": null}, {"name": "query_norm", "type": "f32", "direction": "in", "cap": null, "count": null}, {"name": "vecs", "type": "*f32", "direction": "in", "cap": null, "count": null}, {"name": "dim", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "n_vecs", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "out_scores", "type": "*mut f32", "direction": "in", "cap": null, "count": null}],
+      "return_type": null
+    },
+    {
+      "name": "batch_cosine",
+      "args": [{"name": "query", "type": "*f32", "direction": "in", "cap": null, "count": null}, {"name": "query_norm", "type": "f32", "direction": "in", "cap": null, "count": null}, {"name": "vecs", "type": "*f32", "direction": "in", "cap": null, "count": null}, {"name": "dim", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "n_vecs", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "out_scores", "type": "*mut f32", "direction": "in", "cap": null, "count": null}],
+      "return_type": null
+    },
+    {
+      "name": "batch_l2",
+      "args": [{"name": "query", "type": "*f32", "direction": "in", "cap": null, "count": null}, {"name": "vecs", "type": "*f32", "direction": "in", "cap": null, "count": null}, {"name": "dim", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "n_vecs", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "out_scores", "type": "*mut f32", "direction": "in", "cap": null, "count": null}],
+      "return_type": null
+    },
+    {
+      "name": "batch_l2",
+      "args": [{"name": "query", "type": "*f32", "direction": "in", "cap": null, "count": null}, {"name": "vecs", "type": "*f32", "direction": "in", "cap": null, "count": null}, {"name": "dim", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "n_vecs", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "out_scores", "type": "*mut f32", "direction": "in", "cap": null, "count": null}],
+      "return_type": null
+    },
+    {
+      "name": "normalize_vectors",
+      "args": [{"name": "vecs", "type": "*mut f32", "direction": "in", "cap": null, "count": null}, {"name": "dim", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "n_vecs", "type": "i32", "direction": "in", "cap": null, "count": null}],
+      "return_type": null
+    },
+    {
+      "name": "normalize_vectors",
+      "args": [{"name": "vecs", "type": "*mut f32", "direction": "in", "cap": null, "count": null}, {"name": "dim", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "n_vecs", "type": "i32", "direction": "in", "cap": null, "count": null}],
+      "return_type": null
+    },
+    {
+      "name": "threshold_filter",
+      "args": [{"name": "scores", "type": "*f32", "direction": "in", "cap": null, "count": null}, {"name": "n", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "threshold", "type": "f32", "direction": "in", "cap": null, "count": null}, {"name": "out_indices", "type": "*mut i32", "direction": "in", "cap": null, "count": null}, {"name": "out_count", "type": "*mut i32", "direction": "in", "cap": null, "count": null}],
+      "return_type": null
+    },
+    {
+      "name": "top_k",
+      "args": [{"name": "scores", "type": "*f32", "direction": "in", "cap": null, "count": null}, {"name": "n", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "k", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "out_indices", "type": "*mut i32", "direction": "in", "cap": null, "count": null}, {"name": "out_scores", "type": "*mut f32", "direction": "in", "cap": null, "count": null}],
+      "return_type": null
+    }
+  ],
+  "structs": [
+  ]
+}

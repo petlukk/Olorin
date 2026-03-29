@@ -1,0 +1,302 @@
+// Expression evaluator — shunting-yard with i64 fixed-point arithmetic.
+//
+// Evaluates infix math expressions: +, -, *, /, %, ^
+// with parentheses and unary minus. Values stored as i64 scaled
+// by 1,000,000 (6 decimal places). Rust wrapper divides to get float.
+//
+// Caller provides scratch buffers for stacks (avoids per-call alloc):
+//   val_stack: *mut i64  — 16 slots (128 bytes), indices 0..13 data, 14 = vsp
+//   op_stack:  *mut i32  — 16 slots (64 bytes), indices 0..13 data, 14 = osp
+
+func precedence(op: i32) -> i32 {
+    if op == 43 { return 1 }
+    if op == 45 { return 1 }
+    if op == 42 { return 2 }
+    if op == 47 { return 2 }
+    if op == 37 { return 2 }
+    if op == 94 { return 3 }
+    return 0
+}
+
+func is_right_assoc(op: i32) -> i32 {
+    if op == 94 { return 1 }
+    return 0
+}
+
+func is_operator(b: i32) -> i32 {
+    if b == 43 { return 1 }
+    if b == 45 { return 1 }
+    if b == 42 { return 1 }
+    if b == 47 { return 1 }
+    if b == 37 { return 1 }
+    if b == 94 { return 1 }
+    return 0
+}
+
+// Fixed-point power: base^(exp/SCALE), result in fixed-point.
+func fixed_pow(base: i64, exp: i64, scale: i64) -> i64 {
+    let n: i64 = exp / scale
+    let mut result: i64 = scale
+    let mut idx: i64 = to_i64(0)
+    while idx < n {
+        result = (result * base) / scale
+        idx = idx + to_i64(1)
+    }
+    return result
+}
+
+// Apply top operator. Reads vsp from val_stack[14], osp from op_stack[14].
+// Writes updated vsp/osp back. Returns 0=ok, 1=error.
+func apply_op(vs: *mut i64, os: *mut i32, scale: i64) -> i32 {
+    let osp: i32 = os[14]
+    let vsp: i32 = to_i32(vs[14])
+    if osp < 1 { return 1 }
+    if vsp < 2 { return 1 }
+
+    let op: i32 = os[osp - 1]
+    let b_val: i64 = vs[vsp - 1]
+    let a_val: i64 = vs[vsp - 2]
+
+    let mut r: i64 = to_i64(0)
+    if op == 43 { r = a_val + b_val }
+    if op == 45 { r = a_val - b_val }
+    if op == 42 { r = (a_val * b_val) / scale }
+    if op == 47 {
+        if b_val == to_i64(0) { return 1 }
+        r = (a_val * scale) / b_val
+    }
+    if op == 37 {
+        if b_val == to_i64(0) { return 1 }
+        r = a_val % b_val
+    }
+    if op == 94 {
+        r = fixed_pow(a_val, b_val, scale)
+    }
+
+    vs[vsp - 2] = r
+    vs[14] = to_i64(vsp - 2 + 1)
+    os[14] = osp - 1
+    return 0
+}
+
+export func eval_expr(
+    text: *u8, len: i32,
+    out_result: *mut i64,
+    out_error: *mut i32,
+    val_stack: *mut i64,
+    op_stack: *mut i32
+) {
+    let scale: i64 = to_i64(1000000)
+    out_result[0] = to_i64(0)
+    out_error[0] = 0
+
+    if len < 1 {
+        out_error[0] = 1
+        return
+    }
+
+    // vsp stored at val_stack[14], osp at op_stack[14]
+    val_stack[14] = to_i64(0)
+    op_stack[14] = 0
+
+    // prev_token: 0 = start/open-paren/operator, 1 = number/close-paren
+    let mut prev_token: i32 = 0
+
+    let mut i: i32 = 0
+    while i < len {
+        let b: i32 = to_i32(text[i])
+
+        // Skip whitespace
+        if b == 32 {
+            i = i + 1
+        }
+        if b == 9 {
+            i = i + 1
+        }
+        if b != 32 {
+            if b != 9 {
+
+        // --- Number: digit (48-57) or dot (46) ---
+        let mut is_num: i32 = 0
+        if b >= 48 {
+            if b <= 57 { is_num = 1 }
+        }
+        if b == 46 { is_num = 1 }
+
+        if is_num == 1 {
+            let mut num: i64 = to_i64(0)
+            let mut has_dot: i32 = 0
+            let mut dec_places: i32 = 0
+            let mut parsing: i32 = 1
+
+            while parsing == 1 {
+                if i >= len {
+                    parsing = 0
+                }
+                if i < len {
+                    let c: i32 = to_i32(text[i])
+                    let mut is_digit: i32 = 0
+                    if c >= 48 {
+                        if c <= 57 { is_digit = 1 }
+                    }
+                    if is_digit == 1 {
+                        if has_dot == 0 {
+                            num = num * to_i64(10) + to_i64(c - 48)
+                        }
+                        if has_dot == 1 {
+                            num = num * to_i64(10) + to_i64(c - 48)
+                            dec_places = dec_places + 1
+                        }
+                        i = i + 1
+                    }
+                    if is_digit == 0 {
+                        if c == 46 {
+                            has_dot = 1
+                            i = i + 1
+                        }
+                        if c != 46 {
+                            parsing = 0
+                        }
+                    }
+                }
+            }
+
+            // Scale to fixed-point: multiply by 10^(6 - dec_places)
+            let mut remaining: i32 = 6 - dec_places
+            while remaining > 0 {
+                num = num * to_i64(10)
+                remaining = remaining - 1
+            }
+
+            let vsp_n: i32 = to_i32(val_stack[14])
+            val_stack[vsp_n] = num
+            val_stack[14] = to_i64(vsp_n + 1)
+            prev_token = 1
+        }
+
+        // --- Open paren (40) ---
+        if b == 40 {
+            let osp_lp: i32 = op_stack[14]
+            op_stack[osp_lp] = 40
+            op_stack[14] = osp_lp + 1
+            prev_token = 0
+            i = i + 1
+        }
+
+        // --- Close paren (41) ---
+        if b == 41 {
+            let mut done_cp: i32 = 0
+            while done_cp == 0 {
+                let osp_cp: i32 = op_stack[14]
+                if osp_cp < 1 {
+                    out_error[0] = 1
+                    return
+                }
+                let top_cp: i32 = op_stack[osp_cp - 1]
+                if top_cp == 40 {
+                    op_stack[14] = osp_cp - 1
+                    done_cp = 1
+                }
+                if top_cp != 40 {
+                    let err_cp: i32 = apply_op(val_stack, op_stack, scale)
+                    if err_cp != 0 {
+                        out_error[0] = 1
+                        return
+                    }
+                }
+            }
+            prev_token = 1
+            i = i + 1
+        }
+
+        // --- Operator ---
+        if is_num == 0 {
+            if b != 40 {
+                if b != 41 {
+                    if is_operator(b) == 1 {
+                        // Unary minus
+                        if b == 45 {
+                            if prev_token == 0 {
+                                let vsp_u: i32 = to_i32(val_stack[14])
+                                val_stack[vsp_u] = to_i64(0)
+                                val_stack[14] = to_i64(vsp_u + 1)
+                            }
+                        }
+
+                        let cur_prec: i32 = precedence(b)
+                        let cur_ra: i32 = is_right_assoc(b)
+
+                        let mut done_op: i32 = 0
+                        while done_op == 0 {
+                            let osp_op: i32 = op_stack[14]
+                            if osp_op < 1 {
+                                done_op = 1
+                            }
+                            if osp_op >= 1 {
+                                let top_op: i32 = op_stack[osp_op - 1]
+                                if top_op == 40 {
+                                    done_op = 1
+                                }
+                                if top_op != 40 {
+                                    let top_prec: i32 = precedence(top_op)
+                                    let mut should_pop: i32 = 0
+                                    if cur_ra == 0 {
+                                        if top_prec >= cur_prec { should_pop = 1 }
+                                    }
+                                    if cur_ra == 1 {
+                                        if top_prec > cur_prec { should_pop = 1 }
+                                    }
+                                    if should_pop == 0 {
+                                        done_op = 1
+                                    }
+                                    if should_pop == 1 {
+                                        let err_op: i32 = apply_op(val_stack, op_stack, scale)
+                                        if err_op != 0 {
+                                            out_error[0] = 1
+                                            return
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        let osp_push: i32 = op_stack[14]
+                        op_stack[osp_push] = b
+                        op_stack[14] = osp_push + 1
+                        prev_token = 0
+                        i = i + 1
+                    }
+                    if is_operator(b) == 0 {
+                        i = i + 1
+                    }
+                }
+            }
+        }
+
+            }
+        }
+    }
+
+    // Drain remaining operators
+    let mut osp_drain: i32 = op_stack[14]
+    while osp_drain > 0 {
+        let final_op: i32 = op_stack[osp_drain - 1]
+        if final_op == 40 {
+            out_error[0] = 1
+            return
+        }
+        let err_f: i32 = apply_op(val_stack, op_stack, scale)
+        if err_f != 0 {
+            out_error[0] = 1
+            return
+        }
+        osp_drain = op_stack[14]
+    }
+
+    let final_vsp: i32 = to_i32(val_stack[14])
+    if final_vsp != 1 {
+        out_error[0] = 1
+        return
+    }
+    out_result[0] = val_stack[0]
+}

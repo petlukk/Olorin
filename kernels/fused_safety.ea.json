@@ -1,0 +1,17 @@
+{
+  "library": "/home/peter/projects/olorin1/target/debug/build/olorin-b8f6e5b7101c0541/out/libfused_safety.so",
+  "exports": [
+    {
+      "name": "scan_safety_fused",
+      "args": [{"name": "text", "type": "*u8", "direction": "in", "cap": null, "count": null}, {"name": "len", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "out_inject_masks", "type": "*mut i32", "direction": "in", "cap": null, "count": null}, {"name": "out_leak_masks", "type": "*mut i32", "direction": "in", "cap": null, "count": null}, {"name": "out_n_blocks", "type": "*mut i32", "direction": "in", "cap": null, "count": null}],
+      "return_type": null
+    },
+    {
+      "name": "scan_safety_fused",
+      "args": [{"name": "text", "type": "*u8", "direction": "in", "cap": null, "count": null}, {"name": "len", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "out_inject_masks", "type": "*mut i32", "direction": "in", "cap": null, "count": null}, {"name": "out_leak_masks", "type": "*mut i32", "direction": "in", "cap": null, "count": null}, {"name": "out_n_blocks", "type": "*mut i32", "direction": "in", "cap": null, "count": null}],
+      "return_type": null
+    }
+  ],
+  "structs": [
+  ]
+}

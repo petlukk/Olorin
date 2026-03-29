@@ -1,0 +1,110 @@
+// Fused V weighted sum for head_dim=64: sum_t(weight[t] * dequant(V[t]))
+//
+// head_dim=64 = 1 Q4 group per position, 4 f32x16 output accumulators.
+
+export func q4_fused_v_sum_64_f32(
+    weights:      *restrict f32,
+    v_packed:     *restrict u8,
+    v_scales:     *restrict f32,
+    v_biases:     *restrict f32,
+    out_vec:      *mut f32,
+    seq_len:      i32,
+    group_offset: i32
+) {
+    let mask15: u8x16 = splat(15)
+    let div16: u8x16 = splat(16)
+
+    let mut o0: f32x16 = splat(0.0)
+    let mut o1: f32x16 = splat(0.0)
+    let mut o2: f32x16 = splat(0.0)
+    let mut o3: f32x16 = splat(0.0)
+
+    let mut t: i32 = 0
+    while t < seq_len {
+        let vw: f32x16 = splat(weights[t])
+
+        let g0: i32 = group_offset + t
+        let vs0: f32x16 = splat(v_scales[g0])
+        let vb0: f32x16 = splat(v_biases[g0])
+        let wb0: i32 = g0 * 32
+
+        let p0a: u8x16 = load(v_packed, wb0)
+        let lo0a: u8x16 = p0a .& mask15
+        let hi0a: u8x16 = p0a ./ div16
+        let p0b: u8x16 = load(v_packed, wb0 + 16)
+        let lo0b: u8x16 = p0b .& mask15
+        let hi0b: u8x16 = p0b ./ div16
+
+        o0 = fma(fma(widen_u8_f32x16(lo0a), vs0, vb0), vw, o0)
+        o1 = fma(fma(widen_u8_f32x16(lo0b), vs0, vb0), vw, o1)
+        o2 = fma(fma(widen_u8_f32x16(hi0a), vs0, vb0), vw, o2)
+        o3 = fma(fma(widen_u8_f32x16(hi0b), vs0, vb0), vw, o3)
+
+        t = t + 1
+    }
+
+    store(out_vec, 0, o0)
+    store(out_vec, 16, o1)
+    store(out_vec, 32, o2)
+    store(out_vec, 48, o3)
+}
+
+// Multi-head variant for head_dim=64
+// all_weights: n_heads * seq_len f32, all_out: n_heads * 64 f32
+
+export func q4_fused_v_sum_multi_64_f32(
+    all_weights:    *restrict f32,
+    v_packed:       *restrict u8,
+    v_scales:       *restrict f32,
+    v_biases:       *restrict f32,
+    all_out:        *mut f32,
+    seq_len:        i32,
+    n_heads:        i32,
+    groups_per_head: i32
+) {
+    let mask15: u8x16 = splat(15)
+    let div16: u8x16 = splat(16)
+
+    let mut h: i32 = 0
+    while h < n_heads {
+        let w_offset: i32 = h * seq_len
+        let out_offset: i32 = h * 64
+        let group_offset: i32 = h * groups_per_head
+
+        let mut o0: f32x16 = splat(0.0)
+        let mut o1: f32x16 = splat(0.0)
+        let mut o2: f32x16 = splat(0.0)
+        let mut o3: f32x16 = splat(0.0)
+
+        let mut t: i32 = 0
+        while t < seq_len {
+            let vw: f32x16 = splat(all_weights[w_offset + t])
+
+            let g0: i32 = group_offset + t
+            let vs0: f32x16 = splat(v_scales[g0])
+            let vb0: f32x16 = splat(v_biases[g0])
+            let wb0: i32 = g0 * 32
+
+            let p0a: u8x16 = load(v_packed, wb0)
+            let lo0a: u8x16 = p0a .& mask15
+            let hi0a: u8x16 = p0a ./ div16
+            let p0b: u8x16 = load(v_packed, wb0 + 16)
+            let lo0b: u8x16 = p0b .& mask15
+            let hi0b: u8x16 = p0b ./ div16
+
+            o0 = fma(fma(widen_u8_f32x16(lo0a), vs0, vb0), vw, o0)
+            o1 = fma(fma(widen_u8_f32x16(lo0b), vs0, vb0), vw, o1)
+            o2 = fma(fma(widen_u8_f32x16(hi0a), vs0, vb0), vw, o2)
+            o3 = fma(fma(widen_u8_f32x16(hi0b), vs0, vb0), vw, o3)
+
+            t = t + 1
+        }
+
+        store(all_out, out_offset, o0)
+        store(all_out, out_offset + 16, o1)
+        store(all_out, out_offset + 32, o2)
+        store(all_out, out_offset + 48, o3)
+
+        h = h + 1
+    }
+}

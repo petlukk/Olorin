@@ -1,0 +1,12 @@
+{
+  "library": "/home/peter/projects/olorin1/target/debug/build/olorin-b8f6e5b7101c0541/out/libbitnet_activate.so",
+  "exports": [
+    {
+      "name": "squared_relu_mul_f32",
+      "args": [{"name": "gate", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "up", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "out", "type": "*mut f32", "direction": "in", "cap": null, "count": null}, {"name": "n", "type": "i32", "direction": "in", "cap": null, "count": null}],
+      "return_type": null
+    }
+  ],
+  "structs": [
+  ]
+}

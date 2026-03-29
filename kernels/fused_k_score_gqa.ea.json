@@ -1,0 +1,17 @@
+{
+  "library": "/home/peter/projects/olorin1/target/debug/build/olorin-b8f6e5b7101c0541/out/libfused_k_score_gqa.so",
+  "exports": [
+    {
+      "name": "q4_k_score_gqa_f32",
+      "args": [{"name": "q_vecs", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "k_packed", "type": "*restrict u8", "direction": "in", "cap": null, "count": null}, {"name": "k_scales", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "k_biases", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "all_scores", "type": "*mut f32", "direction": "in", "cap": null, "count": null}, {"name": "seq_len", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "n_q_heads", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "n_kv_heads", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "groups_per_head", "type": "i32", "direction": "in", "cap": null, "count": null}],
+      "return_type": null
+    },
+    {
+      "name": "q4_v_sum_gqa_f32",
+      "args": [{"name": "all_weights", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "v_packed", "type": "*restrict u8", "direction": "in", "cap": null, "count": null}, {"name": "v_scales", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "v_biases", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "all_out", "type": "*mut f32", "direction": "in", "cap": null, "count": null}, {"name": "seq_len", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "n_q_heads", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "n_kv_heads", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "groups_per_head", "type": "i32", "direction": "in", "cap": null, "count": null}],
+      "return_type": null
+    }
+  ],
+  "structs": [
+  ]
+}

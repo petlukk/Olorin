@@ -1,0 +1,37 @@
+// SIMD zeroize — wipe memory via zero-vector stores.
+//
+// Writes 16 zero bytes per iteration using u8x16 splat(0) + store.
+// Scalar tail for remaining 0-15 bytes.
+// Used by SecureBuffer::drop() and Vault::drop().
+
+#[cfg(x86_64)]
+export func zeroize_simd(ptr: *mut u8, len: i32) {
+    let zero: u8x16 = splat(0)
+    let blocks: i32 = len / 16
+
+    for i in 0..blocks {
+        let offset: i32 = i * 16
+        store(ptr, offset, zero)
+    }
+
+    let tail_start: i32 = blocks * 16
+    for j in tail_start..len {
+        ptr[j] = 0
+    }
+}
+
+#[cfg(aarch64)]
+export func zeroize_simd(ptr: *mut u8, len: i32) {
+    let zero: u8x16 = splat(0)
+    let blocks: i32 = len / 16
+
+    for i in 0..blocks {
+        let offset: i32 = i * 16
+        store(ptr, offset, zero)
+    }
+
+    let tail_start: i32 = blocks * 16
+    for j in tail_start..len {
+        ptr[j] = 0
+    }
+}

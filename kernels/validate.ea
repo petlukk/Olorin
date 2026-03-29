@@ -1,0 +1,71 @@
+// Validate Q4 quantized data. Returns 0 if ok, error code if corrupt.
+// Error codes: 1=NaN scale, 2=NaN bias, 3=negative scale
+//
+// Strategy: use i32 pointer aliasing to read float bits as integers.
+// NaN in IEEE 754: absolute value > 0x7F800000 (2139095040).
+// For positive floats: bits > 2139095040 means NaN.
+// For negative floats: bits is negative in i32, and the absolute
+// value trick doesn't work with signed i32 without bitwise ops.
+//
+// Alternative: NaN is neither < 0 nor >= 0. So:
+//   if NOT (s >= 0.0) AND NOT (s < 0.0) => NaN
+// But the compiler may optimize this. Let's try with separate loads.
+
+export func q4_validate(
+    scales: *restrict f32,
+    biases: *restrict f32,
+    scales_bits: *restrict i32,
+    biases_bits: *restrict i32,
+    n_groups: i32
+) -> i32 {
+    let nan_exp: i32 = 2139095040
+    let mut g: i32 = 0
+    while g < n_groups {
+        let sb: i32 = scales_bits[g]
+        let bb: i32 = biases_bits[g]
+
+        // For positive NaN: sb > nan_exp (2139095040)
+        // For negative NaN: sb is between -1 and -8388609 (0xFFFFFFFF to 0xFF800001)
+        //   i.e. sb < -2139095040 is NOT NaN (that's -inf or negative normal)
+        //   sb > -2139095041 AND sb < 0 means negative NaN... this is hard without bitwise
+        //
+        // Simpler: multiply sb by sign to get absolute value in i32?
+        // No, i32 arithmetic != float arithmetic for the bit pattern.
+        //
+        // Let's use the fact that for NaN, both (v >= 0) and (v < 0) are false.
+        // But fast-math might break this too.
+        //
+        // Most practical: positive scale NaN has bits > 2139095040.
+        // Negative scale would be caught by the s < 0 check anyway (or NaN check).
+        // For biases, NaN can be positive or negative.
+        //
+        // Use two checks: positive NaN (sb > nan_exp) and negative NaN (sb < -nan_exp, but that's -inf or less, not NaN)
+        // Hmm. Negative NaN in i32: 0xFF800001 to 0xFFFFFFFF = -8388607 to -1
+        // Wait no. Let me recalculate:
+        // 0xFF800001 as signed i32 = -8388607
+        // 0xFFFFFFFF as signed i32 = -1
+        // 0xFF800000 as signed i32 = -8388608 (this is -Inf)
+        // So negative NaN: sb >= -8388607 AND sb <= -1, i.e. sb > -8388608 AND sb < 0
+        //
+        // Positive NaN: sb > 2139095040
+
+        // Check scale NaN
+        if sb > nan_exp { return 1 }
+        if sb < 0 {
+            if sb > -8388608 { return 1 }
+        }
+
+        // Check bias NaN
+        if bb > nan_exp { return 2 }
+        if bb < 0 {
+            if bb > -8388608 { return 2 }
+        }
+
+        // Scale should be non-negative (using float comparison)
+        let s: f32 = scales[g]
+        if s < 0.0 { return 3 }
+
+        g = g + 1
+    }
+    return 0
+}

@@ -1,0 +1,12 @@
+{
+  "library": "/home/peter/projects/olorin1/target/debug/build/olorin-b8f6e5b7101c0541/out/liboutput_guard.so",
+  "exports": [
+    {
+      "name": "guard_output",
+      "args": [{"name": "text", "type": "*u8", "direction": "in", "cap": null, "count": null}, {"name": "len", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "max_len", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "out_action", "type": "*mut i32", "direction": "in", "cap": null, "count": null}, {"name": "out_offset", "type": "*mut i32", "direction": "in", "cap": null, "count": null}],
+      "return_type": null
+    }
+  ],
+  "structs": [
+  ]
+}

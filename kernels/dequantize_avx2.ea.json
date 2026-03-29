@@ -1,0 +1,17 @@
+{
+  "library": "/home/peter/projects/olorin1/target/debug/build/olorin-b8f6e5b7101c0541/out/libdequantize_avx2.so",
+  "exports": [
+    {
+      "name": "q4_dequantize_avx2_f32",
+      "args": [{"name": "weights", "type": "*restrict u8", "direction": "in", "cap": null, "count": null}, {"name": "scales", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "biases", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "out", "type": "*mut f32", "direction": "in", "cap": null, "count": null}, {"name": "n_groups", "type": "i32", "direction": "in", "cap": null, "count": null}],
+      "return_type": null
+    },
+    {
+      "name": "q4_dequantize_range_avx2_f32",
+      "args": [{"name": "weights", "type": "*restrict u8", "direction": "in", "cap": null, "count": null}, {"name": "scales", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "biases", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "out", "type": "*mut f32", "direction": "in", "cap": null, "count": null}, {"name": "group_start", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "group_count", "type": "i32", "direction": "in", "cap": null, "count": null}],
+      "return_type": null
+    }
+  ],
+  "structs": [
+  ]
+}

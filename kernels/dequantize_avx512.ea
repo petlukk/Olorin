@@ -1,0 +1,89 @@
+// SIMD Q4_1 dequantization — AVX-512 tier (f32x16, 512-bit)
+//
+// Split packing: byte[k] = quant(value[k+32])*16 + quant(value[k])
+// lo nibble → value[k], hi nibble → value[k+32]
+//
+// AVX-512 strategy: widen_u8_f32x16 processes all 16 bytes of u8x16 → f32x16.
+// One widen per channel per load = 2 widens per load = 4 total.
+// No shuffles needed — widen_u8_f32x16 consumes the entire u8x16.
+
+export func q4_dequantize_avx512_f32(
+    weights: *restrict u8,
+    scales: *restrict f32,
+    biases: *restrict f32,
+    out: *mut f32,
+    n_groups: i32
+) {
+    let mask15: u8x16 = splat(15)
+    let div16: u8x16 = splat(16)
+
+    let mut g: i32 = 0
+    while g < n_groups {
+        let vs: f32x16 = splat(scales[g])
+        let vb: f32x16 = splat(biases[g])
+        let wb: i32 = g * 32
+        let ob: i32 = g * 64
+
+        // --- First 16 bytes → lo[0..15] and hi[32..47] ---
+        let p0: u8x16 = load(weights, wb)
+        let lo0: u8x16 = p0 .& mask15
+        let hi0: u8x16 = p0 ./ div16
+
+        // All 16 lo nibbles → out[0..15] in one shot
+        store(out, ob, fma(widen_u8_f32x16(lo0), vs, vb))
+
+        // --- Second 16 bytes → lo[16..31] and hi[48..63] ---
+        let p1: u8x16 = load(weights, wb + 16)
+        let lo1: u8x16 = p1 .& mask15
+        let hi1: u8x16 = p1 ./ div16
+
+        // All 16 lo nibbles → out[16..31]
+        store(out, ob + 16, fma(widen_u8_f32x16(lo1), vs, vb))
+
+        // All 16 hi nibbles → out[32..47]
+        store(out, ob + 32, fma(widen_u8_f32x16(hi0), vs, vb))
+
+        // All 16 hi nibbles → out[48..63]
+        store(out, ob + 48, fma(widen_u8_f32x16(hi1), vs, vb))
+
+        g = g + 1
+    }
+}
+
+// Partial dequantize: contiguous range of groups
+export func q4_dequantize_range_avx512_f32(
+    weights: *restrict u8,
+    scales: *restrict f32,
+    biases: *restrict f32,
+    out: *mut f32,
+    group_start: i32,
+    group_count: i32
+) {
+    let mask15: u8x16 = splat(15)
+    let div16: u8x16 = splat(16)
+
+    let mut i: i32 = 0
+    while i < group_count {
+        let g: i32 = group_start + i
+        let vs: f32x16 = splat(scales[g])
+        let vb: f32x16 = splat(biases[g])
+        let wb: i32 = g * 32
+        let ob: i32 = i * 64
+
+        let p0: u8x16 = load(weights, wb)
+        let lo0: u8x16 = p0 .& mask15
+        let hi0: u8x16 = p0 ./ div16
+
+        store(out, ob, fma(widen_u8_f32x16(lo0), vs, vb))
+
+        let p1: u8x16 = load(weights, wb + 16)
+        let lo1: u8x16 = p1 .& mask15
+        let hi1: u8x16 = p1 ./ div16
+
+        store(out, ob + 16, fma(widen_u8_f32x16(lo1), vs, vb))
+        store(out, ob + 32, fma(widen_u8_f32x16(hi0), vs, vb))
+        store(out, ob + 48, fma(widen_u8_f32x16(hi1), vs, vb))
+
+        i = i + 1
+    }
+}

@@ -1,0 +1,17 @@
+{
+  "library": "/home/peter/projects/olorin1/target/debug/build/olorin-b8f6e5b7101c0541/out/libbitnet_i8dot.so",
+  "exports": [
+    {
+      "name": "i8dot_4row",
+      "args": [{"name": "act", "type": "*restrict i8", "direction": "in", "cap": null, "count": null}, {"name": "w0", "type": "*restrict u8", "direction": "in", "cap": null, "count": null}, {"name": "w1", "type": "*restrict u8", "direction": "in", "cap": null, "count": null}, {"name": "w2", "type": "*restrict u8", "direction": "in", "cap": null, "count": null}, {"name": "w3", "type": "*restrict u8", "direction": "in", "cap": null, "count": null}, {"name": "scores", "type": "*mut i32", "direction": "out", "cap": "4", "count": null}, {"name": "n", "type": "i32", "direction": "in", "cap": null, "count": null}],
+      "return_type": null
+    },
+    {
+      "name": "i8dot_1row",
+      "args": [{"name": "act", "type": "*restrict i8", "direction": "in", "cap": null, "count": null}, {"name": "w", "type": "*restrict u8", "direction": "in", "cap": null, "count": null}, {"name": "n", "type": "i32", "direction": "in", "cap": null, "count": null}],
+      "return_type": "i32"
+    }
+  ],
+  "structs": [
+  ]
+}

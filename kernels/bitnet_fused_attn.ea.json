@@ -1,0 +1,12 @@
+{
+  "library": "/home/peter/projects/olorin1/target/debug/build/olorin-b8f6e5b7101c0541/out/libbitnet_fused_attn.so",
+  "exports": [
+    {
+      "name": "fused_attention_f32",
+      "args": [{"name": "q", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "k_cache", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "v_cache", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "out", "type": "*mut f32", "direction": "in", "cap": null, "count": null}, {"name": "head_dim", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "seq_len", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "scale", "type": "f32", "direction": "in", "cap": null, "count": null}],
+      "return_type": null
+    }
+  ],
+  "structs": [
+  ]
+}
