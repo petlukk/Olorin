@@ -1,13 +1,10 @@
 //! FFI layer for Eä SIMD kernels — inference + KV-cache.
-//!
-//! Initialized by `ffi::init()` via `init_from(&dir)`.
-//! Call `ffi::init()` at startup; these wrappers are then available.
 
 use libloading::{Library, Symbol};
 use std::path::Path;
 use std::sync::OnceLock;
 
-// ── Type aliases — inference ──────────────────────────────────────────────────
+// Type aliases — inference
 
 type I2DotI8Fn = unsafe extern "C" fn(*const u8, *const i8, i32) -> i32;
 type I2DotI8_4RowFn = unsafe extern "C" fn(
@@ -59,18 +56,16 @@ type Q6kDot4RowFn = unsafe extern "C" fn(
 type ApplyRopeFn = unsafe extern "C" fn(*const f32, *const f32, *mut f32, i32, i32);
 #[allow(clippy::type_complexity)]
 type Q4kGemm4x4Fn = unsafe extern "C" fn(
-    *const u8, *const u8, *const u8, *const u8,           // rw0-3
-    *const i8, *const i8, *const i8, *const i8,            // q8_0-3
-    *const i32, *const i32, *const i32, *const i32,        // bsums_0-3
-    *const u8, *const u8, *const u8, *const u8,            // sc0-3
-    *const u8, *const u8, *const u8, *const u8,            // mn0-3
-    *const f32, *const f32, *const f32, *const f32,        // d_arr0-3
-    *const f32, *const f32, *const f32, *const f32,        // dm_arr0-3
-    *const f32, *const f32, *const f32, *const f32,        // q8d_0-3
-    *mut f32, i32,                                          // scores, n_blocks
+    *const u8, *const u8, *const u8, *const u8,
+    *const i8, *const i8, *const i8, *const i8,
+    *const i32, *const i32, *const i32, *const i32,
+    *const u8, *const u8, *const u8, *const u8,
+    *const u8, *const u8, *const u8, *const u8,
+    *const f32, *const f32, *const f32, *const f32,
+    *const f32, *const f32, *const f32, *const f32,
+    *const f32, *const f32, *const f32, *const f32,
+    *mut f32, i32,
 );
-
-// ── Type aliases — KV-cache ───────────────────────────────────────────────────
 
 type QuantizeSIMDFn   = unsafe extern "C" fn(*const f32, *mut i32, *mut f32, *mut f32, i32);
 type DequantizeSIMDFn = unsafe extern "C" fn(*const u8, *const f32, *const f32, *mut f32, i32);
@@ -88,8 +83,6 @@ type FusedAttentionFn = unsafe extern "C" fn(
     *const u8, *const f32, *const f32,
     *mut f32, i32, i32, i32);
 type ValidateFn = unsafe extern "C" fn(*const f32, *const f32, *const i32, *const i32, i32) -> i32;
-
-// ── KernelTableInference ──────────────────────────────────────────────────────
 
 pub struct KernelTableInference {
     pub libs: Vec<Library>,
@@ -258,7 +251,7 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
     }
 }
 
-// ── Public wrappers — inference ───────────────────────────────────────────────
+// Public wrappers — inference
 
 pub unsafe fn i2_dot_i8(weights: *const u8, activations: *const i8, n: i32) -> i32 {
     (k().i2_dot_i8)(weights, activations, n)
@@ -422,101 +415,62 @@ pub unsafe fn apply_rope_f32(
     (k().apply_rope_f32)(data, freqs, out, head_dim, n_heads)
 }
 
-// ── Public wrappers — KV-cache ────────────────────────────────────────────────
-
+// Public wrappers — KV-cache
 pub unsafe fn quantize_simd(
     src: *const f32, weights_out: *mut i32,
     scales_out: *mut f32, biases_out: *mut f32, n_groups: i32,
-) {
-    (k().quantize_simd)(src, weights_out, scales_out, biases_out, n_groups)
-}
-
+) { (k().quantize_simd)(src, weights_out, scales_out, biases_out, n_groups) }
 pub unsafe fn dequantize_simd(
     weights: *const u8, scales: *const f32, biases: *const f32, out: *mut f32, n_groups: i32,
-) {
-    (k().dequantize_simd)(weights, scales, biases, out, n_groups)
-}
-
+) { (k().dequantize_simd)(weights, scales, biases, out, n_groups) }
 pub unsafe fn fused_k_score(
     q_vecs: *const f32, k_packed: *const u8, k_scales: *const f32, k_biases: *const f32,
     all_scores: *mut f32, seq_len: i32, n_heads: i32, groups_per_head: i32,
-) {
-    (k().fused_k_score)(q_vecs, k_packed, k_scales, k_biases,
-        all_scores, seq_len, n_heads, groups_per_head)
-}
-
+) { (k().fused_k_score)(q_vecs, k_packed, k_scales, k_biases,
+    all_scores, seq_len, n_heads, groups_per_head) }
 pub unsafe fn fused_k_score_64(
     q_vecs: *const f32, k_packed: *const u8, k_scales: *const f32, k_biases: *const f32,
     all_scores: *mut f32, seq_len: i32, n_heads: i32, groups_per_head: i32,
-) {
-    (k().fused_k_score_64)(q_vecs, k_packed, k_scales, k_biases,
-        all_scores, seq_len, n_heads, groups_per_head)
-}
-
+) { (k().fused_k_score_64)(q_vecs, k_packed, k_scales, k_biases,
+    all_scores, seq_len, n_heads, groups_per_head) }
 pub unsafe fn fused_k_score_gqa(
     q_vecs: *const f32, k_packed: *const u8, k_scales: *const f32, k_biases: *const f32,
     all_scores: *mut f32, seq_len: i32, n_q_heads: i32, n_kv_heads: i32, groups_per_head: i32,
-) {
-    (k().fused_k_score_gqa)(q_vecs, k_packed, k_scales, k_biases,
-        all_scores, seq_len, n_q_heads, n_kv_heads, groups_per_head)
-}
-
+) { (k().fused_k_score_gqa)(q_vecs, k_packed, k_scales, k_biases,
+    all_scores, seq_len, n_q_heads, n_kv_heads, groups_per_head) }
 pub unsafe fn fused_k_score_gqa_64(
     q_vecs: *const f32, k_packed: *const u8, k_scales: *const f32, k_biases: *const f32,
     all_scores: *mut f32, seq_len: i32, n_q_heads: i32, n_kv_heads: i32, groups_per_head: i32,
-) {
-    (k().fused_k_score_gqa_64)(q_vecs, k_packed, k_scales, k_biases,
-        all_scores, seq_len, n_q_heads, n_kv_heads, groups_per_head)
-}
-
+) { (k().fused_k_score_gqa_64)(q_vecs, k_packed, k_scales, k_biases,
+    all_scores, seq_len, n_q_heads, n_kv_heads, groups_per_head) }
 pub unsafe fn fused_v_sum(
     all_weights: *const f32, v_packed: *const u8, v_scales: *const f32, v_biases: *const f32,
     all_out: *mut f32, seq_len: i32, n_heads: i32, groups_per_head: i32,
-) {
-    (k().fused_v_sum)(all_weights, v_packed, v_scales, v_biases,
-        all_out, seq_len, n_heads, groups_per_head)
-}
-
+) { (k().fused_v_sum)(all_weights, v_packed, v_scales, v_biases,
+    all_out, seq_len, n_heads, groups_per_head) }
 pub unsafe fn fused_v_sum_64(
     all_weights: *const f32, v_packed: *const u8, v_scales: *const f32, v_biases: *const f32,
     all_out: *mut f32, seq_len: i32, n_heads: i32, groups_per_head: i32,
-) {
-    (k().fused_v_sum_64)(all_weights, v_packed, v_scales, v_biases,
-        all_out, seq_len, n_heads, groups_per_head)
-}
-
+) { (k().fused_v_sum_64)(all_weights, v_packed, v_scales, v_biases,
+    all_out, seq_len, n_heads, groups_per_head) }
 pub unsafe fn fused_v_sum_gqa(
     all_weights: *const f32, v_packed: *const u8, v_scales: *const f32, v_biases: *const f32,
     all_out: *mut f32, seq_len: i32, n_q_heads: i32, n_kv_heads: i32, groups_per_head: i32,
-) {
-    (k().fused_v_sum_gqa)(all_weights, v_packed, v_scales, v_biases,
-        all_out, seq_len, n_q_heads, n_kv_heads, groups_per_head)
-}
-
+) { (k().fused_v_sum_gqa)(all_weights, v_packed, v_scales, v_biases,
+    all_out, seq_len, n_q_heads, n_kv_heads, groups_per_head) }
 pub unsafe fn fused_v_sum_gqa_64(
     all_weights: *const f32, v_packed: *const u8, v_scales: *const f32, v_biases: *const f32,
     all_out: *mut f32, seq_len: i32, n_q_heads: i32, n_kv_heads: i32, groups_per_head: i32,
-) {
-    (k().fused_v_sum_gqa_64)(all_weights, v_packed, v_scales, v_biases,
-        all_out, seq_len, n_q_heads, n_kv_heads, groups_per_head)
-}
-
+) { (k().fused_v_sum_gqa_64)(all_weights, v_packed, v_scales, v_biases,
+    all_out, seq_len, n_q_heads, n_kv_heads, groups_per_head) }
 pub unsafe fn fused_attention(
     q_vecs: *const f32,
     k_packed: *const u8, k_scales: *const f32, k_biases: *const f32,
     v_packed: *const u8, v_scales: *const f32, v_biases: *const f32,
     all_out: *mut f32, seq_len: i32, n_heads: i32, groups_per_head: i32,
-) {
-    (k().fused_attention)(
-        q_vecs,
-        k_packed, k_scales, k_biases,
-        v_packed, v_scales, v_biases,
-        all_out, seq_len, n_heads, groups_per_head)
-}
-
+) { (k().fused_attention)(q_vecs, k_packed, k_scales, k_biases,
+    v_packed, v_scales, v_biases, all_out, seq_len, n_heads, groups_per_head) }
 pub unsafe fn validate(
     scales: *const f32, biases: *const f32,
     scales_bits: *const i32, biases_bits: *const i32, n_groups: i32,
-) -> i32 {
-    (k().validate)(scales, biases, scales_bits, biases_bits, n_groups)
-}
+) -> i32 { (k().validate)(scales, biases, scales_bits, biases_bits, n_groups) }
