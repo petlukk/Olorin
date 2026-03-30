@@ -84,7 +84,7 @@ impl LlamaState {
                     &mut vs_all[t*kv..(t+1)*kv],
                 );
                 add_bias(q, lw.q_bias, h);
-                add_bias(k, lw.k_bias, kv);
+                // K-bias kept out of cache — applied as score correction below
                 add_bias(v, lw.v_bias, kv);
                 build_rope_freqs(&mut self.rope_freqs, hd, t, model.rope_theta);
                 apply_rope(q, &self.rope_freqs, hd, nh);
@@ -95,6 +95,30 @@ impl LlamaState {
                 let seq_len = t + 1;
                 let scores = &mut self.attn_scores[..nh * seq_len];
                 cache::attention::attention_scores(&self.kv_cache, q, layer as i32, nh as i32, nkv as i32, seq_len as i32, scores);
+
+                // K-bias correction with position-dependent RoPE
+                if !lw.k_bias.is_null() {
+                    let q_per_kv = nh / nkv;
+                    let rsqrt_hd = 1.0 / (hd as f32).sqrt();
+                    let mut rotated_bias = vec![0.0f32; kv];
+                    let mut bias_freqs = vec![0.0f32; hd];
+                    for s in 0..seq_len {
+                        for i in 0..kv { rotated_bias[i] = unsafe { *lw.k_bias.add(i) }; }
+                        build_rope_freqs(&mut bias_freqs, hd, s, model.rope_theta);
+                        apply_rope(&mut rotated_bias, &bias_freqs, hd, nkv);
+                        for kv_h in 0..nkv {
+                            let kb_off = kv_h * hd;
+                            for q_off in 0..q_per_kv {
+                                let q_h = kv_h * q_per_kv + q_off;
+                                let qb = q_h * hd;
+                                let mut dot = 0.0f32;
+                                for d in 0..hd { dot += q[qb + d] * rotated_bias[kb_off + d]; }
+                                scores[q_h * seq_len + s] += dot * rsqrt_hd;
+                            }
+                        }
+                    }
+                }
+
                 softmax_rows(scores, nh, seq_len);
                 let attn = &mut attn_all[t*h..(t+1)*h];
                 cache::attention::attention_output(&self.kv_cache, scores, layer as i32, nh as i32, nkv as i32, seq_len as i32, attn);

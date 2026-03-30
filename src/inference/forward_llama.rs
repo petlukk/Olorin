@@ -164,7 +164,9 @@ impl LlamaState {
         }
 
         add_bias(&mut self.q, lw.q_bias, h);
-        add_bias(&mut self.k, lw.k_bias, kv);
+        // K-bias: do NOT add to K before cache — it destroys TurboQuant precision.
+        // Instead, apply bias correction to attention scores after Q·K computation.
+        // V-bias: small enough to apply directly (mean_abs ≈ 0.05).
         add_bias(&mut self.v, lw.v_bias, kv);
 
         build_rope_freqs(&mut self.rope_freqs, hd, pos, model.rope_theta);
@@ -177,6 +179,40 @@ impl LlamaState {
         let seq_len = pos + 1;
         let scores = &mut self.attn_scores[..nh * seq_len];
         cache::attention::attention_scores(&self.kv_cache, &self.q, layer as i32, nh as i32, nkv as i32, seq_len as i32, scores);
+
+        // K-bias correction: the original score is Q·(K+bias) with RoPE on both.
+        // Since RoPE is linear: RoPE(K+bias) = RoPE(K) + RoPE(bias).
+        // We stored only RoPE(K) in cache. Correction per (q_head, position t):
+        //   score[q_h, t] += RoPE(Q, pos) · RoPE(k_bias, t) / sqrt(hd)
+        // RoPE(k_bias, t) must be computed per position since RoPE depends on t.
+        if !lw.k_bias.is_null() {
+            let q_per_kv = nh / nkv;
+            let rsqrt_hd = 1.0 / (hd as f32).sqrt();
+            let mut rotated_bias = vec![0.0f32; kv];
+            let mut bias_freqs = vec![0.0f32; hd];
+            for t in 0..seq_len {
+                // Copy k_bias and apply RoPE at position t
+                for i in 0..kv {
+                    rotated_bias[i] = unsafe { *lw.k_bias.add(i) };
+                }
+                build_rope_freqs(&mut bias_freqs, hd, t, model.rope_theta);
+                apply_rope(&mut rotated_bias, &bias_freqs, hd, nkv);
+                // Dot with Q (already RoPE'd at pos) for each query head
+                for kv_h in 0..nkv {
+                    let kb_off = kv_h * hd;
+                    for q_off in 0..q_per_kv {
+                        let q_h = kv_h * q_per_kv + q_off;
+                        let qb = q_h * hd;
+                        let mut dot = 0.0f32;
+                        for d in 0..hd {
+                            dot += self.q[qb + d] * rotated_bias[kb_off + d];
+                        }
+                        scores[q_h * seq_len + t] += dot * rsqrt_hd;
+                    }
+                }
+            }
+        }
+
         softmax_rows(scores, nh, seq_len);
         cache::attention::attention_output(&self.kv_cache, scores, layer as i32, nh as i32, nkv as i32, seq_len as i32, &mut self.attn_out);
 
