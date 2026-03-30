@@ -156,8 +156,27 @@ pub(crate) fn i8_output_matmul_speculative(
         if start >= end { return; }
         let count = end - start;
 
-        // Phase 1: sketch score this chunk
-        for row in start..end {
+        // Phase 1: sketch score this chunk (4-row batched)
+        let mut row = start;
+        while row + 4 <= end {
+            let mut raw4 = [0i32; 4];
+            unsafe {
+                ffi::i8dot_4row(
+                    xs_ptr.ptr(),
+                    sk_ptr.ptr().add(row * sketch_dim) as *const u8,
+                    sk_ptr.ptr().add((row+1) * sketch_dim) as *const u8,
+                    sk_ptr.ptr().add((row+2) * sketch_dim) as *const u8,
+                    sk_ptr.ptr().add((row+3) * sketch_dim) as *const u8,
+                    raw4.as_mut_ptr(), sketch_dim as i32,
+                );
+                *ss_ptr.ptr().add(row) = raw4[0];
+                *ss_ptr.ptr().add(row+1) = raw4[1];
+                *ss_ptr.ptr().add(row+2) = raw4[2];
+                *ss_ptr.ptr().add(row+3) = raw4[3];
+            }
+            row += 4;
+        }
+        while row < end {
             let raw = unsafe {
                 ffi::i8dot_1row(
                     xs_ptr.ptr(),
@@ -166,6 +185,7 @@ pub(crate) fn i8_output_matmul_speculative(
                 )
             };
             unsafe { *ss_ptr.ptr().add(row) = raw; }
+            row += 1;
         }
 
         // Phase 2: local top-k via partial partition
