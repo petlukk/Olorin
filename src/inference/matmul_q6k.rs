@@ -13,24 +13,35 @@ const Q6K_SC_OFF: usize = 192;
 const Q6K_D_OFF: usize = 208;
 
 
+/// Max blocks on stack (same as Q4K).
+const MAX_BLOCKS: usize = 128;
+
+/// Pre-compute per-block d_arr and copy scales for one Q6K weight row.
+unsafe fn q6k_unpack_row(
+    weight: *const u8, n_blocks: usize, q8_d: *const f32,
+    d_arr: &mut [f32], sc_buf: &mut [i8],
+) {
+    for blk in 0..n_blocks {
+        let bp = weight.add(blk * Q6K_BLOCK_BYTES);
+        d_arr[blk] = f16_to_f32(*(bp.add(Q6K_D_OFF) as *const u16)) * *q8_d.add(blk);
+        let sc = std::slice::from_raw_parts(bp.add(Q6K_SC_OFF) as *const i8, 16);
+        sc_buf[blk * 16..blk * 16 + 16].copy_from_slice(sc);
+    }
+}
+
 /// Dot product of one Q6_K weight row against Q8_K activations.
 pub(crate) unsafe fn q6k_row_dot(
     weight: *const u8, n_blocks: usize,
     q8_qs: *const i8, q8_d: *const f32, q8_bsums: *const i32,
 ) -> f32 {
-    let mut result = 0.0f32;
-    for blk in 0..n_blocks {
-        let block_ptr = weight.add(blk * Q6K_BLOCK_BYTES);
-        let d_f16 = *(block_ptr.add(Q6K_D_OFF) as *const u16);
-        let blk_q8_d = *q8_d.add(blk);
-        let d = f16_to_f32(d_f16) * blk_q8_d;
-        result += ffi::q6k_dot_q8k(
-            block_ptr.add(Q6K_QL_OFF), block_ptr.add(Q6K_QH_OFF),
-            block_ptr.add(Q6K_SC_OFF) as *const i8,
-            q8_qs.add(blk * 256), q8_bsums.add(blk * 16), 1, d,
-        );
-    }
-    result
+    debug_assert!(n_blocks <= MAX_BLOCKS);
+    let mut d_arr = [0f32; MAX_BLOCKS];
+    let mut sc = [0i8; MAX_BLOCKS * 16];
+    q6k_unpack_row(weight, n_blocks, q8_d, &mut d_arr, &mut sc);
+    ffi::q6k_dot_q8k(
+        weight, sc.as_ptr(), q8_qs, q8_bsums,
+        n_blocks as i32, d_arr.as_ptr(),
+    )
 }
 
 /// 4-row Q6_K x Q8_K dot product with shared activations.
@@ -40,32 +51,19 @@ pub(crate) unsafe fn q6k_4row_dot(
     q8_qs: *const i8, q8_d: *const f32, q8_bsums: *const i32,
     scores: &mut [f32; 4],
 ) {
-    *scores = [0.0; 4];
-    let mut blk_scores = [0.0f32; 4];
-    for blk in 0..n_blocks {
-        let b0 = w0.add(blk * Q6K_BLOCK_BYTES);
-        let b1 = w1.add(blk * Q6K_BLOCK_BYTES);
-        let b2 = w2.add(blk * Q6K_BLOCK_BYTES);
-        let b3 = w3.add(blk * Q6K_BLOCK_BYTES);
-        let blk_q8_d = *q8_d.add(blk);
-
-        let d0 = f16_to_f32(*(b0.add(Q6K_D_OFF) as *const u16)) * blk_q8_d;
-        let d1 = f16_to_f32(*(b1.add(Q6K_D_OFF) as *const u16)) * blk_q8_d;
-        let d2 = f16_to_f32(*(b2.add(Q6K_D_OFF) as *const u16)) * blk_q8_d;
-        let d3 = f16_to_f32(*(b3.add(Q6K_D_OFF) as *const u16)) * blk_q8_d;
-
-        ffi::q6k_dot_q8k_4row(
-            b0.add(Q6K_QL_OFF), b1.add(Q6K_QL_OFF),
-            b2.add(Q6K_QL_OFF), b3.add(Q6K_QL_OFF),
-            b0.add(Q6K_QH_OFF), b1.add(Q6K_QH_OFF),
-            b2.add(Q6K_QH_OFF), b3.add(Q6K_QH_OFF),
-            b0.add(Q6K_SC_OFF) as *const i8, b1.add(Q6K_SC_OFF) as *const i8,
-            b2.add(Q6K_SC_OFF) as *const i8, b3.add(Q6K_SC_OFF) as *const i8,
-            q8_qs.add(blk * 256), q8_bsums.add(blk * 16),
-            blk_scores.as_mut_ptr(), 1, d0, d1, d2, d3,
-        );
-        for i in 0..4 { scores[i] += blk_scores[i]; }
+    debug_assert!(n_blocks <= MAX_BLOCKS);
+    let mut da = [[0f32; MAX_BLOCKS]; 4];
+    let mut sc = [[0i8; MAX_BLOCKS * 16]; 4];
+    let ws = [w0, w1, w2, w3];
+    for i in 0..4 {
+        q6k_unpack_row(ws[i], n_blocks, q8_d, &mut da[i], &mut sc[i]);
     }
+    ffi::q6k_dot_q8k_4row(
+        w0, w1, w2, w3,
+        sc[0].as_ptr(), sc[1].as_ptr(), sc[2].as_ptr(), sc[3].as_ptr(),
+        q8_qs, q8_bsums, scores.as_mut_ptr(), n_blocks as i32,
+        da[0].as_ptr(), da[1].as_ptr(), da[2].as_ptr(), da[3].as_ptr(),
+    );
 }
 
 /// Multi-threaded Q6_K x Q8_K matrix multiplication.

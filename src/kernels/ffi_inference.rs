@@ -49,12 +49,13 @@ type Q4kDot4RowDualFn = unsafe extern "C" fn(
     *const f32, *const f32, *const f32, *const f32,
     *const f32, *const f32, *const f32, *const f32);
 type Q6kDotQ8kFn = unsafe extern "C" fn(
-    *const u8, *const u8, *const i8, *const i8, *const i32, i32, f32) -> f32;
+    *const u8, *const i8, *const i8, *const i32,
+    i32, *const f32) -> f32;
 type Q6kDot4RowFn = unsafe extern "C" fn(
     *const u8, *const u8, *const u8, *const u8,
-    *const u8, *const u8, *const u8, *const u8,
     *const i8, *const i8, *const i8, *const i8,
-    *const i8, *const i32, *mut f32, i32, f32, f32, f32, f32);
+    *const i8, *const i32, *mut f32, i32,
+    *const f32, *const f32, *const f32, *const f32);
 type ApplyRopeFn = unsafe extern "C" fn(*const f32, *const f32, *mut f32, i32, i32);
 #[allow(clippy::type_complexity)]
 type Q4kGemm4x4Fn = unsafe extern "C" fn(
@@ -372,23 +373,22 @@ pub unsafe fn q4k_dot_q8k_4row_dual(
 }
 
 pub unsafe fn q6k_dot_q8k(
-    ql: *const u8, qh: *const u8, scales: *const i8,
-    q8: *const i8, bsums: *const i32, n_blocks: i32, d: f32,
+    weight: *const u8, scales: *const i8,
+    q8: *const i8, bsums: *const i32, n_blocks: i32,
+    d_arr: *const f32,
 ) -> f32 {
-    (k().q6k_dot_q8k)(ql, qh, scales, q8, bsums, n_blocks, d)
+    (k().q6k_dot_q8k)(weight, scales, q8, bsums, n_blocks, d_arr)
 }
 
 pub unsafe fn q6k_dot_q8k_4row(
-    ql0: *const u8, ql1: *const u8, ql2: *const u8, ql3: *const u8,
-    qh0: *const u8, qh1: *const u8, qh2: *const u8, qh3: *const u8,
+    w0: *const u8, w1: *const u8, w2: *const u8, w3: *const u8,
     sc0: *const i8, sc1: *const i8, sc2: *const i8, sc3: *const i8,
     q8: *const i8, bsums: *const i32, scores: *mut f32, n_blocks: i32,
-    d0: f32, d1: f32, d2: f32, d3: f32,
+    d0: *const f32, d1: *const f32, d2: *const f32, d3: *const f32,
 ) {
     (k().q6k_dot_q8k_4row)(
-        ql0, ql1, ql2, ql3, qh0, qh1, qh2, qh3,
-        sc0, sc1, sc2, sc3, q8, bsums,
-        scores, n_blocks, d0, d1, d2, d3)
+        w0, w1, w2, w3, sc0, sc1, sc2, sc3,
+        q8, bsums, scores, n_blocks, d0, d1, d2, d3)
 }
 
 #[allow(clippy::too_many_arguments)]
