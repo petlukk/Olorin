@@ -133,9 +133,6 @@ pub(crate) fn i8_output_matmul_speculative(
     sorted_idx.sort_unstable_by(|&a, &b| sketch_scores[b].cmp(&sketch_scores[a]));
 
     // Phase 3: full dot product only for candidates
-    for &row in out.iter_mut().zip(std::iter::repeat(&0.0f32)).take(vocab_size) {
-        // zero out
-    }
     for r in 0..vocab_size { out[r] = f32::NEG_INFINITY; }
     for &row in sorted_idx[..top_k].iter() {
         let raw = unsafe {
