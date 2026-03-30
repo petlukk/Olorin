@@ -69,12 +69,19 @@ fn main() {
         })
         .collect();
 
+    // x86-only kernels that have no ARM variant and no _avx2/_avx512 suffix.
+    const ARM_EXCLUDE: &[&str] = &[
+        "fused_attention", "fused_safety", "jl_project", "leak_scanner",
+        "q4k_gemm_tile", "sanitizer", "search", "turbo_rotate", "zeroize",
+    ];
+
     // Filter by architecture
     let filtered: Vec<&KernelSrc> = sources
         .iter()
         .filter(|s| {
             if is_arm {
                 if s.x86_only { return false; }
+                if ARM_EXCLUDE.contains(&s.stem.as_str()) { return false; }
                 if !s.arm_only {
                     let arm_variant = format!("{}_arm", s.stem);
                     !sources.iter().any(|o| o.stem == arm_variant)
