@@ -1,9 +1,8 @@
-// q4k_gemm_tile.ea — Tiled Q4_K × Q8_K GEMM: 4 rows × 4 tokens per tile.
+// q4k_gemm_tile.ea — Tiled Q4_K × Q8_K GEMM: 4 rows × 4 tokens (AVX2).
 //
-// Loads Q4 weight block data ONCE per tile, computes dot products against
-// 4 tokens' Q8 activations. 16 accumulators (4 rows × 4 tokens).
-// Reduces cache thrashing vs the current approach of cycling through
-// all tokens per weight row group.
+// Loads Q4 weight block data ONCE per tile via u8x32, computes dot products
+// against 4 tokens' Q8 activations. 16 accumulators (4 rows × 4 tokens).
+// AVX2: single 32-byte load per chunk per row, halves loads and maddubs calls.
 
 #[cfg(x86_64)]
 
@@ -19,8 +18,8 @@ export func q4k_gemm_4x4(
     out scores: *mut f32 [cap: 16],
     n_blocks: i32
 ) {
-    let mask_lo: u8x16 = splat(15)
-    let shift4: u8x16 = splat(4)
+    let mask_lo: u8x32 = splat(15)
+    let shift4: u8x32 = splat(4)
 
     // 16 accumulators: acc[row][token]
     let mut r0t0: f32 = 0.0
@@ -47,7 +46,6 @@ export func q4k_gemm_4x4(
         let sc_off: i32 = blk * 8
         let bs_off: i32 = blk * 16
 
-        // Integer accumulators per row×token
         let mut s0t0: i32 = 0
         let mut s0t1: i32 = 0
         let mut s0t2: i32 = 0
@@ -67,83 +65,60 @@ export func q4k_gemm_4x4(
 
         let mut j: i32 = 0
         while j < 4 {
-            // Load Q4 weight nibbles for all 4 rows — ONE load per block chunk
-            let p0a: u8x16 = load(rw0, q4_off + j * 32)
-            let p0b: u8x16 = load(rw0, q4_off + j * 32 + 16)
-            let p1a: u8x16 = load(rw1, q4_off + j * 32)
-            let p1b: u8x16 = load(rw1, q4_off + j * 32 + 16)
-            let p2a: u8x16 = load(rw2, q4_off + j * 32)
-            let p2b: u8x16 = load(rw2, q4_off + j * 32 + 16)
-            let p3a: u8x16 = load(rw3, q4_off + j * 32)
-            let p3b: u8x16 = load(rw3, q4_off + j * 32 + 16)
+            // Load Q4 weights — one u8x32 per row per chunk
+            let p0: u8x32 = load(rw0, q4_off + j * 32)
+            let p1: u8x32 = load(rw1, q4_off + j * 32)
+            let p2: u8x32 = load(rw2, q4_off + j * 32)
+            let p3: u8x32 = load(rw3, q4_off + j * 32)
 
-            // Pre-split lo/hi nibbles for all rows
-            let p0a_lo: u8x16 = p0a .& mask_lo
-            let p0b_lo: u8x16 = p0b .& mask_lo
-            let p0a_hi: u8x16 = p0a .>> shift4
-            let p0b_hi: u8x16 = p0b .>> shift4
-            let p1a_lo: u8x16 = p1a .& mask_lo
-            let p1b_lo: u8x16 = p1b .& mask_lo
-            let p1a_hi: u8x16 = p1a .>> shift4
-            let p1b_hi: u8x16 = p1b .>> shift4
-            let p2a_lo: u8x16 = p2a .& mask_lo
-            let p2b_lo: u8x16 = p2b .& mask_lo
-            let p2a_hi: u8x16 = p2a .>> shift4
-            let p2b_hi: u8x16 = p2b .>> shift4
-            let p3a_lo: u8x16 = p3a .& mask_lo
-            let p3b_lo: u8x16 = p3b .& mask_lo
-            let p3a_hi: u8x16 = p3a .>> shift4
-            let p3b_hi: u8x16 = p3b .>> shift4
+            // Pre-split nibbles
+            let p0_lo: u8x32 = p0 .& mask_lo
+            let p0_hi: u8x32 = p0 .>> shift4
+            let p1_lo: u8x32 = p1 .& mask_lo
+            let p1_hi: u8x32 = p1 .>> shift4
+            let p2_lo: u8x32 = p2 .& mask_lo
+            let p2_hi: u8x32 = p2 .>> shift4
+            let p3_lo: u8x32 = p3 .& mask_lo
+            let p3_hi: u8x32 = p3 .>> shift4
 
-            // Token 0 — load Q8 once, dot with all 4 rows
-            let a0: i8x16 = load(q8_0, q8_off + j * 64)
-            let a1: i8x16 = load(q8_0, q8_off + j * 64 + 16)
-            let b0: i8x16 = load(q8_0, q8_off + j * 64 + 32)
-            let b1: i8x16 = load(q8_0, q8_off + j * 64 + 48)
-            s0t0 = s0t0 + reduce_add(maddubs_i32(p0a_lo, a0) .+ maddubs_i32(p0b_lo, a1)) * to_i32(sc0[sc_off + 2*j]) + reduce_add(maddubs_i32(p0a_hi, b0) .+ maddubs_i32(p0b_hi, b1)) * to_i32(sc0[sc_off + 2*j+1])
-            s1t0 = s1t0 + reduce_add(maddubs_i32(p1a_lo, a0) .+ maddubs_i32(p1b_lo, a1)) * to_i32(sc1[sc_off + 2*j]) + reduce_add(maddubs_i32(p1a_hi, b0) .+ maddubs_i32(p1b_hi, b1)) * to_i32(sc1[sc_off + 2*j+1])
-            s2t0 = s2t0 + reduce_add(maddubs_i32(p2a_lo, a0) .+ maddubs_i32(p2b_lo, a1)) * to_i32(sc2[sc_off + 2*j]) + reduce_add(maddubs_i32(p2a_hi, b0) .+ maddubs_i32(p2b_hi, b1)) * to_i32(sc2[sc_off + 2*j+1])
-            s3t0 = s3t0 + reduce_add(maddubs_i32(p3a_lo, a0) .+ maddubs_i32(p3b_lo, a1)) * to_i32(sc3[sc_off + 2*j]) + reduce_add(maddubs_i32(p3a_hi, b0) .+ maddubs_i32(p3b_hi, b1)) * to_i32(sc3[sc_off + 2*j+1])
+            // Token 0
+            let lo0: i8x32 = load(q8_0, q8_off + j * 64)
+            let hi0: i8x32 = load(q8_0, q8_off + j * 64 + 32)
+            let sc_lo: i32 = 2 * j
+            let sc_hi: i32 = 2 * j + 1
+            s0t0 = s0t0 + reduce_add(maddubs_i32(p0_lo, lo0)) * to_i32(sc0[sc_off + sc_lo]) + reduce_add(maddubs_i32(p0_hi, hi0)) * to_i32(sc0[sc_off + sc_hi])
+            s1t0 = s1t0 + reduce_add(maddubs_i32(p1_lo, lo0)) * to_i32(sc1[sc_off + sc_lo]) + reduce_add(maddubs_i32(p1_hi, hi0)) * to_i32(sc1[sc_off + sc_hi])
+            s2t0 = s2t0 + reduce_add(maddubs_i32(p2_lo, lo0)) * to_i32(sc2[sc_off + sc_lo]) + reduce_add(maddubs_i32(p2_hi, hi0)) * to_i32(sc2[sc_off + sc_hi])
+            s3t0 = s3t0 + reduce_add(maddubs_i32(p3_lo, lo0)) * to_i32(sc3[sc_off + sc_lo]) + reduce_add(maddubs_i32(p3_hi, hi0)) * to_i32(sc3[sc_off + sc_hi])
 
             // Token 1
-            let a0: i8x16 = load(q8_1, q8_off + j * 64)
-            let a1: i8x16 = load(q8_1, q8_off + j * 64 + 16)
-            let b0: i8x16 = load(q8_1, q8_off + j * 64 + 32)
-            let b1: i8x16 = load(q8_1, q8_off + j * 64 + 48)
-            s0t1 = s0t1 + reduce_add(maddubs_i32(p0a_lo, a0) .+ maddubs_i32(p0b_lo, a1)) * to_i32(sc0[sc_off + 2*j]) + reduce_add(maddubs_i32(p0a_hi, b0) .+ maddubs_i32(p0b_hi, b1)) * to_i32(sc0[sc_off + 2*j+1])
-            s1t1 = s1t1 + reduce_add(maddubs_i32(p1a_lo, a0) .+ maddubs_i32(p1b_lo, a1)) * to_i32(sc1[sc_off + 2*j]) + reduce_add(maddubs_i32(p1a_hi, b0) .+ maddubs_i32(p1b_hi, b1)) * to_i32(sc1[sc_off + 2*j+1])
-            s2t1 = s2t1 + reduce_add(maddubs_i32(p2a_lo, a0) .+ maddubs_i32(p2b_lo, a1)) * to_i32(sc2[sc_off + 2*j]) + reduce_add(maddubs_i32(p2a_hi, b0) .+ maddubs_i32(p2b_hi, b1)) * to_i32(sc2[sc_off + 2*j+1])
-            s3t1 = s3t1 + reduce_add(maddubs_i32(p3a_lo, a0) .+ maddubs_i32(p3b_lo, a1)) * to_i32(sc3[sc_off + 2*j]) + reduce_add(maddubs_i32(p3a_hi, b0) .+ maddubs_i32(p3b_hi, b1)) * to_i32(sc3[sc_off + 2*j+1])
+            let lo1: i8x32 = load(q8_1, q8_off + j * 64)
+            let hi1: i8x32 = load(q8_1, q8_off + j * 64 + 32)
+            s0t1 = s0t1 + reduce_add(maddubs_i32(p0_lo, lo1)) * to_i32(sc0[sc_off + sc_lo]) + reduce_add(maddubs_i32(p0_hi, hi1)) * to_i32(sc0[sc_off + sc_hi])
+            s1t1 = s1t1 + reduce_add(maddubs_i32(p1_lo, lo1)) * to_i32(sc1[sc_off + sc_lo]) + reduce_add(maddubs_i32(p1_hi, hi1)) * to_i32(sc1[sc_off + sc_hi])
+            s2t1 = s2t1 + reduce_add(maddubs_i32(p2_lo, lo1)) * to_i32(sc2[sc_off + sc_lo]) + reduce_add(maddubs_i32(p2_hi, hi1)) * to_i32(sc2[sc_off + sc_hi])
+            s3t1 = s3t1 + reduce_add(maddubs_i32(p3_lo, lo1)) * to_i32(sc3[sc_off + sc_lo]) + reduce_add(maddubs_i32(p3_hi, hi1)) * to_i32(sc3[sc_off + sc_hi])
 
             // Token 2
-            let a0: i8x16 = load(q8_2, q8_off + j * 64)
-            let a1: i8x16 = load(q8_2, q8_off + j * 64 + 16)
-            let b0: i8x16 = load(q8_2, q8_off + j * 64 + 32)
-            let b1: i8x16 = load(q8_2, q8_off + j * 64 + 48)
-            s0t2 = s0t2 + reduce_add(maddubs_i32(p0a_lo, a0) .+ maddubs_i32(p0b_lo, a1)) * to_i32(sc0[sc_off + 2*j]) + reduce_add(maddubs_i32(p0a_hi, b0) .+ maddubs_i32(p0b_hi, b1)) * to_i32(sc0[sc_off + 2*j+1])
-            s1t2 = s1t2 + reduce_add(maddubs_i32(p1a_lo, a0) .+ maddubs_i32(p1b_lo, a1)) * to_i32(sc1[sc_off + 2*j]) + reduce_add(maddubs_i32(p1a_hi, b0) .+ maddubs_i32(p1b_hi, b1)) * to_i32(sc1[sc_off + 2*j+1])
-            s2t2 = s2t2 + reduce_add(maddubs_i32(p2a_lo, a0) .+ maddubs_i32(p2b_lo, a1)) * to_i32(sc2[sc_off + 2*j]) + reduce_add(maddubs_i32(p2a_hi, b0) .+ maddubs_i32(p2b_hi, b1)) * to_i32(sc2[sc_off + 2*j+1])
-            s3t2 = s3t2 + reduce_add(maddubs_i32(p3a_lo, a0) .+ maddubs_i32(p3b_lo, a1)) * to_i32(sc3[sc_off + 2*j]) + reduce_add(maddubs_i32(p3a_hi, b0) .+ maddubs_i32(p3b_hi, b1)) * to_i32(sc3[sc_off + 2*j+1])
+            let lo2: i8x32 = load(q8_2, q8_off + j * 64)
+            let hi2: i8x32 = load(q8_2, q8_off + j * 64 + 32)
+            s0t2 = s0t2 + reduce_add(maddubs_i32(p0_lo, lo2)) * to_i32(sc0[sc_off + sc_lo]) + reduce_add(maddubs_i32(p0_hi, hi2)) * to_i32(sc0[sc_off + sc_hi])
+            s1t2 = s1t2 + reduce_add(maddubs_i32(p1_lo, lo2)) * to_i32(sc1[sc_off + sc_lo]) + reduce_add(maddubs_i32(p1_hi, hi2)) * to_i32(sc1[sc_off + sc_hi])
+            s2t2 = s2t2 + reduce_add(maddubs_i32(p2_lo, lo2)) * to_i32(sc2[sc_off + sc_lo]) + reduce_add(maddubs_i32(p2_hi, hi2)) * to_i32(sc2[sc_off + sc_hi])
+            s3t2 = s3t2 + reduce_add(maddubs_i32(p3_lo, lo2)) * to_i32(sc3[sc_off + sc_lo]) + reduce_add(maddubs_i32(p3_hi, hi2)) * to_i32(sc3[sc_off + sc_hi])
 
             // Token 3
-            let a0: i8x16 = load(q8_3, q8_off + j * 64)
-            let a1: i8x16 = load(q8_3, q8_off + j * 64 + 16)
-            let b0: i8x16 = load(q8_3, q8_off + j * 64 + 32)
-            let b1: i8x16 = load(q8_3, q8_off + j * 64 + 48)
-            s0t3 = s0t3 + reduce_add(maddubs_i32(p0a_lo, a0) .+ maddubs_i32(p0b_lo, a1)) * to_i32(sc0[sc_off + 2*j]) + reduce_add(maddubs_i32(p0a_hi, b0) .+ maddubs_i32(p0b_hi, b1)) * to_i32(sc0[sc_off + 2*j+1])
-            s1t3 = s1t3 + reduce_add(maddubs_i32(p1a_lo, a0) .+ maddubs_i32(p1b_lo, a1)) * to_i32(sc1[sc_off + 2*j]) + reduce_add(maddubs_i32(p1a_hi, b0) .+ maddubs_i32(p1b_hi, b1)) * to_i32(sc1[sc_off + 2*j+1])
-            s2t3 = s2t3 + reduce_add(maddubs_i32(p2a_lo, a0) .+ maddubs_i32(p2b_lo, a1)) * to_i32(sc2[sc_off + 2*j]) + reduce_add(maddubs_i32(p2a_hi, b0) .+ maddubs_i32(p2b_hi, b1)) * to_i32(sc2[sc_off + 2*j+1])
-            s3t3 = s3t3 + reduce_add(maddubs_i32(p3a_lo, a0) .+ maddubs_i32(p3b_lo, a1)) * to_i32(sc3[sc_off + 2*j]) + reduce_add(maddubs_i32(p3a_hi, b0) .+ maddubs_i32(p3b_hi, b1)) * to_i32(sc3[sc_off + 2*j+1])
+            let lo3: i8x32 = load(q8_3, q8_off + j * 64)
+            let hi3: i8x32 = load(q8_3, q8_off + j * 64 + 32)
+            s0t3 = s0t3 + reduce_add(maddubs_i32(p0_lo, lo3)) * to_i32(sc0[sc_off + sc_lo]) + reduce_add(maddubs_i32(p0_hi, hi3)) * to_i32(sc0[sc_off + sc_hi])
+            s1t3 = s1t3 + reduce_add(maddubs_i32(p1_lo, lo3)) * to_i32(sc1[sc_off + sc_lo]) + reduce_add(maddubs_i32(p1_hi, hi3)) * to_i32(sc1[sc_off + sc_hi])
+            s2t3 = s2t3 + reduce_add(maddubs_i32(p2_lo, lo3)) * to_i32(sc2[sc_off + sc_lo]) + reduce_add(maddubs_i32(p2_hi, hi3)) * to_i32(sc2[sc_off + sc_hi])
+            s3t3 = s3t3 + reduce_add(maddubs_i32(p3_lo, lo3)) * to_i32(sc3[sc_off + sc_lo]) + reduce_add(maddubs_i32(p3_hi, hi3)) * to_i32(sc3[sc_off + sc_hi])
 
             j = j + 1
         }
 
-        // Min correction — shared per-row, applied to all 4 tokens
-        let mut mm0: i32 = 0
-        let mut mm1: i32 = 0
-        let mut mm2: i32 = 0
-        let mut mm3: i32 = 0
-        // Token bsums corrections
+        // Min correction — per-row mins × per-token bsums
         let mut mb0_t0: i32 = 0
         let mut mb0_t1: i32 = 0
         let mut mb0_t2: i32 = 0
@@ -243,7 +218,6 @@ export func q4k_gemm_4x4(
         blk = blk + 1
     }
 
-    // Output: scores[row * 4 + token]
     scores[0] = r0t0
     scores[1] = r0t1
     scores[2] = r0t2

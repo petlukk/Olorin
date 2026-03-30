@@ -8,6 +8,8 @@
 // masking after high nibble extraction: (q4v >> 4) & 0x0F.
 //
 // Q4 weight pointer is *i8 (bit-identical to u8 data, reinterpreted for vdot).
+// d_arr/dmin_arr: per-block pre-multiplied scale arrays (length n_blocks).
+// q4_off uses raw Q4K stride (144 bytes/block, nibbles at offset 16).
 
 #[cfg(aarch64)]
 
@@ -19,8 +21,8 @@ export func q4k_dot_q8k(
     scales: *restrict u8,
     mins: *restrict u8,
     n_blocks: i32,
-    d: f32,
-    dmin: f32
+    d_arr: *restrict f32,
+    dmin_arr: *restrict f32
 ) -> f32 {
     let mask_lo: i8x16 = splat(15)
     let shift4: i8x16 = splat(4)
@@ -28,7 +30,7 @@ export func q4k_dot_q8k(
 
     let mut blk: i32 = 0
     while blk < n_blocks {
-        let q4_off: i32 = blk * 128
+        let q4_off: i32 = blk * 144 + 16
         let q8_off: i32 = blk * 256
         let sc_off: i32 = blk * 8
         let bs_off: i32 = blk * 16
@@ -37,7 +39,6 @@ export func q4k_dot_q8k(
 
         let mut j: i32 = 0
         while j < 4 {
-            // Low nibbles: q4[j*32..j*32+31] & 0x0F × q8[j*64..j*64+31]
             let mut acc_lo: i32x4 = splat(0)
             let mut half: i32 = 0
             while half < 2 {
@@ -47,10 +48,8 @@ export func q4k_dot_q8k(
                 acc_lo = acc_lo .+ vdot_i32(q4_lo, q8v)
                 half = half + 1
             }
-            let sc_lo: i32 = to_i32(scales[sc_off + 2 * j])
-            sumi = sumi + reduce_add(acc_lo) * sc_lo
+            sumi = sumi + reduce_add(acc_lo) * to_i32(scales[sc_off + 2 * j])
 
-            // High nibbles: (q4 >> 4) & 0x0F × q8[j*64+32..j*64+63]
             let mut acc_hi: i32x4 = splat(0)
             half = 0
             while half < 2 {
@@ -60,8 +59,7 @@ export func q4k_dot_q8k(
                 acc_hi = acc_hi .+ vdot_i32(q4_hi, q8v2)
                 half = half + 1
             }
-            let sc_hi: i32 = to_i32(scales[sc_off + 2 * j + 1])
-            sumi = sumi + reduce_add(acc_hi) * sc_hi
+            sumi = sumi + reduce_add(acc_hi) * to_i32(scales[sc_off + 2 * j + 1])
 
             j = j + 1
         }
@@ -75,8 +73,7 @@ export func q4k_dot_q8k(
             j = j + 1
         }
 
-        result = result + d * to_f32(sumi) - dmin * to_f32(summs)
-
+        result = result + d_arr[blk] * to_f32(sumi) - dmin_arr[blk] * to_f32(summs)
         blk = blk + 1
     }
 
@@ -92,8 +89,8 @@ export func q4k_dot_q8k_4row(
     mn0: *restrict u8, mn1: *restrict u8, mn2: *restrict u8, mn3: *restrict u8,
     out scores: *mut f32 [cap: 4],
     n_blocks: i32,
-    d0: f32, d1: f32, d2: f32, d3: f32,
-    dm0: f32, dm1: f32, dm2: f32, dm3: f32
+    d0_arr: *restrict f32, d1_arr: *restrict f32, d2_arr: *restrict f32, d3_arr: *restrict f32,
+    dm0_arr: *restrict f32, dm1_arr: *restrict f32, dm2_arr: *restrict f32, dm3_arr: *restrict f32
 ) {
     let mask_lo: i8x16 = splat(15)
     let shift4: i8x16 = splat(4)
@@ -104,7 +101,7 @@ export func q4k_dot_q8k_4row(
 
     let mut blk: i32 = 0
     while blk < n_blocks {
-        let q4_off: i32 = blk * 128
+        let q4_off: i32 = blk * 144 + 16
         let q8_off: i32 = blk * 256
         let sc_off: i32 = blk * 8
         let bs_off: i32 = blk * 16
@@ -121,33 +118,29 @@ export func q4k_dot_q8k_4row(
             let q8_b0: i8x16 = load(q8, q8_off + j * 64 + 32)
             let q8_b1: i8x16 = load(q8, q8_off + j * 64 + 48)
 
-            // Row 0
             let p0a: i8x16 = load(rw0, q4_off + j * 32)
             let p0b: i8x16 = load(rw0, q4_off + j * 32 + 16)
             let d0_lo: i32 = reduce_add(vdot_i32(p0a .& mask_lo, q8_a0) .+ vdot_i32(p0b .& mask_lo, q8_a1))
             let d0_hi: i32 = reduce_add(vdot_i32((p0a .>> shift4) .& mask_lo, q8_b0) .+ vdot_i32((p0b .>> shift4) .& mask_lo, q8_b1))
-            sumi0 = sumi0 + d0_lo * to_i32(sc0[sc_off + 2 * j]) + d0_hi * to_i32(sc0[sc_off + 2 * j + 1])
+            sumi0 = sumi0 + d0_lo * to_i32(sc0[sc_off + 2*j]) + d0_hi * to_i32(sc0[sc_off + 2*j + 1])
 
-            // Row 1
             let p1a: i8x16 = load(rw1, q4_off + j * 32)
             let p1b: i8x16 = load(rw1, q4_off + j * 32 + 16)
             let d1_lo: i32 = reduce_add(vdot_i32(p1a .& mask_lo, q8_a0) .+ vdot_i32(p1b .& mask_lo, q8_a1))
             let d1_hi: i32 = reduce_add(vdot_i32((p1a .>> shift4) .& mask_lo, q8_b0) .+ vdot_i32((p1b .>> shift4) .& mask_lo, q8_b1))
-            sumi1 = sumi1 + d1_lo * to_i32(sc1[sc_off + 2 * j]) + d1_hi * to_i32(sc1[sc_off + 2 * j + 1])
+            sumi1 = sumi1 + d1_lo * to_i32(sc1[sc_off + 2*j]) + d1_hi * to_i32(sc1[sc_off + 2*j + 1])
 
-            // Row 2
             let p2a: i8x16 = load(rw2, q4_off + j * 32)
             let p2b: i8x16 = load(rw2, q4_off + j * 32 + 16)
             let d2_lo: i32 = reduce_add(vdot_i32(p2a .& mask_lo, q8_a0) .+ vdot_i32(p2b .& mask_lo, q8_a1))
             let d2_hi: i32 = reduce_add(vdot_i32((p2a .>> shift4) .& mask_lo, q8_b0) .+ vdot_i32((p2b .>> shift4) .& mask_lo, q8_b1))
-            sumi2 = sumi2 + d2_lo * to_i32(sc2[sc_off + 2 * j]) + d2_hi * to_i32(sc2[sc_off + 2 * j + 1])
+            sumi2 = sumi2 + d2_lo * to_i32(sc2[sc_off + 2*j]) + d2_hi * to_i32(sc2[sc_off + 2*j + 1])
 
-            // Row 3
             let p3a: i8x16 = load(rw3, q4_off + j * 32)
             let p3b: i8x16 = load(rw3, q4_off + j * 32 + 16)
             let d3_lo: i32 = reduce_add(vdot_i32(p3a .& mask_lo, q8_a0) .+ vdot_i32(p3b .& mask_lo, q8_a1))
             let d3_hi: i32 = reduce_add(vdot_i32((p3a .>> shift4) .& mask_lo, q8_b0) .+ vdot_i32((p3b .>> shift4) .& mask_lo, q8_b1))
-            sumi3 = sumi3 + d3_lo * to_i32(sc3[sc_off + 2 * j]) + d3_hi * to_i32(sc3[sc_off + 2 * j + 1])
+            sumi3 = sumi3 + d3_lo * to_i32(sc3[sc_off + 2*j]) + d3_hi * to_i32(sc3[sc_off + 2*j + 1])
 
             j = j + 1
         }
@@ -158,7 +151,7 @@ export func q4k_dot_q8k_4row(
         let mut summs3: i32 = 0
         j = 0
         while j < 8 {
-            let bs_pair: i32 = bsums[bs_off + 2 * j] + bsums[bs_off + 2 * j + 1]
+            let bs_pair: i32 = bsums[bs_off + 2*j] + bsums[bs_off + 2*j + 1]
             summs0 = summs0 + to_i32(mn0[sc_off + j]) * bs_pair
             summs1 = summs1 + to_i32(mn1[sc_off + j]) * bs_pair
             summs2 = summs2 + to_i32(mn2[sc_off + j]) * bs_pair
@@ -166,10 +159,10 @@ export func q4k_dot_q8k_4row(
             j = j + 1
         }
 
-        res0 = res0 + d0 * to_f32(sumi0) - dm0 * to_f32(summs0)
-        res1 = res1 + d1 * to_f32(sumi1) - dm1 * to_f32(summs1)
-        res2 = res2 + d2 * to_f32(sumi2) - dm2 * to_f32(summs2)
-        res3 = res3 + d3 * to_f32(sumi3) - dm3 * to_f32(summs3)
+        res0 = res0 + d0_arr[blk] * to_f32(sumi0) - dm0_arr[blk] * to_f32(summs0)
+        res1 = res1 + d1_arr[blk] * to_f32(sumi1) - dm1_arr[blk] * to_f32(summs1)
+        res2 = res2 + d2_arr[blk] * to_f32(sumi2) - dm2_arr[blk] * to_f32(summs2)
+        res3 = res3 + d3_arr[blk] * to_f32(sumi3) - dm3_arr[blk] * to_f32(summs3)
 
         blk = blk + 1
     }
@@ -193,10 +186,10 @@ export func q4k_dot_q8k_4row_dual(
     out gate_scores: *mut f32 [cap: 4],
     out up_scores: *mut f32 [cap: 4],
     n_blocks: i32,
-    gd0: f32, gd1: f32, gd2: f32, gd3: f32,
-    gdm0: f32, gdm1: f32, gdm2: f32, gdm3: f32,
-    ud0: f32, ud1: f32, ud2: f32, ud3: f32,
-    udm0: f32, udm1: f32, udm2: f32, udm3: f32
+    gd0: *restrict f32, gd1: *restrict f32, gd2: *restrict f32, gd3: *restrict f32,
+    gdm0: *restrict f32, gdm1: *restrict f32, gdm2: *restrict f32, gdm3: *restrict f32,
+    ud0: *restrict f32, ud1: *restrict f32, ud2: *restrict f32, ud3: *restrict f32,
+    udm0: *restrict f32, udm1: *restrict f32, udm2: *restrict f32, udm3: *restrict f32
 ) {
     let mask_lo: i8x16 = splat(15)
     let shift4: i8x16 = splat(4)
@@ -211,7 +204,7 @@ export func q4k_dot_q8k_4row_dual(
 
     let mut blk: i32 = 0
     while blk < n_blocks {
-        let q4_off: i32 = blk * 128
+        let q4_off: i32 = blk * 144 + 16
         let q8_off: i32 = blk * 256
         let sc_off: i32 = blk * 8
         let bs_off: i32 = blk * 16
@@ -232,7 +225,6 @@ export func q4k_dot_q8k_4row_dual(
             let q8_b0: i8x16 = load(q8, q8_off + j * 64 + 32)
             let q8_b1: i8x16 = load(q8, q8_off + j * 64 + 48)
 
-            // Gate row 0 / Up row 0 — ILP: 2 independent chains
             let gp0a: i8x16 = load(gw0, q4_off + j * 32)
             let gp0b: i8x16 = load(gw0, q4_off + j * 32 + 16)
             let up0a: i8x16 = load(uw0, q4_off + j * 32)
@@ -244,7 +236,6 @@ export func q4k_dot_q8k_4row_dual(
             gs0 = gs0 + gv0_lo * to_i32(gsc0[sc_off + 2*j]) + gv0_hi * to_i32(gsc0[sc_off + 2*j+1])
             us0 = us0 + uv0_lo * to_i32(usc0[sc_off + 2*j]) + uv0_hi * to_i32(usc0[sc_off + 2*j+1])
 
-            // Gate row 1 / Up row 1
             let gp1a: i8x16 = load(gw1, q4_off + j * 32)
             let gp1b: i8x16 = load(gw1, q4_off + j * 32 + 16)
             let up1a: i8x16 = load(uw1, q4_off + j * 32)
@@ -256,7 +247,6 @@ export func q4k_dot_q8k_4row_dual(
             gs1 = gs1 + gv1_lo * to_i32(gsc1[sc_off + 2*j]) + gv1_hi * to_i32(gsc1[sc_off + 2*j+1])
             us1 = us1 + uv1_lo * to_i32(usc1[sc_off + 2*j]) + uv1_hi * to_i32(usc1[sc_off + 2*j+1])
 
-            // Gate row 2 / Up row 2
             let gp2a: i8x16 = load(gw2, q4_off + j * 32)
             let gp2b: i8x16 = load(gw2, q4_off + j * 32 + 16)
             let up2a: i8x16 = load(uw2, q4_off + j * 32)
@@ -268,7 +258,6 @@ export func q4k_dot_q8k_4row_dual(
             gs2 = gs2 + gv2_lo * to_i32(gsc2[sc_off + 2*j]) + gv2_hi * to_i32(gsc2[sc_off + 2*j+1])
             us2 = us2 + uv2_lo * to_i32(usc2[sc_off + 2*j]) + uv2_hi * to_i32(usc2[sc_off + 2*j+1])
 
-            // Gate row 3 / Up row 3
             let gp3a: i8x16 = load(gw3, q4_off + j * 32)
             let gp3b: i8x16 = load(gw3, q4_off + j * 32 + 16)
             let up3a: i8x16 = load(uw3, q4_off + j * 32)
@@ -283,7 +272,6 @@ export func q4k_dot_q8k_4row_dual(
             j = j + 1
         }
 
-        // Min correction — shared bsums, separate mins
         let mut gm0: i32 = 0
         let mut gm1: i32 = 0
         let mut gm2: i32 = 0
@@ -294,7 +282,7 @@ export func q4k_dot_q8k_4row_dual(
         let mut um3: i32 = 0
         j = 0
         while j < 8 {
-            let bs_pair: i32 = bsums[bs_off + 2 * j] + bsums[bs_off + 2 * j + 1]
+            let bs_pair: i32 = bsums[bs_off + 2*j] + bsums[bs_off + 2*j + 1]
             gm0 = gm0 + to_i32(gmn0[sc_off + j]) * bs_pair
             gm1 = gm1 + to_i32(gmn1[sc_off + j]) * bs_pair
             gm2 = gm2 + to_i32(gmn2[sc_off + j]) * bs_pair
@@ -306,14 +294,14 @@ export func q4k_dot_q8k_4row_dual(
             j = j + 1
         }
 
-        gr0 = gr0 + gd0 * to_f32(gs0) - gdm0 * to_f32(gm0)
-        gr1 = gr1 + gd1 * to_f32(gs1) - gdm1 * to_f32(gm1)
-        gr2 = gr2 + gd2 * to_f32(gs2) - gdm2 * to_f32(gm2)
-        gr3 = gr3 + gd3 * to_f32(gs3) - gdm3 * to_f32(gm3)
-        ur0 = ur0 + ud0 * to_f32(us0) - udm0 * to_f32(um0)
-        ur1 = ur1 + ud1 * to_f32(us1) - udm1 * to_f32(um1)
-        ur2 = ur2 + ud2 * to_f32(us2) - udm2 * to_f32(um2)
-        ur3 = ur3 + ud3 * to_f32(us3) - udm3 * to_f32(um3)
+        gr0 = gr0 + gd0[blk] * to_f32(gs0) - gdm0[blk] * to_f32(gm0)
+        gr1 = gr1 + gd1[blk] * to_f32(gs1) - gdm1[blk] * to_f32(gm1)
+        gr2 = gr2 + gd2[blk] * to_f32(gs2) - gdm2[blk] * to_f32(gm2)
+        gr3 = gr3 + gd3[blk] * to_f32(gs3) - gdm3[blk] * to_f32(gm3)
+        ur0 = ur0 + ud0[blk] * to_f32(us0) - udm0[blk] * to_f32(um0)
+        ur1 = ur1 + ud1[blk] * to_f32(us1) - udm1[blk] * to_f32(um1)
+        ur2 = ur2 + ud2[blk] * to_f32(us2) - udm2[blk] * to_f32(um2)
+        ur3 = ur3 + ud3[blk] * to_f32(us3) - udm3[blk] * to_f32(um3)
 
         blk = blk + 1
     }

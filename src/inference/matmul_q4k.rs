@@ -7,6 +7,8 @@ use crate::inference::ptr::{SendPtr, SendMutPtr};
 /// Bytes per Q4_K super-block (256 elements).
 pub(crate) const Q4K_BLOCK_BYTES: usize = 144;
 
+/// Max blocks we support on the stack (32k dim / 256 = 128).
+const MAX_BLOCKS: usize = 128;
 
 /// Unpack Q4_K 12-byte packed scales into 8 scales + 8 mins.
 pub(crate) fn unpack_q4k_scales(packed: &[u8], scales: &mut [u8; 8], mins: &mut [u8; 8]) {
@@ -20,32 +22,42 @@ pub(crate) fn unpack_q4k_scales(packed: &[u8], scales: &mut [u8; 8], mins: &mut 
     }
 }
 
+/// Pre-unpack one weight row into stack buffers.
+unsafe fn unpack_row(
+    weight: *const u8, n_blocks: usize, q8_d: *const f32,
+    sc_buf: &mut [u8], mn_buf: &mut [u8],
+    d_buf: &mut [f32], dm_buf: &mut [f32],
+) {
+    let mut sc_tmp = [0u8; 8];
+    let mut mn_tmp = [0u8; 8];
+    for blk in 0..n_blocks {
+        let bp = weight.add(blk * Q4K_BLOCK_BYTES);
+        let blk_q8_d = *q8_d.add(blk);
+        d_buf[blk] = f16_to_f32(*(bp as *const u16)) * blk_q8_d;
+        dm_buf[blk] = f16_to_f32(*(bp.add(2) as *const u16)) * blk_q8_d;
+        unpack_q4k_scales(
+            std::slice::from_raw_parts(bp.add(4), 12), &mut sc_tmp, &mut mn_tmp);
+        sc_buf[blk * 8..blk * 8 + 8].copy_from_slice(&sc_tmp);
+        mn_buf[blk * 8..blk * 8 + 8].copy_from_slice(&mn_tmp);
+    }
+}
+
 /// Dot product of one Q4_K weight row against Q8_K activations.
 pub(crate) unsafe fn q4k_row_dot(
     weight: *const u8, n_blocks: usize,
     q8_qs: *const i8, q8_d: *const f32, q8_bsums: *const i32,
 ) -> f32 {
-    let mut result = 0.0f32;
-    let mut scales = [0u8; 8];
-    let mut mins = [0u8; 8];
-
-    for blk in 0..n_blocks {
-        let block_ptr = weight.add(blk * Q4K_BLOCK_BYTES);
-        let d_f16 = *(block_ptr as *const u16);
-        let dmin_f16 = *(block_ptr.add(2) as *const u16);
-        let blk_q8_d = *q8_d.add(blk);
-        let d = f16_to_f32(d_f16) * blk_q8_d;
-        let dmin = f16_to_f32(dmin_f16) * blk_q8_d;
-        let packed = std::slice::from_raw_parts(block_ptr.add(4), 12);
-        unpack_q4k_scales(packed, &mut scales, &mut mins);
-        let q4_ptr = block_ptr.add(16);
-        let q8_ptr = q8_qs.add(blk * 256);
-        let bsums_ptr = q8_bsums.add(blk * 16);
-        result += ffi::q4k_dot_q8k(
-            q4_ptr, q8_ptr, bsums_ptr, scales.as_ptr(), mins.as_ptr(), 1, d, dmin,
-        );
-    }
-    result
+    debug_assert!(n_blocks <= MAX_BLOCKS);
+    let mut sc = [0u8; MAX_BLOCKS * 8];
+    let mut mn = [0u8; MAX_BLOCKS * 8];
+    let mut da = [0f32; MAX_BLOCKS];
+    let mut dma = [0f32; MAX_BLOCKS];
+    unpack_row(weight, n_blocks, q8_d, &mut sc, &mut mn, &mut da, &mut dma);
+    ffi::q4k_dot_q8k(
+        weight, q8_qs, q8_bsums,
+        sc.as_ptr(), mn.as_ptr(), n_blocks as i32,
+        da.as_ptr(), dma.as_ptr(),
+    )
 }
 
 /// 4-row Q4_K dot product with shared Q8_K activations.
@@ -55,46 +67,25 @@ pub(crate) unsafe fn q4k_4row_dot(
     q8_qs: *const i8, q8_d: *const f32, q8_bsums: *const i32,
     scores: &mut [f32; 4],
 ) {
-    *scores = [0.0; 4];
-    let mut sc0 = [0u8; 8]; let mut sc1 = [0u8; 8];
-    let mut sc2 = [0u8; 8]; let mut sc3 = [0u8; 8];
-    let mut mn0 = [0u8; 8]; let mut mn1 = [0u8; 8];
-    let mut mn2 = [0u8; 8]; let mut mn3 = [0u8; 8];
-    let mut blk_scores = [0.0f32; 4];
-
-    for blk in 0..n_blocks {
-        let b0 = w0.add(blk * Q4K_BLOCK_BYTES);
-        let b1 = w1.add(blk * Q4K_BLOCK_BYTES);
-        let b2 = w2.add(blk * Q4K_BLOCK_BYTES);
-        let b3 = w3.add(blk * Q4K_BLOCK_BYTES);
-        let blk_q8_d = *q8_d.add(blk);
-
-        let d0 = f16_to_f32(*(b0 as *const u16)) * blk_q8_d;
-        let d1 = f16_to_f32(*(b1 as *const u16)) * blk_q8_d;
-        let d2 = f16_to_f32(*(b2 as *const u16)) * blk_q8_d;
-        let d3 = f16_to_f32(*(b3 as *const u16)) * blk_q8_d;
-        let dm0 = f16_to_f32(*(b0.add(2) as *const u16)) * blk_q8_d;
-        let dm1 = f16_to_f32(*(b1.add(2) as *const u16)) * blk_q8_d;
-        let dm2 = f16_to_f32(*(b2.add(2) as *const u16)) * blk_q8_d;
-        let dm3 = f16_to_f32(*(b3.add(2) as *const u16)) * blk_q8_d;
-
-        unpack_q4k_scales(std::slice::from_raw_parts(b0.add(4), 12), &mut sc0, &mut mn0);
-        unpack_q4k_scales(std::slice::from_raw_parts(b1.add(4), 12), &mut sc1, &mut mn1);
-        unpack_q4k_scales(std::slice::from_raw_parts(b2.add(4), 12), &mut sc2, &mut mn2);
-        unpack_q4k_scales(std::slice::from_raw_parts(b3.add(4), 12), &mut sc3, &mut mn3);
-
-        let q8_ptr = q8_qs.add(blk * 256);
-        let bsums_ptr = q8_bsums.add(blk * 16);
-        ffi::q4k_dot_q8k_4row(
-            b0.add(16), b1.add(16), b2.add(16), b3.add(16),
-            q8_ptr, bsums_ptr,
-            sc0.as_ptr(), sc1.as_ptr(), sc2.as_ptr(), sc3.as_ptr(),
-            mn0.as_ptr(), mn1.as_ptr(), mn2.as_ptr(), mn3.as_ptr(),
-            blk_scores.as_mut_ptr(), 1,
-            d0, d1, d2, d3, dm0, dm1, dm2, dm3,
-        );
-        for i in 0..4 { scores[i] += blk_scores[i]; }
+    debug_assert!(n_blocks <= MAX_BLOCKS);
+    let mut sc = [[0u8; MAX_BLOCKS * 8]; 4];
+    let mut mn = [[0u8; MAX_BLOCKS * 8]; 4];
+    let mut da = [[0f32; MAX_BLOCKS]; 4];
+    let mut dma = [[0f32; MAX_BLOCKS]; 4];
+    let ws = [w0, w1, w2, w3];
+    for ri in 0..4 {
+        unpack_row(ws[ri], n_blocks, q8_d,
+            &mut sc[ri], &mut mn[ri], &mut da[ri], &mut dma[ri]);
     }
+    ffi::q4k_dot_q8k_4row(
+        w0, w1, w2, w3,
+        q8_qs, q8_bsums,
+        sc[0].as_ptr(), sc[1].as_ptr(), sc[2].as_ptr(), sc[3].as_ptr(),
+        mn[0].as_ptr(), mn[1].as_ptr(), mn[2].as_ptr(), mn[3].as_ptr(),
+        scores.as_mut_ptr(), n_blocks as i32,
+        da[0].as_ptr(), da[1].as_ptr(), da[2].as_ptr(), da[3].as_ptr(),
+        dma[0].as_ptr(), dma[1].as_ptr(), dma[2].as_ptr(), dma[3].as_ptr(),
+    );
 }
 
 /// Multi-threaded Q4_K x Q8_K matrix multiplication.
@@ -227,45 +218,37 @@ pub(crate) unsafe fn q4k_dual_4row_dot(
     q8_qs: *const i8, q8_d: *const f32, q8_bsums: *const i32,
     g_scores: &mut [f32; 4], u_scores: &mut [f32; 4],
 ) {
-    *g_scores = [0.0; 4]; *u_scores = [0.0; 4];
-    let mut g_blk = [0.0f32; 4]; let mut u_blk = [0.0f32; 4];
-    let mut gsc = [[0u8; 8]; 4]; let mut gmn = [[0u8; 8]; 4];
-    let mut usc = [[0u8; 8]; 4]; let mut umn = [[0u8; 8]; 4];
-
-    for blk in 0..n_blocks {
-        let blk_q8_d = *q8_d.add(blk);
-        let q8_ptr = q8_qs.add(blk * 256);
-        let bsums_ptr = q8_bsums.add(blk * 16);
-        let gbs = [gw0.add(blk * Q4K_BLOCK_BYTES), gw1.add(blk * Q4K_BLOCK_BYTES),
-                   gw2.add(blk * Q4K_BLOCK_BYTES), gw3.add(blk * Q4K_BLOCK_BYTES)];
-        let ubs = [uw0.add(blk * Q4K_BLOCK_BYTES), uw1.add(blk * Q4K_BLOCK_BYTES),
-                   uw2.add(blk * Q4K_BLOCK_BYTES), uw3.add(blk * Q4K_BLOCK_BYTES)];
-
-        let mut gd = [0f32; 4]; let mut gdm = [0f32; 4];
-        let mut ud = [0f32; 4]; let mut udm = [0f32; 4];
-        for i in 0..4 {
-            gd[i] = f16_to_f32(*(gbs[i] as *const u16)) * blk_q8_d;
-            gdm[i] = f16_to_f32(*(gbs[i].add(2) as *const u16)) * blk_q8_d;
-            unpack_q4k_scales(std::slice::from_raw_parts(gbs[i].add(4), 12), &mut gsc[i], &mut gmn[i]);
-            ud[i] = f16_to_f32(*(ubs[i] as *const u16)) * blk_q8_d;
-            udm[i] = f16_to_f32(*(ubs[i].add(2) as *const u16)) * blk_q8_d;
-            unpack_q4k_scales(std::slice::from_raw_parts(ubs[i].add(4), 12), &mut usc[i], &mut umn[i]);
-        }
-
-        ffi::q4k_dot_q8k_4row_dual(
-            gbs[0].add(16), gbs[1].add(16), gbs[2].add(16), gbs[3].add(16),
-            ubs[0].add(16), ubs[1].add(16), ubs[2].add(16), ubs[3].add(16),
-            q8_ptr, bsums_ptr,
-            gsc[0].as_ptr(), gsc[1].as_ptr(), gsc[2].as_ptr(), gsc[3].as_ptr(),
-            gmn[0].as_ptr(), gmn[1].as_ptr(), gmn[2].as_ptr(), gmn[3].as_ptr(),
-            usc[0].as_ptr(), usc[1].as_ptr(), usc[2].as_ptr(), usc[3].as_ptr(),
-            umn[0].as_ptr(), umn[1].as_ptr(), umn[2].as_ptr(), umn[3].as_ptr(),
-            g_blk.as_mut_ptr(), u_blk.as_mut_ptr(), 1,
-            gd[0], gd[1], gd[2], gd[3], gdm[0], gdm[1], gdm[2], gdm[3],
-            ud[0], ud[1], ud[2], ud[3], udm[0], udm[1], udm[2], udm[3],
-        );
-        for i in 0..4 { g_scores[i] += g_blk[i]; u_scores[i] += u_blk[i]; }
+    debug_assert!(n_blocks <= MAX_BLOCKS);
+    let mut gsc = [[0u8; MAX_BLOCKS * 8]; 4];
+    let mut gmn = [[0u8; MAX_BLOCKS * 8]; 4];
+    let mut usc = [[0u8; MAX_BLOCKS * 8]; 4];
+    let mut umn = [[0u8; MAX_BLOCKS * 8]; 4];
+    let mut gd = [[0f32; MAX_BLOCKS]; 4];
+    let mut gdm = [[0f32; MAX_BLOCKS]; 4];
+    let mut ud = [[0f32; MAX_BLOCKS]; 4];
+    let mut udm = [[0f32; MAX_BLOCKS]; 4];
+    let gws = [gw0, gw1, gw2, gw3];
+    let uws = [uw0, uw1, uw2, uw3];
+    for i in 0..4 {
+        unpack_row(gws[i], n_blocks, q8_d,
+            &mut gsc[i], &mut gmn[i], &mut gd[i], &mut gdm[i]);
+        unpack_row(uws[i], n_blocks, q8_d,
+            &mut usc[i], &mut umn[i], &mut ud[i], &mut udm[i]);
     }
+    ffi::q4k_dot_q8k_4row_dual(
+        gw0, gw1, gw2, gw3,
+        uw0, uw1, uw2, uw3,
+        q8_qs, q8_bsums,
+        gsc[0].as_ptr(), gsc[1].as_ptr(), gsc[2].as_ptr(), gsc[3].as_ptr(),
+        gmn[0].as_ptr(), gmn[1].as_ptr(), gmn[2].as_ptr(), gmn[3].as_ptr(),
+        usc[0].as_ptr(), usc[1].as_ptr(), usc[2].as_ptr(), usc[3].as_ptr(),
+        umn[0].as_ptr(), umn[1].as_ptr(), umn[2].as_ptr(), umn[3].as_ptr(),
+        g_scores.as_mut_ptr(), u_scores.as_mut_ptr(), n_blocks as i32,
+        gd[0].as_ptr(), gd[1].as_ptr(), gd[2].as_ptr(), gd[3].as_ptr(),
+        gdm[0].as_ptr(), gdm[1].as_ptr(), gdm[2].as_ptr(), gdm[3].as_ptr(),
+        ud[0].as_ptr(), ud[1].as_ptr(), ud[2].as_ptr(), ud[3].as_ptr(),
+        udm[0].as_ptr(), udm[1].as_ptr(), udm[2].as_ptr(), udm[3].as_ptr(),
+    );
 }
 
 /// Fused gate+up+SiLU per-thread work function.

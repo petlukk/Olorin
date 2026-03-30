@@ -25,13 +25,16 @@ type SquaredReluFn  = unsafe extern "C" fn(*const f32, *const f32, *mut f32, i32
 type VecAddFn       = unsafe extern "C" fn(*const f32, *const f32, *mut f32, i32);
 type QuantF32Q8kFn  = unsafe extern "C" fn(*const f32, *mut i8, *mut f32, *mut i32, i32);
 type Q4kDotQ8kFn    = unsafe extern "C" fn(
-    *const u8, *const i8, *const i32, *const u8, *const u8, i32, f32, f32) -> f32;
+    *const u8, *const i8, *const i32, *const u8, *const u8,
+    i32, *const f32, *const f32) -> f32;
 type Q4kDot4RowFn = unsafe extern "C" fn(
     *const u8, *const u8, *const u8, *const u8,
     *const i8, *const i32,
     *const u8, *const u8, *const u8, *const u8,
     *const u8, *const u8, *const u8, *const u8,
-    *mut f32, i32, f32, f32, f32, f32, f32, f32, f32, f32);
+    *mut f32, i32,
+    *const f32, *const f32, *const f32, *const f32,
+    *const f32, *const f32, *const f32, *const f32);
 type Q4kDot4RowDualFn = unsafe extern "C" fn(
     *const u8, *const u8, *const u8, *const u8,
     *const u8, *const u8, *const u8, *const u8,
@@ -41,8 +44,10 @@ type Q4kDot4RowDualFn = unsafe extern "C" fn(
     *const u8, *const u8, *const u8, *const u8,
     *const u8, *const u8, *const u8, *const u8,
     *mut f32, *mut f32, i32,
-    f32, f32, f32, f32, f32, f32, f32, f32,
-    f32, f32, f32, f32, f32, f32, f32, f32);
+    *const f32, *const f32, *const f32, *const f32,
+    *const f32, *const f32, *const f32, *const f32,
+    *const f32, *const f32, *const f32, *const f32,
+    *const f32, *const f32, *const f32, *const f32);
 type Q6kDotQ8kFn = unsafe extern "C" fn(
     *const u8, *const u8, *const i8, *const i8, *const i32, i32, f32) -> f32;
 type Q6kDot4RowFn = unsafe extern "C" fn(
@@ -319,9 +324,10 @@ pub unsafe fn quant_f32_q8k(
 
 pub unsafe fn q4k_dot_q8k(
     q4: *const u8, q8: *const i8, bsums: *const i32,
-    scales: *const u8, mins: *const u8, n_blocks: i32, d: f32, dmin: f32,
+    scales: *const u8, mins: *const u8, n_blocks: i32,
+    d_arr: *const f32, dmin_arr: *const f32,
 ) -> f32 {
-    (k().q4k_dot_q8k)(q4, q8, bsums, scales, mins, n_blocks, d, dmin)
+    (k().q4k_dot_q8k)(q4, q8, bsums, scales, mins, n_blocks, d_arr, dmin_arr)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -331,8 +337,8 @@ pub unsafe fn q4k_dot_q8k_4row(
     sc0: *const u8, sc1: *const u8, sc2: *const u8, sc3: *const u8,
     mn0: *const u8, mn1: *const u8, mn2: *const u8, mn3: *const u8,
     scores: *mut f32, n_blocks: i32,
-    d0: f32, d1: f32, d2: f32, d3: f32,
-    dm0: f32, dm1: f32, dm2: f32, dm3: f32,
+    d0: *const f32, d1: *const f32, d2: *const f32, d3: *const f32,
+    dm0: *const f32, dm1: *const f32, dm2: *const f32, dm3: *const f32,
 ) {
     (k().q4k_dot_q8k_4row)(
         rw0, rw1, rw2, rw3, q8, bsums,
@@ -350,10 +356,10 @@ pub unsafe fn q4k_dot_q8k_4row_dual(
     usc0: *const u8, usc1: *const u8, usc2: *const u8, usc3: *const u8,
     umn0: *const u8, umn1: *const u8, umn2: *const u8, umn3: *const u8,
     gate_scores: *mut f32, up_scores: *mut f32, n_blocks: i32,
-    gd0: f32, gd1: f32, gd2: f32, gd3: f32,
-    gdm0: f32, gdm1: f32, gdm2: f32, gdm3: f32,
-    ud0: f32, ud1: f32, ud2: f32, ud3: f32,
-    udm0: f32, udm1: f32, udm2: f32, udm3: f32,
+    gd0: *const f32, gd1: *const f32, gd2: *const f32, gd3: *const f32,
+    gdm0: *const f32, gdm1: *const f32, gdm2: *const f32, gdm3: *const f32,
+    ud0: *const f32, ud1: *const f32, ud2: *const f32, ud3: *const f32,
+    udm0: *const f32, udm1: *const f32, udm2: *const f32, udm3: *const f32,
 ) {
     (k().q4k_dot_q8k_4row_dual)(
         gw0, gw1, gw2, gw3, uw0, uw1, uw2, uw3,
