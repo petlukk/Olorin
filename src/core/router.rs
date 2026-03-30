@@ -41,35 +41,26 @@ pub enum StreamEvent {
 }
 
 impl Response {
-    fn text(s: impl Into<String>) -> Self {
+    pub(crate) fn text(s: impl Into<String>) -> Self {
         Self { text: s.into(), blocked: false }
     }
 
-    fn blocked(reason: impl Into<String>) -> Self {
+    pub(crate) fn blocked(reason: impl Into<String>) -> Self {
         Self { text: reason.into(), blocked: true }
     }
 }
 
 /// Central dispatch context — holds all state needed for the pipeline.
 pub struct DispatchContext {
-    /// Conversation history
-    messages:     Vec<Message>,
-    /// Recall store for conversation search (session, in-memory)
-    recall:       VectorStore,
-    /// Encrypted vault for persistent conversation storage
-    vault:        Option<Vault>,
-    /// Local inference engine (BitNet/Llama GGUF)
-    engine:       Option<Engine>,
-    /// Anthropic cloud client (optional — requires API key)
-    anthropic:    Option<AnthropicClient>,
-    /// Last turn timing
-    last_timing:  Option<handlers::TurnTiming>,
-    /// System prompt
-    system_prompt: String,
-    /// Recall level: 0 = off, N = top_k for recall context
-    recall_level:  usize,
-    /// Max tool-loop turns before stopping
-    _max_turns:   usize,
+    pub(crate) messages:      Vec<Message>,
+    pub(crate) recall:        VectorStore,
+    pub(crate) vault:         Option<Vault>,
+    pub(crate) engine:        Option<Engine>,
+    pub(crate) anthropic:     Option<AnthropicClient>,
+    pub(crate) last_timing:   Option<handlers::TurnTiming>,
+    pub(crate) system_prompt: String,
+    pub(crate) recall_level:  usize,
+    pub(crate) _max_turns:    usize,
 }
 
 impl DispatchContext {
@@ -400,14 +391,14 @@ impl DispatchContext {
     }
 
     /// Save a message to the encrypted vault. Silently ignores errors.
-    fn vault_save(&mut self, role: &[u8], content: &[u8]) {
+    pub(crate) fn vault_save(&mut self, role: &[u8], content: &[u8]) {
         if let Some(ref mut vault) = self.vault {
             let _ = vault.append(role, content);
         }
     }
 
     /// Clear conversation history (session only — vault is persistent).
-    pub fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.messages.clear();
         self.recall.clear();
     }
@@ -420,118 +411,6 @@ impl DispatchContext {
     /// Current recall level.
     pub fn recall_level(&self) -> usize {
         self.recall_level
-    }
-
-    // ── Meta command handling ────────────────────────────────────────────────
-
-    fn handle_meta(&mut self, cmd_id: i32) -> Response {
-        match cmd_id {
-            dispatch::CMD_QUIT => Response::text("Goodbye!"),
-            dispatch::CMD_HELP => Response::text(self.help_text()),
-            dispatch::CMD_TOOLS => Response::text(
-                "Available tools: time, calc, cpu, shell, http, memory, read, write, \
-                 ls, json, tokens, bench, weather, translate, define, summarize, \
-                 grep, git, remind"
-            ),
-            dispatch::CMD_CLEAR => {
-                self.clear();
-                Response::text("Context cleared.")
-            }
-            dispatch::CMD_MODEL => {
-                let local = self.engine.as_ref().map(|e| e.quant_type_str()).unwrap_or("none");
-                let cloud = if self.anthropic.is_some() { "Anthropic" } else { "none" };
-                Response::text(format!("Local: {local}, Cloud: {cloud}"))
-            }
-            dispatch::CMD_PROFILE => {
-                let msg = match &self.last_timing {
-                    Some(t) => t.format(),
-                    None => "No timing data yet.".to_string(),
-                };
-                Response::text(msg)
-            }
-            _ => Response::text(""),
-        }
-    }
-
-    // ── Tool command handling ────────────────────────────────────────────────
-
-    fn handle_tool_command(&mut self, cmd_id: i32, cmd_arg: &[u8]) -> Response {
-        let arg_str = String::from_utf8_lossy(cmd_arg);
-        let tool_start = Instant::now();
-
-        match dispatch::build_tool_params(cmd_id, &arg_str) {
-            Ok((name, params)) => {
-                let result = self.execute_tool(name, &params);
-                let tool_ms = tool_start.elapsed().as_millis() as u64;
-                self.last_timing = Some(handlers::TurnTiming {
-                    safety_scan_us: 0,
-                    llm_call_ms: 0,
-                    tool_execs: vec![(name.to_string(), tool_ms)],
-                });
-                match result {
-                    Ok(output) => {
-                        // Safety scan tool output
-                        let scan = safety::scan(output.as_bytes());
-                        if scan.blocked {
-                            Response::blocked("Tool output blocked by safety scan.")
-                        } else {
-                            // Save tool interaction to vault
-                            self.vault_save(b"user", arg_str.as_bytes());
-                            self.vault_save(b"tool", output.as_bytes());
-                            Response::text(output)
-                        }
-                    }
-                    Err(e) => Response::text(format!("Tool error: {e}")),
-                }
-            }
-            Err(e) => Response::text(format!("{e}")),
-        }
-    }
-
-    // ── Intent execution ─────────────────────────────────────────────────────
-
-    fn execute_intent(&mut self, tool_name: &str, intent: i32, arg_bytes: &[u8]) -> Response {
-        let params = dispatch::intent_to_params(intent, arg_bytes);
-        match self.execute_tool(tool_name, &params) {
-            Ok(output) => {
-                // Save intent interaction to vault
-                self.vault_save(b"user", arg_bytes);
-                self.vault_save(b"tool", output.as_bytes());
-                Response::text(output)
-            }
-            Err(e) => Response::text(format!("Tool error: {e}")),
-        }
-    }
-
-    // ── Tool execution ───────────────────────────────────────────────────────
-
-    /// Execute a tool by name with parameters.
-    fn execute_tool(
-        &self,
-        name: &str,
-        params: &[(&str, String)],
-    ) -> Result<String, String> {
-        // Calc uses SIMD kernel directly with fixed-point formatting
-        if name == "calc" {
-            let expr = params.iter()
-                .find(|(k, _)| *k == "expr")
-                .map(|(_, v)| v.as_str())
-                .unwrap_or("");
-            return match dispatch::eval_expr(expr) {
-                Ok(result) => Ok(result),
-                Err(e) => Err(format!("{e}")),
-            };
-        }
-
-        // All other tools go through the tool registry
-        let args = params.iter()
-            .map(|(_, v)| v.as_str())
-            .collect::<Vec<_>>()
-            .join(" ");
-        match crate::tools::run_tool(name, &args) {
-            Some(r) => if r.success { Ok(r.output) } else { Err(r.output) },
-            None => Err(format!("unknown tool: {name}")),
-        }
     }
 
     // ── Inference ────────────────────────────────────────────────────────────
@@ -581,21 +460,4 @@ impl DispatchContext {
         Err("No LLM backend available. Load a model or set ANTHROPIC_API_KEY.".to_string())
     }
 
-    // ── Help text ────────────────────────────────────────────────────────────
-
-    fn help_text(&self) -> String {
-        "\
-Commands:
-  /help    /quit    /tools   /clear   /model   /profile
-
-Tools:
-  /time  /calc <expr>  /http <url>  /shell <cmd>  /cpu
-  /memory <action> [key] [value]   /read <path>   /write <path> <content>
-  /ls [path]  /json <action> <input>  /tokens <text>  /bench <target>
-  /weather <city>  /translate <lang> <text>  /define <word>  /summarize <url>
-  /grep <pattern> [path]  /git <subcommand> [args]  /remind <time> <message>
-  /recall <query>
-
-Agent: Olorin".to_string()
-    }
 }
