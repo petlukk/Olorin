@@ -144,7 +144,7 @@ impl InferenceState {
                     &model.embed_weight_i8, &model.embed_row_scales,
                     &model.embed_sketch, model.embed_sketch_dim,
                     &self.x_norm, &mut self.logits,
-                    model.vocab_size, h,
+                    model.vocab_size, h, &self.pool,
                 );
             } else {
                 i8_output_matmul_mt(

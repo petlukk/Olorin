@@ -95,16 +95,16 @@ pub(crate) fn i8_output_matmul_mt(
 }
 
 /// Speculative output matmul: sketch-based pre-filter + full dot for candidates.
-/// ARM-only: subsample every 4th weight byte to approximate row scores,
-/// then compute full dot product only for rows above the sketch threshold.
+/// ARM-only: SIMD sketch-dot to approximate row scores in parallel,
+/// nth_element partition for top-k, then parallel full dot for candidates.
 #[cfg(target_arch = "aarch64")]
 pub(crate) fn i8_output_matmul_speculative(
     embed_i8: &[u8], row_scales: &[f32],
     sketch: &[u8], sketch_dim: usize,
     x: &[f32], out: &mut [f32],
     vocab_size: usize, hidden_dim: usize,
+    pool: &ThreadPool,
 ) {
-    // Quantize activation to i8
     let mut x_amax = 0.0f32;
     for &v in x.iter().take(hidden_dim) { let a = v.abs(); if a > x_amax { x_amax = a; } }
     let x_inv = if x_amax > 1e-10 { 127.0 / x_amax } else { 0.0 };
@@ -116,34 +116,58 @@ pub(crate) fn i8_output_matmul_speculative(
     let mut x_sketch = vec![0i8; sketch_dim];
     for s in 0..sketch_dim { x_sketch[s] = x_i8[s * 4]; }
 
-    // Phase 1: sketch scores for all rows
+    // Phase 1: parallel sketch scoring via SIMD
     let mut sketch_scores = vec![0i32; vocab_size];
-    for row in 0..vocab_size {
-        let sk = &sketch[row * sketch_dim..(row + 1) * sketch_dim];
-        let mut dot = 0i32;
-        for s in 0..sketch_dim {
-            dot += sk[s] as i32 * x_sketch[s] as i32;
+    let n_thr = pool.thread_count().min(vocab_size).max(1);
+    let chunk = (vocab_size + n_thr - 1) / n_thr;
+    let sk_ptr = SendPtr(sketch.as_ptr());
+    let xs_ptr = SendPtr(x_sketch.as_ptr());
+    let ss_ptr = SendMutPtr(sketch_scores.as_mut_ptr());
+    pool.run(n_thr, move |tid, _| {
+        let start = tid * chunk;
+        let end = (start + chunk).min(vocab_size);
+        for row in start..end {
+            let raw = unsafe {
+                ffi::i8dot_1row(
+                    xs_ptr.ptr(), sk_ptr.ptr().add(row * sketch_dim) as *const u8,
+                    sketch_dim as i32,
+                )
+            };
+            unsafe { *ss_ptr.ptr().add(row) = raw; }
         }
-        sketch_scores[row] = dot;
-    }
+    });
 
-    // Phase 2: find threshold (top 4096 or 10% of vocab, whichever is smaller)
+    // Phase 2: partition top-k (O(n) instead of O(n log n) sort)
     let top_k = vocab_size.min(4096);
-    let mut sorted_idx: Vec<usize> = (0..vocab_size).collect();
-    sorted_idx.sort_unstable_by(|&a, &b| sketch_scores[b].cmp(&sketch_scores[a]));
+    let mut indices: Vec<u32> = (0..vocab_size as u32).collect();
+    indices.select_nth_unstable_by(top_k, |&a, &b| {
+        sketch_scores[b as usize].cmp(&sketch_scores[a as usize])
+    });
 
-    // Phase 3: full dot product only for candidates
+    // Phase 3: parallel full dot product for candidates
     for r in 0..vocab_size { out[r] = f32::NEG_INFINITY; }
-    for &row in sorted_idx[..top_k].iter() {
-        let raw = unsafe {
-            ffi::i8dot_1row(
-                x_i8.as_ptr(), embed_i8.as_ptr().add(row * hidden_dim),
-                hidden_dim as i32,
-            )
-        };
-        let row_s = row_scales[row];
-        out[row] = raw as f32 * x_scale * (row_s / 127.0);
-    }
+    let candidates = &indices[..top_k];
+    let cand_chunk = (top_k + n_thr - 1) / n_thr;
+    let act = SendPtr(x_i8.as_ptr());
+    let emb = SendPtr(embed_i8.as_ptr());
+    let scales = SendPtr(row_scales.as_ptr());
+    let out_ptr = SendMutPtr(out.as_mut_ptr());
+    let cand_ptr = SendPtr(candidates.as_ptr());
+    pool.run(n_thr, move |tid, _| {
+        let start = tid * cand_chunk;
+        let end = (start + cand_chunk).min(top_k);
+        for ci in start..end {
+            let row = unsafe { *cand_ptr.ptr().add(ci) } as usize;
+            let raw = unsafe {
+                ffi::i8dot_1row(
+                    act.ptr(), emb.ptr().add(row * hidden_dim),
+                    hidden_dim as i32,
+                )
+            };
+            let row_s = unsafe { *scales.ptr().add(row) };
+            unsafe { *out_ptr.ptr().add(row) = raw as f32 * x_scale * (row_s / 127.0); }
+        }
+    });
 }
 
 /// Ternary matmul with configurable thread count.
