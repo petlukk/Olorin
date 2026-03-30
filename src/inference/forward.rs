@@ -3,7 +3,7 @@
 use crate::kernels::ffi_inference as ffi;
 use crate::inference::matmul::{embed_f16_lookup, i8_output_matmul_mt, ternary_matmul_mt, ternary_matmul_fused_pair, ternary_matmul_qkv};
 #[cfg(target_arch = "aarch64")]
-use crate::inference::matmul::i8_output_matmul_speculative;
+use crate::inference::matmul::{i8_output_matmul_speculative, SpeculativeWork};
 use crate::inference::engine::BitNetModel;
 use crate::inference::cache::{self, EakvCache};
 use crate::inference::threadpool::ThreadPool;
@@ -29,6 +29,8 @@ pub struct InferenceState {
     pub(crate) rope_freqs: Vec<f32>,
     #[allow(dead_code)]
     pub(crate) max_seq_len: usize,
+    #[cfg(target_arch = "aarch64")]
+    pub(crate) spec_work: SpeculativeWork,
 }
 
 pub(crate) fn softmax_rows(data: &mut [f32], n_rows: usize, seq_len: usize) {
@@ -168,6 +170,8 @@ impl InferenceState {
             attn_scores: vec![0.0; nh * max_seq_len],
             rope_freqs: vec![0.0; model.head_dim],
             max_seq_len,
+            #[cfg(target_arch = "aarch64")]
+            spec_work: SpeculativeWork::new(v, h, model.embed_sketch_dim),
         }
     }
 
@@ -314,7 +318,7 @@ impl InferenceState {
                     &model.embed_weight_i8, &model.embed_row_scales,
                     &model.embed_sketch, model.embed_sketch_dim,
                     &self.x_norm, &mut self.logits,
-                    model.vocab_size, h, &self.pool,
+                    model.vocab_size, h, &self.pool, &mut self.spec_work,
                 );
             } else {
                 i8_output_matmul_mt(
