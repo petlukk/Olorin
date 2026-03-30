@@ -59,7 +59,7 @@ export func quant_f32_q8k(
                 let v: f32x4 = load(src, base + i)
                 let scaled: f32x4 = v .* v_inv
                 let clamped: f32x4 = select(scaled .< v_min, v_min, select(scaled .> v_max, v_max, scaled))
-                let narrow: i8x16 = narrow_f32x4_i8(clamped)
+                let narrow: i8x4 = narrow_f32x4_i8(clamped)
                 store(dst_qs, base + i, narrow)
                 i = i + 4
             }

@@ -10,11 +10,10 @@
 // Pass 1: SIMD absmax over f32x8
 // Pass 2: scale by 127/absmax, narrow f32x4 → i8, store as i8x16
 // Returns scale factor via out_scale pointer.
-// n must be divisible by 4. Caller must allocate dst with 12 extra bytes
-// (narrow_f32x4_i8 writes 16 bytes per 4-element store).
+// n must be divisible by 4.
 export func quant_f32_i8(
     src: *restrict f32,
-    out dst: *mut i8 [cap: n + 12],
+    out dst: *mut i8 [cap: n],
     out out_scale: *mut f32 [cap: 1],
     out out_sum: *mut i32 [cap: 1],
     n: i32
@@ -73,10 +72,7 @@ export func quant_f32_i8(
         let v: f32x4 = load(src, i)
         let scaled: f32x4 = v .* v_inv
         let clamped: f32x4 = select(scaled .< v_min, v_min, select(scaled .> v_max, v_max, scaled))
-        // narrow_f32x4_i8: f32x4 → fptosi → trunc → i8x16 (lower 4 valid)
-        let narrow: i8x16 = narrow_f32x4_i8(clamped)
-        // Store 4 bytes — store writes 16 but only first 4 matter
-        // We step by 4, so next store overwrites the garbage upper bytes
+        let narrow: i8x4 = narrow_f32x4_i8(clamped)
         store(dst, i, narrow)
         total_sum = total_sum + to_i32(dst[i]) + to_i32(dst[i + 1]) + to_i32(dst[i + 2]) + to_i32(dst[i + 3])
         i = i + 4
