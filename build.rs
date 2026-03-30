@@ -54,6 +54,7 @@ fn main() {
     struct KernelSrc {
         stem: String,
         arm_only: bool,
+        x86_only: bool,
         path: PathBuf,
     }
 
@@ -63,7 +64,8 @@ fn main() {
             let fname = e.file_name().to_string_lossy().to_string();
             let stem = fname.strip_suffix(".ea").unwrap().to_string();
             let arm_only = stem.ends_with("_arm");
-            KernelSrc { stem, arm_only, path: e.path() }
+            let x86_only = stem.contains("_avx2") || stem.contains("_avx512");
+            KernelSrc { stem, arm_only, x86_only, path: e.path() }
         })
         .collect();
 
@@ -72,6 +74,7 @@ fn main() {
         .iter()
         .filter(|s| {
             if is_arm {
+                if s.x86_only { return false; }
                 if !s.arm_only {
                     let arm_variant = format!("{}_arm", s.stem);
                     !sources.iter().any(|o| o.stem == arm_variant)
