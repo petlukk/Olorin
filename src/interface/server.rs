@@ -386,26 +386,31 @@ fn read_cpu_temp() -> Option<u32> {
     Some(s.trim().parse::<u32>().ok()? / 1000)
 }
 
+fn parse_proc_stat() -> Option<(u64, u64)> {
+    let s = std::fs::read_to_string("/proc/stat").ok()?;
+    let line = s.lines().find(|l| l.starts_with("cpu "))?;
+    let vals: Vec<u64> = line.split_whitespace().skip(1)
+        .filter_map(|v| v.parse().ok()).collect();
+    if vals.len() < 4 { return None; }
+    let total: u64 = vals.iter().sum();
+    let idle = vals[3];
+    Some((total, idle))
+}
+
 fn read_cpu_percent() -> Option<u32> {
-    // Read /proc/stat twice with a short gap to compute delta
-    let parse_idle = |s: &str| -> Option<(u64, u64)> {
-        let line = s.lines().find(|l| l.starts_with("cpu "))?;
-        let vals: Vec<u64> = line.split_whitespace().skip(1)
-            .filter_map(|v| v.parse().ok()).collect();
-        if vals.len() < 4 { return None; }
-        let total: u64 = vals.iter().sum();
-        let idle = vals[3];
-        Some((total, idle))
-    };
-    let s1 = std::fs::read_to_string("/proc/stat").ok()?;
-    let (t1, i1) = parse_idle(&s1)?;
-    std::thread::sleep(std::time::Duration::from_millis(100));
-    let s2 = std::fs::read_to_string("/proc/stat").ok()?;
-    let (t2, i2) = parse_idle(&s2)?;
+    use std::sync::Mutex;
+    static PREV: Mutex<(u64, u64, u32)> = Mutex::new((0, 0, 0));
+    let (t2, i2) = parse_proc_stat()?;
+    let mut prev = PREV.lock().ok()?;
+    let (t1, i1, last_pct) = *prev;
     let dt = t2.saturating_sub(t1);
     let di = i2.saturating_sub(i1);
-    if dt == 0 { return Some(0); }
-    Some((100 * (dt - di) / dt) as u32)
+    *prev = if dt > 0 {
+        (t2, i2, (100 * (dt - di) / dt) as u32)
+    } else {
+        (t2, i2, last_pct)
+    };
+    Some(prev.2)
 }
 
 fn read_uptime() -> Option<u64> {
