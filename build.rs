@@ -71,8 +71,7 @@ fn main() {
 
     // x86-only kernels that have no ARM variant and no _avx2/_avx512 suffix.
     const ARM_EXCLUDE: &[&str] = &[
-        "fused_attention", "fused_safety", "jl_project", "leak_scanner",
-        "q4k_gemm_tile", "sanitizer", "search", "turbo_rotate", "zeroize",
+        "fused_attention", "q4k_gemm_tile",
     ];
 
     // Filter by architecture
