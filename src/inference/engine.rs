@@ -10,6 +10,7 @@ pub enum QuantType { I2S, Q4K }
 pub enum Activation { SquaredReLU, SiLU }
 
 pub struct BitNetModel {
+    pub architecture: String,
     pub quant_type: QuantType,
     pub activation: Activation,
     pub n_layers: usize,
@@ -289,6 +290,7 @@ impl BitNetModel {
                 n_layers, embed_dtype, output_bb);
 
             return Ok(BitNetModel {
+                architecture: arch.to_string(),
                 quant_type, activation,
                 n_layers, hidden_dim, n_heads, n_kv_heads, head_dim, kv_dim, ffn_dim,
                 vocab_size, rope_theta, rms_eps,
@@ -409,6 +411,7 @@ impl BitNetModel {
         }
 
         Ok(BitNetModel {
+            architecture: arch.to_string(),
             quant_type,
             activation,
             n_layers,

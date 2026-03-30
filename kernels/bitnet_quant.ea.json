@@ -3,7 +3,7 @@
   "exports": [
     {
       "name": "quant_f32_i8",
-      "args": [{"name": "src", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "dst", "type": "*mut i8", "direction": "out", "cap": "n + 12", "count": null}, {"name": "out_scale", "type": "*mut f32", "direction": "out", "cap": "1", "count": null}, {"name": "out_sum", "type": "*mut i32", "direction": "out", "cap": "1", "count": null}, {"name": "n", "type": "i32", "direction": "in", "cap": null, "count": null}],
+      "args": [{"name": "src", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "dst", "type": "*mut i8", "direction": "out", "cap": "n", "count": null}, {"name": "out_scale", "type": "*mut f32", "direction": "out", "cap": "1", "count": null}, {"name": "out_sum", "type": "*mut i32", "direction": "out", "cap": "1", "count": null}, {"name": "n", "type": "i32", "direction": "in", "cap": null, "count": null}],
       "return_type": null
     },
     {

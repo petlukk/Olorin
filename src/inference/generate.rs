@@ -57,17 +57,10 @@ impl Engine {
         let is_q4k = model.quant_type == QuantType::Q4K;
 
         // Build prompt tokens — match each model's native format
-        let mut tokens = vec![tokenizer.bos_id];
+        let skip_bos = model.architecture == "qwen2";
+        let mut tokens = if skip_bos { Vec::new() } else { vec![tokenizer.bos_id] };
         if is_q4k {
-            let mut chat = String::new();
-            if !system.is_empty() {
-                chat.push_str("<|start_header_id|>system<|end_header_id|>\n\n");
-                chat.push_str(system);
-                chat.push_str("<|eot_id|>");
-            }
-            chat.push_str("<|start_header_id|>user<|end_header_id|>\n\n");
-            chat.push_str(prompt);
-            chat.push_str("<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n");
+            let chat = build_chat_prompt(&model.architecture, system, prompt);
             tokens.extend(tokenizer.encode(&chat));
         } else {
             tokens.extend(tokenizer.encode(prompt));
@@ -119,6 +112,35 @@ impl Engine {
     }
 }
 
+/// Build chat prompt in the model's native template format.
+fn build_chat_prompt(architecture: &str, system: &str, prompt: &str) -> String {
+    let mut chat = String::new();
+    match architecture {
+        "qwen2" => {
+            if !system.is_empty() {
+                chat.push_str("<|im_start|>system\n");
+                chat.push_str(system);
+                chat.push_str("<|im_end|>\n");
+            }
+            chat.push_str("<|im_start|>user\n");
+            chat.push_str(prompt);
+            chat.push_str("<|im_end|>\n<|im_start|>assistant\n");
+        }
+        _ => {
+            // Llama 3 format (default)
+            if !system.is_empty() {
+                chat.push_str("<|start_header_id|>system<|end_header_id|>\n\n");
+                chat.push_str(system);
+                chat.push_str("<|eot_id|>");
+            }
+            chat.push_str("<|start_header_id|>user<|end_header_id|>\n\n");
+            chat.push_str(prompt);
+            chat.push_str("<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n");
+        }
+    }
+    chat
+}
+
 /// Find a GGUF model in standard locations.
 pub fn find_model() -> Option<PathBuf> {
     let home = std::env::var("HOME").ok()?;
@@ -138,6 +160,7 @@ pub fn resolve_model(arg: Option<&str>) -> Option<PathBuf> {
         ("bitnet",  "ggml-model-i2_s.gguf"),
         ("llama",   "Llama-3.2-3B-Instruct-Q4_K_M.gguf"),
         ("llama8b", "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"),
+        ("qwen",    "Qwen2.5-1.5B-Instruct-Q4_K_M.gguf"),
     ];
     match arg {
         Some(name) => {
