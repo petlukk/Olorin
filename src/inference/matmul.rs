@@ -94,6 +94,61 @@ pub(crate) fn i8_output_matmul_mt(
     });
 }
 
+/// Speculative output matmul: sketch-based pre-filter + full dot for candidates.
+/// ARM-only: subsample every 4th weight byte to approximate row scores,
+/// then compute full dot product only for rows above the sketch threshold.
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn i8_output_matmul_speculative(
+    embed_i8: &[u8], row_scales: &[f32],
+    sketch: &[u8], sketch_dim: usize,
+    x: &[f32], out: &mut [f32],
+    vocab_size: usize, hidden_dim: usize,
+) {
+    // Quantize activation to i8
+    let mut x_amax = 0.0f32;
+    for &v in x.iter().take(hidden_dim) { let a = v.abs(); if a > x_amax { x_amax = a; } }
+    let x_inv = if x_amax > 1e-10 { 127.0 / x_amax } else { 0.0 };
+    let mut x_i8 = vec![0i8; hidden_dim];
+    for d in 0..hidden_dim { x_i8[d] = (x[d] * x_inv).round().clamp(-127.0, 127.0) as i8; }
+    let x_scale = x_amax / 127.0;
+
+    // Build sketch activation (subsampled every 4th element)
+    let mut x_sketch = vec![0i8; sketch_dim];
+    for s in 0..sketch_dim { x_sketch[s] = x_i8[s * 4]; }
+
+    // Phase 1: sketch scores for all rows
+    let mut sketch_scores = vec![0i32; vocab_size];
+    for row in 0..vocab_size {
+        let sk = &sketch[row * sketch_dim..(row + 1) * sketch_dim];
+        let mut dot = 0i32;
+        for s in 0..sketch_dim {
+            dot += sk[s] as i32 * x_sketch[s] as i32;
+        }
+        sketch_scores[row] = dot;
+    }
+
+    // Phase 2: find threshold (top 4096 or 10% of vocab, whichever is smaller)
+    let top_k = vocab_size.min(4096);
+    let mut sorted_idx: Vec<usize> = (0..vocab_size).collect();
+    sorted_idx.sort_unstable_by(|&a, &b| sketch_scores[b].cmp(&sketch_scores[a]));
+
+    // Phase 3: full dot product only for candidates
+    for &row in out.iter_mut().zip(std::iter::repeat(&0.0f32)).take(vocab_size) {
+        // zero out
+    }
+    for r in 0..vocab_size { out[r] = f32::NEG_INFINITY; }
+    for &row in sorted_idx[..top_k].iter() {
+        let raw = unsafe {
+            ffi::i8dot_1row(
+                x_i8.as_ptr(), embed_i8.as_ptr().add(row * hidden_dim),
+                hidden_dim as i32,
+            )
+        };
+        let row_s = row_scales[row];
+        out[row] = raw as f32 * x_scale * (row_s / 127.0);
+    }
+}
+
 /// Ternary matmul with configurable thread count.
 pub(crate) fn ternary_matmul_mt_n(
     weight: *const u8, act: *const i8,
