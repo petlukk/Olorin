@@ -221,7 +221,7 @@ Cursor: blinkande block på `patch.cursor`.
 
 | Fil | ~Rader | Ansvar |
 |-----|--------|--------|
-| `src/interface/pty.rs` | 250 | PtySession: openpty, fork, read/write, resize, Drop |
+| `src/interface/pty.rs` | 300 | PtySession: openpty, fork, read/write, resize, Drop, CommandBuffer + safety guard |
 | `src/interface/ansi.rs` | 200 | State machine, CSI-parsning, SGR, cell-grid update |
 | `kernels/ansi_parser.ea` | 60 | SIMD byte-classifier |
 | `kernels/terminal_diff.ea` | 40 | SIMD cell-grid diff |
@@ -248,6 +248,22 @@ Cursor: blinkande block på `patch.cursor`.
 | `tests/pty.rs` | PTY-livscykel: open, write/read, resize, close |
 | `tests/ansi.rs` | State machine: SGR, cursor, ED/EL med riktiga sekvenser |
 | `tests/terminal_diff.rs` | Diff: identiska grids → tom, ändrade celler korrekt |
+| `tests/pty_guard.rs` | Safety guard: blockerade destruktiva kommandon, tillåtna säkra, ctrl-C passthrough |
+
+## Säkerhet — PTY Command Guard
+
+PTY-tilen ger full bash-åtkomst via webbläsaren. Utan skydd kan en angripare (eller en oförsiktig användare) köra `rm -rf /` direkt.
+
+**Lösning:** `PtySession::write_guarded()` buffrar tangentinput tills enter. Innan raden skickas till PTY:n körs:
+
+1. **`fused_safety.ea`** — SIMD-scan för injection-mönster och hemliga nycklar (samma kärna som skyddar chat/repl/WhatsApp)
+2. **`ShellGuard::check()`** — klassificerar kommandot som Allow/Write/Destructive baserat på befintlig blocklista (rm, mkfs, shutdown, dd, etc.)
+
+Om någon av gatarna blockerar: raden skickas aldrig till bash. Istället returneras ett error som visas som en röd flash i terminalens Canvas-ram.
+
+**Vad som passerar direkt (utan guard):** Raw control-bytes — Ctrl-C (0x03), Ctrl-Z (0x1A), piltangenter (ESC-sekvenser), tab (0x09), backspace (0x7F). Dessa är terminal-kontroll, inte kommandon.
+
+**Policy:** Styrs av `OLORIN_SHELL_POLICY` (env) eller `~/.olorin/shell_policy` (fil). Default: `safe` (blockerar destructive, tillåter write). `strict` blockerar även write-operationer. `open` stänger av guarden helt.
 
 ## Hard Rules
 
