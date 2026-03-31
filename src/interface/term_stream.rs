@@ -112,6 +112,7 @@ pub fn handle_term_stream(stream: &mut std::net::TcpStream, id: u32) {
         revents: 0,
     };
 
+    let mut prev_cursor: (u16, u16) = (0, 0);
     eprintln!("[term-stream] starting SSE loop for session {id}, fd={}", pollfd.fd);
     loop {
         let ret = unsafe { libc::poll(&mut pollfd, 1, 16) };
@@ -120,12 +121,14 @@ pub fn handle_term_stream(stream: &mut std::net::TcpStream, id: u32) {
             let mut s = session.lock().unwrap();
             let dirty: Vec<u8> = s.read_and_apply().to_vec();
             let dirty_count = dirty.iter().filter(|&&d| d != 0).count();
-            eprintln!("[term-stream] read: {dirty_count} dirty cells");
+            let grid = s.grid();
+            let cols = grid.cols;
+            let (crow, ccol) = grid.cursor();
+            let cursor_moved = prev_cursor != (ccol, crow);
+            prev_cursor = (ccol, crow);
+            eprintln!("[term-stream] read: {dirty_count} dirty cells, cursor_moved={cursor_moved}");
 
-            if dirty_count > 0 {
-                let grid = s.grid();
-                let cols = grid.cols;
-                let (crow, ccol) = grid.cursor();
+            if dirty_count > 0 || cursor_moved {
 
                 let mut cells_json = String::with_capacity(1024);
                 cells_json.push('[');
@@ -137,15 +140,19 @@ pub fn handle_term_stream(stream: &mut std::net::TcpStream, id: u32) {
                         let cell = grid.cell(row as u16, col as u16);
                         if !first { cells_json.push(','); }
                         first = false;
-                        let ch = if cell.ch >= 32 && cell.ch < 127 {
-                            let c = cell.ch as u8 as char;
-                            if c == '"' { "\\\"".to_string() }
-                            else if c == '\\' { "\\\\".to_string() }
-                            else { c.to_string() }
-                        } else if cell.ch == 0 || cell.ch == 32 {
+                        let ch = if cell.ch == 0 || cell.ch == 32 {
                             " ".to_string()
+                        } else if let Some(c) = char::from_u32(cell.ch) {
+                            match c {
+                                '"' => "\\\"".to_string(),
+                                '\\' => "\\\\".to_string(),
+                                '\n' => "\\n".to_string(),
+                                '\r' => "\\r".to_string(),
+                                '\t' => "\\t".to_string(),
+                                _ => c.to_string(),
+                            }
                         } else {
-                            char::from_u32(cell.ch).map(|c| c.to_string()).unwrap_or(" ".to_string())
+                            " ".to_string()
                         };
                         cells_json.push_str(&format!(
                             "{{\"r\":{row},\"c\":{col},\"ch\":\"{ch}\",\"fg\":\"#{:06x}\",\"bg\":\"#{:06x}\",\"fl\":{}}}",

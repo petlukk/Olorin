@@ -119,7 +119,8 @@ impl PtySession {
     pub fn write_guarded(&mut self, data: &[u8]) -> Result<(), String> {
         for &b in data {
             match b {
-                // Enter — flush the line through safety
+                // Enter — safety-check the buffered line, then send \r
+                // (chars were already sent individually for echo)
                 b'\r' | b'\n' => {
                     if !self.line_buf.is_empty() {
                         let line = String::from_utf8_lossy(&self.line_buf).to_string();
@@ -131,17 +132,19 @@ impl PtySession {
                                 .map(|w| w.pattern)
                                 .unwrap_or("safety violation");
                             self.line_buf.clear();
+                            // Ctrl-U to kill the line bash already has, then Ctrl-C
+                            self.write_raw(&[0x15, 0x03]);
                             return Err(format!("blocked by safety scan: {reason}"));
                         }
 
                         // 2. Shell guard (destructive command classification)
                         if let Err(e) = self.guard.check(&line) {
                             self.line_buf.clear();
+                            self.write_raw(&[0x15, 0x03]);
                             return Err(e);
                         }
 
-                        // Passed both gates — send line + newline to PTY
-                        self.write_raw(&self.line_buf.clone());
+                        // Passed both gates — send newline only
                         self.write_raw(&[b'\r']);
                         self.line_buf.clear();
                     } else {
@@ -161,9 +164,10 @@ impl PtySession {
                 0x1b => {
                     self.write_raw(&[b]);
                 }
-                // Printable — accumulate in line buffer
+                // Printable — accumulate in line buffer + echo to PTY
                 _ => {
                     self.line_buf.push(b);
+                    self.write_raw(&[b]);
                 }
             }
         }

@@ -61,7 +61,7 @@ body{background:var(--crust);color:var(--text);font-family:'Inter',system-ui,san
 .cfg-scope{display:flex;gap:12px;align-items:center;margin-bottom:16px;color:var(--subtext1)}.cfg-scope label{width:auto}
 </style></head><body>
 <div class="hyprbar">
-<div class="left"><span id="olorin-btn" style="cursor:pointer"><span class="c-teal">&#9670;</span> <span class="c-teal">olorin</span></span><span class="sep">|</span><span><span class="c-mauve">&#9670;</span> <span id="hb-model" class="c-text">—</span></span><span class="sep">|</span><span id="hb-backend" class="c-blue">—</span><span class="sep">|</span><span><span id="hb-tps" class="c-green">0.0</span> <span class="c-green">tok/s</span></span><span class="sep">|</span><span>temp <span id="hb-cfg-temp" class="c-yellow">0.4</span></span><span class="sep">|</span><span>k:<span id="hb-cfg-topk" class="c-yellow">40</span></span><span class="sep">|</span><span>p:<span id="hb-cfg-topp" class="c-yellow">0.9</span></span><span class="sep">|</span><span>rep:<span id="hb-cfg-rep" class="c-yellow">1.05</span></span><span class="sep">|</span><span>max:<span id="hb-cfg-max" class="c-yellow">64</span></span><span class="sep">|</span><span>recall <span id="hb-recall" class="c-yellow">—</span></span><span class="sep">|</span><span>sessions <span id="hb-sessions" class="c-peach">0</span></span></div>
+<div class="left"><span id="olorin-btn" style="cursor:pointer"><span class="c-teal">&#9670;</span> <span class="c-teal">Olorin</span></span><span class="sep">|</span><span><span class="c-mauve">&#9670;</span> <span id="hb-model" class="c-text">—</span></span><span class="sep">|</span><span id="hb-backend" class="c-blue">—</span><span class="sep">|</span><span><span id="hb-tps" class="c-green">0.0</span> <span class="c-green">tok/s</span></span><span class="sep">|</span><span>temp <span id="hb-cfg-temp" class="c-yellow">0.4</span></span><span class="sep">|</span><span>k:<span id="hb-cfg-topk" class="c-yellow">40</span></span><span class="sep">|</span><span>p:<span id="hb-cfg-topp" class="c-yellow">0.9</span></span><span class="sep">|</span><span>rep:<span id="hb-cfg-rep" class="c-yellow">1.05</span></span><span class="sep">|</span><span>max:<span id="hb-cfg-max" class="c-yellow">64</span></span><span class="sep">|</span><span>recall <span id="hb-recall" class="c-yellow">—</span></span><span class="sep">|</span><span>sessions <span id="hb-sessions" class="c-peach">0</span></span></div>
 <div class="right">
 <span>cpu <span id="hb-cpu" class="c-teal">—</span> <span id="hb-temp" class="c-peach">—</span></span>
 <span class="sep">|</span>
@@ -158,13 +158,13 @@ async function sendChat(id,body,input){
 function createReplTile(id){
   const t=el('div','tile');t.dataset.id=id;
   const hdr=el('div','tile-header');
-  const hl=el('span','');const ht=span('c-mauve','repl');hl.appendChild(ht);hl.appendChild(document.createTextNode(' olorin'));
+  const hl=el('span','');const ht=span('c-mauve','repl');hl.appendChild(ht);hl.appendChild(document.createTextNode(' Olorin'));
   hdr.appendChild(hl);
   const cb=el('button','tile-close','×');cb.onclick=()=>closeTile(id);hdr.appendChild(cb);
   t.appendChild(hdr);
   const body=el('div','repl-body');body.id='repl-body-'+id;t.appendChild(body);
   const iline=el('div','repl-input-line');
-  const prompt=span('repl-prompt','olorin ▸ ');iline.appendChild(prompt);
+  const prompt=span('repl-prompt','Olorin ▸ ');iline.appendChild(prompt);
   const inp=el('input','repl-input');inp.autocomplete='off';
   inp.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();sendCommand(id,body,inp)}});
   iline.appendChild(inp);t.appendChild(iline);
@@ -174,7 +174,7 @@ function createReplTile(id){
 async function sendCommand(id,body,input){
   const text=input.value.trim();if(!text)return;input.value='';
   const cmdLine=el('div','repl-line');
-  const p=span('repl-prompt','olorin ▸ ');cmdLine.appendChild(p);cmdLine.appendChild(document.createTextNode(text));
+  const p=span('repl-prompt','Olorin ▸ ');cmdLine.appendChild(p);cmdLine.appendChild(document.createTextNode(text));
   body.appendChild(cmdLine);
   if(text.startsWith('/')){
     try{
@@ -218,13 +218,17 @@ function createTermTile(id){
     fetch('/api/term/'+t._termId+'/close',{method:'POST'});closeTile(id);
   };hdr.appendChild(cb);
   t.appendChild(hdr);
+  const wrap=document.createElement('div');wrap.style.cssText='position:relative;flex:1;min-height:0;overflow:hidden';
   const canvas=document.createElement('canvas');canvas.className='term-canvas';
-  t.appendChild(canvas);
-  t._canvas=canvas;t._termId=null;t._cells={};t._cursor=[0,0];t._cols=80;t._rows=24;
+  const tinp=document.createElement('textarea');
+  tinp.className='term-input';tinp.autocomplete='off';tinp.spellcheck=false;
+  tinp.style.cssText='position:absolute;top:0;left:0;width:100%;height:100%;opacity:0;cursor:default;resize:none;padding:0;border:0';
+  wrap.appendChild(canvas);wrap.appendChild(tinp);t.appendChild(wrap);
+  t._canvas=canvas;t._tinp=tinp;t._termId=null;t._cells={};t._cursor=[0,0];t._cols=80;t._rows=24;
   t._cellW=0;t._cellH=0;
   fetch('/api/term/open',{method:'POST'}).then(r=>r.json()).then(d=>{
     t._termId=d.id;
-    requestAnimationFrame(()=>{initTermCanvas(t);startTermStream(t);});
+    requestAnimationFrame(()=>{initTermCanvas(t);startTermStream(t);tinp.focus();});
   });
   return t;
 }
@@ -248,11 +252,12 @@ function initTermCanvas(t){
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({cols:t._cols,rows:t._rows})});
   }
-  canvas.tabIndex=0;
-  canvas.addEventListener('keydown',e=>{
+  const tinp=t._tinp;
+  tinp.addEventListener('keydown',e=>{
+    if(e.altKey)return;
     e.preventDefault();
     let seq='';
-    if(e.key.length===1&&!e.ctrlKey&&!e.altKey){seq=e.key;}
+    if(e.key.length===1&&!e.ctrlKey){seq=e.key;}
     else if(e.key==='Enter'){seq='\r';}
     else if(e.key==='Backspace'){seq='\x7f';}
     else if(e.key==='Tab'){seq='\t';}
@@ -278,6 +283,7 @@ function initTermCanvas(t){
           }
         }).catch(()=>{});
     }
+    tinp.value='';
   });
   new ResizeObserver(()=>{
     const r2=t.getBoundingClientRect();
@@ -288,7 +294,10 @@ function initTermCanvas(t){
       canvas.width=nc*t._cellW;canvas.height=nr*t._cellH;
       canvas.style.width=canvas.width+'px';canvas.style.height=canvas.height+'px';
       const ctx2=canvas.getContext('2d');
+      ctx2.font='13px "JetBrains Mono",monospace';
       ctx2.fillStyle='#1e1e2e';ctx2.fillRect(0,0,canvas.width,canvas.height);
+      t._cellCache={};
+      t._prevCursor=null;
       if(t._termId!=null){
         fetch('/api/term/'+t._termId+'/resize',{method:'POST',
           headers:{'Content-Type':'application/json'},
@@ -327,8 +336,9 @@ function startTermStream(t){
       if(t._prevCursor){
         const[pc,pr]=t._prevCursor;
         const prev=t._cellCache[pr+','+pc];
-        if(prev){
-          ctx.fillStyle=prev.bg;ctx.fillRect(pc*cw,pr*ch,cw,ch);
+        ctx.fillStyle=prev?prev.bg:'#1e1e2e';
+        ctx.fillRect(pc*cw,pr*ch,cw,ch);
+        if(prev&&prev.ch!==' '){
           ctx.fillStyle=prev.fg;ctx.fillText(prev.ch,pc*cw,pr*ch+12);
         }
       }
@@ -362,8 +372,8 @@ function focusTile(id){
   tiles.forEach(t=>t.el.classList.toggle('focused',t.id===id));focusedId=id;
   const tile=tiles.find(t=>t.id===id);
   if(tile){
-    const canvas=tile.el.querySelector('canvas');
-    if(canvas){canvas.focus()}
+    const tinp=tile.el.querySelector('.term-input');
+    if(tinp){tinp.focus()}
     else{const inp=tile.el.querySelector('input');if(inp)inp.focus()}
   }
 }
@@ -376,9 +386,9 @@ function updateGrid(){
 }
 document.addEventListener('keydown',e=>{
   if(!e.altKey)return;
-  if(e.key==='t'){e.preventDefault();openTile('repl')}
-  else if(e.key==='c'){e.preventDefault();openTile('chat')}
-  else if(e.key==='s'){e.preventDefault();openTile('term')}
+  if(e.key==='t'){e.preventDefault();e.stopImmediatePropagation();openTile('repl')}
+  else if(e.key==='c'){e.preventDefault();e.stopImmediatePropagation();openTile('chat')}
+  else if(e.key==='s'){e.preventDefault();e.stopImmediatePropagation();openTile('term')}
   else if(e.key==='w'){e.preventDefault();if(focusedId!=null)closeTile(focusedId)}
   else if(e.key>='1'&&e.key<='9'){e.preventDefault();const i=parseInt(e.key)-1;if(i<tiles.length)focusTile(tiles[i].id)}
   else if(e.key==='ArrowRight'||e.key==='ArrowLeft'){
@@ -386,11 +396,11 @@ document.addEventListener('keydown',e=>{
     const next=e.key==='ArrowLeft'?(idx+1)%tiles.length:(idx-1+tiles.length)%tiles.length;
     focusTile(tiles[next].id);
   }
-});
+},true);
 openTile('chat');openTile('repl');
 
 fetch('/api/model').then(r=>r.json()).then(d=>{
-  document.getElementById('hb-model').textContent=d.name||'olorin';
+  document.getElementById('hb-model').textContent=d.name||'—';
   document.getElementById('hb-backend').textContent=d.backend||'cougar';
 }).catch(()=>{});
 function updateSystem(){
@@ -474,6 +484,7 @@ document.querySelectorAll('.cfg-row input[type=number]').forEach(n=>{
 function applyCfg(){
   const scope=document.querySelector('input[name="cfg-scope"]:checked').value;
   const cfg={
+    model:document.getElementById('cfg-model').value,
     temperature:parseFloat(document.getElementById('cfg-temp').value),
     top_k:parseInt(document.getElementById('cfg-topk').value),
     top_p:parseFloat(document.getElementById('cfg-topp').value),
@@ -488,7 +499,10 @@ function applyCfg(){
     const tile=tiles.find(t=>t.id===focusedId);
     if(tile)tile.el._config=cfg;
   }else{
-    fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)});
+    fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)})
+      .then(r=>r.json()).then(d=>{
+        if(d.model)document.getElementById('hb-model').textContent=d.model;
+      }).catch(()=>{});
     window._globalConfig=cfg;
   }
   const apikey=document.getElementById('cfg-apikey').value;

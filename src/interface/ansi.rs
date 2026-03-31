@@ -72,6 +72,9 @@ pub struct TermGrid {
     param_idx: usize,
     question_mark: bool,
     cursor_visible: bool,
+    utf8_buf: [u8; 4],
+    utf8_len: u8,
+    utf8_need: u8,
 }
 
 impl TermGrid {
@@ -85,6 +88,7 @@ impl TermGrid {
             state: ParseState::Ground,
             params: [0; 16], param_idx: 0,
             question_mark: false, cursor_visible: true,
+            utf8_buf: [0; 4], utf8_len: 0, utf8_need: 0,
         }
     }
 
@@ -119,6 +123,37 @@ impl TermGrid {
     }
 
     fn ground(&mut self, b: u8, cls: u8) {
+        // If we're accumulating a UTF-8 sequence, handle continuation bytes
+        if self.utf8_need > 0 {
+            if b & 0xC0 == 0x80 {
+                self.utf8_buf[self.utf8_len as usize] = b;
+                self.utf8_len += 1;
+                if self.utf8_len == self.utf8_need {
+                    let s = std::str::from_utf8(&self.utf8_buf[..self.utf8_len as usize]);
+                    let cp = s.ok().and_then(|s| s.chars().next()).unwrap_or('\u{FFFD}') as u32;
+                    self.utf8_len = 0;
+                    self.utf8_need = 0;
+                    self.put_char(cp);
+                }
+            } else {
+                // Invalid continuation — emit replacement, reprocess this byte
+                self.utf8_len = 0;
+                self.utf8_need = 0;
+                self.put_char(0xFFFD);
+                self.ground(b, cls);
+            }
+            return;
+        }
+
+        // Check for UTF-8 lead bytes (high bit set, not a control/escape)
+        if b >= 0xC0 && b < 0xFE && cls != 1 && cls != 6 {
+            let need = if b < 0xE0 { 2 } else if b < 0xF0 { 3 } else { 4u8 };
+            self.utf8_buf[0] = b;
+            self.utf8_len = 1;
+            self.utf8_need = need;
+            return;
+        }
+
         match cls {
             0 | 2 | 3 | 4 | 5 => self.put_char(b as u32),
             1 => self.state = ParseState::Escape,
@@ -241,6 +276,18 @@ impl TermGrid {
                 self.cursor_row = self.rows - 1;
             }
         }
+        let wide = is_wide_char(ch);
+        // Wide chars need 2 columns — wrap if only 1 left
+        if wide && self.cursor_col + 1 >= self.cols {
+            let idx = self.cursor_row as usize * self.cols as usize + self.cursor_col as usize;
+            self.cells[idx] = Cell::default();
+            self.cursor_col = 0;
+            self.cursor_row += 1;
+            if self.cursor_row >= self.rows {
+                self.scroll_up();
+                self.cursor_row = self.rows - 1;
+            }
+        }
         let idx = self.cursor_row as usize * self.cols as usize + self.cursor_col as usize;
         self.cells[idx] = Cell {
             ch,
@@ -250,6 +297,18 @@ impl TermGrid {
             _pad: [0; 3],
         };
         self.cursor_col += 1;
+        // Wide char: place a zero-width spacer in the next cell
+        if wide && self.cursor_col < self.cols {
+            let idx2 = self.cursor_row as usize * self.cols as usize + self.cursor_col as usize;
+            self.cells[idx2] = Cell {
+                ch: 0,
+                fg: self.attrs.fg,
+                bg: self.attrs.bg,
+                flags: self.attrs.flags,
+                _pad: [0; 3],
+            };
+            self.cursor_col += 1;
+        }
     }
 
     fn control(&mut self, b: u8) {
@@ -324,6 +383,29 @@ impl TermGrid {
         std::mem::swap(&mut self.cells, prev);
         prev.copy_from_slice(&self.cells);
     }
+}
+
+// ── Wide character detection ─────────────────────────────────────────────────
+
+/// Returns true for characters that occupy 2 terminal columns:
+/// CJK, emoji, fullwidth forms, etc.
+fn is_wide_char(cp: u32) -> bool {
+    matches!(cp,
+        // CJK Unified Ideographs + Extension A
+        0x3400..=0x4DBF | 0x4E00..=0x9FFF |
+        // CJK Compatibility Ideographs
+        0xF900..=0xFAFF |
+        // CJK Unified Extension B-F
+        0x20000..=0x2FA1F |
+        // Fullwidth Forms
+        0xFF01..=0xFF60 | 0xFFE0..=0xFFE6 |
+        // Hangul Syllables
+        0xAC00..=0xD7AF |
+        // Emoji (common ranges)
+        0x1F300..=0x1F9FF | 0x1FA00..=0x1FA6F | 0x1FA70..=0x1FAFF |
+        // Misc symbols, dingbats, emoticons
+        0x2600..=0x27BF
+    )
 }
 
 // ── Color tables ─────────────────────────────────────────────────────────────
