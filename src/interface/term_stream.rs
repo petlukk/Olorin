@@ -21,7 +21,13 @@ pub fn parse_term_id(path: &str) -> u32 {
     parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0)
 }
 
+const MAX_TERM_SESSIONS: usize = 8;
+
 pub fn handle_term_open(stream: &mut std::net::TcpStream) {
+    if term_sessions().lock().unwrap().len() >= MAX_TERM_SESSIONS {
+        serve_json(stream, r#"{"error":"too many sessions"}"#);
+        return;
+    }
     let id = NEXT_TERM_ID.fetch_add(1, Ordering::Relaxed);
     match PtySession::new(80, 24) {
         Ok(session) => {

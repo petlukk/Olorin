@@ -30,12 +30,13 @@ pub fn run(port: u16, model_arg: Option<&str>) {
     let api_key = std::env::var("ANTHROPIC_API_KEY").ok();
     let ctx = Arc::new(Mutex::new(DispatchContext::new(api_key, model_arg)));
 
-    let addr = format!("0.0.0.0:{port}");
+    let bind_host = std::env::var("OLORIN_BIND").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let addr = format!("{bind_host}:{port}");
     let listener = TcpListener::bind(&addr).unwrap_or_else(|e| {
         eprintln!("[olorin] cannot bind {addr}: {e}");
         std::process::exit(1);
     });
-    println!("[Olorin] Web UI at http://0.0.0.0:{port}");
+    println!("[Olorin] Web UI at http://{addr}");
 
     for stream in listener.incoming() {
         let mut stream = match stream {
@@ -159,8 +160,11 @@ pub(crate) fn serve_json(stream: &mut std::net::TcpStream, body: &str) {
     );
 }
 
+const MAX_BODY_SIZE: usize = 1024 * 1024; // 1 MB
+
 pub(crate) fn read_body(stream: &mut std::net::TcpStream, req: &str, buf: &[u8], n: usize) -> Vec<u8> {
     let content_len = parse_content_length(req);
+    if content_len > MAX_BODY_SIZE { return Vec::new(); }
     let header_end  = req.find("\r\n\r\n").unwrap_or(n) + 4;
     let already     = n.saturating_sub(header_end);
     let mut body_buf = vec![0u8; content_len];
