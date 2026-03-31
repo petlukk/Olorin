@@ -230,9 +230,11 @@ Cursor: blinkande block på `patch.cursor`.
 
 | Fil | Ändring |
 |-----|---------|
-| `src/interface/server.rs` | 5 nya endpoints + SSE-loop-tråd per session |
+| `src/interface/server.rs` | 5 terminal-endpoints + SSE-loop + 3 config-endpoints + param-extraction i `/api/generate` |
 | `src/kernels/ffi.rs` | FFI-wrappers för ansi_parser och terminal_diff |
-| `web/chat.html` | createTermTile(), Canvas-renderer, Alt+S keybinding |
+| `src/core/router.rs` | `update_config()`, `get_config()`, runtime parameter mutation |
+| `src/core/anthropic.rs` | `set_model()`, `set_max_tokens()`, pub api_key setter |
+| `web/chat.html` | createTermTile(), Canvas-renderer, Alt+S, hyprbar config, olorin-knapp, config-modal, per-tile config |
 | `src/lib.rs` / `mod.rs` | `mod pty; mod ansi;` |
 
 ### Oförändrade filer
@@ -249,6 +251,7 @@ Cursor: blinkande block på `patch.cursor`.
 | `tests/ansi.rs` | State machine: SGR, cursor, ED/EL med riktiga sekvenser |
 | `tests/terminal_diff.rs` | Diff: identiska grids → tom, ändrade celler korrekt |
 | `tests/pty_guard.rs` | Safety guard: blockerade destruktiva kommandon, tillåtna säkra, ctrl-C passthrough |
+| `tests/config_api.rs` | Config GET/POST roundtrip, partial update, apikey store/retrieve |
 
 ## Säkerhet — PTY Command Guard
 
@@ -264,6 +267,145 @@ Om någon av gatarna blockerar: raden skickas aldrig till bash. Istället return
 **Vad som passerar direkt (utan guard):** Raw control-bytes — Ctrl-C (0x03), Ctrl-Z (0x1A), piltangenter (ESC-sekvenser), tab (0x09), backspace (0x7F). Dessa är terminal-kontroll, inte kommandon.
 
 **Policy:** Styrs av `OLORIN_SHELL_POLICY` (env) eller `~/.olorin/shell_policy` (fil). Default: `safe` (blockerar destructive, tillåter write). `strict` blockerar även write-operationer. `open` stänger av guarden helt.
+
+## Hyprbar Config Panel
+
+### Bakgrund
+
+Inference-parametrar (temp, top_k, top_p, rep_penalty, max_tokens) är idag hårdkodade. Web-UI:t skickar parametrar i `/api/generate` men servern ignorerar dem. Anthropic API key sätts via env utan runtime-ändring. Denna sektion lägger till config i hyprbaren och en modal för full konfiguration.
+
+### Hyprbar-utökning
+
+Befintliga element: `model | backend | tps | recall | sessions | cpu | temp | mem | os | uptime | clock`
+
+Nya element efter `tps`:
+
+```
+temp:0.4 | k:40 | p:0.9 | rep:1.05 | max:64
+```
+
+Kompakt monospace, samma stil som befintliga metrics. Uppdateras via utökat `/api/system`-svar (piggyback på befintlig 2s poll).
+
+### "olorin"-knapp
+
+Klickbart element längst till vänster i hyprbaren. Text: "◆ olorin" i teal. Klick öppnar config-modalen.
+
+### Config-modal
+
+Fullscreen semi-transparent overlay (`rgba(17,17,27,0.85)`) med centrerad panel (max 500px bred). Catppuccin Mocha-tema. Stängs med Escape eller klick utanför.
+
+#### Inference-sektion
+
+| Parameter | Kontroll | Range | Default |
+|-----------|----------|-------|---------|
+| Model | Dropdown | bitnet / llama / llama8b / qwen | (loaded model) |
+| Temperature | Slider + number | 0.0–2.0 | 0.4 |
+| Top-K | Slider + number | 1–100 | 40 |
+| Top-P | Slider + number | 0.0–1.0 | 0.9 |
+| Repetition penalty | Slider + number | 1.0–2.0 | 1.05 |
+| Max tokens | Number input | 1–4096 | 64 |
+
+#### Cloud Fallback-sektion
+
+| Parameter | Kontroll | Default |
+|-----------|----------|---------|
+| API key | Password input (masked) | (from vault or env) |
+| Cloud model | Text input | claude-3-5-haiku-latest |
+| Cloud max tokens | Number input (1–16384) | 4096 |
+
+#### System-sektion
+
+| Parameter | Kontroll | Default |
+|-----------|----------|---------|
+| Recall level | Slider + number (0–10) | Current level |
+| System prompt | Textarea (4 rader) | Current prompt |
+
+#### Apply-scope
+
+"Apply to: **Global** / **This tile**" toggle längst ner. Default: Global. "This tile" syns bara om en tile är fokuserad. Per-tile override clearas vid Global-save.
+
+#### Save/Cancel
+
+"Apply" (teal) och "Cancel" (surface1).
+
+### Per-tile Config Override
+
+Varje tile får valfritt `_config`-objekt i JS:
+
+```javascript
+tile._config = null;  // null = use global
+// or:
+tile._config = { temperature: 0.7, max_tokens: 256 };
+```
+
+Vid `/api/generate` mergas per-tile config över global:
+
+```javascript
+const cfg = Object.assign({}, globalConfig, tile._config || {});
+```
+
+Servern behöver inte veta om per-tile — klienten skickar rätt värden per request.
+
+### Nya Config-endpoints
+
+| Endpoint | Metod | Funktion |
+|----------|-------|----------|
+| `GET /api/config` | Returnerar global config (API key masked: `sk-ant-***`) |
+| `POST /api/config` | Partiell uppdatering av global config |
+| `POST /api/config/apikey` | Sparar API key krypterat i vault |
+
+#### `GET /api/config` svar
+
+```json
+{
+    "model": "bitnet",
+    "temperature": 0.4,
+    "top_k": 40,
+    "top_p": 0.9,
+    "repetition_penalty": 1.05,
+    "max_tokens": 64,
+    "cloud_model": "claude-3-5-haiku-latest",
+    "cloud_max_tokens": 4096,
+    "recall_level": 3,
+    "system_prompt": "You are Olorin...",
+    "has_api_key": true
+}
+```
+
+#### `POST /api/config` body (partiell)
+
+```json
+{ "temperature": 0.8, "max_tokens": 256 }
+```
+
+Model-byte returnerar `{"ok":true,"reload_required":true}` — kräver Engine-reload.
+
+#### `POST /api/config/apikey`
+
+Raw bytes i body. Sparas via `vault.store("config:api_key", key_bytes)`. Vid startup: `vault.search("config:api_key")` → initiera AnthropicClient.
+
+### Befintlig Endpoint-fix: `/api/generate`
+
+Servern extraherar idag bara `prompt`. Fixas: parsa `temperature`, `repetition_penalty`, `max_tokens`, `top_k`, `top_p`, `recall_level` från JSON och skicka genom till routern.
+
+### Config Dataflöde
+
+```
+Modal "Apply" → POST /api/config → DispatchContext: update Engine + AnthropicClient
+API key "Save" → POST /api/config/apikey → vault.store() → AnthropicClient update
+Hyprbar ← GET /api/system (utökat med config-fält, befintlig 2s poll)
+Modal load ← GET /api/config (en gång vid öppning)
+```
+
+### Config-filer
+
+| Fil | Config-ändring | ~Rader |
+|-----|----------------|--------|
+| `src/interface/server.rs` | 3 config-endpoints, extrahera params i `/api/generate`, config i `/api/system` | +120 |
+| `src/core/router.rs` | `update_config()`, `get_config()`, runtime parameter mutation | +40 |
+| `src/core/anthropic.rs` | `set_model()`, `set_max_tokens()`, pub api_key setter | +15 |
+| `web/chat.html` | Hyprbar config-element, olorin-knapp, modal HTML/CSS/JS, per-tile config | +200 |
+| `tests/config_api.rs` | GET/POST roundtrip, partial update, apikey store/retrieve | +60 |
 
 ## Hard Rules
 
@@ -282,3 +424,9 @@ Om någon av gatarna blockerar: raden skickas aldrig till bash. Istället return
 7. **Scan-buffert återanvänds.** `scan_buf` allokeras i `new()`, återanvänds varje read-cykel.
 
 8. **SIMD-alignment.** Cell-grids som `Vec<Cell>` med 16-byte aligned struct. Inga casts från `Vec<u8>`.
+
+9. **API key aldrig i plaintext.** Sparas i vault, maskas i GET-svar, skickas via POST body. Aldrig loggad.
+
+10. **Per-tile override är klient-only.** Servern ser bara parametrar per request. Ingen server-state per tile.
+
+11. **Model-byte är explicit.** Inte hot-swap. Kräver bekräftelse och Engine-reload.
