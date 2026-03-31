@@ -4,17 +4,16 @@ use crate::inference::gemm_q4k::BatchQ8K;
 use crate::inference::matmul_q6k::{q6k_4row_dot, q6k_row_dot};
 use crate::inference::ptr::{SendPtr, SendMutPtr};
 
-fn n_threads() -> usize {
-    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
-}
+use crate::inference::threadpool::ThreadPool;
 
 /// GEMM: Q6_K weight[out_dim] x batch[n_tokens] -> out[n_tokens * out_dim]
 pub(crate) fn q6k_gemm_mt(
     weight: *const u8, row_stride: usize, n_blocks: usize,
     batch: &BatchQ8K, out: &mut [f32], out_dim: usize,
+    pool: &ThreadPool,
 ) {
     let nt = batch.n_tokens;
-    let total = n_threads().min(out_dim / 4).max(1);
+    let total = pool.thread_count().min(out_dim / 4).max(1);
     let qs: Vec<usize> = (0..nt).map(|t| batch.qs_ptr(t) as usize).collect();
     let ds: Vec<usize> = (0..nt).map(|t| batch.d_ptr(t) as usize).collect();
     let bs: Vec<usize> = (0..nt).map(|t| batch.bsums_ptr(t) as usize).collect();
@@ -22,15 +21,10 @@ pub(crate) fn q6k_gemm_mt(
     let w = SendPtr(weight);
     let o = SendMutPtr(out.as_mut_ptr());
 
-    std::thread::scope(|s| {
-        for tid in 0..total {
+    pool.run(total, move |tid, _n| {
             let start = tid * chunk;
             let end = (start + chunk).min(out_dim);
-            if start >= end { continue; }
-            let qs = &qs;
-            let ds = &ds;
-            let bs = &bs;
-            s.spawn(move || {
+            if start >= end { return; }
                 let mut scores = [0.0f32; 4];
                 let mut r = start;
                 unsafe {
@@ -57,7 +51,5 @@ pub(crate) fn q6k_gemm_mt(
                         r += 1;
                     }
                 }
-            });
-        }
     });
 }

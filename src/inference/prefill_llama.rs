@@ -67,12 +67,12 @@ impl LlamaState {
                 });
             }
 
-            q4k_gemm_mt(lw.wq, h_rs, h_nb, &bq_h, &mut qs_all, h);
-            q4k_gemm_mt(lw.wk, h_rs, h_nb, &bq_h, &mut ks_all, kv);
+            q4k_gemm_mt(lw.wq, h_rs, h_nb, &bq_h, &mut qs_all, h, &self.pool);
+            q4k_gemm_mt(lw.wk, h_rs, h_nb, &bq_h, &mut ks_all, kv, &self.pool);
             if lw.wv_block_bytes == Q6K_BLOCK_BYTES {
-                q6k_gemm_mt(lw.wv, h_nb * Q6K_BLOCK_BYTES, h_nb, &bq_h, &mut vs_all, kv);
+                q6k_gemm_mt(lw.wv, h_nb * Q6K_BLOCK_BYTES, h_nb, &bq_h, &mut vs_all, kv, &self.pool);
             } else {
-                q4k_gemm_mt(lw.wv, h_rs, h_nb, &bq_h, &mut vs_all, kv);
+                q4k_gemm_mt(lw.wv, h_rs, h_nb, &bq_h, &mut vs_all, kv, &self.pool);
             }
 
             // ── Attention (sequential — KV-cache dependency) ──
@@ -137,7 +137,7 @@ impl LlamaState {
                 });
             }
 
-            q4k_gemm_mt(lw.wo, h_rs, h_nb, &bq_h, &mut tmp_all, h);
+            q4k_gemm_mt(lw.wo, h_rs, h_nb, &bq_h, &mut tmp_all, h, &self.pool);
 
             // ── Parallel vecadd residual (attn) ──
             {
@@ -172,7 +172,7 @@ impl LlamaState {
                 });
             }
 
-            q4k_fused_silu_gemm_mt(lw.w_gate, lw.w_up, h_rs, h_nb, &bq_h, &mut hidden_all, f);
+            q4k_fused_silu_gemm_mt(lw.w_gate, lw.w_up, h_rs, h_nb, &bq_h, &mut hidden_all, f, &self.pool);
 
             // ── Parallel quantize hidden ──
             {
@@ -188,9 +188,9 @@ impl LlamaState {
             }
 
             if lw.w_down_block_bytes == Q6K_BLOCK_BYTES {
-                q6k_gemm_mt(lw.w_down, f_nb * Q6K_BLOCK_BYTES, f_nb, &bq_f, &mut tmp_all, h);
+                q6k_gemm_mt(lw.w_down, f_nb * Q6K_BLOCK_BYTES, f_nb, &bq_f, &mut tmp_all, h, &self.pool);
             } else {
-                q4k_gemm_mt(lw.w_down, f_nb * Q4K_BLOCK_BYTES, f_nb, &bq_f, &mut tmp_all, h);
+                q4k_gemm_mt(lw.w_down, f_nb * Q4K_BLOCK_BYTES, f_nb, &bq_f, &mut tmp_all, h, &self.pool);
             }
 
             // ── Parallel vecadd residual (ffn) ──

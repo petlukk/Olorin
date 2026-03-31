@@ -5,9 +5,7 @@ use crate::inference::matmul_q4k::{q4k_4row_dot, q4k_row_dot, q4k_dual_4row_dot,
 use crate::inference::matmul::f16_to_f32;
 use crate::inference::ptr::{SendPtr, SendMutPtr};
 
-fn n_threads() -> usize {
-    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
-}
+use crate::inference::threadpool::ThreadPool;
 
 /// Batched Q8K activation data for N tokens.
 pub(crate) struct BatchQ8K {
@@ -59,9 +57,10 @@ impl BatchQ8K {
 pub(crate) fn q4k_gemm_mt(
     weight: *const u8, row_stride: usize, n_blocks: usize,
     batch: &BatchQ8K, out: &mut [f32], out_dim: usize,
+    pool: &ThreadPool,
 ) {
     let nt = batch.n_tokens;
-    let total = n_threads().min(out_dim / 4).max(1);
+    let total = pool.thread_count().min(out_dim / 4).max(1);
     let qs: Vec<usize> = (0..nt).map(|t| batch.qs_ptr(t) as usize).collect();
     let ds: Vec<usize> = (0..nt).map(|t| batch.d_ptr(t) as usize).collect();
     let bs: Vec<usize> = (0..nt).map(|t| batch.bsums_ptr(t) as usize).collect();
@@ -69,15 +68,10 @@ pub(crate) fn q4k_gemm_mt(
     let w = SendPtr(weight);
     let o = SendMutPtr(out.as_mut_ptr());
 
-    std::thread::scope(|s| {
-        for tid in 0..total {
+    pool.run(total, move |tid, _n| {
             let start = tid * chunk;
             let end = (start + chunk).min(out_dim);
-            if start >= end { continue; }
-            let qs = &qs;
-            let ds = &ds;
-            let bs = &bs;
-            s.spawn(move || {
+            if start >= end { return; }
                 let mut scores4 = [0.0f32; 4];
                 let mut scores16 = [0.0f32; 16];
                 // Per-row pre-unpacked scale/min/d/dm arrays
@@ -155,8 +149,6 @@ pub(crate) fn q4k_gemm_mt(
                         r += 1;
                     }
                 }
-            });
-        }
     });
 }
 
@@ -165,9 +157,10 @@ pub(crate) fn q4k_fused_silu_gemm_mt(
     w_gate: *const u8, w_up: *const u8,
     row_stride: usize, n_blocks: usize,
     batch: &BatchQ8K, out: &mut [f32], out_dim: usize,
+    pool: &ThreadPool,
 ) {
     let nt = batch.n_tokens;
-    let total = n_threads().min(out_dim / 4).max(1);
+    let total = pool.thread_count().min(out_dim / 4).max(1);
     let qs: Vec<usize> = (0..nt).map(|t| batch.qs_ptr(t) as usize).collect();
     let ds: Vec<usize> = (0..nt).map(|t| batch.d_ptr(t) as usize).collect();
     let bs: Vec<usize> = (0..nt).map(|t| batch.bsums_ptr(t) as usize).collect();
@@ -176,15 +169,10 @@ pub(crate) fn q4k_fused_silu_gemm_mt(
     let wu = SendPtr(w_up);
     let o = SendMutPtr(out.as_mut_ptr());
 
-    std::thread::scope(|s| {
-        for tid in 0..total {
+    pool.run(total, move |tid, _n| {
             let start = tid * chunk;
             let end = (start + chunk).min(out_dim);
-            if start >= end { continue; }
-            let qs = &qs;
-            let ds = &ds;
-            let bs = &bs;
-            s.spawn(move || {
+            if start >= end { return; }
                 let mut g_scores = [0.0f32; 4];
                 let mut u_scores = [0.0f32; 4];
                 let mut r = start;
@@ -218,7 +206,5 @@ pub(crate) fn q4k_fused_silu_gemm_mt(
                         r += 1;
                     }
                 }
-            });
-        }
     });
 }
