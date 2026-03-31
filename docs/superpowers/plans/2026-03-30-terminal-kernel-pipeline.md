@@ -1,14 +1,14 @@
-# Terminal Kernel Pipeline Implementation Plan
+# Terminal Kernel Pipeline + Hyprbar Config Panel
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add SIMD-accelerated interactive terminal (PTY) tiles to Olorin's web-UI, with `ansi_parser.ea` for bulk byte classification, `terminal_diff.ea` for cell-grid diffing, and `fused_safety.ea` + `ShellGuard` gating every command before it reaches bash.
+**Goal:** Add SIMD-accelerated interactive terminal (PTY) tiles to Olorin's web-UI, and a runtime config panel in the hyprbar for inference/cloud/system parameters with per-tile override support.
 
-**Architecture:** Rust owns all stateful logic (PTY lifecycle, ANSI state machine, cell grid). Eä kernels handle the parallelizable hot paths: `ansi_parser.ea` classifies raw bytes via SIMD, `terminal_diff.ea` compares cell grids, and `fused_safety.ea` scans each command line before it reaches the PTY. Transport uses existing SSE-down + POST-up pattern. Canvas renders in the browser.
+**Architecture:** Rust owns all stateful logic (PTY lifecycle, ANSI state machine, cell grid, config state). Eä kernels handle the parallelizable hot paths: `ansi_parser.ea` classifies raw bytes via SIMD, `terminal_diff.ea` compares cell grids, and `fused_safety.ea` scans each command line before it reaches the PTY. Config panel shows inference params in hyprbar, opens a modal on click for full configuration. API key stored encrypted in vault. Transport uses existing SSE-down + POST-up pattern. Canvas renders in the browser.
 
 **Tech Stack:** Rust (libc: openpty/fork/ioctl/poll), Eä SIMD kernels, HTML5 Canvas, SSE
 
-**Security:** Every line entered in the terminal tile goes through `fused_safety.ea` (injection + leak scan) and `ShellGuard` (command classification) before being written to the PTY. Raw control bytes (Ctrl-C, arrows, tab) bypass the guard — they are not commands. Blocked commands produce an SSE error event instead of reaching bash.
+**Security:** Every line entered in the terminal tile goes through `fused_safety.ea` (injection + leak scan) and `ShellGuard` (command classification) before being written to the PTY. Raw control bytes (Ctrl-C, arrows, tab) bypass the guard — they are not commands. Blocked commands produce an SSE error event instead of reaching bash. API key stored encrypted in vault — never in plaintext, never logged, masked in GET responses.
 
 **Spec:** `docs/superpowers/specs/2026-03-30-terminal-kernel-pipeline-design.md`
 
@@ -35,8 +35,20 @@
 |------|--------|
 | `src/interface/mod.rs` | Add `pub mod pty; pub mod ansi;` |
 | `src/kernels/ffi.rs` | Add type aliases, KernelTable fields, load + public wrappers for 2 new kernels |
-| `src/interface/server.rs` | Add 5 terminal endpoints + SSE loop thread |
-| `web/chat.html` | Add `createTermTile()`, Canvas renderer, `Alt+S` keybinding |
+| `src/interface/server.rs` | 5 terminal endpoints + SSE loop + 3 config endpoints + param extraction in `/api/generate` + config in `/api/system` |
+| `src/core/router.rs` | `update_config()`, `get_config()`, runtime parameter mutation, vault API key load |
+| `src/core/anthropic.rs` | `set_model()`, `set_max_tokens()`, pub `api_key()` setter |
+| `web/chat.html` | `createTermTile()`, Canvas renderer, `Alt+S`, hyprbar config elements, olorin button, config modal, per-tile config |
+
+### Test Files
+
+| File | Tests |
+|------|-------|
+| `tests/pty.rs` | PTY lifecycle: open, write/read, resize, close |
+| `tests/ansi.rs` | State machine: SGR, cursor, ED/EL |
+| `tests/terminal_diff.rs` | Diff: identical grids, changed cells |
+| `tests/pty_guard.rs` | Safety guard: blocked destructive commands, allowed safe, ctrl-C passthrough |
+| `tests/config_api.rs` | Config GET/POST roundtrip, partial update, param passthrough |
 
 ---
 
@@ -2139,4 +2151,819 @@ Expected: no file > 500 lines. If `server.rs` exceeds 500, split terminal handle
 ```bash
 git add -A
 git commit -m "chore: remove dead code, verify 500-line limit"
+```
+
+---
+
+## Part 2: Hyprbar Config Panel
+
+---
+
+### Task 12: Router Config API (`router.rs` + `anthropic.rs`)
+
+**Files:**
+- Modify: `src/core/router.rs`
+- Modify: `src/core/anthropic.rs`
+
+- [ ] **Step 1: Add setters to AnthropicClient**
+
+Add after `with_model()` (line 26 in `src/core/anthropic.rs`):
+
+```rust
+    pub fn set_api_key(&mut self, key: String) {
+        self.api_key = key;
+    }
+
+    pub fn set_model(&mut self, model: String) {
+        self.model = model;
+    }
+
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    pub fn has_key(&self) -> bool {
+        !self.api_key.is_empty()
+    }
+```
+
+Replace the hardcoded `MAX_TOKENS` constant usage. Change line 12:
+
+```rust
+const DEFAULT_CLOUD_MAX_TOKENS: i64 = 4096;
+```
+
+Add a `max_tokens` field to `AnthropicClient`:
+
+```rust
+pub struct AnthropicClient {
+    api_key: String,
+    model:   String,
+    max_tokens: i64,
+}
+```
+
+Update `new()` and `with_model()` to initialize `max_tokens: DEFAULT_CLOUD_MAX_TOKENS`.
+
+Add setter:
+
+```rust
+    pub fn set_max_tokens(&mut self, n: i64) {
+        self.max_tokens = n;
+    }
+
+    pub fn max_tokens(&self) -> i64 {
+        self.max_tokens
+    }
+```
+
+Update `build_request` to accept `max_tokens` parameter instead of using constant. Change its signature:
+
+```rust
+fn build_request(model: &str, max_tokens: i64, system: &str, messages: &[(&str, &str)]) -> String {
+```
+
+And update the call in `generate()`:
+
+```rust
+let body = build_request(&self.model, self.max_tokens, system, messages);
+```
+
+- [ ] **Step 2: Add `get_config()` and `update_config()` to DispatchContext**
+
+Add at the end of `impl DispatchContext` in `src/core/router.rs` (before the closing `}`):
+
+```rust
+    /// Return current config as JSON string. API key is masked.
+    pub fn get_config(&self) -> String {
+        let (model, temp, top_k, top_p, rep_pen, max_tok) = match &self.engine {
+            Some(e) => (
+                e.quant_type_str(),
+                e.temperature,
+                e.top_k,
+                e.top_p,
+                e.repetition_penalty,
+                e.max_tokens,
+            ),
+            None => ("none", 0.0, 0, 0.0, 1.0, 0),
+        };
+        let (cloud_model, cloud_max, has_key) = match &self.anthropic {
+            Some(a) => (a.model(), a.max_tokens(), a.has_key()),
+            None => ("claude-3-5-haiku-latest", 4096, false),
+        };
+        let system_prompt = crate::interface::server::escape_json(&self.system_prompt);
+        format!(
+            "{{\"model\":\"{model}\",\"temperature\":{temp},\
+             \"top_k\":{top_k},\"top_p\":{top_p},\
+             \"repetition_penalty\":{rep_pen},\"max_tokens\":{max_tok},\
+             \"cloud_model\":\"{cloud_model}\",\"cloud_max_tokens\":{cloud_max},\
+             \"recall_level\":{},\"system_prompt\":\"{system_prompt}\",\
+             \"has_api_key\":{has_key}}}",
+            self.recall_level
+        )
+    }
+
+    /// Update config fields from a partial JSON body.
+    /// Only fields present in the JSON are updated.
+    pub fn update_config(&mut self, json: &str) {
+        use crate::interface::server::extract_json_string;
+
+        if let Some(engine) = &mut self.engine {
+            if let Some(v) = extract_json_float(json, "temperature") {
+                engine.temperature = v;
+            }
+            if let Some(v) = extract_json_int(json, "top_k") {
+                engine.top_k = v as usize;
+            }
+            if let Some(v) = extract_json_float(json, "top_p") {
+                engine.top_p = v;
+            }
+            if let Some(v) = extract_json_float(json, "repetition_penalty") {
+                engine.repetition_penalty = v;
+            }
+            if let Some(v) = extract_json_int(json, "max_tokens") {
+                engine.max_tokens = v as usize;
+            }
+        }
+
+        if let Some(anthropic) = &mut self.anthropic {
+            if let Some(v) = extract_json_string(json, "cloud_model") {
+                anthropic.set_model(v);
+            }
+            if let Some(v) = extract_json_int(json, "cloud_max_tokens") {
+                anthropic.set_max_tokens(v as i64);
+            }
+        }
+
+        if let Some(v) = extract_json_int(json, "recall_level") {
+            self.recall_level = v as usize;
+        }
+        if let Some(v) = extract_json_string(json, "system_prompt") {
+            self.system_prompt = v;
+        }
+    }
+
+    /// Store API key in vault and update/create AnthropicClient.
+    pub fn store_api_key(&mut self, key: &str) {
+        if let Some(vault) = &mut self.vault {
+            let _ = vault.append(b"config:api_key", key.as_bytes());
+        }
+        match &mut self.anthropic {
+            Some(a) => a.set_api_key(key.to_string()),
+            None => self.anthropic = Some(AnthropicClient::new(key.to_string())),
+        }
+    }
+
+    /// Try to load API key from vault at startup.
+    pub fn load_api_key_from_vault(&mut self) {
+        if self.anthropic.is_some() { return; } // env key takes priority
+        if let Some(vault) = &mut self.vault {
+            if let Ok(results) = vault.search("config:api_key", 1) {
+                if let Some(hit) = results.first() {
+                    let text = String::from_utf8_lossy(&hit.plaintext);
+                    if let Some(key) = text.strip_prefix("config:api_key: ") {
+                        let key = key.trim().to_string();
+                        if !key.is_empty() {
+                            self.anthropic = Some(AnthropicClient::new(key));
+                        }
+                    }
+                }
+            }
+        }
+    }
+```
+
+- [ ] **Step 3: Add JSON number extraction helpers to router.rs**
+
+Add at the bottom of `src/core/router.rs` (after the `impl DispatchContext` block):
+
+```rust
+fn extract_json_float(json: &str, key: &str) -> Option<f32> {
+    let pattern = format!("\"{}\"", key);
+    let start = json.find(&pattern)?;
+    let after_key = &json[start + pattern.len()..];
+    let colon = after_key.find(':')?;
+    let rest = after_key[colon + 1..].trim_start();
+    let end = rest.find(|c: char| !c.is_ascii_digit() && c != '.' && c != '-')
+        .unwrap_or(rest.len());
+    rest[..end].parse().ok()
+}
+
+fn extract_json_int(json: &str, key: &str) -> Option<i64> {
+    let pattern = format!("\"{}\"", key);
+    let start = json.find(&pattern)?;
+    let after_key = &json[start + pattern.len()..];
+    let colon = after_key.find(':')?;
+    let rest = after_key[colon + 1..].trim_start();
+    let end = rest.find(|c: char| !c.is_ascii_digit() && c != '-')
+        .unwrap_or(rest.len());
+    rest[..end].parse().ok()
+}
+```
+
+- [ ] **Step 4: Call `load_api_key_from_vault()` in `new()`**
+
+In `src/core/router.rs`, add after line 84 (`_max_turns: 8,`), before the closing `}`:
+
+Change `new()` to:
+
+```rust
+    pub fn new(api_key: Option<String>, model_arg: Option<&str>) -> Self {
+        let anthropic = api_key.map(AnthropicClient::new);
+        let vault = Self::open_vault();
+        let engine = Self::load_engine(model_arg);
+        let mut ctx = Self {
+            messages:      Vec::new(),
+            recall:        VectorStore::new(1024),
+            vault,
+            engine,
+            anthropic,
+            last_timing:   None,
+            system_prompt: llm::SYSTEM_PROMPT.to_string(),
+            recall_level:  0,
+            _max_turns:    8,
+        };
+        ctx.load_api_key_from_vault();
+        ctx
+    }
+```
+
+- [ ] **Step 5: Build to verify**
+
+```bash
+PATH="/home/peter/projects/eacompute/target/release:$PATH" cargo build 2>&1
+```
+Expected: compiles without errors.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/core/router.rs src/core/anthropic.rs
+git commit -m "feat: add runtime config API to DispatchContext + AnthropicClient setters"
+```
+
+---
+
+### Task 13: Server Config Endpoints + Parameter Passthrough
+
+**Files:**
+- Modify: `src/interface/server.rs`
+
+- [ ] **Step 1: Add config routes**
+
+In `src/interface/server.rs`, add before the `_ => { 404` match arm (line 101):
+
+```rust
+        ("GET", "/api/config") => {
+            let body = ctx.lock().unwrap().get_config();
+            serve_json(stream, &body);
+        }
+        ("POST", "/api/config") => {
+            handle_config_update(stream, req, &buf[..n], n, ctx);
+        }
+        ("POST", "/api/config/apikey") => {
+            handle_config_apikey(stream, req, &buf[..n], n, ctx);
+        }
+```
+
+- [ ] **Step 2: Add config handler functions**
+
+Add after `escape_json()` (line 472 in `src/interface/server.rs`):
+
+```rust
+// ── Config handlers ──────────────────────────────────────────────────────────
+
+fn handle_config_update(
+    stream: &mut std::net::TcpStream,
+    req: &str,
+    buf: &[u8],
+    n: usize,
+    ctx: Arc<Mutex<DispatchContext>>,
+) {
+    let body_bytes = read_body(stream, req, buf, n);
+    let body_str = std::str::from_utf8(&body_bytes).unwrap_or("");
+    ctx.lock().unwrap().update_config(body_str);
+    let config = ctx.lock().unwrap().get_config();
+    serve_json(stream, &config);
+}
+
+fn handle_config_apikey(
+    stream: &mut std::net::TcpStream,
+    req: &str,
+    buf: &[u8],
+    n: usize,
+    ctx: Arc<Mutex<DispatchContext>>,
+) {
+    let body_bytes = read_body(stream, req, buf, n);
+    let key = std::str::from_utf8(&body_bytes).unwrap_or("").trim();
+    if key.is_empty() {
+        serve_json(stream, r#"{"ok":false,"error":"empty key"}"#);
+        return;
+    }
+    ctx.lock().unwrap().store_api_key(key);
+    serve_json(stream, r#"{"ok":true}"#);
+}
+```
+
+- [ ] **Step 3: Extract inference params in `/api/generate`**
+
+Replace the prompt-only extraction in `handle_generate()` (line 153) — change:
+
+```rust
+    let prompt     = extract_json_string(body_str, "prompt").unwrap_or_default();
+```
+
+to:
+
+```rust
+    let prompt = extract_json_string(body_str, "prompt").unwrap_or_default();
+
+    // Apply per-request inference params (from chat/repl tile config)
+    {
+        let mut c = ctx.lock().unwrap();
+        if let Some(engine) = &mut c.engine {
+            if let Some(v) = extract_json_float(body_str, "temperature") {
+                engine.temperature = v;
+            }
+            if let Some(v) = extract_json_int(body_str, "max_tokens") {
+                engine.max_tokens = v as usize;
+            }
+            if let Some(v) = extract_json_float(body_str, "repetition_penalty") {
+                engine.repetition_penalty = v;
+            }
+        }
+    }
+```
+
+Add the import at the top of the function (or at file-level):
+
+```rust
+use crate::core::router::{extract_json_float, extract_json_int};
+```
+
+Make `extract_json_float` and `extract_json_int` in `router.rs` pub:
+
+```rust
+pub fn extract_json_float(json: &str, key: &str) -> Option<f32> {
+pub fn extract_json_int(json: &str, key: &str) -> Option<i64> {
+```
+
+- [ ] **Step 4: Add config fields to `/api/system` response**
+
+In `build_system_json()` (line 352), change the signature to accept config:
+
+```rust
+pub fn build_system_json(recall_level: usize, config_json: &str) -> String {
+```
+
+Update the format string to include config at the end:
+
+```rust
+    format!(
+        "{{\"cpu_percent\":{cpu_percent},\"cpu_temp\":{cpu_temp},\
+         \"memory_used_mb\":{mem_used},\"memory_total_mb\":{mem_total},\
+         \"os\":\"{os}\",\"arch\":\"{arch}\",\"uptime_seconds\":{uptime},\
+         \"recall_level\":{recall_level},\"config\":{config_json}}}"
+    )
+```
+
+Update the call site in the route handler (line 91):
+
+```rust
+        ("GET", "/api/system") => {
+            let c = ctx.lock().unwrap();
+            let recall_level = c.recall_level();
+            let config_json = c.get_config();
+            drop(c);
+            let body = build_system_json(recall_level, &config_json);
+            serve_json(stream, &body);
+        }
+```
+
+- [ ] **Step 5: Build to verify**
+
+```bash
+PATH="/home/peter/projects/eacompute/target/release:$PATH" cargo build 2>&1
+```
+Expected: compiles without errors.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/interface/server.rs src/core/router.rs
+git commit -m "feat: add config endpoints (GET/POST /api/config, POST /api/config/apikey)"
+```
+
+---
+
+### Task 14: Config API Tests
+
+**Files:**
+- Create: `tests/config_api.rs`
+
+- [ ] **Step 1: Write config test**
+
+Create `tests/config_api.rs`:
+
+```rust
+//! Tests for runtime config API — get/update/partial update.
+
+use olorin::core::router::DispatchContext;
+
+#[test]
+fn get_config_returns_defaults() {
+    olorin::kernels::ffi::init().unwrap();
+    let ctx = DispatchContext::new(None, None);
+    let json = ctx.get_config();
+    assert!(json.contains("\"temperature\":"));
+    assert!(json.contains("\"has_api_key\":false"));
+}
+
+#[test]
+fn update_config_changes_temperature() {
+    olorin::kernels::ffi::init().unwrap();
+    let mut ctx = DispatchContext::new(None, None);
+    ctx.update_config(r#"{"temperature": 1.5}"#);
+    let json = ctx.get_config();
+    assert!(json.contains("\"temperature\":1.5"));
+}
+
+#[test]
+fn update_config_partial_preserves_other_fields() {
+    olorin::kernels::ffi::init().unwrap();
+    let mut ctx = DispatchContext::new(None, None);
+    let before = ctx.get_config();
+    ctx.update_config(r#"{"temperature": 0.8}"#);
+    let after = ctx.get_config();
+    // top_k should be unchanged
+    assert!(after.contains("\"top_k\":40"));
+    // temperature should be changed
+    assert!(after.contains("\"temperature\":0.8"));
+}
+
+#[test]
+fn update_config_system_prompt() {
+    olorin::kernels::ffi::init().unwrap();
+    let mut ctx = DispatchContext::new(None, None);
+    ctx.update_config(r#"{"system_prompt": "Be helpful."}"#);
+    let json = ctx.get_config();
+    assert!(json.contains("Be helpful."));
+}
+
+#[test]
+fn store_api_key_creates_client() {
+    olorin::kernels::ffi::init().unwrap();
+    let mut ctx = DispatchContext::new(None, None);
+    assert!(ctx.get_config().contains("\"has_api_key\":false"));
+    ctx.store_api_key("sk-ant-test-key");
+    assert!(ctx.get_config().contains("\"has_api_key\":true"));
+}
+
+#[test]
+fn update_cloud_model() {
+    olorin::kernels::ffi::init().unwrap();
+    let mut ctx = DispatchContext::new(Some("sk-test".to_string()), None);
+    ctx.update_config(r#"{"cloud_model": "claude-sonnet-4-6"}"#);
+    let json = ctx.get_config();
+    assert!(json.contains("claude-sonnet-4-6"));
+}
+
+#[test]
+fn update_recall_level() {
+    olorin::kernels::ffi::init().unwrap();
+    let mut ctx = DispatchContext::new(None, None);
+    ctx.update_config(r#"{"recall_level": 5}"#);
+    let json = ctx.get_config();
+    assert!(json.contains("\"recall_level\":5"));
+}
+```
+
+- [ ] **Step 2: Run tests**
+
+```bash
+PATH="/home/peter/projects/eacompute/target/release:$PATH" cargo test --test config_api 2>&1
+```
+Expected: all 7 tests pass.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add tests/config_api.rs
+git commit -m "test: add config API tests — get/update/partial/apikey/cloud"
+```
+
+---
+
+### Task 15: Web-UI Hyprbar Config Elements + Config Modal
+
+**Files:**
+- Modify: `web/chat.html`
+
+- [ ] **Step 1: Add olorin button and config elements to hyprbar**
+
+In `web/chat.html`, replace the hyprbar left div content. Change the existing `<div class="left">` section (lines 53-63) to:
+
+```html
+  <div class="left">
+    <span id="olorin-btn" style="cursor:pointer"><span class="c-teal">◆</span> <span class="c-teal">olorin</span></span>
+    <span class="sep">|</span>
+    <span><span class="c-mauve">◆</span> <span id="hb-model" class="c-text">—</span></span>
+    <span class="sep">|</span>
+    <span id="hb-backend" class="c-blue">—</span>
+    <span class="sep">|</span>
+    <span><span id="hb-tps" class="c-green">0.0</span> <span class="c-green">tok/s</span></span>
+    <span class="sep">|</span>
+    <span>temp <span id="hb-cfg-temp" class="c-yellow">0.4</span></span>
+    <span class="sep">|</span>
+    <span>k:<span id="hb-cfg-topk" class="c-yellow">40</span></span>
+    <span class="sep">|</span>
+    <span>p:<span id="hb-cfg-topp" class="c-yellow">0.9</span></span>
+    <span class="sep">|</span>
+    <span>rep:<span id="hb-cfg-rep" class="c-yellow">1.05</span></span>
+    <span class="sep">|</span>
+    <span>max:<span id="hb-cfg-max" class="c-yellow">64</span></span>
+    <span class="sep">|</span>
+    <span>recall <span id="hb-recall" class="c-yellow">—</span></span>
+    <span class="sep">|</span>
+    <span>sessions <span id="hb-sessions" class="c-peach">0</span></span>
+  </div>
+```
+
+- [ ] **Step 2: Update `updateSystem()` to read config from `/api/system`**
+
+Change the `updateSystem` function (line 230) to also update config elements:
+
+```javascript
+function updateSystem(){
+  fetch('/api/system').then(r=>r.json()).then(d=>{
+    document.getElementById('hb-cpu').textContent=d.cpu_percent+'%';
+    document.getElementById('hb-temp').textContent=d.cpu_temp!=null?d.cpu_temp+'°C':'–';
+    const m=(d.memory_used_mb/1024).toFixed(1),t=(d.memory_total_mb/1024).toFixed(1);
+    document.getElementById('hb-mem').textContent=m+'G/'+t+'G';
+    document.getElementById('hb-os').textContent=d.os+' '+d.arch;
+    const h=Math.floor(d.uptime_seconds/3600),mi=Math.floor((d.uptime_seconds%3600)/60);
+    document.getElementById('hb-uptime').textContent=h+'h '+mi+'m';
+    if(d.recall_level!=null)document.getElementById('hb-recall').textContent=d.recall_level;
+    if(d.config){
+      const c=d.config;
+      document.getElementById('hb-cfg-temp').textContent=c.temperature;
+      document.getElementById('hb-cfg-topk').textContent=c.top_k;
+      document.getElementById('hb-cfg-topp').textContent=c.top_p;
+      document.getElementById('hb-cfg-rep').textContent=c.repetition_penalty;
+      document.getElementById('hb-cfg-max').textContent=c.max_tokens;
+      window._globalConfig=c;
+    }
+  }).catch(()=>{});
+}
+```
+
+- [ ] **Step 3: Add config modal CSS**
+
+Add before `</style>`:
+
+```css
+.cfg-overlay{position:fixed;inset:0;background:rgba(17,17,27,0.85);display:none;z-index:100;align-items:center;justify-content:center}
+.cfg-overlay.open{display:flex}
+.cfg-panel{background:var(--base);border:1px solid var(--surface0);border-radius:8px;padding:20px;width:480px;max-height:80vh;overflow-y:auto;color:var(--text);font-family:'JetBrains Mono',monospace;font-size:12px}
+.cfg-panel h2{margin:0 0 16px;font-size:14px;color:var(--lavender)}
+.cfg-section{margin-bottom:16px}
+.cfg-section h3{margin:0 0 8px;font-size:12px;color:var(--mauve);text-transform:uppercase;letter-spacing:1px}
+.cfg-row{display:flex;align-items:center;margin-bottom:8px;gap:8px}
+.cfg-row label{width:120px;color:var(--subtext1);flex-shrink:0}
+.cfg-row input[type=range]{flex:1;accent-color:var(--teal)}
+.cfg-row input[type=number],.cfg-row input[type=text],.cfg-row input[type=password]{background:var(--surface0);border:1px solid var(--surface1);color:var(--text);padding:4px 8px;border-radius:4px;width:70px;font-family:inherit;font-size:12px}
+.cfg-row input[type=text].wide,.cfg-row input[type=password].wide,.cfg-row textarea{width:100%;flex:1}
+.cfg-row textarea{background:var(--surface0);border:1px solid var(--surface1);color:var(--text);padding:4px 8px;border-radius:4px;font-family:inherit;font-size:12px;resize:vertical;min-height:60px}
+.cfg-row select{background:var(--surface0);border:1px solid var(--surface1);color:var(--text);padding:4px 8px;border-radius:4px;font-family:inherit;font-size:12px}
+.cfg-buttons{display:flex;gap:8px;justify-content:flex-end;margin-top:16px}
+.cfg-buttons button{padding:6px 16px;border:none;border-radius:4px;cursor:pointer;font-family:inherit;font-size:12px}
+.cfg-btn-apply{background:var(--teal);color:var(--base)}
+.cfg-btn-cancel{background:var(--surface1);color:var(--text)}
+.cfg-scope{display:flex;gap:12px;align-items:center;margin-bottom:16px;color:var(--subtext1)}
+.cfg-scope label{width:auto}
+```
+
+- [ ] **Step 4: Add config modal HTML**
+
+Add after the closing `</div>` of the hyprbar (after the `<div id="tiles">` container, before `<script>`):
+
+```html
+<div id="cfg-overlay" class="cfg-overlay" onclick="if(event.target===this)closeCfg()">
+  <div class="cfg-panel">
+    <h2>⚙ Configuration</h2>
+    <div class="cfg-scope" id="cfg-scope-row" style="display:none">
+      <label>Apply to:</label>
+      <label><input type="radio" name="cfg-scope" value="global" checked> Global</label>
+      <label><input type="radio" name="cfg-scope" value="tile"> This tile</label>
+    </div>
+    <div class="cfg-section">
+      <h3>Inference</h3>
+      <div class="cfg-row"><label>Model</label><select id="cfg-model"><option>bitnet</option><option>llama</option><option>llama8b</option><option>qwen</option></select></div>
+      <div class="cfg-row"><label>Temperature</label><input type="range" id="cfg-temp-r" min="0" max="2" step="0.05"><input type="number" id="cfg-temp" min="0" max="2" step="0.05"></div>
+      <div class="cfg-row"><label>Top-K</label><input type="range" id="cfg-topk-r" min="1" max="100" step="1"><input type="number" id="cfg-topk" min="1" max="100"></div>
+      <div class="cfg-row"><label>Top-P</label><input type="range" id="cfg-topp-r" min="0" max="1" step="0.01"><input type="number" id="cfg-topp" min="0" max="1" step="0.01"></div>
+      <div class="cfg-row"><label>Rep. penalty</label><input type="range" id="cfg-rep-r" min="1" max="2" step="0.01"><input type="number" id="cfg-rep" min="1" max="2" step="0.01"></div>
+      <div class="cfg-row"><label>Max tokens</label><input type="number" id="cfg-max" min="1" max="4096" style="width:100px"></div>
+    </div>
+    <div class="cfg-section">
+      <h3>Cloud Fallback</h3>
+      <div class="cfg-row"><label>API key</label><input type="password" id="cfg-apikey" class="wide" placeholder="sk-ant-..."></div>
+      <div class="cfg-row"><label>Cloud model</label><input type="text" id="cfg-cloud-model" class="wide"></div>
+      <div class="cfg-row"><label>Cloud max tok</label><input type="number" id="cfg-cloud-max" min="1" max="16384" style="width:100px"></div>
+    </div>
+    <div class="cfg-section">
+      <h3>System</h3>
+      <div class="cfg-row"><label>Recall level</label><input type="range" id="cfg-recall-r" min="0" max="10" step="1"><input type="number" id="cfg-recall" min="0" max="10"></div>
+      <div class="cfg-row" style="align-items:flex-start"><label>System prompt</label><textarea id="cfg-sysprompt" rows="4"></textarea></div>
+    </div>
+    <div class="cfg-buttons">
+      <button class="cfg-btn-cancel" onclick="closeCfg()">Cancel</button>
+      <button class="cfg-btn-apply" onclick="applyCfg()">Apply</button>
+    </div>
+  </div>
+</div>
+```
+
+- [ ] **Step 5: Add config modal JS**
+
+Add after the `updateSystem` function:
+
+```javascript
+// ── Config modal ────────────────────────────────────────────────────────────
+window._globalConfig={};
+
+function openCfg(){
+  fetch('/api/config').then(r=>r.json()).then(c=>{
+    window._globalConfig=c;
+    document.getElementById('cfg-model').value=c.model||'bitnet';
+    setSlider('cfg-temp',c.temperature);
+    setSlider('cfg-topk',c.top_k);
+    setSlider('cfg-topp',c.top_p);
+    setSlider('cfg-rep',c.repetition_penalty);
+    document.getElementById('cfg-max').value=c.max_tokens;
+    document.getElementById('cfg-cloud-model').value=c.cloud_model||'';
+    document.getElementById('cfg-cloud-max').value=c.cloud_max_tokens||4096;
+    setSlider('cfg-recall',c.recall_level);
+    document.getElementById('cfg-sysprompt').value=c.system_prompt||'';
+    // Show tile scope toggle if a tile is focused
+    const scopeRow=document.getElementById('cfg-scope-row');
+    scopeRow.style.display=focusedId!=null?'flex':'none';
+    document.querySelector('input[name="cfg-scope"][value="global"]').checked=true;
+    document.getElementById('cfg-overlay').classList.add('open');
+  });
+}
+
+function closeCfg(){
+  document.getElementById('cfg-overlay').classList.remove('open');
+}
+
+function setSlider(id,val){
+  document.getElementById(id).value=val;
+  const r=document.getElementById(id+'-r');
+  if(r)r.value=val;
+}
+
+// Sync slider ↔ number input
+document.querySelectorAll('.cfg-row input[type=range]').forEach(r=>{
+  const numId=r.id.replace('-r','');
+  r.addEventListener('input',()=>{document.getElementById(numId).value=r.value});
+});
+document.querySelectorAll('.cfg-row input[type=number]').forEach(n=>{
+  const rId=n.id+'-r';
+  n.addEventListener('input',()=>{const r=document.getElementById(rId);if(r)r.value=n.value});
+});
+
+function applyCfg(){
+  const scope=document.querySelector('input[name="cfg-scope"]:checked').value;
+  const cfg={
+    temperature:parseFloat(document.getElementById('cfg-temp').value),
+    top_k:parseInt(document.getElementById('cfg-topk').value),
+    top_p:parseFloat(document.getElementById('cfg-topp').value),
+    repetition_penalty:parseFloat(document.getElementById('cfg-rep').value),
+    max_tokens:parseInt(document.getElementById('cfg-max').value),
+    cloud_model:document.getElementById('cfg-cloud-model').value,
+    cloud_max_tokens:parseInt(document.getElementById('cfg-cloud-max').value),
+    recall_level:parseInt(document.getElementById('cfg-recall').value),
+    system_prompt:document.getElementById('cfg-sysprompt').value,
+  };
+
+  if(scope==='tile'&&focusedId!=null){
+    const tile=tiles.find(t=>t.id===focusedId);
+    if(tile)tile.el._config=cfg;
+  }else{
+    fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)});
+    window._globalConfig=cfg;
+  }
+
+  // API key — only send if non-empty (don't overwrite on every save)
+  const apikey=document.getElementById('cfg-apikey').value;
+  if(apikey){
+    fetch('/api/config/apikey',{method:'POST',body:apikey});
+    document.getElementById('cfg-apikey').value='';
+  }
+
+  closeCfg();
+}
+
+document.getElementById('olorin-btn').addEventListener('click',openCfg);
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeCfg()});
+```
+
+- [ ] **Step 6: Update `sendChat()` and `sendCommand()` to use per-tile config**
+
+Replace the hardcoded params in `sendChat()` (line 117). Change:
+
+```javascript
+body:JSON.stringify({prompt:text,temperature:0,repetition_penalty:1.1,max_tokens:512,recall_level:-1})
+```
+
+to:
+
+```javascript
+body:JSON.stringify(Object.assign({prompt:text},tileConfig(id)))
+```
+
+Add the `tileConfig()` helper before `sendChat()`:
+
+```javascript
+function tileConfig(id){
+  const tile=tiles.find(t=>t.id===id);
+  const tc=tile&&tile.el._config||{};
+  const gc=window._globalConfig||{};
+  return{
+    temperature:tc.temperature!=null?tc.temperature:gc.temperature!=null?gc.temperature:0.4,
+    top_k:tc.top_k!=null?tc.top_k:gc.top_k!=null?gc.top_k:40,
+    top_p:tc.top_p!=null?tc.top_p:gc.top_p!=null?gc.top_p:0.9,
+    repetition_penalty:tc.repetition_penalty!=null?tc.repetition_penalty:gc.repetition_penalty!=null?gc.repetition_penalty:1.05,
+    max_tokens:tc.max_tokens!=null?tc.max_tokens:gc.max_tokens!=null?gc.max_tokens:512,
+    recall_level:tc.recall_level!=null?tc.recall_level:gc.recall_level!=null?gc.recall_level:-1,
+  };
+}
+```
+
+Similarly update the REPL generate call in `sendCommand()`. Change:
+
+```javascript
+body:JSON.stringify({prompt:text,temperature:0.7,repetition_penalty:1.1,max_tokens:512,recall_level:-1})
+```
+
+to:
+
+```javascript
+body:JSON.stringify(Object.assign({prompt:text},tileConfig(id)))
+```
+
+- [ ] **Step 7: Build and verify**
+
+```bash
+PATH="/home/peter/projects/eacompute/target/release:$PATH" cargo build 2>&1
+```
+Expected: compiles. Manual test: `cargo run -- --web 8080`, open browser, click "◆ olorin", verify modal opens with current values.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add web/chat.html
+git commit -m "feat: add config modal, hyprbar config elements, per-tile config override"
+```
+
+---
+
+### Task 16: Final Verification + 500-line Check
+
+**Files:**
+- All modified files
+
+- [ ] **Step 1: Run full test suite**
+
+```bash
+PATH="/home/peter/projects/eacompute/target/release:$PATH" cargo test 2>&1
+```
+Expected: all tests pass (terminal + config + existing).
+
+- [ ] **Step 2: Verify no file exceeds 500 lines**
+
+```bash
+find src -name '*.rs' -exec wc -l {} + | sort -rn | head -10
+```
+Expected: no file > 500 lines. If `server.rs` exceeds 500 (it was at 473 + ~50 new = ~523), split config handlers into `src/interface/config.rs`:
+
+Create `src/interface/config.rs` with `handle_config_update`, `handle_config_apikey`, and the config route matching. Add `pub mod config;` to `src/interface/mod.rs`. Move only the config handler functions, keep routes in `server.rs` calling into `config::handle_*`.
+
+- [ ] **Step 3: Verify chat.html sends per-tile config**
+
+Manual verification in browser:
+1. Open chat tile (`Alt+C`)
+2. Click "◆ olorin", change temperature to 1.0, Apply
+3. Hyprbar should show `temp 1.0`
+4. Send a message — check browser network tab that request body contains `"temperature":1.0`
+5. Click "◆ olorin" again, switch to "This tile", set temp to 0.0, Apply
+6. Send another message — should send `"temperature":0`
+7. Open second chat tile — it should use global (1.0)
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add -A
+git commit -m "chore: final verification, 500-line split if needed"
 ```
