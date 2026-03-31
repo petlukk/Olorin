@@ -144,23 +144,47 @@ impl LlamaState {
                 }
             }
 
-            // Sequential attention scoring (KV already in cache, seq_len = n)
-            // attention_scores/output use explicit seq_len param, not cache.seq_len
-            for t in 0..n {
-                let q = &qs_all[t*h..(t+1)*h];
-                let seq_len = t + 1;
-                let scores = &mut self.attn_scores[..nh * seq_len];
-                cache::attention::attention_scores(&self.kv_cache, q, layer as i32, nh as i32, nkv as i32, seq_len as i32, scores);
-                if has_k_bias {
-                    for q_h in 0..nh {
-                        for s in 0..seq_len {
-                            scores[q_h * seq_len + s] += k_bias_dots[t * nh * n + q_h * n + s];
+            // Parallel attention scoring — each token independent (KV already in cache)
+            {
+                let cache_ptr = &self.kv_cache as *const cache::EakvCache as usize;
+                let qs_ptr = qs_all.as_ptr() as usize;
+                let attn_ptr = attn_all.as_mut_ptr() as usize;
+                let bias_ptr = if has_k_bias { k_bias_dots.as_ptr() as usize } else { 0 };
+                let layer_i32 = layer as i32;
+                let nh_i32 = nh as i32;
+                let nkv_i32 = nkv as i32;
+                let n_tokens = n;
+
+                self.pool.run(nt.min(n), move |tid, nt_used| {
+                    let mut t = tid;
+                    while t < n_tokens {
+                        let seq_len = (t + 1) as i32;
+                        let mut scores = vec![0.0f32; nh * (t + 1)];
+                        let q = unsafe { std::slice::from_raw_parts((qs_ptr as *const f32).add(t * h), h) };
+                        let cache_ref = unsafe { &*(cache_ptr as *const cache::EakvCache) };
+                        cache::attention::attention_scores(
+                            cache_ref, q, layer_i32, nh_i32, nkv_i32, seq_len, &mut scores,
+                        );
+                        if bias_ptr != 0 {
+                            let bias = unsafe { std::slice::from_raw_parts(
+                                (bias_ptr as *const f32).add(t * nh * n_tokens), nh * n_tokens,
+                            )};
+                            for q_h in 0..nh {
+                                for s in 0..(t + 1) {
+                                    scores[q_h * (t + 1) + s] += bias[q_h * n_tokens + s];
+                                }
+                            }
                         }
+                        softmax_rows(&mut scores, nh, t + 1);
+                        let attn_out = unsafe { std::slice::from_raw_parts_mut(
+                            (attn_ptr as *mut f32).add(t * h), h,
+                        )};
+                        cache::attention::attention_output(
+                            cache_ref, &scores, layer_i32, nh_i32, nkv_i32, seq_len, attn_out,
+                        );
+                        t += nt_used;
                     }
-                }
-                softmax_rows(scores, nh, seq_len);
-                let attn = &mut attn_all[t*h..(t+1)*h];
-                cache::attention::attention_output(&self.kv_cache, scores, layer as i32, nh as i32, nkv as i32, seq_len as i32, attn);
+                });
             }
 
             // ── Parallel quantize attn output ──
