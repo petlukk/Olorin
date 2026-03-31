@@ -47,7 +47,7 @@ body{background:var(--crust);color:var(--text);font-family:'Inter',system-ui,san
 .repl-input-line{display:flex;align-items:center;padding:8px 12px;border-top:1px solid var(--surface0);background:var(--mantle);font:13px 'JetBrains Mono',monospace}
 .repl-input{flex:1;background:transparent;border:none;color:var(--text);font:13px 'JetBrains Mono',monospace;outline:none;padding:0}
 .repl-cursor{display:inline-block;width:7px;height:15px;background:var(--mauve);animation:blink 1s step-end infinite;vertical-align:text-bottom}
-.term-canvas{flex:1;min-height:0;display:block;background:var(--base);image-rendering:pixelated}
+.term-canvas{flex:1;min-height:0;width:100%;display:block;background:var(--base);image-rendering:pixelated;outline:none}
 .cfg-overlay{position:fixed;inset:0;background:rgba(17,17,27,0.85);display:none;z-index:100;align-items:center;justify-content:center}.cfg-overlay.open{display:flex}
 .cfg-panel{background:var(--base);border:1px solid var(--surface0);border-radius:8px;padding:20px;width:480px;max-height:80vh;overflow-y:auto;color:var(--text);font-family:'JetBrains Mono',monospace;font-size:12px}
 .cfg-panel h2{margin:0 0 16px;font-size:14px;color:var(--lavender)}.cfg-section{margin-bottom:16px}
@@ -224,15 +224,14 @@ function createTermTile(id){
   t._cellW=0;t._cellH=0;
   fetch('/api/term/open',{method:'POST'}).then(r=>r.json()).then(d=>{
     t._termId=d.id;
-    initTermCanvas(t);
-    startTermStream(t);
+    requestAnimationFrame(()=>{initTermCanvas(t);startTermStream(t);});
   });
   return t;
 }
 
 function initTermCanvas(t){
   const canvas=t._canvas;
-  const rect=canvas.parentElement.getBoundingClientRect();
+  const rect=t.getBoundingClientRect();
   const ctx=canvas.getContext('2d');
   ctx.font='13px "JetBrains Mono",monospace';
   const m=ctx.measureText('M');
@@ -282,7 +281,7 @@ function initTermCanvas(t){
     }
   });
   new ResizeObserver(()=>{
-    const r2=canvas.parentElement.getBoundingClientRect();
+    const r2=t.getBoundingClientRect();
     const nc=Math.floor(r2.width/t._cellW)||80;
     const nr=Math.floor((r2.height-28)/t._cellH)||24;
     if(nc!==t._cols||nr!==t._rows){
@@ -297,7 +296,7 @@ function initTermCanvas(t){
           body:JSON.stringify({cols:nc,rows:nr})});
       }
     }
-  }).observe(canvas.parentElement);
+  }).observe(t);
 }
 
 function startTermStream(t){
