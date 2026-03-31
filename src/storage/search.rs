@@ -162,12 +162,15 @@ impl FusedSearcher {
 
         let mc = match_count as usize;
         let lw = lines_written as usize;
-        let mut context_lines = Vec::with_capacity(lw);
+        let mut context_lines: Vec<Vec<u8>> = Vec::with_capacity(lw);
         for i in 0..lw {
             let off = self.line_offsets[i] as usize;
             let l = self.line_lens[i] as usize;
             if off + l <= self.lines_buf.len() {
-                context_lines.push(self.lines_buf[off..off + l].to_vec());
+                let line = self.lines_buf[off..off + l].to_vec();
+                if !context_lines.iter().any(|existing| existing == &line) {
+                    context_lines.push(line);
+                }
             }
         }
 

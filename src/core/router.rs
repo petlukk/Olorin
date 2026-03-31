@@ -353,10 +353,12 @@ impl DispatchContext {
             if let Ok(vault_hits) = vault.search(input, top_k) {
                 for hit in &vault_hits {
                     for line in &hit.lines {
-                        if !line.trim().is_empty() {
-                            recall_text.push_str("\n[vault] ");
-                            recall_text.push_str(line);
+                        let trimmed = line.trim();
+                        if trimmed.is_empty() || trimmed.starts_with("assistant:") {
+                            continue;
                         }
+                        recall_text.push_str("\n");
+                        recall_text.push_str(trimmed);
                     }
                 }
             }
