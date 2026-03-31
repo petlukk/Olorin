@@ -75,7 +75,7 @@ impl Engine {
             output_ref.lock().unwrap().push(tok_id);
         };
 
-        let generated = if is_q4k {
+        let mut generated = if is_q4k {
             use crate::inference::forward_llama;
             let (gen, _, _) = forward_llama::generate(
                 &model, &tokens, self.max_tokens, self.temperature,
@@ -93,16 +93,14 @@ impl Engine {
             gen
         };
 
-        let gen_tokens: Vec<u32> = generated[tokens.len()..].to_vec();
+        let mut gen_tokens: Vec<u32> = generated[tokens.len()..].to_vec();
         let result = tokenizer.decode(&gen_tokens);
 
         // Wipe token buffers — no plaintext residue
         unsafe {
             std::ptr::write_bytes(tokens.as_mut_ptr(), 0, tokens.len());
-            let gen_ptr = generated.as_ptr() as *mut u32;
-            std::ptr::write_bytes(gen_ptr, 0, generated.len());
-            let gt_ptr = gen_tokens.as_ptr() as *mut u32;
-            std::ptr::write_bytes(gt_ptr, 0, gen_tokens.len());
+            std::ptr::write_bytes(generated.as_mut_ptr(), 0, generated.len());
+            std::ptr::write_bytes(gen_tokens.as_mut_ptr(), 0, gen_tokens.len());
             let mut out = output.lock().unwrap();
             std::ptr::write_bytes(out.as_mut_ptr(), 0, out.len());
         }

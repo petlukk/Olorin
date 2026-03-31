@@ -42,30 +42,30 @@ fn chacha20_xor(key: &[u8; 32], nonce: &[u8; 12], counter: i32, buf: &mut [u8]) 
     // Scratch: 64 i32s (256 bytes) for the keystream.
     let mut scratch = vec![0i32; 64];
 
-    // We need a separate output buffer — the kernel takes separate in/out pointers.
-    // Copy input, encrypt into a temp buffer, then copy back.
-    let input_copy: Vec<u8> = buf.to_vec();
-    let mut output: Vec<u8> = vec![0u8; buf.len()];
+    // i32-aligned staging buffers for SIMD kernel (CLAUDE.md: "Use Vec<i32> not Vec<u8>")
+    let i32_len = (buf.len() + 3) / 4;
+    let mut input_i32: Vec<i32> = vec![0i32; i32_len];
+    let mut output_i32: Vec<i32> = vec![0i32; i32_len];
 
     unsafe {
+        std::ptr::copy_nonoverlapping(buf.as_ptr(), input_i32.as_mut_ptr() as *mut u8, buf.len());
+
         let ks_i32_ptr = scratch.as_mut_ptr();
         let ks_u8_ptr  = ks_i32_ptr as *mut u8;
-        let pt_i32_ptr = input_copy.as_ptr() as *mut i32;
-        let ct_i32_ptr = output.as_mut_ptr() as *mut i32;
 
         ffi::chacha20_encrypt(
             key_i32.as_ptr(),
             nonce_i32.as_ptr(),
             counter,
-            input_copy.as_ptr(),
-            output.as_mut_ptr(),
+            input_i32.as_ptr() as *const u8,
+            output_i32.as_mut_ptr() as *mut u8,
             buf.len() as i32,
             ks_i32_ptr,
             ks_u8_ptr,
-            pt_i32_ptr,
-            ct_i32_ptr,
+            input_i32.as_mut_ptr(),
+            output_i32.as_mut_ptr(),
         );
-    }
 
-    buf.copy_from_slice(&output);
+        std::ptr::copy_nonoverlapping(output_i32.as_ptr() as *const u8, buf.as_mut_ptr(), buf.len());
+    }
 }
