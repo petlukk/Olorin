@@ -79,7 +79,7 @@ body{background:var(--crust);color:var(--text);font-family:'Inter',system-ui,san
 <h2>Configuration</h2>
 <div class="cfg-scope" id="cfg-scope-row" style="display:none"><label>Apply to:</label><label><input type="radio" name="cfg-scope" value="global" checked> Global</label><label><input type="radio" name="cfg-scope" value="tile"> This tile</label></div>
 <div class="cfg-section"><h3>Inference</h3>
-<div class="cfg-row"><label>Model</label><select id="cfg-model"><option>bitnet</option><option>llama</option><option>llama8b</option><option>qwen</option></select></div>
+<div class="cfg-row"><label>Model</label><select id="cfg-model"></select></div>
 <div class="cfg-row"><label>Temperature</label><input type="range" id="cfg-temp-r" min="0" max="2" step="0.05"><input type="number" id="cfg-temp" min="0" max="2" step="0.05"></div>
 <div class="cfg-row"><label>Top-K</label><input type="range" id="cfg-topk-r" min="1" max="100" step="1"><input type="number" id="cfg-topk" min="1" max="100"></div>
 <div class="cfg-row"><label>Top-P</label><input type="range" id="cfg-topp-r" min="0" max="1" step="0.01"><input type="number" id="cfg-topp" min="0" max="1" step="0.01"></div>
@@ -423,7 +423,10 @@ function tileConfig(id){
 function openCfg(){
   fetch('/api/config').then(r=>r.json()).then(c=>{
     window._globalConfig=c;
-    document.getElementById('cfg-model').value=c.model||'bitnet';
+    const sel=document.getElementById('cfg-model');
+    while(sel.firstChild)sel.removeChild(sel.firstChild);
+    if(c.available_models){c.available_models.forEach(m=>{const o=document.createElement('option');o.value=m;o.textContent=m;sel.appendChild(o);})}
+    sel.value=c.model||'';
     setSlider('cfg-temp',c.temperature);
     setSlider('cfg-topk',c.top_k);
     setSlider('cfg-topp',c.top_p);

@@ -17,13 +17,18 @@ impl DispatchContext {
             None => ("claude-3-5-haiku-latest", 4096, false),
         };
         let system_prompt = crate::interface::server::escape_json(&self.system_prompt);
+        let available = crate::inference::generate::available_models();
+        let models_json: String = available.iter()
+            .map(|m| format!("\"{m}\""))
+            .collect::<Vec<_>>()
+            .join(",");
         format!(
             "{{\"model\":\"{model}\",\"temperature\":{temp},\
              \"top_k\":{top_k},\"top_p\":{top_p},\
              \"repetition_penalty\":{rep_pen},\"max_tokens\":{max_tok},\
              \"cloud_model\":\"{cloud_model}\",\"cloud_max_tokens\":{cloud_max},\
              \"recall_level\":{},\"system_prompt\":\"{system_prompt}\",\
-             \"has_api_key\":{has_key}}}",
+             \"has_api_key\":{has_key},\"available_models\":[{models_json}]}}",
             self.recall_level
         )
     }

@@ -143,13 +143,34 @@ fn build_chat_prompt(architecture: &str, system: &str, prompt: &str) -> String {
 
 /// Find a GGUF model in standard locations.
 pub fn find_model() -> Option<PathBuf> {
+    let dir = models_dir()?;
+    std::fs::read_dir(&dir).ok()?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| p.extension().map(|e| e == "gguf").unwrap_or(false))
+}
+
+fn models_dir() -> Option<PathBuf> {
     let home = std::env::var("HOME").ok()?;
-    let home = Path::new(&home);
-    let paths = [
-        home.join(".olorin/models/ggml-model-i2_s.gguf"),
-        home.join(".olorin/models/ggml-model-i2_s.gguf"),
-    ];
-    paths.into_iter().find(|p| p.exists())
+    let dir = Path::new(&home).join(".olorin/models");
+    dir.is_dir().then_some(dir)
+}
+
+/// List all .gguf files in ~/.olorin/models/ — stem names only.
+pub fn available_models() -> Vec<String> {
+    let dir = match models_dir() {
+        Some(d) => d,
+        None => return Vec::new(),
+    };
+    let mut names: Vec<String> = std::fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().map(|x| x == "gguf").unwrap_or(false))
+        .filter_map(|e| e.path().file_stem().map(|s| s.to_string_lossy().into_owned()))
+        .collect();
+    names.sort();
+    names
 }
 
 /// Resolve model path from CLI argument or auto-detect.
@@ -164,12 +185,17 @@ pub fn resolve_model(arg: Option<&str>) -> Option<PathBuf> {
     ];
     match arg {
         Some(name) => {
+            // Try alias
             for &(alias, filename) in aliases {
                 if name == alias {
                     let p = olorin_models.join(filename);
                     return p.exists().then_some(p);
                 }
             }
+            // Try stem name (from available_models)
+            let stem_path = olorin_models.join(format!("{name}.gguf"));
+            if stem_path.exists() { return Some(stem_path); }
+            // Try full path
             let p = PathBuf::from(name);
             p.exists().then_some(p)
         }
