@@ -1,0 +1,221 @@
+// ARM NEON fused causal attention (GQA, head_dim=128).
+// Flash attention style: K+V dequant once per position, online softmax, no score matrix.
+//
+// Same interface as x86 variant. Uses f32x4 (128-bit NEON).
+
+#[cfg(aarch64)]
+
+export func fused_causal_attn_gqa_f32(
+    q_vecs:          *restrict f32,
+    k_packed:        *restrict u8,
+    k_scales:        *restrict f32,
+    k_biases:        *restrict f32,
+    v_packed:        *restrict u8,
+    v_scales:        *restrict f32,
+    v_biases:        *restrict f32,
+    out state:       *mut f32,
+    all_out:         *mut f32,
+    seq_len:         i32,
+    n_queries:       i32,
+    n_q_heads:       i32,
+    n_kv_heads:      i32,
+    groups_per_head: i32
+) {
+    let mask15: u8x16 = splat(15)
+    let div16: u8x16 = splat(16)
+    let rsqrt_d: f32 = 1.0 / sqrt(to_f32(128))
+    let q_per_kv: i32 = n_q_heads / n_kv_heads
+    let state_stride: i32 = 130
+
+    // Init state
+    let total_pairs: i32 = n_queries * n_q_heads
+    let mut pi: i32 = 0
+    while pi < total_pairs {
+        let base: i32 = pi * state_stride
+        let mut d: i32 = 0
+        while d < 128 {
+            state[base + d] = 0.0
+            d = d + 1
+        }
+        state[base + 128] = -1000000.0
+        state[base + 129] = 0.0
+        pi = pi + 1
+    }
+
+    let mut kv_h: i32 = 0
+    while kv_h < n_kv_heads {
+        let group_offset: i32 = kv_h * groups_per_head
+
+        let mut t: i32 = 0
+        while t < seq_len {
+            // === Dequant K[kv_h, t] — using widen_u8_f32x4 + shuffle ===
+            let g0: i32 = group_offset + t * 2
+            let vs0: f32x4 = splat(k_scales[g0])
+            let vb0: f32x4 = splat(k_biases[g0])
+            let wb0: i32 = g0 * 32
+            let p0: u8x16 = load(k_packed, wb0)
+            let lo0: u8x16 = p0 .& mask15
+            let hi0: u8x16 = p0 ./ div16
+            let p1: u8x16 = load(k_packed, wb0 + 16)
+            let lo1: u8x16 = p1 .& mask15
+            let hi1: u8x16 = p1 ./ div16
+
+            let g1: i32 = g0 + 1
+            let vs1: f32x4 = splat(k_scales[g1])
+            let vb1: f32x4 = splat(k_biases[g1])
+            let wb1: i32 = g1 * 32
+            let p2: u8x16 = load(k_packed, wb1)
+            let lo2: u8x16 = p2 .& mask15
+            let hi2: u8x16 = p2 ./ div16
+            let p3: u8x16 = load(k_packed, wb1 + 16)
+            let lo3: u8x16 = p3 .& mask15
+            let hi3: u8x16 = p3 ./ div16
+
+            // === Dequant V[kv_h, t] ===
+            let vvs0: f32x4 = splat(v_scales[g0])
+            let vvb0: f32x4 = splat(v_biases[g0])
+            let vw0: i32 = g0 * 32
+            let vp0: u8x16 = load(v_packed, vw0)
+            let vlo0: u8x16 = vp0 .& mask15
+            let vhi0: u8x16 = vp0 ./ div16
+            let vp1: u8x16 = load(v_packed, vw0 + 16)
+            let vlo1: u8x16 = vp1 .& mask15
+            let vhi1: u8x16 = vp1 ./ div16
+
+            let vvs1: f32x4 = splat(v_scales[g1])
+            let vvb1: f32x4 = splat(v_biases[g1])
+            let vw1: i32 = g1 * 32
+            let vp2: u8x16 = load(v_packed, vw1)
+            let vlo2: u8x16 = vp2 .& mask15
+            let vhi2: u8x16 = vp2 ./ div16
+            let vp3: u8x16 = load(v_packed, vw1 + 16)
+            let vlo3: u8x16 = vp3 .& mask15
+            let vhi3: u8x16 = vp3 ./ div16
+
+            // === Process all queries qi >= t ===
+            let mut qi: i32 = t
+            while qi < n_queries {
+                let qi_base: i32 = qi * n_q_heads * 128
+
+                let mut q_off: i32 = 0
+                while q_off < q_per_kv {
+                    let q_h: i32 = kv_h * q_per_kv + q_off
+                    let qbase: i32 = qi_base + q_h * 128
+                    let sb: i32 = (qi * n_q_heads + q_h) * state_stride
+
+                    // Dot Q · K (128 dims via f32x4)
+                    let zero4: f32x4 = splat(0.0)
+                    let mut acc: f32x4 = zero4
+                    // Group 0: lo0(16) + lo1(16) + hi0(16) + hi1(16) = 64 dims
+                    acc = acc .+ fma(fma(widen_u8_f32x4(lo0), vs0, vb0), load(q_vecs, qbase), zero4)
+                    acc = acc .+ fma(fma(widen_u8_f32x4(shuffle(lo0, [4,5,6,7,0,0,0,0,0,0,0,0,0,0,0,0])), vs0, vb0), load(q_vecs, qbase+4), zero4)
+                    acc = acc .+ fma(fma(widen_u8_f32x4(shuffle(lo0, [8,9,10,11,0,0,0,0,0,0,0,0,0,0,0,0])), vs0, vb0), load(q_vecs, qbase+8), zero4)
+                    acc = acc .+ fma(fma(widen_u8_f32x4(shuffle(lo0, [12,13,14,15,0,0,0,0,0,0,0,0,0,0,0,0])), vs0, vb0), load(q_vecs, qbase+12), zero4)
+                    acc = acc .+ fma(fma(widen_u8_f32x4(lo1), vs0, vb0), load(q_vecs, qbase+16), zero4)
+                    acc = acc .+ fma(fma(widen_u8_f32x4(shuffle(lo1, [4,5,6,7,0,0,0,0,0,0,0,0,0,0,0,0])), vs0, vb0), load(q_vecs, qbase+20), zero4)
+                    acc = acc .+ fma(fma(widen_u8_f32x4(shuffle(lo1, [8,9,10,11,0,0,0,0,0,0,0,0,0,0,0,0])), vs0, vb0), load(q_vecs, qbase+24), zero4)
+                    acc = acc .+ fma(fma(widen_u8_f32x4(shuffle(lo1, [12,13,14,15,0,0,0,0,0,0,0,0,0,0,0,0])), vs0, vb0), load(q_vecs, qbase+28), zero4)
+                    acc = acc .+ fma(fma(widen_u8_f32x4(hi0), vs0, vb0), load(q_vecs, qbase+32), zero4)
+                    acc = acc .+ fma(fma(widen_u8_f32x4(shuffle(hi0, [4,5,6,7,0,0,0,0,0,0,0,0,0,0,0,0])), vs0, vb0), load(q_vecs, qbase+36), zero4)
+                    acc = acc .+ fma(fma(widen_u8_f32x4(shuffle(hi0, [8,9,10,11,0,0,0,0,0,0,0,0,0,0,0,0])), vs0, vb0), load(q_vecs, qbase+40), zero4)
+                    acc = acc .+ fma(fma(widen_u8_f32x4(shuffle(hi0, [12,13,14,15,0,0,0,0,0,0,0,0,0,0,0,0])), vs0, vb0), load(q_vecs, qbase+44), zero4)
+                    acc = acc .+ fma(fma(widen_u8_f32x4(hi1), vs0, vb0), load(q_vecs, qbase+48), zero4)
+                    acc = acc .+ fma(fma(widen_u8_f32x4(shuffle(hi1, [4,5,6,7,0,0,0,0,0,0,0,0,0,0,0,0])), vs0, vb0), load(q_vecs, qbase+52), zero4)
+                    acc = acc .+ fma(fma(widen_u8_f32x4(shuffle(hi1, [8,9,10,11,0,0,0,0,0,0,0,0,0,0,0,0])), vs0, vb0), load(q_vecs, qbase+56), zero4)
+                    acc = acc .+ fma(fma(widen_u8_f32x4(shuffle(hi1, [12,13,14,15,0,0,0,0,0,0,0,0,0,0,0,0])), vs0, vb0), load(q_vecs, qbase+60), zero4)
+                    // Group 1: lo2+lo3+hi2+hi3 = 64 dims
+                    acc = acc .+ fma(fma(widen_u8_f32x4(lo2), vs1, vb1), load(q_vecs, qbase+64), zero4)
+                    acc = acc .+ fma(fma(widen_u8_f32x4(shuffle(lo2, [4,5,6,7,0,0,0,0,0,0,0,0,0,0,0,0])), vs1, vb1), load(q_vecs, qbase+68), zero4)
+                    acc = acc .+ fma(fma(widen_u8_f32x4(shuffle(lo2, [8,9,10,11,0,0,0,0,0,0,0,0,0,0,0,0])), vs1, vb1), load(q_vecs, qbase+72), zero4)
+                    acc = acc .+ fma(fma(widen_u8_f32x4(shuffle(lo2, [12,13,14,15,0,0,0,0,0,0,0,0,0,0,0,0])), vs1, vb1), load(q_vecs, qbase+76), zero4)
+                    acc = acc .+ fma(fma(widen_u8_f32x4(lo3), vs1, vb1), load(q_vecs, qbase+80), zero4)
+                    acc = acc .+ fma(fma(widen_u8_f32x4(shuffle(lo3, [4,5,6,7,0,0,0,0,0,0,0,0,0,0,0,0])), vs1, vb1), load(q_vecs, qbase+84), zero4)
+                    acc = acc .+ fma(fma(widen_u8_f32x4(shuffle(lo3, [8,9,10,11,0,0,0,0,0,0,0,0,0,0,0,0])), vs1, vb1), load(q_vecs, qbase+88), zero4)
+                    acc = acc .+ fma(fma(widen_u8_f32x4(shuffle(lo3, [12,13,14,15,0,0,0,0,0,0,0,0,0,0,0,0])), vs1, vb1), load(q_vecs, qbase+92), zero4)
+                    acc = acc .+ fma(fma(widen_u8_f32x4(hi2), vs1, vb1), load(q_vecs, qbase+96), zero4)
+                    acc = acc .+ fma(fma(widen_u8_f32x4(shuffle(hi2, [4,5,6,7,0,0,0,0,0,0,0,0,0,0,0,0])), vs1, vb1), load(q_vecs, qbase+100), zero4)
+                    acc = acc .+ fma(fma(widen_u8_f32x4(shuffle(hi2, [8,9,10,11,0,0,0,0,0,0,0,0,0,0,0,0])), vs1, vb1), load(q_vecs, qbase+104), zero4)
+                    acc = acc .+ fma(fma(widen_u8_f32x4(shuffle(hi2, [12,13,14,15,0,0,0,0,0,0,0,0,0,0,0,0])), vs1, vb1), load(q_vecs, qbase+108), zero4)
+                    acc = acc .+ fma(fma(widen_u8_f32x4(hi3), vs1, vb1), load(q_vecs, qbase+112), zero4)
+                    acc = acc .+ fma(fma(widen_u8_f32x4(shuffle(hi3, [4,5,6,7,0,0,0,0,0,0,0,0,0,0,0,0])), vs1, vb1), load(q_vecs, qbase+116), zero4)
+                    acc = acc .+ fma(fma(widen_u8_f32x4(shuffle(hi3, [8,9,10,11,0,0,0,0,0,0,0,0,0,0,0,0])), vs1, vb1), load(q_vecs, qbase+120), zero4)
+                    acc = acc .+ fma(fma(widen_u8_f32x4(shuffle(hi3, [12,13,14,15,0,0,0,0,0,0,0,0,0,0,0,0])), vs1, vb1), load(q_vecs, qbase+124), zero4)
+
+                    let score: f32 = reduce_add(acc) * rsqrt_d
+
+                    // Online softmax + V accumulate
+                    let old_max: f32 = state[sb + 128]
+
+                    if score > old_max {
+                        let correction: f32 = exp(old_max - score)
+                        let vc: f32x4 = splat(correction)
+                        let mut di: i32 = 0
+                        while di < 128 {
+                            store(state, sb + di, load(state, sb + di) .* vc)
+                            di = di + 4
+                        }
+                        state[sb + 128] = score
+                        state[sb + 129] = state[sb + 129] * correction
+                    }
+
+                    let weight: f32 = exp(score - state[sb + 128])
+                    state[sb + 129] = state[sb + 129] + weight
+                    let vw: f32x4 = splat(weight)
+
+                    // V accumulate — dequant V inline (reusing packed data)
+                    store(state, sb,    fma(fma(widen_u8_f32x4(vlo0), vvs0, vvb0), vw, load(state, sb)))
+                    store(state, sb+4,  fma(fma(widen_u8_f32x4(shuffle(vlo0, [4,5,6,7,0,0,0,0,0,0,0,0,0,0,0,0])), vvs0, vvb0), vw, load(state, sb+4)))
+                    store(state, sb+8,  fma(fma(widen_u8_f32x4(shuffle(vlo0, [8,9,10,11,0,0,0,0,0,0,0,0,0,0,0,0])), vvs0, vvb0), vw, load(state, sb+8)))
+                    store(state, sb+12, fma(fma(widen_u8_f32x4(shuffle(vlo0, [12,13,14,15,0,0,0,0,0,0,0,0,0,0,0,0])), vvs0, vvb0), vw, load(state, sb+12)))
+                    store(state, sb+16, fma(fma(widen_u8_f32x4(vlo1), vvs0, vvb0), vw, load(state, sb+16)))
+                    store(state, sb+20, fma(fma(widen_u8_f32x4(shuffle(vlo1, [4,5,6,7,0,0,0,0,0,0,0,0,0,0,0,0])), vvs0, vvb0), vw, load(state, sb+20)))
+                    store(state, sb+24, fma(fma(widen_u8_f32x4(shuffle(vlo1, [8,9,10,11,0,0,0,0,0,0,0,0,0,0,0,0])), vvs0, vvb0), vw, load(state, sb+24)))
+                    store(state, sb+28, fma(fma(widen_u8_f32x4(shuffle(vlo1, [12,13,14,15,0,0,0,0,0,0,0,0,0,0,0,0])), vvs0, vvb0), vw, load(state, sb+28)))
+                    store(state, sb+32, fma(fma(widen_u8_f32x4(vhi0), vvs0, vvb0), vw, load(state, sb+32)))
+                    store(state, sb+36, fma(fma(widen_u8_f32x4(shuffle(vhi0, [4,5,6,7,0,0,0,0,0,0,0,0,0,0,0,0])), vvs0, vvb0), vw, load(state, sb+36)))
+                    store(state, sb+40, fma(fma(widen_u8_f32x4(shuffle(vhi0, [8,9,10,11,0,0,0,0,0,0,0,0,0,0,0,0])), vvs0, vvb0), vw, load(state, sb+40)))
+                    store(state, sb+44, fma(fma(widen_u8_f32x4(shuffle(vhi0, [12,13,14,15,0,0,0,0,0,0,0,0,0,0,0,0])), vvs0, vvb0), vw, load(state, sb+44)))
+                    store(state, sb+48, fma(fma(widen_u8_f32x4(vhi1), vvs0, vvb0), vw, load(state, sb+48)))
+                    store(state, sb+52, fma(fma(widen_u8_f32x4(shuffle(vhi1, [4,5,6,7,0,0,0,0,0,0,0,0,0,0,0,0])), vvs0, vvb0), vw, load(state, sb+52)))
+                    store(state, sb+56, fma(fma(widen_u8_f32x4(shuffle(vhi1, [8,9,10,11,0,0,0,0,0,0,0,0,0,0,0,0])), vvs0, vvb0), vw, load(state, sb+56)))
+                    store(state, sb+60, fma(fma(widen_u8_f32x4(shuffle(vhi1, [12,13,14,15,0,0,0,0,0,0,0,0,0,0,0,0])), vvs0, vvb0), vw, load(state, sb+60)))
+                    store(state, sb+64, fma(fma(widen_u8_f32x4(vlo2), vvs1, vvb1), vw, load(state, sb+64)))
+                    store(state, sb+68, fma(fma(widen_u8_f32x4(shuffle(vlo2, [4,5,6,7,0,0,0,0,0,0,0,0,0,0,0,0])), vvs1, vvb1), vw, load(state, sb+68)))
+                    store(state, sb+72, fma(fma(widen_u8_f32x4(shuffle(vlo2, [8,9,10,11,0,0,0,0,0,0,0,0,0,0,0,0])), vvs1, vvb1), vw, load(state, sb+72)))
+                    store(state, sb+76, fma(fma(widen_u8_f32x4(shuffle(vlo2, [12,13,14,15,0,0,0,0,0,0,0,0,0,0,0,0])), vvs1, vvb1), vw, load(state, sb+76)))
+                    store(state, sb+80, fma(fma(widen_u8_f32x4(vlo3), vvs1, vvb1), vw, load(state, sb+80)))
+                    store(state, sb+84, fma(fma(widen_u8_f32x4(shuffle(vlo3, [4,5,6,7,0,0,0,0,0,0,0,0,0,0,0,0])), vvs1, vvb1), vw, load(state, sb+84)))
+                    store(state, sb+88, fma(fma(widen_u8_f32x4(shuffle(vlo3, [8,9,10,11,0,0,0,0,0,0,0,0,0,0,0,0])), vvs1, vvb1), vw, load(state, sb+88)))
+                    store(state, sb+92, fma(fma(widen_u8_f32x4(shuffle(vlo3, [12,13,14,15,0,0,0,0,0,0,0,0,0,0,0,0])), vvs1, vvb1), vw, load(state, sb+92)))
+                    store(state, sb+96, fma(fma(widen_u8_f32x4(vhi2), vvs1, vvb1), vw, load(state, sb+96)))
+                    store(state, sb+100, fma(fma(widen_u8_f32x4(shuffle(vhi2, [4,5,6,7,0,0,0,0,0,0,0,0,0,0,0,0])), vvs1, vvb1), vw, load(state, sb+100)))
+                    store(state, sb+104, fma(fma(widen_u8_f32x4(shuffle(vhi2, [8,9,10,11,0,0,0,0,0,0,0,0,0,0,0,0])), vvs1, vvb1), vw, load(state, sb+104)))
+                    store(state, sb+108, fma(fma(widen_u8_f32x4(shuffle(vhi2, [12,13,14,15,0,0,0,0,0,0,0,0,0,0,0,0])), vvs1, vvb1), vw, load(state, sb+108)))
+                    store(state, sb+112, fma(fma(widen_u8_f32x4(vhi3), vvs1, vvb1), vw, load(state, sb+112)))
+                    store(state, sb+116, fma(fma(widen_u8_f32x4(shuffle(vhi3, [4,5,6,7,0,0,0,0,0,0,0,0,0,0,0,0])), vvs1, vvb1), vw, load(state, sb+116)))
+                    store(state, sb+120, fma(fma(widen_u8_f32x4(shuffle(vhi3, [8,9,10,11,0,0,0,0,0,0,0,0,0,0,0,0])), vvs1, vvb1), vw, load(state, sb+120)))
+                    store(state, sb+124, fma(fma(widen_u8_f32x4(shuffle(vhi3, [12,13,14,15,0,0,0,0,0,0,0,0,0,0,0,0])), vvs1, vvb1), vw, load(state, sb+124)))
+
+                    q_off = q_off + 1
+                }
+                qi = qi + 1
+            }
+            t = t + 1
+        }
+        kv_h = kv_h + 1
+    }
+
+    // Normalize output
+    pi = 0
+    while pi < total_pairs {
+        let sb: i32 = pi * state_stride
+        let inv_sum: f32x4 = splat(1.0 / state[sb + 129])
+        let out_base: i32 = pi * 128
+        let mut di: i32 = 0
+        while di < 128 {
+            store(all_out, out_base + di, load(state, sb + di) .* inv_sum)
+            di = di + 4
+        }
+        pi = pi + 1
+    }
+}

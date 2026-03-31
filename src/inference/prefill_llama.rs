@@ -144,8 +144,49 @@ impl LlamaState {
                 }
             }
 
-            // Parallel attention scoring — each token independent (KV already in cache)
-            {
+            // Attention: fused causal kernel if available, else parallel per-token
+            if !has_k_bias && ffi::has_fused_causal_attn() {
+                // Fused flash attention: one kernel call, K+V dequant once per position
+                let signs = self.kv_cache.jl_signs();
+                let n_q_groups = (nh * hd) / 64;
+                let mut rot_qs = qs_all[..n * h].to_vec();
+                for qi in 0..n {
+                    for g in 0..n_q_groups {
+                        unsafe {
+                            let ptr = rot_qs.as_mut_ptr().add(qi * h + g * 64);
+                            crate::kernels::ffi::turbo_rotate(ptr, signs.as_ptr(), 64);
+                        }
+                    }
+                }
+                let gph = self.kv_cache.max_seq_len() * (hd as i32 / 64);
+                let k_w = self.kv_cache.weights(layer as i32, 0);
+                let k_s = self.kv_cache.scales(layer as i32, 0);
+                let k_b = self.kv_cache.biases(layer as i32, 0);
+                let v_w = self.kv_cache.weights(layer as i32, 1);
+                let v_s = self.kv_cache.scales(layer as i32, 1);
+                let v_b = self.kv_cache.biases(layer as i32, 1);
+                let mut state = vec![0.0f32; n * nh * 130];
+                unsafe {
+                    ffi::fused_causal_attn_gqa(
+                        rot_qs.as_ptr(), k_w.as_ptr(), k_s.as_ptr(), k_b.as_ptr(),
+                        v_w.as_ptr(), v_s.as_ptr(), v_b.as_ptr(),
+                        state.as_mut_ptr(), attn_all.as_mut_ptr(),
+                        n as i32, n as i32, nh as i32, nkv as i32, gph,
+                    );
+                }
+                // Inverse-rotate output
+                let n_out_groups = (nh * hd) / 64;
+                for qi in 0..n {
+                    for g in 0..n_out_groups {
+                        unsafe {
+                            let ptr = attn_all.as_mut_ptr().add(qi * h + g * 64);
+                            crate::kernels::ffi::fwht_inplace(ptr, 64);
+                            crate::kernels::ffi::sign_flip(ptr, signs.as_ptr(), 64);
+                        }
+                    }
+                }
+            } else {
+                // Fallback: parallel per-token attention
                 let cache_ptr = &self.kv_cache as *const cache::EakvCache as usize;
                 let qs_ptr = qs_all.as_ptr() as usize;
                 let attn_ptr = attn_all.as_mut_ptr() as usize;
@@ -154,7 +195,6 @@ impl LlamaState {
                 let nh_i32 = nh as i32;
                 let nkv_i32 = nkv as i32;
                 let n_tokens = n;
-
                 self.pool.run(nt.min(n), move |tid, nt_used| {
                     let mut t = tid;
                     while t < n_tokens {

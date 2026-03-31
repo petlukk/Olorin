@@ -82,6 +82,10 @@ type FusedAttentionFn = unsafe extern "C" fn(
     *const u8, *const f32, *const f32,
     *const u8, *const f32, *const f32,
     *mut f32, i32, i32, i32);
+type FusedCausalAttnFn = unsafe extern "C" fn(
+    *const f32, *const u8, *const f32, *const f32,
+    *const u8, *const f32, *const f32,
+    *mut f32, *mut f32, i32, i32, i32, i32, i32);
 type ValidateFn = unsafe extern "C" fn(*const f32, *const f32, *const i32, *const i32, i32) -> i32;
 
 pub struct KernelTableInference {
@@ -115,6 +119,7 @@ pub struct KernelTableInference {
     pub fused_v_sum_gqa:       VSumGqaFn,
     pub fused_v_sum_gqa_64:    VSumGqaFn,
     pub fused_attention:       FusedAttentionFn,
+    pub fused_causal_attn_gqa: Option<FusedCausalAttnFn>,
     pub validate:              ValidateFn,
 }
 
@@ -171,6 +176,7 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
     let v_sum_lib         = load("fused_v_sum")?;
     let v_sum_64_lib      = load("fused_v_sum_64")?;
     let fused_attn_lib    = load("fused_attention")?;
+    let causal_attn_lib   = load("fused_causal_attn_gqa").ok();
     let validate_lib      = load("validate")?;
 
     // CPU-dispatch for dequantize: prefer AVX-512 > AVX2 > SIMD
@@ -236,16 +242,22 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
             fused_v_sum_gqa:       std::mem::transmute(sym(&k_score_gqa_lib,   b"q4_v_sum_gqa_f32\0")?),
             fused_v_sum_gqa_64:    std::mem::transmute(sym(&k_score_gqa64_lib, b"q4_v_sum_gqa_64_f32\0")?),
             fused_attention:       std::mem::transmute(sym(&fused_attn_lib, b"q4_fused_attention_multi_f32\0")?),
+            fused_causal_attn_gqa: causal_attn_lib.as_ref().and_then(|lib|
+                sym(lib, b"fused_causal_attn_gqa_f32\0").ok().map(|s| std::mem::transmute(s))),
             validate:              std::mem::transmute(sym(&validate_lib, b"q4_validate\0")?),
-            libs: vec![
-                i2s, quant, rms, attn, i8d, act, vadd,
-                q4kq, q4kd, q6kd, rope, gemm_tile,
-                quantize_lib, deq_lib,
-                k_score_lib, k_score_64_lib,
-                k_score_gqa_lib, k_score_gqa64_lib,
-                v_sum_lib, v_sum_64_lib,
-                fused_attn_lib, validate_lib,
-            ],
+            libs: {
+                let mut v = vec![
+                    i2s, quant, rms, attn, i8d, act, vadd,
+                    q4kq, q4kd, q6kd, rope, gemm_tile,
+                    quantize_lib, deq_lib,
+                    k_score_lib, k_score_64_lib,
+                    k_score_gqa_lib, k_score_gqa64_lib,
+                    v_sum_lib, v_sum_64_lib,
+                    fused_attn_lib, validate_lib,
+                ];
+                if let Some(lib) = causal_attn_lib { v.push(lib); }
+                v
+            },
         };
         Ok(t)
     }
@@ -470,6 +482,13 @@ pub unsafe fn fused_attention(
     all_out: *mut f32, seq_len: i32, n_heads: i32, groups_per_head: i32,
 ) { (k().fused_attention)(q_vecs, k_packed, k_scales, k_biases,
     v_packed, v_scales, v_biases, all_out, seq_len, n_heads, groups_per_head) }
+pub fn has_fused_causal_attn() -> bool { k().fused_causal_attn_gqa.is_some() }
+pub unsafe fn fused_causal_attn_gqa(
+    q: *const f32, kp: *const u8, ks: *const f32, kb: *const f32,
+    vp: *const u8, vs: *const f32, vb: *const f32,
+    state: *mut f32, out: *mut f32,
+    seq_len: i32, n_q: i32, n_qh: i32, n_kvh: i32, gph: i32,
+) { (k().fused_causal_attn_gqa.unwrap())(q, kp, ks, kb, vp, vs, vb, state, out, seq_len, n_q, n_qh, n_kvh, gph) }
 pub unsafe fn validate(
     scales: *const f32, biases: *const f32,
     scales_bits: *const i32, biases_bits: *const i32, n_groups: i32,
