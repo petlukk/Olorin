@@ -35,7 +35,7 @@ impl Engine {
             model,
             tokenizer,
             max_seq_len,
-            max_tokens: 128,
+            max_tokens: 64,
             temperature: 0.4,
             top_k: 40,
             top_p: 0.9,
