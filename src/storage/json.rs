@@ -230,7 +230,32 @@ impl<'a> Parser<'a> {
                         _ => return Err("invalid escape sequence"),
                     }
                 }
-                Some(b) => s.push(b as char),
+                Some(b) if b < 0x80 => s.push(b as char),
+                Some(b) => {
+                    let (need, mut cp) = if b < 0xE0 {
+                        (1, (b & 0x1F) as u32)
+                    } else if b < 0xF0 {
+                        (2, (b & 0x0F) as u32)
+                    } else {
+                        (3, (b & 0x07) as u32)
+                    };
+                    let mut valid = true;
+                    for _ in 0..need {
+                        match self.advance() {
+                            Some(cont) if cont & 0xC0 == 0x80 => {
+                                cp = (cp << 6) | (cont & 0x3F) as u32;
+                            }
+                            _ => { s.push('\u{FFFD}'); valid = false; break; }
+                        }
+                    }
+                    if valid {
+                        if let Some(c) = char::from_u32(cp) {
+                            s.push(c);
+                        } else {
+                            s.push('\u{FFFD}');
+                        }
+                    }
+                }
             }
         }
         Ok(s)

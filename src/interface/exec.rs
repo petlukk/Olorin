@@ -23,7 +23,9 @@ pub fn run(argv: &[&str]) -> io::Result<Output> {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty argv"));
     }
 
-    let c_args: Vec<CString> = argv.iter().map(|s| CString::new(*s).unwrap()).collect();
+    let c_args: Vec<CString> = argv.iter().map(|s| {
+        CString::new(*s).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL byte in argument"))
+    }).collect::<io::Result<Vec<CString>>>()?;
     let c_ptrs: Vec<*const libc::c_char> = c_args
         .iter()
         .map(|s| s.as_ptr())
@@ -176,7 +178,9 @@ pub fn spawn(argv: &[&str]) -> io::Result<Child> {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty argv"));
     }
 
-    let c_args: Vec<CString> = argv.iter().map(|s| CString::new(*s).unwrap()).collect();
+    let c_args: Vec<CString> = argv.iter().map(|s| {
+        CString::new(*s).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL byte in argument"))
+    }).collect::<io::Result<Vec<CString>>>()?;
     let c_ptrs: Vec<*const libc::c_char> = c_args
         .iter()
         .map(|s| s.as_ptr())

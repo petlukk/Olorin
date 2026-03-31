@@ -43,7 +43,7 @@ pub const CMD_REMIND:    i32 = 26;
 pub const CMD_TELEPORT:  i32 = 27;
 // Range
 pub const CMD_TOOL_FIRST: i32 = CMD_TIME;
-pub const CMD_TOOL_LAST:  i32 = CMD_REMIND;
+pub const CMD_TOOL_LAST:  i32 = CMD_TELEPORT;
 
 // Intent constants from classify_intent kernel
 // Kernel: 0=CALC, 1=TIME, 2=CPU, 3=WEATHER, -1=NONE
