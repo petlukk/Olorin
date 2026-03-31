@@ -193,10 +193,7 @@ impl DispatchContext {
         self.messages.push(handlers::user_message(input));
 
         if let Some(engine) = &self.engine {
-            let system = match &recall_context {
-                Some(ctx) => format!("{}\n\n{ctx}", self.system_prompt),
-                None => self.system_prompt.clone(),
-            };
+            let system = self.system_prompt.clone();
             let prompt = match &recall_context {
                 Some(ctx) => format!("{ctx}\n\n{}", self.last_user_text()),
                 None => self.last_user_text(),
@@ -244,10 +241,7 @@ impl DispatchContext {
 
         // Cloud fallback — not streamable, send as single token
         if let Some(client) = &self.anthropic {
-            let system = match &recall_context {
-                Some(ctx) => format!("{}\n\n{ctx}", self.system_prompt),
-                None => self.system_prompt.clone(),
-            };
+            let system = self.system_prompt.clone();
             let msg_pairs: Vec<(&str, &str)> = self.messages.iter().map(|m| {
                 let role = m.role.as_str();
                 let text: &str = m.content.iter().find_map(|b| {
@@ -371,11 +365,10 @@ impl DispatchContext {
         Ok(if recall_text.is_empty() { None } else { Some(recall_text) })
     }
 
-    /// Post-inference bookkeeping: recall index + vault save + message history.
+    /// Post-inference bookkeeping: vault save + message history.
+    /// Only user input is indexed for recall — model output is not stored
+    /// in the recall index to prevent garbage feedback loops.
     fn finalize_response(&mut self, input: &str, text: &str) {
-        if !text.trim().is_empty() {
-            self.recall.add(text);
-        }
         self.vault_save(b"user", input.as_bytes());
         self.vault_save(b"assistant", text.as_bytes());
         self.messages.push(handlers::assistant_message(text));
@@ -419,11 +412,7 @@ impl DispatchContext {
         &self,
         recall_context: &Option<String>,
     ) -> Result<String, String> {
-        // Build system prompt with recall context
-        let system = match recall_context {
-            Some(ctx) => format!("{}\n\n{ctx}", self.system_prompt),
-            None => self.system_prompt.clone(),
-        };
+        let system = self.system_prompt.clone();
 
         // Try local engine first
         if let Some(engine) = &self.engine {

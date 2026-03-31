@@ -220,10 +220,12 @@ impl VectorStore {
     pub fn synthesize_context(&mut self, query: &str, k: usize) -> Option<String> {
         let results = self.search_dedup(query, k);
         if results.is_empty() { return None; }
-        let mut ctx = format!("[Recalled context, {} entries]\n", results.len());
+        let mut ctx = String::from("Earlier in this conversation:\n");
         for r in &results {
             let preview: String = r.text.chars().take(100).collect();
-            ctx.push_str(&format!("- {}{}\n", preview, if r.text.len() > 100 { "..." } else { "" }));
+            ctx.push_str(&preview);
+            if r.text.len() > 100 { ctx.push_str("..."); }
+            ctx.push('\n');
         }
         Some(ctx)
     }
