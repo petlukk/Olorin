@@ -24,6 +24,8 @@ type FusedSafetyFn      = unsafe extern "C" fn(*const u8, i32, *mut i32, *mut i3
 type ClassifyIntentFn   = unsafe extern "C" fn(*const u8, i32, *mut i32, *mut i32, *mut i32);
 type EvalExprFn         = unsafe extern "C" fn(*const u8, i32, *mut i64, *mut i32, *mut i64, *mut i32);
 type ZeroizeFn          = unsafe extern "C" fn(*mut u8, i32);
+type AnsiClassifyFn     = unsafe extern "C" fn(*const u8, *mut u8, i32);
+type TerminalDiffFn     = unsafe extern "C" fn(*const u8, *const u8, *mut u8, i32);
 type BatchDotFn         = unsafe extern "C" fn(*const f32, *const f32, i32, i32, *mut f32);
 type BatchCosineFn      = unsafe extern "C" fn(*const f32, f32, *const f32, i32, i32, *mut f32);
 type BatchL2Fn          = unsafe extern "C" fn(*const f32, *const f32, i32, i32, *mut f32);
@@ -83,6 +85,8 @@ pub struct KernelTable {
     pub chacha20_encrypt:         Chacha20EncryptFn,
     pub chacha20_search_v2:       SearchV2Fn,
     pub pretokenize:              PretokenizeFn,
+    pub ansi_classify:            AnsiClassifyFn,
+    pub terminal_diff:            TerminalDiffFn,
 }
 
 // SAFETY: KernelTable holds function pointers and library handles.
@@ -172,6 +176,8 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
     let chacha20_lib    = load("chacha20")?;
     let chacha20_sv2    = load("chacha20_search_v2")?;
     let pretokenize_lib = load("pretokenize")?;
+    let ansi_parser_lib  = load("ansi_parser")?;
+    let terminal_diff_lib = load("terminal_diff")?;
 
     // Runtime CPU detection: prefer AVX-512 search kernel if available
     #[cfg(target_arch = "x86_64")]
@@ -242,11 +248,16 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
                 sym(&chacha20_sv2, b"chacha20_search_v2\0")?),
             pretokenize: std::mem::transmute(
                 sym(&pretokenize_lib, b"pretokenize\0")?),
+            ansi_classify: std::mem::transmute(
+                sym(&ansi_parser_lib, b"ansi_classify\0")?),
+            terminal_diff: std::mem::transmute(
+                sym(&terminal_diff_lib, b"terminal_diff\0")?),
             libs: vec![
                 byte_classifier, leak_scanner, sanitizer, command_router,
                 fused_safety, intent_router, expr_eval,
                 zeroize_lib, search, jl_project_lib, turbo_rotate_lib,
                 chacha20_lib, chacha20_sv2, pretokenize_lib,
+                ansi_parser_lib, terminal_diff_lib,
             ],
         };
         Ok(table)
@@ -416,4 +427,24 @@ pub unsafe fn chacha20_search_v2(
         max_matches, max_line_len, window_size,
         match_count, lines_written,
     );
+}
+
+/// SIMD-accelerated ANSI byte classification.
+/// Classifies each byte: 0=printable, 1=ESC, 2=bracket, 3=digit, 4=semicolon,
+/// 5=final, 6=control, 7=high-byte.
+/// # Safety
+/// `data` must be valid for `len` bytes. `classes` must be valid for `len` bytes.
+pub unsafe fn ansi_classify(data: *const u8, classes: *mut u8, len: i32) {
+    (k().ansi_classify)(data, classes, len);
+}
+
+/// SIMD-accelerated terminal cell-grid diff.
+/// Compares old_grid vs new_grid (each cell = 16 bytes), writes dirty bitmap.
+/// # Safety
+/// `old_grid` and `new_grid` must be valid for `n_cells * 16` bytes.
+/// `dirty` must be valid for `n_cells` bytes.
+pub unsafe fn terminal_diff(
+    old_grid: *const u8, new_grid: *const u8, dirty: *mut u8, n_cells: i32,
+) {
+    (k().terminal_diff)(old_grid, new_grid, dirty, n_cells);
 }
