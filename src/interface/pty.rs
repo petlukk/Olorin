@@ -69,8 +69,13 @@ impl PtySession {
                 libc::dup2(slave, 2);
                 if slave > 2 { libc::close(slave); }
 
+                // Set TERM so bash knows we support colors
+                let term = b"TERM=xterm-256color\0".as_ptr() as *const libc::c_char;
+                libc::putenv(term as *mut libc::c_char);
+
                 let shell = b"/bin/bash\0".as_ptr() as *const libc::c_char;
-                let argv: [*const libc::c_char; 2] = [shell, std::ptr::null()];
+                let login = b"--login\0".as_ptr() as *const libc::c_char;
+                let argv: [*const libc::c_char; 3] = [shell, login, std::ptr::null()];
                 libc::execvp(shell, argv.as_ptr());
                 libc::_exit(127);
             }
