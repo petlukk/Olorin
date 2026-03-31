@@ -48,25 +48,59 @@ impl InferenceState {
             i2s_gemm_mt(lw.wk, lw.wk_scale, &batch_h, &mut ks_all, kv, h, &self.pool);
             i2s_gemm_mt(lw.wv, lw.wv_scale, &batch_h, &mut vs_all, kv, h, &self.pool);
 
-            self.kv_cache.restore(0).unwrap();
+            // Apply RoPE to all tokens, then bulk KV append
             for t in 0..n {
-                let (q, k) = (
-                    &mut qs_all[t * h..(t + 1) * h],
-                    &mut ks_all[t * kv..(t + 1) * kv],
-                );
+                let q = &mut qs_all[t * h..(t + 1) * h];
+                let k = &mut ks_all[t * kv..(t + 1) * kv];
                 build_rope_freqs(&mut self.rope_freqs, hd, t, model.rope_theta);
                 apply_rope(q, &self.rope_freqs, hd, nh);
                 apply_rope(k, &self.rope_freqs, hd, nkv);
-                let v_slice = &vs_all[t * kv..(t + 1) * kv];
-                self.kv_cache.append(k, layer as i32, 0, 1).unwrap();
-                self.kv_cache.append(v_slice, layer as i32, 1, 1).unwrap();
-                self.kv_cache.advance(1).unwrap();
-                let seq_len = t + 1;
-                let scores = &mut self.attn_scores[..nh * seq_len];
-                cache::attention::attention_scores(&self.kv_cache, q, layer as i32, nh as i32, nkv as i32, seq_len as i32, scores);
-                softmax_rows(scores, nh, seq_len);
-                let attn = &mut attn_all[t * h..(t + 1) * h];
-                cache::attention::attention_output(&self.kv_cache, scores, layer as i32, nh as i32, nkv as i32, seq_len as i32, attn);
+            }
+            let mut k_tr = vec![0.0f32; nkv * n * hd];
+            let mut v_tr = vec![0.0f32; nkv * n * hd];
+            for t in 0..n {
+                for head in 0..nkv {
+                    let src = t * kv + head * hd;
+                    let dst = head * n * hd + t * hd;
+                    k_tr[dst..dst + hd].copy_from_slice(&ks_all[src..src + hd]);
+                    v_tr[dst..dst + hd].copy_from_slice(&vs_all[src..src + hd]);
+                }
+            }
+            self.kv_cache.restore(0).unwrap();
+            self.kv_cache.append(&k_tr, layer as i32, 0, n as i32).unwrap();
+            self.kv_cache.append(&v_tr, layer as i32, 1, n as i32).unwrap();
+            self.kv_cache.advance(n as i32).unwrap();
+
+            // Parallel attention scoring
+            {
+                let pool_n = self.pool.thread_count().min(n);
+                let cache_ptr = &self.kv_cache as *const cache::EakvCache as usize;
+                let qs_ptr = qs_all.as_ptr() as usize;
+                let attn_ptr = attn_all.as_mut_ptr() as usize;
+                let layer_i32 = layer as i32;
+                let nh_i32 = nh as i32;
+                let nkv_i32 = nkv as i32;
+                let n_tokens = n;
+                self.pool.run(pool_n, move |tid, nt_used| {
+                    let mut t = tid;
+                    while t < n_tokens {
+                        let seq_len = (t + 1) as i32;
+                        let mut scores = vec![0.0f32; nh * (t + 1)];
+                        let q = unsafe { std::slice::from_raw_parts((qs_ptr as *const f32).add(t * h), h) };
+                        let cache_ref = unsafe { &*(cache_ptr as *const cache::EakvCache) };
+                        cache::attention::attention_scores(
+                            cache_ref, q, layer_i32, nh_i32, nkv_i32, seq_len, &mut scores,
+                        );
+                        softmax_rows(&mut scores, nh, t + 1);
+                        let attn_out = unsafe { std::slice::from_raw_parts_mut(
+                            (attn_ptr as *mut f32).add(t * h), h,
+                        )};
+                        cache::attention::attention_output(
+                            cache_ref, &scores, layer_i32, nh_i32, nkv_i32, seq_len, attn_out,
+                        );
+                        t += nt_used;
+                    }
+                });
             }
 
             for t in 0..n {
