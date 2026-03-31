@@ -6,6 +6,7 @@ use crate::inference::matmul::{embed_f16_lookup, i8_output_matmul_mt, ternary_ma
 use crate::inference::matmul::{i8_output_matmul_speculative, SpeculativeWork};
 use crate::inference::engine::BitNetModel;
 use crate::inference::cache::{self, EakvCache};
+use crate::inference::math::{softmax_rows, wipe_f32, wipe_i8};
 use crate::inference::threadpool::ThreadPool;
 
 pub struct InferenceState {
@@ -34,20 +35,6 @@ pub struct InferenceState {
     pub(crate) max_seq_len: usize,
     #[cfg(target_arch = "aarch64")]
     pub(crate) spec_work: SpeculativeWork,
-}
-
-pub(crate) fn softmax_rows(data: &mut [f32], n_rows: usize, seq_len: usize) {
-    for r in 0..n_rows {
-        let row = &mut data[r * seq_len..(r + 1) * seq_len];
-        let max_v = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        let mut sum = 0.0f32;
-        for v in row.iter_mut() {
-            *v = (*v - max_v).exp();
-            sum += *v;
-        }
-        let inv = 1.0 / sum;
-        for v in row.iter_mut() { *v *= inv; }
-    }
 }
 
 pub(crate) fn build_rope_freqs(freqs: &mut [f32], head_dim: usize, pos: usize, theta: f32) {
@@ -434,16 +421,6 @@ impl InferenceState {
         eprintln!("decode:     {n_gen} tokens in {decode_ms:.0}ms ({dtps:.1} tok/s, {avg:.1}ms/tok)");
         (output, prefill_ms, decode_ms)
     }
-}
-
-fn wipe_f32(buf: &mut [f32]) {
-    unsafe { std::ptr::write_bytes(buf.as_mut_ptr(), 0, buf.len()); }
-    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
-}
-
-fn wipe_i8(buf: &mut [i8]) {
-    unsafe { std::ptr::write_bytes(buf.as_mut_ptr(), 0, buf.len()); }
-    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
 }
 
 impl Drop for InferenceState {

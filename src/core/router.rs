@@ -244,17 +244,9 @@ impl DispatchContext {
         // Cloud fallback — not streamable, send as single token
         if let Some(client) = &self.anthropic {
             let system = self.system_prompt.clone();
-            let msg_pairs: Vec<(&str, &str)> = self.messages.iter().map(|m| {
-                let role = m.role.as_str();
-                let text: &str = m.content.iter().find_map(|b| {
-                    if let ContentBlock::Text { text } = b {
-                        Some(text.as_str())
-                    } else {
-                        None
-                    }
-                }).unwrap_or("");
-                (role, text)
-            }).collect();
+            let owned = self.build_cloud_messages();
+            let msg_pairs: Vec<(&str, &str)> = owned.iter()
+                .map(|(r, t)| (r.as_str(), t.as_str())).collect();
 
             match client.generate(&system, &msg_pairs) {
                 Ok(text) => {
@@ -412,6 +404,21 @@ impl DispatchContext {
 
     // ── Inference ────────────────────────────────────────────────────────────
 
+    /// Build (role, text) pairs from message history for cloud fallback.
+    fn build_cloud_messages(&self) -> Vec<(String, String)> {
+        self.messages.iter().map(|m| {
+            let role = m.role.as_str().to_string();
+            let text = m.content.iter().find_map(|b| {
+                if let ContentBlock::Text { text } = b {
+                    Some(text.clone())
+                } else {
+                    None
+                }
+            }).unwrap_or_default();
+            (role, text)
+        }).collect()
+    }
+
     fn run_inference(
         &self,
         recall_context: &Option<String>,
@@ -434,13 +441,9 @@ impl DispatchContext {
 
         // Fall back to Anthropic cloud
         if let Some(client) = &self.anthropic {
-            let msg_pairs: Vec<(&str, &str)> = self.messages.iter().map(|m| {
-                let role = m.role.as_str();
-                let text: &str = m.content.iter().find_map(|b| {
-                    if let ContentBlock::Text { text } = b { Some(text.as_str()) } else { None }
-                }).unwrap_or("");
-                (role, text)
-            }).collect();
+            let owned = self.build_cloud_messages();
+            let msg_pairs: Vec<(&str, &str)> = owned.iter()
+                .map(|(r, t)| (r.as_str(), t.as_str())).collect();
 
             match client.generate(&system, &msg_pairs) {
                 Ok(text) => return Ok(text),

@@ -11,6 +11,7 @@ pub mod matmul_q6k;
 pub mod gemm_i2s;
 pub mod gemm_q4k;
 pub mod gemm_q6k;
+pub(crate) mod math;
 pub mod forward;
 pub mod forward_llama;
 pub mod prefill;

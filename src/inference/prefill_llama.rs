@@ -2,7 +2,8 @@
 
 use crate::kernels::ffi_inference as ffi;
 use crate::inference::forward::{apply_rope, build_rope_freqs};
-use crate::inference::forward_llama::{LlamaState, embed_token, add_bias, q8k_blocks, softmax_rows};
+use crate::inference::forward_llama::{LlamaState, embed_token, add_bias, q8k_blocks};
+use crate::inference::math::softmax_rows;
 use crate::inference::gemm_q4k::{BatchQ8K, q4k_gemm_mt, q4k_fused_silu_gemm_mt};
 use crate::inference::gemm_q6k::q6k_gemm_mt;
 use crate::inference::matmul_q4k::Q4K_BLOCK_BYTES;

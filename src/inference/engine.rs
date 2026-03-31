@@ -2,6 +2,7 @@
 
 use crate::error::{Error, Result};
 use crate::inference::gguf::{GgufFile, MetaValue};
+use crate::inference::matmul::f16_to_f32;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum QuantType { I2S, Q4K }
@@ -322,23 +323,6 @@ impl BitNetModel {
             .ok_or_else(|| Error::Inference("missing tensor: token_embd.weight".into()))?;
         let n_f16 = vocab_size * hidden_dim;
         let embed_f16 = unsafe { std::slice::from_raw_parts(embed_data.as_ptr() as *const u16, n_f16) };
-        let f16_to_f32 = |h: u16| -> f32 {
-            let sign = ((h >> 15) & 1) as u32;
-            let exp = ((h >> 10) & 0x1f) as u32;
-            let frac = (h & 0x3ff) as u32;
-            if exp == 0 {
-                if frac == 0 { return f32::from_bits(sign << 31); }
-                let mut e = 0i32;
-                let mut fr = frac;
-                while fr & 0x400 == 0 { fr <<= 1; e -= 1; }
-                fr &= 0x3ff;
-                return f32::from_bits((sign << 31) | (((127 - 15 + 1 + e) as u32) << 23) | (fr << 13));
-            }
-            if exp == 31 {
-                return f32::from_bits((sign << 31) | (0xff << 23) | (frac << 13));
-            }
-            f32::from_bits((sign << 31) | ((exp + 127 - 15) << 23) | (frac << 13))
-        };
         let mut embed_weight_i8 = Vec::with_capacity(n_f16);
         let mut embed_row_scales = Vec::with_capacity(vocab_size);
         for row in 0..vocab_size {

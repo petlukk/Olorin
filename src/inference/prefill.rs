@@ -1,7 +1,8 @@
 //! Batched prefill: load each layer's weights once, multiply all prompt tokens.
 
 use crate::kernels::ffi_inference as ffi;
-use crate::inference::forward::{apply_rope, build_rope_freqs, softmax_rows, InferenceState};
+use crate::inference::forward::{apply_rope, build_rope_freqs, InferenceState};
+use crate::inference::math::softmax_rows;
 use crate::inference::gemm_i2s::{BatchI8, i2s_gemm_mt, i2s_fused_sqrelu_gemm_mt};
 use crate::inference::matmul::{embed_f16_lookup, i8_output_matmul_mt};
 #[cfg(target_arch = "aarch64")]
