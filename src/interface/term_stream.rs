@@ -117,7 +117,7 @@ pub fn handle_term_stream(stream: &mut std::net::TcpStream, id: u32) {
 
         if ret > 0 && pollfd.revents & libc::POLLIN != 0 {
             let mut s = session.lock().unwrap();
-            let dirty = s.read_and_apply();
+            let dirty: Vec<u8> = s.read_and_apply().to_vec();
 
             if dirty.iter().any(|&d| d != 0) {
                 let grid = s.grid();
