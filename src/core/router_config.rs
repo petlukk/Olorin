@@ -31,6 +31,16 @@ impl DispatchContext {
     pub fn update_config(&mut self, json: &str) {
         use crate::interface::server::extract_json_string;
         use crate::storage::json::{extract_json_float, extract_json_int};
+
+        // Model change requires full engine reload
+        if let Some(model_name) = extract_json_string(json, "model") {
+            let current = self.engine.as_ref().map(|e| e.quant_type_str()).unwrap_or("none");
+            if model_name != current {
+                eprintln!("[olorin] Reloading model: {model_name}");
+                self.engine = Self::load_engine(Some(&model_name));
+            }
+        }
+
         if let Some(engine) = &mut self.engine {
             if let Some(v) = extract_json_float(json, "temperature") { engine.temperature = v; }
             if let Some(v) = extract_json_int(json, "top_k") { engine.top_k = v as usize; }

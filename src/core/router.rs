@@ -86,7 +86,7 @@ impl DispatchContext {
         ctx
     }
 
-    fn load_engine(model_arg: Option<&str>) -> Option<Engine> {
+    pub(crate) fn load_engine(model_arg: Option<&str>) -> Option<Engine> {
         use crate::inference::generate;
         let path = generate::resolve_model(model_arg)?;
         eprintln!("[Olorin] Loading model: {}", path.display());
