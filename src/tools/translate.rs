@@ -15,10 +15,11 @@ pub fn run(args: &str) -> ToolResult {
         return ToolResult { output: "usage: translate <lang> <text>".to_string(), success: false };
     }
 
-    // lingva.ml (no API key needed)
+    // lingva.ml (no API key needed) — needs ISO-639 codes
+    let lang_code = lang_to_code(lang);
     let url = format!(
-        "https://lingva.ml/api/v1/en/{}/{}", 
-        lang.to_lowercase(),
+        "https://lingva.ml/api/v1/en/{}/{}",
+        lang_code,
         urlenc(text)
     );
 
@@ -45,6 +46,34 @@ pub fn run(args: &str) -> ToolResult {
         },
         Err(e) => ToolResult { output: format!("curl failed: {e}"), success: false },
     }
+}
+
+fn lang_to_code(name: &str) -> String {
+    let lower = name.to_lowercase();
+    match lower.as_str() {
+        "swedish" | "svenska" => "sv",
+        "norwegian" | "norsk" => "no",
+        "danish" | "dansk" => "da",
+        "finnish" | "suomi" => "fi",
+        "german" | "deutsch" => "de",
+        "french" | "français" | "francais" => "fr",
+        "spanish" | "español" | "espanol" => "es",
+        "italian" | "italiano" => "it",
+        "portuguese" | "português" | "portugues" => "pt",
+        "dutch" | "nederlands" => "nl",
+        "polish" | "polski" => "pl",
+        "russian" | "русский" => "ru",
+        "chinese" | "中文" => "zh",
+        "japanese" | "日本語" => "ja",
+        "korean" | "한국어" => "ko",
+        "arabic" | "العربية" => "ar",
+        "hindi" | "हिन्दी" => "hi",
+        "turkish" | "türkçe" => "tr",
+        "greek" | "ελληνικά" => "el",
+        "czech" | "čeština" => "cs",
+        "ukrainian" | "українська" => "uk",
+        _ => return lower, // assume already a code
+    }.to_string()
 }
 
 fn urlenc(s: &str) -> String {
