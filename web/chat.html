@@ -308,6 +308,12 @@ function startTermStream(t){
       ctx.font='13px "JetBrains Mono",monospace';
       ctx.textBaseline='alphabetic';
       const cw=t._cellW,ch=t._cellH;
+      // Store cells for redraw
+      if(!t._cellCache)t._cellCache={};
+      for(const c of d.cells){
+        t._cellCache[c.r+','+c.c]=c;
+      }
+      // Redraw all changed cells
       for(const c of d.cells){
         ctx.fillStyle=c.bg;
         ctx.fillRect(c.c*cw,c.r*ch,cw,ch);
@@ -316,13 +322,20 @@ function startTermStream(t){
         ctx.fillText(c.ch,c.c*cw,c.r*ch+12);
         if(c.fl&1)ctx.font='13px "JetBrains Mono",monospace';
       }
+      // Restore previous cursor cell
       if(t._prevCursor){
         const[pc,pr]=t._prevCursor;
-        ctx.fillStyle='#1e1e2e';ctx.fillRect(pc*cw,pr*ch,cw,ch);
+        const prev=t._cellCache[pr+','+pc];
+        if(prev){
+          ctx.fillStyle=prev.bg;ctx.fillRect(pc*cw,pr*ch,cw,ch);
+          ctx.fillStyle=prev.fg;ctx.fillText(prev.ch,pc*cw,pr*ch+12);
+        }
       }
+      // Draw cursor block (inverted)
       const[cc,cr]=d.cursor;
-      ctx.fillStyle='#cdd6f4';ctx.globalAlpha=0.7;
-      ctx.fillRect(cc*cw,cr*ch,cw,ch);ctx.globalAlpha=1.0;
+      ctx.fillStyle='#cdd6f4';ctx.fillRect(cc*cw,cr*ch,cw,ch);
+      const cur=t._cellCache[cr+','+cc];
+      if(cur){ctx.fillStyle='#1e1e2e';ctx.fillText(cur.ch,cc*cw,cr*ch+12);}
       t._prevCursor=d.cursor;
     }else if(d.type==='exit'){
       es.close();
