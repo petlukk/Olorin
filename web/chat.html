@@ -48,19 +48,20 @@ body{background:var(--crust);color:var(--text);font-family:'Inter',system-ui,san
 .repl-input{flex:1;background:transparent;border:none;color:var(--text);font:13px 'JetBrains Mono',monospace;outline:none;padding:0}
 .repl-cursor{display:inline-block;width:7px;height:15px;background:var(--mauve);animation:blink 1s step-end infinite;vertical-align:text-bottom}
 .term-canvas{flex:1;min-height:0;display:block;background:var(--base);image-rendering:pixelated}
+.cfg-overlay{position:fixed;inset:0;background:rgba(17,17,27,0.85);display:none;z-index:100;align-items:center;justify-content:center}.cfg-overlay.open{display:flex}
+.cfg-panel{background:var(--base);border:1px solid var(--surface0);border-radius:8px;padding:20px;width:480px;max-height:80vh;overflow-y:auto;color:var(--text);font-family:'JetBrains Mono',monospace;font-size:12px}
+.cfg-panel h2{margin:0 0 16px;font-size:14px;color:var(--lavender)}.cfg-section{margin-bottom:16px}
+.cfg-section h3{margin:0 0 8px;font-size:12px;color:var(--mauve);text-transform:uppercase;letter-spacing:1px}
+.cfg-row{display:flex;align-items:center;margin-bottom:8px;gap:8px}.cfg-row label{width:120px;color:var(--subtext1);flex-shrink:0}
+.cfg-row input[type=range]{flex:1;accent-color:var(--teal)}.cfg-row select,.cfg-row textarea,.cfg-row input[type=number],.cfg-row input[type=text],.cfg-row input[type=password]{background:var(--surface0);border:1px solid var(--surface1);color:var(--text);padding:4px 8px;border-radius:4px;font-family:inherit;font-size:12px}
+.cfg-row input[type=number],.cfg-row input[type=text],.cfg-row input[type=password]{width:70px}.cfg-row input[type=text].wide,.cfg-row input[type=password].wide,.cfg-row textarea{width:100%;flex:1}
+.cfg-row textarea{resize:vertical;min-height:60px}.cfg-buttons{display:flex;gap:8px;justify-content:flex-end;margin-top:16px}
+.cfg-buttons button{padding:6px 16px;border:none;border-radius:4px;cursor:pointer;font-family:inherit;font-size:12px}
+.cfg-btn-apply{background:var(--teal);color:var(--base)}.cfg-btn-cancel{background:var(--surface1);color:var(--text)}
+.cfg-scope{display:flex;gap:12px;align-items:center;margin-bottom:16px;color:var(--subtext1)}.cfg-scope label{width:auto}
 </style></head><body>
 <div class="hyprbar">
-<div class="left">
-<span><span class="c-mauve">&#9670;</span> <span id="hb-model" class="c-text">—</span></span>
-<span class="sep">|</span>
-<span id="hb-backend" class="c-blue">—</span>
-<span class="sep">|</span>
-<span><span id="hb-tps" class="c-green">0.0</span> <span class="c-green">tok/s</span></span>
-<span class="sep">|</span>
-<span>recall <span id="hb-recall" class="c-yellow">—</span></span>
-<span class="sep">|</span>
-<span>sessions <span id="hb-sessions" class="c-peach">0</span></span>
-</div>
+<div class="left"><span id="olorin-btn" style="cursor:pointer"><span class="c-teal">&#9670;</span> <span class="c-teal">olorin</span></span><span class="sep">|</span><span><span class="c-mauve">&#9670;</span> <span id="hb-model" class="c-text">—</span></span><span class="sep">|</span><span id="hb-backend" class="c-blue">—</span><span class="sep">|</span><span><span id="hb-tps" class="c-green">0.0</span> <span class="c-green">tok/s</span></span><span class="sep">|</span><span>temp <span id="hb-cfg-temp" class="c-yellow">0.4</span></span><span class="sep">|</span><span>k:<span id="hb-cfg-topk" class="c-yellow">40</span></span><span class="sep">|</span><span>p:<span id="hb-cfg-topp" class="c-yellow">0.9</span></span><span class="sep">|</span><span>rep:<span id="hb-cfg-rep" class="c-yellow">1.05</span></span><span class="sep">|</span><span>max:<span id="hb-cfg-max" class="c-yellow">64</span></span><span class="sep">|</span><span>recall <span id="hb-recall" class="c-yellow">—</span></span><span class="sep">|</span><span>sessions <span id="hb-sessions" class="c-peach">0</span></span></div>
 <div class="right">
 <span>cpu <span id="hb-cpu" class="c-teal">—</span> <span id="hb-temp" class="c-peach">—</span></span>
 <span class="sep">|</span>
@@ -74,6 +75,25 @@ body{background:var(--crust);color:var(--text);font-family:'Inter',system-ui,san
 </div>
 </div>
 <div id="tiles" class="tile-container"></div>
+<div id="cfg-overlay" class="cfg-overlay" onclick="if(event.target===this)closeCfg()"><div class="cfg-panel">
+<h2>Configuration</h2>
+<div class="cfg-scope" id="cfg-scope-row" style="display:none"><label>Apply to:</label><label><input type="radio" name="cfg-scope" value="global" checked> Global</label><label><input type="radio" name="cfg-scope" value="tile"> This tile</label></div>
+<div class="cfg-section"><h3>Inference</h3>
+<div class="cfg-row"><label>Model</label><select id="cfg-model"><option>bitnet</option><option>llama</option><option>llama8b</option><option>qwen</option></select></div>
+<div class="cfg-row"><label>Temperature</label><input type="range" id="cfg-temp-r" min="0" max="2" step="0.05"><input type="number" id="cfg-temp" min="0" max="2" step="0.05"></div>
+<div class="cfg-row"><label>Top-K</label><input type="range" id="cfg-topk-r" min="1" max="100" step="1"><input type="number" id="cfg-topk" min="1" max="100"></div>
+<div class="cfg-row"><label>Top-P</label><input type="range" id="cfg-topp-r" min="0" max="1" step="0.01"><input type="number" id="cfg-topp" min="0" max="1" step="0.01"></div>
+<div class="cfg-row"><label>Rep. penalty</label><input type="range" id="cfg-rep-r" min="1" max="2" step="0.01"><input type="number" id="cfg-rep" min="1" max="2" step="0.01"></div>
+<div class="cfg-row"><label>Max tokens</label><input type="number" id="cfg-max" min="1" max="4096" style="width:100px"></div></div>
+<div class="cfg-section"><h3>Cloud Fallback</h3>
+<div class="cfg-row"><label>API key</label><input type="password" id="cfg-apikey" class="wide" placeholder="sk-ant-..."></div>
+<div class="cfg-row"><label>Cloud model</label><input type="text" id="cfg-cloud-model" class="wide"></div>
+<div class="cfg-row"><label>Cloud max tok</label><input type="number" id="cfg-cloud-max" min="1" max="16384" style="width:100px"></div></div>
+<div class="cfg-section"><h3>System</h3>
+<div class="cfg-row"><label>Recall level</label><input type="range" id="cfg-recall-r" min="0" max="10" step="1"><input type="number" id="cfg-recall" min="0" max="10"></div>
+<div class="cfg-row" style="align-items:flex-start"><label>System prompt</label><textarea id="cfg-sysprompt" rows="4"></textarea></div></div>
+<div class="cfg-buttons"><button class="cfg-btn-cancel" onclick="closeCfg()">Cancel</button><button class="cfg-btn-apply" onclick="applyCfg()">Apply</button></div>
+</div></div>
 <script>
 const tiles=[];let focusedId=null,nextId=0;
 
@@ -115,7 +135,7 @@ async function sendChat(id,body,input){
   const cursor=el('span','cursor-blink');bubble.after(cursor);
   try{
     const res=await fetch('/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({prompt:text,temperature:0,repetition_penalty:1.1,max_tokens:512,recall_level:-1})});
+      body:JSON.stringify(Object.assign({prompt:text},tileConfig(id)))});
     const reader=res.body.getReader();const dec=new TextDecoder();let buf='';
     while(true){
       const{done,value}=await reader.read();if(done)break;
@@ -166,7 +186,7 @@ async function sendCommand(id,body,input){
     const out=el('div','repl-line repl-output');out.textContent='';body.appendChild(out);
     try{
       const res=await fetch('/api/generate',{method:'POST',
-        body:JSON.stringify({prompt:text,temperature:0.7,repetition_penalty:1.1,max_tokens:512,recall_level:-1})});
+        body:JSON.stringify(Object.assign({prompt:text},tileConfig(id)))});
       const reader=res.body.getReader(),dec=new TextDecoder();let buf='';
       while(true){
         const{done,value}=await reader.read();if(done)break;
@@ -368,9 +388,102 @@ function updateSystem(){
     const h=Math.floor(d.uptime_seconds/3600),mi=Math.floor((d.uptime_seconds%3600)/60);
     document.getElementById('hb-uptime').textContent=h+'h '+mi+'m';
     if(d.recall_level!=null)document.getElementById('hb-recall').textContent=d.recall_level;
+    if(d.config){
+      const c=d.config;
+      document.getElementById('hb-cfg-temp').textContent=c.temperature;
+      document.getElementById('hb-cfg-topk').textContent=c.top_k;
+      document.getElementById('hb-cfg-topp').textContent=c.top_p;
+      document.getElementById('hb-cfg-rep').textContent=c.repetition_penalty;
+      document.getElementById('hb-cfg-max').textContent=c.max_tokens;
+      window._globalConfig=c;
+    }
   }).catch(()=>{});
 }
 updateSystem();setInterval(updateSystem,3000);
+
+window._globalConfig={};
+
+function tileConfig(id){
+  const tile=tiles.find(t=>t.id===id);
+  const tc=tile&&tile.el._config||{};
+  const gc=window._globalConfig||{};
+  return{
+    temperature:tc.temperature!=null?tc.temperature:gc.temperature!=null?gc.temperature:0.4,
+    top_k:tc.top_k!=null?tc.top_k:gc.top_k!=null?gc.top_k:40,
+    top_p:tc.top_p!=null?tc.top_p:gc.top_p!=null?gc.top_p:0.9,
+    repetition_penalty:tc.repetition_penalty!=null?tc.repetition_penalty:gc.repetition_penalty!=null?gc.repetition_penalty:1.05,
+    max_tokens:tc.max_tokens!=null?tc.max_tokens:gc.max_tokens!=null?gc.max_tokens:512,
+    recall_level:tc.recall_level!=null?tc.recall_level:gc.recall_level!=null?gc.recall_level:-1,
+  };
+}
+
+function openCfg(){
+  fetch('/api/config').then(r=>r.json()).then(c=>{
+    window._globalConfig=c;
+    document.getElementById('cfg-model').value=c.model||'bitnet';
+    setSlider('cfg-temp',c.temperature);
+    setSlider('cfg-topk',c.top_k);
+    setSlider('cfg-topp',c.top_p);
+    setSlider('cfg-rep',c.repetition_penalty);
+    document.getElementById('cfg-max').value=c.max_tokens;
+    document.getElementById('cfg-cloud-model').value=c.cloud_model||'';
+    document.getElementById('cfg-cloud-max').value=c.cloud_max_tokens||4096;
+    setSlider('cfg-recall',c.recall_level);
+    document.getElementById('cfg-sysprompt').value=c.system_prompt||'';
+    const scopeRow=document.getElementById('cfg-scope-row');
+    scopeRow.style.display=focusedId!=null?'flex':'none';
+    document.querySelector('input[name="cfg-scope"][value="global"]').checked=true;
+    document.getElementById('cfg-overlay').classList.add('open');
+  });
+}
+
+function closeCfg(){document.getElementById('cfg-overlay').classList.remove('open')}
+
+function setSlider(id,val){
+  document.getElementById(id).value=val;
+  const r=document.getElementById(id+'-r');if(r)r.value=val;
+}
+
+document.querySelectorAll('.cfg-row input[type=range]').forEach(r=>{
+  const numId=r.id.replace('-r','');
+  r.addEventListener('input',()=>{document.getElementById(numId).value=r.value});
+});
+document.querySelectorAll('.cfg-row input[type=number]').forEach(n=>{
+  const rId=n.id+'-r';
+  n.addEventListener('input',()=>{const r=document.getElementById(rId);if(r)r.value=n.value});
+});
+
+function applyCfg(){
+  const scope=document.querySelector('input[name="cfg-scope"]:checked').value;
+  const cfg={
+    temperature:parseFloat(document.getElementById('cfg-temp').value),
+    top_k:parseInt(document.getElementById('cfg-topk').value),
+    top_p:parseFloat(document.getElementById('cfg-topp').value),
+    repetition_penalty:parseFloat(document.getElementById('cfg-rep').value),
+    max_tokens:parseInt(document.getElementById('cfg-max').value),
+    cloud_model:document.getElementById('cfg-cloud-model').value,
+    cloud_max_tokens:parseInt(document.getElementById('cfg-cloud-max').value),
+    recall_level:parseInt(document.getElementById('cfg-recall').value),
+    system_prompt:document.getElementById('cfg-sysprompt').value,
+  };
+  if(scope==='tile'&&focusedId!=null){
+    const tile=tiles.find(t=>t.id===focusedId);
+    if(tile)tile.el._config=cfg;
+  }else{
+    fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)});
+    window._globalConfig=cfg;
+  }
+  const apikey=document.getElementById('cfg-apikey').value;
+  if(apikey){
+    fetch('/api/config/apikey',{method:'POST',body:apikey});
+    document.getElementById('cfg-apikey').value='';
+  }
+  closeCfg();
+}
+
+document.getElementById('olorin-btn').addEventListener('click',openCfg);
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeCfg()});
+
 setInterval(()=>{const now=new Date();
   document.getElementById('hb-clock').textContent=String(now.getHours()).padStart(2,'0')+':'+String(now.getMinutes()).padStart(2,'0');
 },1000);
