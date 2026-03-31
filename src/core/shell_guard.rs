@@ -115,10 +115,8 @@ fn classify(command: &str) -> CommandRisk {
         return CommandRisk::Destructive;
     }
 
-    for target in DANGEROUS_TARGETS {
-        if command.contains(&format!(">{target}")) || command.contains(&format!("> {target}")) {
-            return CommandRisk::Destructive;
-        }
+    if targets_dangerous_redirect(command) {
+        return CommandRisk::Destructive;
     }
 
     let mut worst = CommandRisk::Allow;
@@ -128,6 +126,16 @@ fn classify(command: &str) -> CommandRisk {
         if worst == CommandRisk::Destructive { return CommandRisk::Destructive; }
     }
     worst
+}
+
+fn targets_dangerous_redirect(command: &str) -> bool {
+    for (i, _) in command.match_indices('>') {
+        let rest = command[i + 1..].trim_start();
+        for &target in DANGEROUS_TARGETS {
+            if rest.starts_with(target) { return true; }
+        }
+    }
+    false
 }
 
 fn classify_single(cmd: &str) -> CommandRisk {
@@ -140,7 +148,7 @@ fn classify_single(cmd: &str) -> CommandRisk {
     let binary = extract_binary_name(parts[0]);
     let has_redirect = cmd.contains('>');
 
-    if DESTRUCTIVE_COMMANDS.iter().any(|&c| binary == c || binary.starts_with(&format!("{c}."))) {
+    if DESTRUCTIVE_COMMANDS.iter().any(|&c| binary == c || (binary.len() > c.len() && binary.as_bytes()[c.len()] == b'.' && binary.starts_with(c))) {
         if binary == "rm" && !parts.iter().any(|p| DANGEROUS_FLAGS.iter().any(|f| p == f || p.contains(f))) {
             if parts.iter().any(|p| *p == "/" || *p == "/*" || *p == "~" || *p == "~/*") {
                 return CommandRisk::Destructive;

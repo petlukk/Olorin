@@ -27,6 +27,9 @@ pub struct InferenceState {
     pub(crate) kv_cache: EakvCache,
     pub(crate) attn_scores: Vec<f32>,
     pub(crate) rope_freqs: Vec<f32>,
+    pub(crate) sample_logits_buf: Vec<f32>,
+    pub(crate) sample_probs: Vec<f32>,
+    pub(crate) sample_indices: Vec<usize>,
     #[allow(dead_code)]
     pub(crate) max_seq_len: usize,
     #[cfg(target_arch = "aarch64")]
@@ -69,27 +72,29 @@ pub(crate) fn argmax(s: &[f32]) -> u32 {
         .map(|(i, _)| i as u32).unwrap_or(0)
 }
 
-pub(crate) fn apply_top_k(logits: &mut [f32], k: usize) {
+pub(crate) fn apply_top_k_into(logits: &mut [f32], indices: &mut [usize], k: usize) {
     if k == 0 || k >= logits.len() { return; }
-    let mut indices: Vec<usize> = (0..logits.len()).collect();
-    indices.select_nth_unstable_by(k - 1, |&a, &b| {
+    let n = logits.len();
+    for i in 0..n { indices[i] = i; }
+    indices[..n].select_nth_unstable_by(k - 1, |&a, &b| {
         logits[b].partial_cmp(&logits[a]).unwrap_or(std::cmp::Ordering::Equal)
     });
-    for &i in &indices[k..] { logits[i] = f32::NEG_INFINITY; }
+    for &i in &indices[k..n] { logits[i] = f32::NEG_INFINITY; }
 }
 
-pub(crate) fn apply_top_p(probs: &mut [f32], p: f32) -> usize {
+pub(crate) fn apply_top_p_into(probs: &mut [f32], indices: &mut [usize], p: f32) -> usize {
     if p >= 1.0 { return probs.len(); }
-    let mut indices: Vec<usize> = (0..probs.len()).collect();
-    indices.sort_unstable_by(|&a, &b| probs[b].partial_cmp(&probs[a]).unwrap_or(std::cmp::Ordering::Equal));
+    let n = probs.len();
+    for i in 0..n { indices[i] = i; }
+    indices[..n].sort_unstable_by(|&a, &b| probs[b].partial_cmp(&probs[a]).unwrap_or(std::cmp::Ordering::Equal));
     let mut cumsum = 0.0;
     let mut kept = 0;
-    for &i in &indices {
+    for &i in &indices[..n] {
         cumsum += probs[i];
         kept += 1;
         if cumsum >= p { break; }
     }
-    for &i in &indices[kept..] { probs[i] = 0.0; }
+    for &i in &indices[kept..n] { probs[i] = 0.0; }
     let sum: f32 = probs.iter().sum();
     if sum > 0.0 {
         let inv = 1.0 / sum;
@@ -98,22 +103,32 @@ pub(crate) fn apply_top_p(probs: &mut [f32], p: f32) -> usize {
     kept
 }
 
-pub(crate) fn sample(logits: &[f32], temperature: f32, top_k: usize, top_p: f32) -> u32 {
+pub(crate) fn sample_into(
+    logits: &[f32],
+    buf: &mut [f32],
+    probs: &mut [f32],
+    indices: &mut [usize],
+    temperature: f32,
+    top_k: usize,
+    top_p: f32,
+) -> u32 {
     if temperature <= 0.0 { return argmax(logits); }
-    let mut logits_buf: Vec<f32> = logits.to_vec();
-    apply_top_k(&mut logits_buf, top_k);
-    let max_val = logits_buf.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    let mut probs: Vec<f32> = logits_buf.iter().map(|&x| ((x - max_val) / temperature).exp()).collect();
-    let sum: f32 = probs.iter().sum();
-    for p in probs.iter_mut() { *p /= sum; }
-    apply_top_p(&mut probs, top_p);
+    let n = logits.len();
+    buf[..n].copy_from_slice(logits);
+    apply_top_k_into(&mut buf[..n], indices, top_k);
+    let max_val = buf[..n].iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    for i in 0..n { probs[i] = ((buf[i] - max_val) / temperature).exp(); }
+    let sum: f32 = probs[..n].iter().sum();
+    let inv = 1.0 / sum;
+    for i in 0..n { probs[i] *= inv; }
+    apply_top_p_into(&mut probs[..n], indices, top_p);
     let r = xorshift_f32();
     let mut cumsum = 0.0;
-    for (i, &p) in probs.iter().enumerate() {
-        cumsum += p;
+    for i in 0..n {
+        cumsum += probs[i];
         if r < cumsum { return i as u32; }
     }
-    (probs.len() - 1) as u32
+    (n - 1) as u32
 }
 
 /// Xorshift64 RNG returning f32 in [0, 1).
@@ -169,6 +184,9 @@ impl InferenceState {
             kv_cache,
             attn_scores: vec![0.0; nh * max_seq_len],
             rope_freqs: vec![0.0; model.head_dim],
+            sample_logits_buf: vec![0.0; v],
+            sample_probs: vec![0.0; v],
+            sample_indices: vec![0; v],
             max_seq_len,
             #[cfg(target_arch = "aarch64")]
             spec_work: SpeculativeWork::new(v, h, model.embed_sketch_dim),
@@ -349,8 +367,14 @@ impl InferenceState {
         }
     }
 
-    pub fn sample_logits(&self, temperature: f32, top_k: usize, top_p: f32) -> u32 {
-        sample(&self.logits, temperature, top_k, top_p)
+    pub fn sample_logits(&mut self, temperature: f32, top_k: usize, top_p: f32) -> u32 {
+        sample_into(
+            &self.logits,
+            &mut self.sample_logits_buf,
+            &mut self.sample_probs,
+            &mut self.sample_indices,
+            temperature, top_k, top_p,
+        )
     }
 
     pub fn generate(
@@ -438,5 +462,7 @@ impl Drop for InferenceState {
         wipe_i8(&mut self.hidden_quant);
         wipe_f32(&mut self.logits);
         wipe_f32(&mut self.tmp);
+        wipe_f32(&mut self.sample_logits_buf);
+        wipe_f32(&mut self.sample_probs);
     }
 }

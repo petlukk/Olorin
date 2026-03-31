@@ -1,7 +1,7 @@
 //! Transformer forward pass for Llama models with Q4_K_M quantization.
 
 use crate::kernels::ffi_inference as ffi;
-use crate::inference::forward::{apply_rope, build_rope_freqs, sample};
+use crate::inference::forward::{apply_rope, build_rope_freqs, sample_into};
 use crate::inference::matmul::embed_f16_lookup;
 use crate::inference::matmul_q4k::{Q4K_BLOCK_BYTES, q4k_matmul_mt, q4k_matmul_work, q4k_fused_gate_up_silu_work};
 use crate::inference::matmul_q6k::{Q6K_BLOCK_BYTES, q6k_matmul_mt, q6k_matmul_work};
@@ -43,6 +43,9 @@ pub struct LlamaState {
     pub(crate) attn_scores: Vec<f32>,
     pub(crate) rope_freqs: Vec<f32>,
     pub(crate) x_norm_pub: Vec<f32>,
+    pub(crate) sample_logits_buf: Vec<f32>,
+    pub(crate) sample_probs: Vec<f32>,
+    pub(crate) sample_indices: Vec<usize>,
     #[allow(dead_code)]
     pub(crate) max_seq_len: usize,
 }
@@ -106,6 +109,9 @@ impl LlamaState {
             attn_scores: vec![0.0; nh * max_seq_len],
             rope_freqs: vec![0.0; model.head_dim],
             x_norm_pub: vec![0.0; h],
+            sample_logits_buf: vec![0.0; v],
+            sample_probs: vec![0.0; v],
+            sample_indices: vec![0; v],
             max_seq_len,
         }
     }
@@ -304,8 +310,14 @@ impl LlamaState {
         &self.logits
     }
 
-    pub fn sample_logits(&self, temperature: f32, top_k: usize, top_p: f32) -> u32 {
-        sample(&self.logits, temperature, top_k, top_p)
+    pub fn sample_logits(&mut self, temperature: f32, top_k: usize, top_p: f32) -> u32 {
+        sample_into(
+            &self.logits,
+            &mut self.sample_logits_buf,
+            &mut self.sample_probs,
+            &mut self.sample_indices,
+            temperature, top_k, top_p,
+        )
     }
 }
 
@@ -396,5 +408,7 @@ impl Drop for LlamaState {
         wipe_i32(&mut self.hidden_q8_bsums);
         wipe_f32(&mut self.logits);
         wipe_f32(&mut self.tmp);
+        wipe_f32(&mut self.sample_logits_buf);
+        wipe_f32(&mut self.sample_probs);
     }
 }
