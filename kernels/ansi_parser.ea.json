@@ -1,0 +1,12 @@
+{
+  "library": "/tmp/libansi_parser.so",
+  "exports": [
+    {
+      "name": "ansi_classify",
+      "args": [{"name": "data", "type": "*u8", "direction": "in", "cap": null, "count": null}, {"name": "classes", "type": "*mut u8", "direction": "out", "cap": null, "count": null}, {"name": "len", "type": "i32", "direction": "in", "cap": null, "count": null}],
+      "return_type": null
+    }
+  ],
+  "structs": [
+  ]
+}
