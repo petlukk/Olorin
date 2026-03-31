@@ -1,0 +1,23 @@
+// Terminal cell-grid diff — compare old and new grids, produce dirty bitmap.
+//
+// Each cell is 16 bytes. XOR old vs new, movemask to detect any difference.
+// Output: dirty[i] = 1 if cell i changed, 0 otherwise.
+
+export func terminal_diff(old_grid: *u8, new_grid: *u8, out dirty: *mut u8, n_cells: i32) {
+    let v_zero: u8x16 = splat(0)
+    let v_one_byte: u8x16 = splat(1)
+
+    // Each cell = 16 bytes, so byte offset = cell_index * 16
+    for i in 0..n_cells {
+        let offset: i32 = i * 16
+        let old_cell: u8x16 = load(old_grid, offset)
+        let new_cell: u8x16 = load(new_grid, offset)
+        let diff: u8x16 = old_cell .^ new_cell
+        let any_diff: i32 = movemask(diff)
+        if any_diff != 0 {
+            dirty[i] = 1
+        } else {
+            dirty[i] = 0
+        }
+    }
+}
