@@ -9,21 +9,29 @@ use crate::storage::json::{self, Object, Value};
 
 const API_URL:     &str = "https://api.anthropic.com/v1/messages";
 const API_VERSION: &str = "2023-06-01";
-const MAX_TOKENS:  i64  = 4096;
+const DEFAULT_CLOUD_MAX_TOKENS: i64 = 4096;
 
 pub struct AnthropicClient {
     api_key: String,
     model:   String,
+    max_tokens: i64,
 }
 
 impl AnthropicClient {
     pub fn new(api_key: String) -> Self {
-        Self { api_key, model: "claude-3-5-haiku-latest".to_string() }
+        Self { api_key, model: "claude-3-5-haiku-latest".to_string(), max_tokens: DEFAULT_CLOUD_MAX_TOKENS }
     }
 
     pub fn with_model(api_key: String, model: String) -> Self {
-        Self { api_key, model }
+        Self { api_key, model, max_tokens: DEFAULT_CLOUD_MAX_TOKENS }
     }
+
+    pub fn set_api_key(&mut self, key: String) { self.api_key = key; }
+    pub fn set_model(&mut self, model: String) { self.model = model; }
+    pub fn model(&self) -> &str { &self.model }
+    pub fn has_key(&self) -> bool { !self.api_key.is_empty() }
+    pub fn set_max_tokens(&mut self, n: i64) { self.max_tokens = n; }
+    pub fn max_tokens(&self) -> i64 { self.max_tokens }
 
     /// Generate a response from the Anthropic API.
     ///
@@ -32,7 +40,7 @@ impl AnthropicClient {
     ///
     /// Blocks until the response is complete.
     pub fn generate(&self, system: &str, messages: &[(&str, &str)]) -> Result<String> {
-        let body = build_request(&self.model, system, messages);
+        let body = build_request(&self.model, self.max_tokens, system, messages);
         let output = Command::new("curl")
             .arg("--silent")
             .arg("--fail-with-body")
@@ -67,10 +75,10 @@ impl AnthropicClient {
 }
 
 /// Build JSON request body using crate::storage::json.
-fn build_request(model: &str, system: &str, messages: &[(&str, &str)]) -> String {
+fn build_request(model: &str, max_tokens: i64, system: &str, messages: &[(&str, &str)]) -> String {
     let mut req = Object::new();
     req.set("model",      Value::Str(model.to_string()));
-    req.set("max_tokens", Value::I64(MAX_TOKENS));
+    req.set("max_tokens", Value::I64(max_tokens));
     req.set("system",     Value::Str(system.to_string()));
 
     let msgs: Vec<Value> = messages.iter().map(|(role, content)| {

@@ -71,7 +71,7 @@ impl DispatchContext {
         let anthropic = api_key.map(AnthropicClient::new);
         let vault = Self::open_vault();
         let engine = Self::load_engine(model_arg);
-        Self {
+        let mut ctx = Self {
             messages:      Vec::new(),
             recall:        VectorStore::new(1024),
             vault,
@@ -81,7 +81,9 @@ impl DispatchContext {
             system_prompt: llm::SYSTEM_PROMPT.to_string(),
             recall_level:  0,
             _max_turns:    8,
-        }
+        };
+        ctx.load_api_key_from_vault();
+        ctx
     }
 
     fn load_engine(model_arg: Option<&str>) -> Option<Engine> {

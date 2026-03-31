@@ -417,3 +417,27 @@ fn write_string(s: &str, out: &mut String) {
     }
     out.push('"');
 }
+
+// ── Quick JSON scanners ─────────────────────────────────────────────────────
+
+/// Extract a float value for a given key from a JSON string (quick scanner).
+pub fn extract_json_float(json: &str, key: &str) -> Option<f32> {
+    let pattern = format!("\"{}\"", key);
+    let start = json.find(&pattern)?;
+    let after_key = &json[start + pattern.len()..];
+    let colon = after_key.find(':')?;
+    let rest = after_key[colon + 1..].trim_start();
+    let end = rest.find(|c: char| !c.is_ascii_digit() && c != '.' && c != '-').unwrap_or(rest.len());
+    rest[..end].parse().ok()
+}
+
+/// Extract an integer value for a given key from a JSON string (quick scanner).
+pub fn extract_json_int(json: &str, key: &str) -> Option<i64> {
+    let pattern = format!("\"{}\"", key);
+    let start = json.find(&pattern)?;
+    let after_key = &json[start + pattern.len()..];
+    let colon = after_key.find(':')?;
+    let rest = after_key[colon + 1..].trim_start();
+    let end = rest.find(|c: char| !c.is_ascii_digit() && c != '-').unwrap_or(rest.len());
+    rest[..end].parse().ok()
+}
