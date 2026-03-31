@@ -7,7 +7,6 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 use crate::core::router::DispatchContext;
-use crate::interface::exec;
 use crate::interface::term_stream;
 
 // ── Hybrid embed for chat.html ────────────────────────────────────────────────
@@ -89,8 +88,11 @@ fn handle_connection(stream: &mut std::net::TcpStream, ctx: Arc<Mutex<DispatchCo
             serve_json(stream, r#"{"name":"olorin","backend":"pipe"}"#);
         }
         ("GET", "/api/system") => {
-            let recall_level = ctx.lock().unwrap().recall_level();
-            let body = build_system_json(recall_level);
+            let c = ctx.lock().unwrap();
+            let recall_level = c.recall_level();
+            let config_json = c.get_config();
+            drop(c);
+            let body = build_system_json(recall_level, &config_json);
             serve_json(stream, &body);
         }
         ("POST", "/api/generate") => {
@@ -117,6 +119,16 @@ fn handle_connection(stream: &mut std::net::TcpStream, ctx: Arc<Mutex<DispatchCo
         ("GET", path) if path.starts_with("/api/term/") && path.ends_with("/stream") => {
             let id = term_stream::parse_term_id(path);
             term_stream::handle_term_stream(stream, id);
+        }
+        ("GET", "/api/config") => {
+            let body = ctx.lock().unwrap().get_config();
+            serve_json(stream, &body);
+        }
+        ("POST", "/api/config") => {
+            handle_config_update(stream, req, &buf[..n], n, ctx);
+        }
+        ("POST", "/api/config/apikey") => {
+            handle_config_apikey(stream, req, &buf[..n], n, ctx);
         }
         _ => {
             let _ = write!(
@@ -171,6 +183,22 @@ fn handle_generate(
     let body_bytes = read_body(stream, req, buf, n);
     let body_str   = std::str::from_utf8(&body_bytes).unwrap_or("");
     let prompt     = extract_json_string(body_str, "prompt").unwrap_or_default();
+
+    // Apply per-request inference params
+    {
+        let mut c = ctx.lock().unwrap();
+        if let Some(engine) = &mut c.engine {
+            if let Some(v) = crate::storage::json::extract_json_float(body_str, "temperature") {
+                engine.temperature = v;
+            }
+            if let Some(v) = crate::storage::json::extract_json_int(body_str, "max_tokens") {
+                engine.max_tokens = v as usize;
+            }
+            if let Some(v) = crate::storage::json::extract_json_float(body_str, "repetition_penalty") {
+                engine.repetition_penalty = v;
+            }
+        }
+    }
 
     // SSE headers
     let _ = write!(
@@ -252,124 +280,9 @@ fn handle_command(
     serve_json(stream, &body);
 }
 
-// ── WhatsApp bridge ───────────────────────────────────────────────────────────
-
-/// Start the WhatsApp bridge subprocess and run the JSONL message loop.
-pub fn run_whatsapp(model_arg: Option<&str>) {
-    let bridge_path = find_bridge();
-
-    let home        = std::env::var("HOME").unwrap_or_default();
-    let session_dir = format!("{home}/.olorin/wa_session");
-    std::fs::create_dir_all(&session_dir).ok();
-
-    let child = match exec::spawn(&[&bridge_path, "--session-dir", &session_dir]) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("[olorin] failed to start WhatsApp bridge: {e}");
-            std::process::exit(1);
-        }
-    };
-
-    let api_key = std::env::var("ANTHROPIC_API_KEY").ok();
-    let ctx     = Arc::new(Mutex::new(DispatchContext::new(api_key, model_arg)));
-
-    eprintln!("[olorin] WhatsApp bridge started (pid={})", child.pid);
-    eprintln!("[olorin] Waiting for bridge connection...");
-
-    // Pull fds out before forgetting Child so Drop doesn't close them
-    let pid       = child.pid;
-    let stdout_fd = child.stdout_fd;
-    let stdin_fd  = child.stdin_fd;
-    std::mem::forget(child);
-
-    wa_message_loop(stdout_fd, stdin_fd, pid, ctx);
-}
-
-fn wa_message_loop(
-    stdout_fd: i32,
-    stdin_fd:  i32,
-    pid:       i32,
-    ctx:       Arc<Mutex<DispatchContext>>,
-) {
-    let mut line_buf = String::new();
-    let mut byte     = [0u8; 1];
-
-    loop {
-        // Read one line from bridge stdout
-        line_buf.clear();
-        loop {
-            let n = unsafe {
-                libc::read(stdout_fd, byte.as_mut_ptr() as *mut libc::c_void, 1)
-            };
-            if n <= 0 {
-                eprintln!("[olorin] Bridge stdout closed.");
-                unsafe { libc::waitpid(pid, std::ptr::null_mut(), 0) };
-                unsafe { libc::close(stdout_fd); libc::close(stdin_fd); }
-                return;
-            }
-            if byte[0] == b'\n' { break; }
-            line_buf.push(byte[0] as char);
-        }
-
-        if line_buf.is_empty() { continue; }
-
-        let msg_type = extract_json_string(&line_buf, "type").unwrap_or_default();
-        match msg_type.as_str() {
-            "connected" => {
-                eprintln!("[olorin] WhatsApp connected!");
-            }
-            "message" => {
-                let text = extract_json_string(&line_buf, "text").unwrap_or_default();
-                let jid  = extract_json_string(&line_buf, "jid").unwrap_or_default();
-                if text.is_empty() || jid.is_empty() { continue; }
-
-                let response = {
-                    let mut guard = ctx.lock().unwrap();
-                    guard.dispatch(&text)
-                };
-
-                let reply_text = escape_json(&response.text);
-                let reply_jid  = escape_json(&jid);
-                let reply = format!(
-                    "{{\"type\":\"send\",\"jid\":\"{reply_jid}\",\"text\":\"{reply_text}\"}}\n"
-                );
-                let bytes = reply.as_bytes();
-                let mut written = 0;
-                while written < bytes.len() {
-                    let n = unsafe {
-                        libc::write(
-                            stdin_fd,
-                            bytes[written..].as_ptr() as *const libc::c_void,
-                            bytes.len() - written,
-                        )
-                    };
-                    if n <= 0 { break; }
-                    written += n as usize;
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
-pub fn find_bridge() -> String {
-    if let Ok(p) = std::env::var("OLORIN_BRIDGE") {
-        return p;
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        let candidate = exe.parent()
-            .map(|p| p.join("bridge/wa-bridge"))
-            .unwrap_or_default();
-        if candidate.exists() {
-            return candidate.to_string_lossy().into_owned();
-        }
-    }
-    "bridge/wa-bridge".to_string()
-}
-
 // ── System info ───────────────────────────────────────────────────────────────
 
-pub fn build_system_json(recall_level: usize) -> String {
+pub fn build_system_json(recall_level: usize, config_json: &str) -> String {
     let (mem_used, mem_total) = read_memory().unwrap_or((0, 0));
     let uptime   = read_uptime().unwrap_or(0);
     let os       = std::env::consts::OS;
@@ -383,7 +296,7 @@ pub fn build_system_json(recall_level: usize) -> String {
         "{{\"cpu_percent\":{cpu_percent},\"cpu_temp\":{cpu_temp},\
          \"memory_used_mb\":{mem_used},\"memory_total_mb\":{mem_total},\
          \"os\":\"{os}\",\"arch\":\"{arch}\",\"uptime_seconds\":{uptime},\
-         \"recall_level\":{recall_level}}}"
+         \"recall_level\":{recall_level},\"config\":{config_json}}}"
     )
 }
 
@@ -491,4 +404,35 @@ pub(crate) fn escape_json(s: &str) -> String {
     out
 }
 
+// ── Config handlers ──────────────────────────────────────────────────────────
 
+fn handle_config_update(
+    stream: &mut std::net::TcpStream,
+    req: &str,
+    buf: &[u8],
+    n: usize,
+    ctx: Arc<Mutex<DispatchContext>>,
+) {
+    let body_bytes = read_body(stream, req, buf, n);
+    let body_str = std::str::from_utf8(&body_bytes).unwrap_or("");
+    ctx.lock().unwrap().update_config(body_str);
+    let config = ctx.lock().unwrap().get_config();
+    serve_json(stream, &config);
+}
+
+fn handle_config_apikey(
+    stream: &mut std::net::TcpStream,
+    req: &str,
+    buf: &[u8],
+    n: usize,
+    ctx: Arc<Mutex<DispatchContext>>,
+) {
+    let body_bytes = read_body(stream, req, buf, n);
+    let key = std::str::from_utf8(&body_bytes).unwrap_or("").trim();
+    if key.is_empty() {
+        serve_json(stream, r#"{"ok":false,"error":"empty key"}"#);
+        return;
+    }
+    ctx.lock().unwrap().store_api_key(key);
+    serve_json(stream, r#"{"ok":true}"#);
+}

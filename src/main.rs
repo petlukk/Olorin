@@ -25,7 +25,7 @@ fn main() {
     if serve {
         interface::server::run(port, model_arg);
     } else if whatsapp {
-        interface::server::run_whatsapp(model_arg);
+        interface::whatsapp::run_whatsapp(model_arg);
     } else {
         interface::terminal::run(model_arg);
     }
