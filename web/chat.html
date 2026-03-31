@@ -234,9 +234,8 @@ function initTermCanvas(t){
   const rect=t.getBoundingClientRect();
   const ctx=canvas.getContext('2d');
   ctx.font='13px "JetBrains Mono",monospace';
-  const m=ctx.measureText('M');
-  t._cellW=Math.ceil(m.width);
-  t._cellH=Math.ceil(13*1.4);
+  t._cellW=8;
+  t._cellH=16;
   t._cols=Math.floor(rect.width/t._cellW)||80;
   t._rows=Math.floor((rect.height-28)/t._cellH)||24;
   canvas.width=t._cols*t._cellW;
@@ -307,14 +306,14 @@ function startTermStream(t){
     if(d.type==='frame'){
       const ctx=canvas.getContext('2d');
       ctx.font='13px "JetBrains Mono",monospace';
-      ctx.textBaseline='top';
+      ctx.textBaseline='alphabetic';
       const cw=t._cellW,ch=t._cellH;
       for(const c of d.cells){
         ctx.fillStyle=c.bg;
         ctx.fillRect(c.c*cw,c.r*ch,cw,ch);
         ctx.fillStyle=c.fg;
         if(c.fl&1)ctx.font='bold 13px "JetBrains Mono",monospace';
-        ctx.fillText(c.ch,c.c*cw,c.r*ch+2);
+        ctx.fillText(c.ch,c.c*cw,c.r*ch+12);
         if(c.fl&1)ctx.font='13px "JetBrains Mono",monospace';
       }
       if(t._prevCursor){
