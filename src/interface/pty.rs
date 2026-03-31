@@ -218,6 +218,7 @@ impl PtySession {
             if total_read >= self.read_buf.len() { break; }
         }
 
+        eprintln!("[pty] read {total_read} bytes from master fd");
         if total_read == 0 {
             for d in &mut self.dirty_buf { *d = 0; }
             return &self.dirty_buf;
@@ -229,7 +230,10 @@ impl PtySession {
         }
 
         // Feed through ANSI state machine (SIMD classifier + Rust interpreter)
+        let cursor_before = self.grid.cursor();
         self.grid.feed(&self.read_buf[..total_read], &mut self.scan_buf);
+        let cursor_after = self.grid.cursor();
+        eprintln!("[pty] cursor: {:?} -> {:?}", cursor_before, cursor_after);
 
         // SIMD diff: compare prev vs current grid
         let n_cells = self.grid.cell_count();

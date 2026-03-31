@@ -112,14 +112,17 @@ pub fn handle_term_stream(stream: &mut std::net::TcpStream, id: u32) {
         revents: 0,
     };
 
+    eprintln!("[term-stream] starting SSE loop for session {id}, fd={}", pollfd.fd);
     loop {
         let ret = unsafe { libc::poll(&mut pollfd, 1, 16) };
 
         if ret > 0 && pollfd.revents & libc::POLLIN != 0 {
             let mut s = session.lock().unwrap();
             let dirty: Vec<u8> = s.read_and_apply().to_vec();
+            let dirty_count = dirty.iter().filter(|&&d| d != 0).count();
+            eprintln!("[term-stream] read: {dirty_count} dirty cells");
 
-            if dirty.iter().any(|&d| d != 0) {
+            if dirty_count > 0 {
                 let grid = s.grid();
                 let cols = grid.cols;
                 let (crow, ccol) = grid.cursor();
