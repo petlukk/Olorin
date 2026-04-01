@@ -285,22 +285,19 @@ pub unsafe fn q4k_dot_q8k_4row_dual(
 }
 
 pub unsafe fn q6k_dot_q8k(
-    weight: *const u8, scales: *const i8,
-    q8: *const i8, bsums: *const i32, n_blocks: i32,
-    d_arr: *const f32,
+    weight: *const u8, q8: *const i8, bsums: *const i32,
+    n_blocks: i32, d_arr: *const f32,
 ) -> f32 {
-    (k().q6k_dot_q8k)(weight, scales, q8, bsums, n_blocks, d_arr)
+    (k().q6k_dot_q8k)(weight, q8, bsums, n_blocks, d_arr)
 }
 
 pub unsafe fn q6k_dot_q8k_4row(
     w0: *const u8, w1: *const u8, w2: *const u8, w3: *const u8,
-    sc0: *const i8, sc1: *const i8, sc2: *const i8, sc3: *const i8,
     q8: *const i8, bsums: *const i32, scores: *mut f32, n_blocks: i32,
     d0: *const f32, d1: *const f32, d2: *const f32, d3: *const f32,
 ) {
     (k().q6k_dot_q8k_4row)(
-        w0, w1, w2, w3, sc0, sc1, sc2, sc3,
-        q8, bsums, scores, n_blocks, d0, d1, d2, d3)
+        w0, w1, w2, w3, q8, bsums, scores, n_blocks, d0, d1, d2, d3)
 }
 
 #[allow(clippy::too_many_arguments)]

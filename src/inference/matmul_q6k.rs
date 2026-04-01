@@ -16,16 +16,14 @@ const Q6K_D_OFF: usize = 208;
 /// Max blocks on stack (same as Q4K).
 const MAX_BLOCKS: usize = 128;
 
-/// Pre-compute per-block d_arr and copy scales for one Q6K weight row.
-unsafe fn q6k_unpack_row(
+/// Pre-compute per-block d_arr (f16→f32 × q8_d) for one Q6K weight row.
+unsafe fn q6k_unpack_d(
     weight: *const u8, n_blocks: usize, q8_d: *const f32,
-    d_arr: &mut [f32], sc_buf: &mut [i8],
+    d_arr: &mut [f32],
 ) {
     for blk in 0..n_blocks {
         let bp = weight.add(blk * Q6K_BLOCK_BYTES);
         d_arr[blk] = f16_to_f32(*(bp.add(Q6K_D_OFF) as *const u16)) * *q8_d.add(blk);
-        let sc = std::slice::from_raw_parts(bp.add(Q6K_SC_OFF) as *const i8, 16);
-        sc_buf[blk * 16..blk * 16 + 16].copy_from_slice(sc);
     }
 }
 
@@ -36,10 +34,9 @@ pub(crate) unsafe fn q6k_row_dot(
 ) -> f32 {
     debug_assert!(n_blocks <= MAX_BLOCKS);
     let mut d_arr = [0f32; MAX_BLOCKS];
-    let mut sc = [0i8; MAX_BLOCKS * 16];
-    q6k_unpack_row(weight, n_blocks, q8_d, &mut d_arr, &mut sc);
+    q6k_unpack_d(weight, n_blocks, q8_d, &mut d_arr);
     ffi::q6k_dot_q8k(
-        weight, sc.as_ptr(), q8_qs, q8_bsums,
+        weight, q8_qs, q8_bsums,
         n_blocks as i32, d_arr.as_ptr(),
     )
 }
@@ -53,14 +50,12 @@ pub(crate) unsafe fn q6k_4row_dot(
 ) {
     debug_assert!(n_blocks <= MAX_BLOCKS);
     let mut da = [[0f32; MAX_BLOCKS]; 4];
-    let mut sc = [[0i8; MAX_BLOCKS * 16]; 4];
     let ws = [w0, w1, w2, w3];
     for i in 0..4 {
-        q6k_unpack_row(ws[i], n_blocks, q8_d, &mut da[i], &mut sc[i]);
+        q6k_unpack_d(ws[i], n_blocks, q8_d, &mut da[i]);
     }
     ffi::q6k_dot_q8k_4row(
         w0, w1, w2, w3,
-        sc[0].as_ptr(), sc[1].as_ptr(), sc[2].as_ptr(), sc[3].as_ptr(),
         q8_qs, q8_bsums, scores.as_mut_ptr(), n_blocks as i32,
         da[0].as_ptr(), da[1].as_ptr(), da[2].as_ptr(), da[3].as_ptr(),
     );
@@ -122,9 +117,7 @@ pub(crate) unsafe fn q6k_matmul_work(
     let count = end - start;
     let out_slice = std::slice::from_raw_parts_mut(out.add(start), count);
 
-    // Pre-allocate buffers ONCE per thread (not per iteration)
     let mut da = [[0f32; MAX_BLOCKS]; 4];
-    let mut sc = [[0i8; MAX_BLOCKS * 16]; 4];
     let mut scores4 = [0.0f32; 4];
 
     let mut r = 0;
@@ -133,23 +126,21 @@ pub(crate) unsafe fn q6k_matmul_work(
         let ws = [weight.add(row * row_stride), weight.add((row+1) * row_stride),
                   weight.add((row+2) * row_stride), weight.add((row+3) * row_stride)];
         for i in 0..4 {
-            q6k_unpack_row(ws[i], n_blocks, q8_d, &mut da[i], &mut sc[i]);
+            q6k_unpack_d(ws[i], n_blocks, q8_d, &mut da[i]);
         }
         ffi::q6k_dot_q8k_4row(
             ws[0], ws[1], ws[2], ws[3],
-            sc[0].as_ptr(), sc[1].as_ptr(), sc[2].as_ptr(), sc[3].as_ptr(),
             q8_qs, q8_bsums, scores4.as_mut_ptr(), n_blocks as i32,
             da[0].as_ptr(), da[1].as_ptr(), da[2].as_ptr(), da[3].as_ptr(),
         );
         for j in 0..4 { out_slice[r+j] = scores4[j]; }
         r += 4;
     }
-    // Tail rows: reuse first slot of the pre-allocated buffers
     while r < count {
         let row = start + r;
-        q6k_unpack_row(weight.add(row * row_stride), n_blocks, q8_d, &mut da[0], &mut sc[0]);
+        q6k_unpack_d(weight.add(row * row_stride), n_blocks, q8_d, &mut da[0]);
         out_slice[r] = ffi::q6k_dot_q8k(
-            weight.add(row * row_stride), sc[0].as_ptr(), q8_qs, q8_bsums,
+            weight.add(row * row_stride), q8_qs, q8_bsums,
             n_blocks as i32, da[0].as_ptr(),
         );
         r += 1;
