@@ -8,7 +8,7 @@ use crate::inference::ptr::{SendPtr, SendMutPtr};
 pub(crate) const Q4K_BLOCK_BYTES: usize = 144;
 
 /// Max blocks we support on the stack (32k dim / 256 = 128).
-const MAX_BLOCKS: usize = 128;
+pub(crate) const MAX_BLOCKS: usize = 128;
 
 /// Unpack Q4_K 12-byte packed scales into 8 scales + 8 mins.
 pub(crate) fn unpack_q4k_scales(packed: &[u8], scales: &mut [u8; 8], mins: &mut [u8; 8]) {

@@ -14,7 +14,7 @@ const Q6K_D_OFF: usize = 208;
 
 
 /// Max blocks on stack (same as Q4K).
-const MAX_BLOCKS: usize = 128;
+pub(crate) const MAX_BLOCKS: usize = 128;
 
 /// Pre-compute per-block d_arr (f16→f32 × q8_d) for one Q6K weight row.
 unsafe fn q6k_unpack_d(

@@ -1,7 +1,7 @@
 //! GEMM-style batched Q4_K matmul: load weight once, multiply against N tokens.
 
 use crate::kernels::ffi_inference as ffi;
-use crate::inference::matmul_q4k::{q4k_4row_dot, q4k_row_dot, q4k_dual_4row_dot, Q4K_BLOCK_BYTES, unpack_q4k_scales};
+use crate::inference::matmul_q4k::{q4k_row_dot, Q4K_BLOCK_BYTES, MAX_BLOCKS};
 use crate::inference::matmul::f16_to_f32;
 use crate::inference::ptr::{SendPtr, SendMutPtr};
 
@@ -73,18 +73,11 @@ pub(crate) fn q4k_gemm_mt(
             let end = (start + chunk).min(out_dim);
             if start >= end { return; }
                 let mut scores4 = [0.0f32; 4];
-                let mut scores16 = [0.0f32; 16];
-                // Per-row pre-unpacked scale/min/d/dm arrays
-                let mut sc = [vec![0u8; n_blocks * 8], vec![0u8; n_blocks * 8],
-                              vec![0u8; n_blocks * 8], vec![0u8; n_blocks * 8]];
-                let mut mn = [vec![0u8; n_blocks * 8], vec![0u8; n_blocks * 8],
-                              vec![0u8; n_blocks * 8], vec![0u8; n_blocks * 8]];
-                let mut da = [vec![0.0f32; n_blocks], vec![0.0f32; n_blocks],
-                              vec![0.0f32; n_blocks], vec![0.0f32; n_blocks]];
-                let mut dma = [vec![0.0f32; n_blocks], vec![0.0f32; n_blocks],
-                               vec![0.0f32; n_blocks], vec![0.0f32; n_blocks]];
-                let mut sc_tmp = [0u8; 8];
-                let mut mn_tmp = [0u8; 8];
+                // Pre-cache f16→f32 weight scales (invariant across tokens)
+                let mut da_w = [[0.0f32; MAX_BLOCKS]; 4];
+                let mut dma_w = [[0.0f32; MAX_BLOCKS]; 4];
+                let mut da = [[0.0f32; MAX_BLOCKS]; 4];
+                let mut dma = [[0.0f32; MAX_BLOCKS]; 4];
                 let mut r = start;
                 unsafe {
                     while r + 4 <= end {
@@ -94,49 +87,31 @@ pub(crate) fn q4k_gemm_mt(
                             w.ptr().add((r+2) * row_stride),
                             w.ptr().add((r+3) * row_stride),
                         ];
-                        // Pre-unpack for tiled kernel
                         for ri in 0..4 {
                             for blk in 0..n_blocks {
                                 let bp = ws[ri].add(blk * Q4K_BLOCK_BYTES);
-                                da[ri][blk] = f16_to_f32(*(bp as *const u16));
-                                dma[ri][blk] = f16_to_f32(*(bp.add(2) as *const u16));
-                                unpack_q4k_scales(
-                                    std::slice::from_raw_parts(bp.add(4), 12),
-                                    &mut sc_tmp, &mut mn_tmp);
-                                sc[ri][blk*8..blk*8+8].copy_from_slice(&sc_tmp);
-                                mn[ri][blk*8..blk*8+8].copy_from_slice(&mn_tmp);
+                                da_w[ri][blk] = f16_to_f32(*(bp as *const u16));
+                                dma_w[ri][blk] = f16_to_f32(*(bp.add(2) as *const u16));
                             }
                         }
-                        // Tiled: 4 tokens at a time via SIMD kernel
-                        let mut t = 0;
-                        while t + 4 <= nt {
-                            ffi::q4k_gemm_4x4(
-                                ws[0], ws[1], ws[2], ws[3],
-                                qs[t] as _, qs[t+1] as _, qs[t+2] as _, qs[t+3] as _,
-                                bs[t] as _, bs[t+1] as _, bs[t+2] as _, bs[t+3] as _,
-                                sc[0].as_ptr(), sc[1].as_ptr(), sc[2].as_ptr(), sc[3].as_ptr(),
-                                mn[0].as_ptr(), mn[1].as_ptr(), mn[2].as_ptr(), mn[3].as_ptr(),
-                                da[0].as_ptr(), da[1].as_ptr(), da[2].as_ptr(), da[3].as_ptr(),
-                                dma[0].as_ptr(), dma[1].as_ptr(), dma[2].as_ptr(), dma[3].as_ptr(),
-                                ds[t] as _, ds[t+1] as _, ds[t+2] as _, ds[t+3] as _,
-                                scores16.as_mut_ptr(), n_blocks as i32,
-                            );
-                            // scores16: [r0t0, r0t1, r0t2, r0t3, r1t0, ..., r3t3]
+                        for t in 0..nt {
+                            let q8_d_ptr = ds[t] as *const f32;
                             for ri in 0..4 {
-                                for ti in 0..4 {
-                                    *o.ptr().add((t + ti) * out_dim + r + ri) = scores16[ri * 4 + ti];
+                                for blk in 0..n_blocks {
+                                    let q = *q8_d_ptr.add(blk);
+                                    da[ri][blk] = da_w[ri][blk] * q;
+                                    dma[ri][blk] = dma_w[ri][blk] * q;
                                 }
                             }
-                            t += 4;
-                        }
-                        // Remainder tokens
-                        while t < nt {
-                            q4k_4row_dot(ws[0], ws[1], ws[2], ws[3], n_blocks,
-                                qs[t] as _, ds[t] as _, bs[t] as _, &mut scores4);
+                            ffi::q4k_dot_q8k_4row(
+                                ws[0], ws[1], ws[2], ws[3],
+                                qs[t] as _, bs[t] as _,
+                                scores4.as_mut_ptr(), n_blocks as i32,
+                                da[0].as_ptr(), da[1].as_ptr(), da[2].as_ptr(), da[3].as_ptr(),
+                                dma[0].as_ptr(), dma[1].as_ptr(), dma[2].as_ptr(), dma[3].as_ptr(),
+                            );
                             let base = o.ptr().add(t * out_dim + r);
-                            *base = scores4[0]; *base.add(1) = scores4[1];
-                            *base.add(2) = scores4[2]; *base.add(3) = scores4[3];
-                            t += 1;
+                            for j in 0..4 { *base.add(j) = scores4[j]; }
                         }
                         r += 4;
                     }
@@ -153,6 +128,7 @@ pub(crate) fn q4k_gemm_mt(
 }
 
 /// Fused gate+up+SiLU GEMM: compute silu(gate) * up for all tokens.
+/// Weight-stationary tiling: load 4 gate + 4 up rows once, multiply all tokens.
 pub(crate) fn q4k_fused_silu_gemm_mt(
     w_gate: *const u8, w_up: *const u8,
     row_stride: usize, n_blocks: usize,
@@ -170,41 +146,79 @@ pub(crate) fn q4k_fused_silu_gemm_mt(
     let o = SendMutPtr(out.as_mut_ptr());
 
     pool.run(total, move |tid, _n| {
-            let start = tid * chunk;
-            let end = (start + chunk).min(out_dim);
-            if start >= end { return; }
-                let mut g_scores = [0.0f32; 4];
-                let mut u_scores = [0.0f32; 4];
-                let mut r = start;
-                unsafe {
-                    while r + 4 <= end {
-                        for t in 0..nt {
-                            q4k_dual_4row_dot(
-                                wg.ptr().add(r * row_stride), wg.ptr().add((r+1) * row_stride),
-                                wg.ptr().add((r+2) * row_stride), wg.ptr().add((r+3) * row_stride),
-                                wu.ptr().add(r * row_stride), wu.ptr().add((r+1) * row_stride),
-                                wu.ptr().add((r+2) * row_stride), wu.ptr().add((r+3) * row_stride),
-                                n_blocks, qs[t] as _, ds[t] as _, bs[t] as _,
-                                &mut g_scores, &mut u_scores,
-                            );
-                            let base = o.ptr().add(t * out_dim + r);
-                            for i in 0..4 {
-                                let g = g_scores[i];
-                                *base.add(i) = (g / (1.0 + (-g).exp())) * u_scores[i];
-                            }
-                        }
-                        r += 4;
-                    }
-                    while r < end {
-                        let gw = wg.ptr().add(r * row_stride);
-                        let uw = wu.ptr().add(r * row_stride);
-                        for t in 0..nt {
-                            let g = q4k_row_dot(gw, n_blocks, qs[t] as _, ds[t] as _, bs[t] as _);
-                            let u = q4k_row_dot(uw, n_blocks, qs[t] as _, ds[t] as _, bs[t] as _);
-                            *o.ptr().add(t * out_dim + r) = (g / (1.0 + (-g).exp())) * u;
-                        }
-                        r += 1;
+        let start = tid * chunk;
+        let end = (start + chunk).min(out_dim);
+        if start >= end { return; }
+        // Pre-cache f16→f32 weight scales: computed ONCE per 4-row group,
+        // then multiplied by per-token q8_d in the inner loop.
+        let mut gd_w = [[0f32; MAX_BLOCKS]; 4];  // gate d (weight-only)
+        let mut gdm_w = [[0f32; MAX_BLOCKS]; 4]; // gate dmin
+        let mut ud_w = [[0f32; MAX_BLOCKS]; 4];  // up d
+        let mut udm_w = [[0f32; MAX_BLOCKS]; 4]; // up dmin
+        let mut gd = [[0f32; MAX_BLOCKS]; 4];
+        let mut gdm = [[0f32; MAX_BLOCKS]; 4];
+        let mut ud = [[0f32; MAX_BLOCKS]; 4];
+        let mut udm = [[0f32; MAX_BLOCKS]; 4];
+        let mut g_scores = [0.0f32; 4];
+        let mut u_scores = [0.0f32; 4];
+        let mut r = start;
+        unsafe {
+            while r + 4 <= end {
+                let gws = [wg.ptr().add(r * row_stride), wg.ptr().add((r+1) * row_stride),
+                           wg.ptr().add((r+2) * row_stride), wg.ptr().add((r+3) * row_stride)];
+                let uws = [wu.ptr().add(r * row_stride), wu.ptr().add((r+1) * row_stride),
+                           wu.ptr().add((r+2) * row_stride), wu.ptr().add((r+3) * row_stride)];
+                // f16→f32 ONCE per 4-row group (invariant across tokens)
+                for i in 0..4 {
+                    for blk in 0..n_blocks {
+                        let gbp = gws[i].add(blk * Q4K_BLOCK_BYTES);
+                        let ubp = uws[i].add(blk * Q4K_BLOCK_BYTES);
+                        gd_w[i][blk] = f16_to_f32(*(gbp as *const u16));
+                        gdm_w[i][blk] = f16_to_f32(*(gbp.add(2) as *const u16));
+                        ud_w[i][blk] = f16_to_f32(*(ubp as *const u16));
+                        udm_w[i][blk] = f16_to_f32(*(ubp.add(2) as *const u16));
                     }
                 }
+                for t in 0..nt {
+                    // Multiply cached weight-d by per-token q8_d (cheap: just n_blocks muls)
+                    let q8_d_ptr = ds[t] as *const f32;
+                    for i in 0..4 {
+                        for blk in 0..n_blocks {
+                            let q = *q8_d_ptr.add(blk);
+                            gd[i][blk] = gd_w[i][blk] * q;
+                            gdm[i][blk] = gdm_w[i][blk] * q;
+                            ud[i][blk] = ud_w[i][blk] * q;
+                            udm[i][blk] = udm_w[i][blk] * q;
+                        }
+                    }
+                    ffi::q4k_dot_q8k_4row_dual(
+                        gws[0], gws[1], gws[2], gws[3],
+                        uws[0], uws[1], uws[2], uws[3],
+                        qs[t] as _, bs[t] as _,
+                        g_scores.as_mut_ptr(), u_scores.as_mut_ptr(), n_blocks as i32,
+                        gd[0].as_ptr(), gd[1].as_ptr(), gd[2].as_ptr(), gd[3].as_ptr(),
+                        gdm[0].as_ptr(), gdm[1].as_ptr(), gdm[2].as_ptr(), gdm[3].as_ptr(),
+                        ud[0].as_ptr(), ud[1].as_ptr(), ud[2].as_ptr(), ud[3].as_ptr(),
+                        udm[0].as_ptr(), udm[1].as_ptr(), udm[2].as_ptr(), udm[3].as_ptr(),
+                    );
+                    let base = o.ptr().add(t * out_dim + r);
+                    for i in 0..4 {
+                        let g = g_scores[i];
+                        *base.add(i) = (g / (1.0 + (-g).exp())) * u_scores[i];
+                    }
+                }
+                r += 4;
+            }
+            while r < end {
+                let gw = wg.ptr().add(r * row_stride);
+                let uw = wu.ptr().add(r * row_stride);
+                for t in 0..nt {
+                    let g = q4k_row_dot(gw, n_blocks, qs[t] as _, ds[t] as _, bs[t] as _);
+                    let u = q4k_row_dot(uw, n_blocks, qs[t] as _, ds[t] as _, bs[t] as _);
+                    *o.ptr().add(t * out_dim + r) = (g / (1.0 + (-g).exp())) * u;
+                }
+                r += 1;
+            }
+        }
     });
 }
