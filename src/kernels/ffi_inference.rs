@@ -247,25 +247,21 @@ pub unsafe fn quant_f32_q8k(
 
 pub unsafe fn q4k_dot_q8k(
     q4: *const u8, q8: *const i8, bsums: *const i32,
-    scales: *const u8, mins: *const u8, n_blocks: i32,
-    d_arr: *const f32, dmin_arr: *const f32,
+    n_blocks: i32, d_arr: *const f32, dmin_arr: *const f32,
 ) -> f32 {
-    (k().q4k_dot_q8k)(q4, q8, bsums, scales, mins, n_blocks, d_arr, dmin_arr)
+    (k().q4k_dot_q8k)(q4, q8, bsums, n_blocks, d_arr, dmin_arr)
 }
 
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn q4k_dot_q8k_4row(
     rw0: *const u8, rw1: *const u8, rw2: *const u8, rw3: *const u8,
     q8: *const i8, bsums: *const i32,
-    sc0: *const u8, sc1: *const u8, sc2: *const u8, sc3: *const u8,
-    mn0: *const u8, mn1: *const u8, mn2: *const u8, mn3: *const u8,
     scores: *mut f32, n_blocks: i32,
     d0: *const f32, d1: *const f32, d2: *const f32, d3: *const f32,
     dm0: *const f32, dm1: *const f32, dm2: *const f32, dm3: *const f32,
 ) {
     (k().q4k_dot_q8k_4row)(
         rw0, rw1, rw2, rw3, q8, bsums,
-        sc0, sc1, sc2, sc3, mn0, mn1, mn2, mn3,
         scores, n_blocks, d0, d1, d2, d3, dm0, dm1, dm2, dm3)
 }
 
@@ -274,10 +270,6 @@ pub unsafe fn q4k_dot_q8k_4row_dual(
     gw0: *const u8, gw1: *const u8, gw2: *const u8, gw3: *const u8,
     uw0: *const u8, uw1: *const u8, uw2: *const u8, uw3: *const u8,
     q8: *const i8, bsums: *const i32,
-    gsc0: *const u8, gsc1: *const u8, gsc2: *const u8, gsc3: *const u8,
-    gmn0: *const u8, gmn1: *const u8, gmn2: *const u8, gmn3: *const u8,
-    usc0: *const u8, usc1: *const u8, usc2: *const u8, usc3: *const u8,
-    umn0: *const u8, umn1: *const u8, umn2: *const u8, umn3: *const u8,
     gate_scores: *mut f32, up_scores: *mut f32, n_blocks: i32,
     gd0: *const f32, gd1: *const f32, gd2: *const f32, gd3: *const f32,
     gdm0: *const f32, gdm1: *const f32, gdm2: *const f32, gdm3: *const f32,
@@ -287,8 +279,6 @@ pub unsafe fn q4k_dot_q8k_4row_dual(
     (k().q4k_dot_q8k_4row_dual)(
         gw0, gw1, gw2, gw3, uw0, uw1, uw2, uw3,
         q8, bsums,
-        gsc0, gsc1, gsc2, gsc3, gmn0, gmn1, gmn2, gmn3,
-        usc0, usc1, usc2, usc3, umn0, umn1, umn2, umn3,
         gate_scores, up_scores, n_blocks,
         gd0, gd1, gd2, gd3, gdm0, gdm1, gdm2, gdm3,
         ud0, ud1, ud2, ud3, udm0, udm1, udm2, udm3)
