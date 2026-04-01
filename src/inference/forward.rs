@@ -69,26 +69,6 @@ pub(crate) fn apply_top_k_into(logits: &mut [f32], indices: &mut [usize], k: usi
     for &i in &indices[k..n] { logits[i] = f32::NEG_INFINITY; }
 }
 
-pub(crate) fn apply_top_p_into(probs: &mut [f32], indices: &mut [usize], p: f32) -> usize {
-    if p >= 1.0 { return probs.len(); }
-    let n = probs.len();
-    for i in 0..n { indices[i] = i; }
-    indices[..n].sort_unstable_by(|&a, &b| probs[b].partial_cmp(&probs[a]).unwrap_or(std::cmp::Ordering::Equal));
-    let mut cumsum = 0.0;
-    let mut kept = 0;
-    for &i in &indices[..n] {
-        cumsum += probs[i];
-        kept += 1;
-        if cumsum >= p { break; }
-    }
-    for &i in &indices[kept..n] { probs[i] = 0.0; }
-    let sum: f32 = probs.iter().sum();
-    if sum > 0.0 {
-        let inv = 1.0 / sum;
-        for v in probs.iter_mut() { *v *= inv; }
-    }
-    kept
-}
 
 pub(crate) fn sample_into(
     logits: &[f32],
@@ -98,17 +78,21 @@ pub(crate) fn sample_into(
     temperature: f32,
     top_k: usize,
     top_p: f32,
+    min_p: f32,
 ) -> u32 {
     if temperature <= 0.0 { return argmax(logits); }
     let n = logits.len();
     buf[..n].copy_from_slice(logits);
+    // llama.cpp order: top_k → top_p → min_p → temperature → softmax → sample
     apply_top_k_into(&mut buf[..n], indices, top_k);
+    apply_top_p_logits(&mut buf[..n], indices, top_p);
+    apply_min_p(&mut buf[..n], min_p);
+    // temperature + softmax
     let max_val = buf[..n].iter().cloned().fold(f32::NEG_INFINITY, f32::max);
     for i in 0..n { probs[i] = ((buf[i] - max_val) / temperature).exp(); }
     let sum: f32 = probs[..n].iter().sum();
     let inv = 1.0 / sum;
     for i in 0..n { probs[i] *= inv; }
-    apply_top_p_into(&mut probs[..n], indices, top_p);
     let r = xorshift_f32();
     let mut cumsum = 0.0;
     for i in 0..n {
@@ -116,6 +100,44 @@ pub(crate) fn sample_into(
         if r < cumsum { return i as u32; }
     }
     (n - 1) as u32
+}
+
+/// min_p: filter logits below max_logit + ln(min_p), matching llama.cpp
+pub(crate) fn apply_min_p(logits: &mut [f32], p: f32) {
+    if p <= 0.0 { return; }
+    let max_logit = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let threshold = max_logit + p.ln();
+    for l in logits.iter_mut() {
+        if *l < threshold { *l = f32::NEG_INFINITY; }
+    }
+}
+
+/// top_p on logits: softmax internally, zero out low-prob tokens, matching llama.cpp
+pub(crate) fn apply_top_p_logits(logits: &mut [f32], indices: &mut [usize], p: f32) {
+    if p >= 1.0 { return; }
+    let n = logits.len();
+    // softmax to get probs
+    let max_val = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let mut probs = Vec::with_capacity(n);
+    let mut sum = 0.0f32;
+    for i in 0..n {
+        let e = (logits[i] - max_val).exp();
+        probs.push(e);
+        sum += e;
+    }
+    let inv = 1.0 / sum;
+    for p_val in probs.iter_mut() { *p_val *= inv; }
+    // sort indices by prob descending
+    for i in 0..n { indices[i] = i; }
+    indices[..n].sort_unstable_by(|&a, &b| probs[b].partial_cmp(&probs[a]).unwrap_or(std::cmp::Ordering::Equal));
+    let mut cumsum = 0.0;
+    let mut kept = 0;
+    for &i in &indices[..n] {
+        cumsum += probs[i];
+        kept += 1;
+        if cumsum >= p { break; }
+    }
+    for &i in &indices[kept..n] { logits[i] = f32::NEG_INFINITY; }
 }
 
 /// Xorshift64 RNG returning f32 in [0, 1).
@@ -354,13 +376,13 @@ impl InferenceState {
         }
     }
 
-    pub fn sample_logits(&mut self, temperature: f32, top_k: usize, top_p: f32) -> u32 {
+    pub fn sample_logits(&mut self, temperature: f32, top_k: usize, top_p: f32, min_p: f32) -> u32 {
         sample_into(
             &self.logits,
             &mut self.sample_logits_buf,
             &mut self.sample_probs,
             &mut self.sample_indices,
-            temperature, top_k, top_p,
+            temperature, top_k, top_p, min_p,
         )
     }
 
@@ -371,8 +393,9 @@ impl InferenceState {
         temperature: f32,
         top_k: usize,
         top_p: f32,
+        min_p: f32,
         repetition_penalty: f32,
-        eos_id: u32,
+        stop_ids: &[u32],
         max_seq_len: usize,
         mut on_token: impl FnMut(u32),
     ) -> (Vec<u32>, f64, f64) {
@@ -400,8 +423,8 @@ impl InferenceState {
         for step in 0..max_tokens {
             if pos >= max_seq_len { break; }
             state.apply_repetition_penalty(&output, repetition_penalty);
-            let next = state.sample_logits(temperature, top_k, top_p);
-            if next == eos_id { break; }
+            let next = state.sample_logits(temperature, top_k, top_p, min_p);
+            if stop_ids.contains(&next) { break; }
             output.push(next);
             on_token(next);
             if step == 0 { first_tok_ms = first_tok_start.elapsed().as_secs_f64() * 1000.0; }

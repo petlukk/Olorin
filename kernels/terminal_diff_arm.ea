@@ -1,0 +1,28 @@
+// Terminal cell-grid diff — ARM NEON port of terminal_diff.ea
+//
+// Each cell is 16 bytes (u8x16 = one NEON register).
+// XOR old vs new, SIMD select to flag differing bytes,
+// reduce_add (NEON ADDV) replaces x86 movemask to detect any change.
+// Output: dirty[i] = 1 if cell i changed, 0 otherwise.
+#[cfg(aarch64)]
+
+export func terminal_diff(old_grid: *u8, new_grid: *u8, out dirty: *mut u8, n_cells: i32) {
+    let v_zero: u8x16 = splat(0)
+    let v_one: u8x16 = splat(1)
+
+    for i in 0..n_cells {
+        let offset: i32 = i * 16
+        let old_cell: u8x16 = load(old_grid, offset)
+        let new_cell: u8x16 = load(new_grid, offset)
+        let diff: u8x16 = old_cell .^ new_cell
+        // SIMD lane-wise: set each byte to 1 where XOR is non-zero
+        let has_diff: u8x16 = select(diff .!= v_zero, v_one, v_zero)
+        // NEON ADDV: horizontal sum across all 16 lanes — non-zero = dirty
+        let any_diff: i32 = to_i32(reduce_add(has_diff))
+        if any_diff != 0 {
+            dirty[i] = 1
+        } else {
+            dirty[i] = 0
+        }
+    }
+}

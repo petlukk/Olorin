@@ -298,13 +298,13 @@ impl LlamaState {
         &self.logits
     }
 
-    pub fn sample_logits(&mut self, temperature: f32, top_k: usize, top_p: f32) -> u32 {
+    pub fn sample_logits(&mut self, temperature: f32, top_k: usize, top_p: f32, min_p: f32) -> u32 {
         sample_into(
             &self.logits,
             &mut self.sample_logits_buf,
             &mut self.sample_probs,
             &mut self.sample_indices,
-            temperature, top_k, top_p,
+            temperature, top_k, top_p, min_p,
         )
     }
 }
@@ -316,8 +316,9 @@ pub fn generate(
     temperature: f32,
     top_k: usize,
     top_p: f32,
+    min_p: f32,
     repetition_penalty: f32,
-    eos_id: u32,
+    stop_ids: &[u32],
     max_seq_len: usize,
     mut on_token: impl FnMut(u32),
 ) -> (Vec<u32>, f64, f64) {
@@ -340,8 +341,8 @@ pub fn generate(
     for step in 0..max_tokens {
         if pos >= max_seq_len { break; }
         state.apply_repetition_penalty(&output, repetition_penalty);
-        let next = state.sample_logits(temperature, top_k, top_p);
-        if next == eos_id { break; }
+        let next = state.sample_logits(temperature, top_k, top_p, min_p);
+        if stop_ids.contains(&next) { break; }
         output.push(next);
         on_token(next);
         if step == 0 { first_tok_ms = first_tok_start.elapsed().as_secs_f64() * 1000.0; }

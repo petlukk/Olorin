@@ -21,6 +21,7 @@ pub struct Engine {
     pub temperature: f32,
     pub top_k: usize,
     pub top_p: f32,
+    pub min_p: f32,
     pub repetition_penalty: f32,
 }
 
@@ -36,10 +37,11 @@ impl Engine {
             tokenizer,
             max_seq_len,
             max_tokens: 64,
-            temperature: 0.4,
+            temperature: 0.8,
             top_k: 40,
-            top_p: 0.9,
-            repetition_penalty: 1.05,
+            top_p: 0.95,
+            min_p: 0.05,
+            repetition_penalty: 1.0,
         })
     }
 
@@ -79,16 +81,16 @@ impl Engine {
             use crate::inference::forward_llama;
             let (gen, _, _) = forward_llama::generate(
                 &model, &tokens, self.max_tokens, self.temperature,
-                self.top_k, self.top_p, self.repetition_penalty,
-                tokenizer.eos_id, self.max_seq_len, on_tok,
+                self.top_k, self.top_p, self.min_p, self.repetition_penalty,
+                &tokenizer.stop_ids, self.max_seq_len, on_tok,
             );
             gen
         } else {
             use crate::inference::forward::InferenceState;
             let (gen, _, _) = InferenceState::generate(
                 &model, &tokens, self.max_tokens, self.temperature,
-                self.top_k, self.top_p, self.repetition_penalty,
-                tokenizer.eos_id, self.max_seq_len, on_tok,
+                self.top_k, self.top_p, self.min_p, self.repetition_penalty,
+                &tokenizer.stop_ids, self.max_seq_len, on_tok,
             );
             gen
         };

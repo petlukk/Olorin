@@ -14,6 +14,7 @@ pub struct Tokenizer {
     scores: Vec<f32>,
     pub bos_id: u32,
     pub eos_id: u32,
+    pub stop_ids: Vec<u32>,
 }
 
 /// Parse a byte-fallback token like "<0x41>" into the byte value 0x41.
@@ -125,7 +126,17 @@ impl Tokenizer {
         let bos_id = gguf.get_u32("tokenizer.ggml.bos_token_id").unwrap_or(1);
         let eos_id = gguf.get_u32("tokenizer.ggml.eos_token_id").unwrap_or(2);
 
-        Ok(Tokenizer { vocab, token_to_id, scores, bos_id, eos_id })
+        // Collect all stop token IDs: eos + chat-specific end-of-turn markers
+        let mut stop_ids = vec![eos_id];
+        for special in ["<|eot_id|>", "<|im_end|>"] {
+            if let Some(id) = token_to_id.get(special.as_bytes()) {
+                if *id != eos_id {
+                    stop_ids.push(*id);
+                }
+            }
+        }
+
+        Ok(Tokenizer { vocab, token_to_id, scores, bos_id, eos_id, stop_ids })
     }
 
     /// Look up a token string in the vocabulary. Returns None if not found.
