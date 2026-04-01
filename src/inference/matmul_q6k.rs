@@ -157,6 +157,7 @@ pub(crate) unsafe fn q6k_matmul_work(
 }
 
 /// Dequantize a single embedding row from Q6_K block data to f32.
+/// Matches llama.cpp's `dequantize_row_q6_K` element ordering exactly.
 pub(crate) fn q6k_embed_lookup(
     embed_data: *const u8, token: u32, out: &mut [f32], hidden_dim: usize,
 ) {
@@ -167,43 +168,38 @@ pub(crate) fn q6k_embed_lookup(
     for blk in 0..n_blocks {
         let block = unsafe { row_ptr.add(blk * Q6K_BLOCK_BYTES) };
         let d = f16_to_f32(unsafe { *(block.add(Q6K_D_OFF) as *const u16) });
-        let ql = unsafe { block.add(Q6K_QL_OFF) };
-        let qh = unsafe { block.add(Q6K_QH_OFF) };
-        let scales = unsafe { block.add(Q6K_SC_OFF) };
+        let mut ql = unsafe { block.add(Q6K_QL_OFF) };
+        let mut qh = unsafe { block.add(Q6K_QH_OFF) };
+        let mut sc = unsafe { block.add(Q6K_SC_OFF) as *const i8 };
+        let mut y = blk * 256;
 
-        for half in 0..2usize {
-            let ql_base = ql as usize + half * 64;
-            let qh_base = qh as usize + half * 32;
-            let elem_base = blk * 256 + half * 128;
+        // Two halves of 128 elements each (matching llama.cpp's n += 128 loop)
+        for _half in 0..2 {
+            for l in 0..32usize {
+                let is = l / 16;
+                let ql0 = unsafe { *ql.add(l) };
+                let ql32 = unsafe { *ql.add(l + 32) };
+                let qh_byte = unsafe { *qh.add(l) };
 
-            for group in 0..4usize {
-                let sc0 = unsafe { *(scales.add(half * 8 + group * 2) as *const i8) } as f32;
-                let sc1 = unsafe { *(scales.add(half * 8 + group * 2 + 1) as *const i8) } as f32;
+                let q1 = ((ql0 & 0xF) | (((qh_byte >> 0) & 3) << 4)) as i8 as f32 - 32.0;
+                let q2 = ((ql32 & 0xF) | (((qh_byte >> 2) & 3) << 4)) as i8 as f32 - 32.0;
+                let q3 = ((ql0 >> 4) | (((qh_byte >> 4) & 3) << 4)) as i8 as f32 - 32.0;
+                let q4 = ((ql32 >> 4) | (((qh_byte >> 6) & 3) << 4)) as i8 as f32 - 32.0;
 
-                for pos in 0..32usize {
-                    let ql_byte = unsafe {
-                        match group {
-                            0 | 1 => *(ql_base as *const u8).add(pos),
-                            _ => *(ql_base as *const u8).add(32 + pos),
-                        }
-                    };
-                    let low4 = match group {
-                        0 | 2 => ql_byte & 0x0F,
-                        _ => ql_byte >> 4,
-                    };
-                    let qh_byte = unsafe { *(qh_base as *const u8).add(pos) };
-                    let high2 = match group {
-                        0 => qh_byte & 0x03,
-                        1 => (qh_byte >> 2) & 0x03,
-                        2 => (qh_byte >> 4) & 0x03,
-                        _ => (qh_byte >> 6) & 0x03,
-                    };
-                    let q6_unsigned = low4 | (high2 << 4);
-                    let q6_signed = q6_unsigned as i8 as f32 - 32.0;
-                    let scale = if pos < 16 { sc0 } else { sc1 };
-                    out[elem_base + group * 32 + pos] = d * scale * q6_signed;
-                }
+                let s0 = unsafe { *sc.add(is as usize) } as f32;
+                let s2 = unsafe { *sc.add(is as usize + 2) } as f32;
+                let s4 = unsafe { *sc.add(is as usize + 4) } as f32;
+                let s6 = unsafe { *sc.add(is as usize + 6) } as f32;
+
+                out[y + l] = d * s0 * q1;
+                out[y + l + 32] = d * s2 * q2;
+                out[y + l + 64] = d * s4 * q3;
+                out[y + l + 96] = d * s6 * q4;
             }
+            y += 128;
+            ql = unsafe { ql.add(64) };
+            qh = unsafe { qh.add(32) };
+            sc = unsafe { sc.add(8) };
         }
     }
 }
