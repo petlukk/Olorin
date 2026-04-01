@@ -102,6 +102,7 @@ fn main() {
             .arg(&so_path);
         if is_arm {
             cmd.arg("--target-triple=aarch64-unknown-linux-gnu");
+            cmd.arg("--target=cortex-a76");
             cmd.arg("--dotprod");
             cmd.env("CC", "aarch64-linux-gnu-gcc");
         }
