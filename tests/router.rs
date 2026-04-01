@@ -133,9 +133,8 @@ fn content_block_tool_error() {
 
 #[test]
 fn system_prompt_rules() {
-    assert!(SYSTEM_PROMPT.contains("One line"));
-    assert!(SYSTEM_PROMPT.contains("unknown"));
-    assert!(SYSTEM_PROMPT.contains("<tool_call>"));
+    assert!(SYSTEM_PROMPT.contains("one sentence"));
+    assert!(SYSTEM_PROMPT.contains("direct"));
 }
 
 #[test]

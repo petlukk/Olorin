@@ -1,6 +1,6 @@
 use olorin::interface::server::{
-    parse_content_length, extract_json_string, escape_json,
-    build_system_json, find_bridge, get_chat_html,
+    parse_content_length, extract_json_string,
+    build_system_json, get_chat_html,
 };
 
 #[test]
@@ -25,41 +25,13 @@ fn test_extract_json_string_missing() {
 }
 
 #[test]
-fn test_escape_json_quotes() {
-    assert_eq!(escape_json("he\"llo"), "he\\\"llo");
-}
-
-#[test]
-fn test_escape_json_newline() {
-    assert_eq!(escape_json("line\nnew"), "line\\nnew");
-}
-
-#[test]
-fn test_escape_json_backslash() {
-    assert_eq!(escape_json("a\\b"), "a\\\\b");
-}
-
-#[test]
 fn test_build_system_json_shape() {
-    let json = build_system_json(0);
+    let json = build_system_json(0, "{}");
     assert!(json.contains("\"cpu_temp\""));
     assert!(json.contains("\"memory_used_mb\""));
     assert!(json.contains("\"os\""));
     assert!(json.contains("\"arch\""));
     assert!(json.contains("\"uptime_seconds\""));
-}
-
-#[test]
-fn test_find_bridge_env_override() {
-    std::env::set_var("OLORIN_BRIDGE", "/tmp/fake-bridge");
-    assert_eq!(find_bridge(), "/tmp/fake-bridge");
-    std::env::remove_var("OLORIN_BRIDGE");
-}
-
-#[test]
-fn test_find_bridge_default_nonempty() {
-    std::env::remove_var("OLORIN_BRIDGE");
-    assert!(!find_bridge().is_empty());
 }
 
 #[test]
