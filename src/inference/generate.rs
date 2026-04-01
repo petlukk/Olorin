@@ -41,7 +41,7 @@ impl Engine {
             top_k: 40,
             top_p: 0.95,
             min_p: 0.05,
-            repetition_penalty: 1.0,
+            repetition_penalty: 1.1,
         })
     }
 

@@ -22,7 +22,7 @@ export func fused_causal_attn_gqa_f32(
     groups_per_head: i32
 ) {
     let mask15: u8x16 = splat(15)
-    let div16: u8x16 = splat(16)
+    let shr4: u8x16 = splat(4)
     let rsqrt_d: f32 = 1.0 / sqrt(to_f32(128))
     let q_per_kv: i32 = n_q_heads / n_kv_heads
     let state_stride: i32 = 130
@@ -55,10 +55,10 @@ export func fused_causal_attn_gqa_f32(
             let wb0: i32 = g0 * 32
             let p0: u8x16 = load(k_packed, wb0)
             let lo0: u8x16 = p0 .& mask15
-            let hi0: u8x16 = p0 ./ div16
+            let hi0: u8x16 = p0 .>> shr4
             let p1: u8x16 = load(k_packed, wb0 + 16)
             let lo1: u8x16 = p1 .& mask15
-            let hi1: u8x16 = p1 ./ div16
+            let hi1: u8x16 = p1 .>> shr4
 
             let g1: i32 = g0 + 1
             let vs1: f32x4 = splat(k_scales[g1])
@@ -66,10 +66,10 @@ export func fused_causal_attn_gqa_f32(
             let wb1: i32 = g1 * 32
             let p2: u8x16 = load(k_packed, wb1)
             let lo2: u8x16 = p2 .& mask15
-            let hi2: u8x16 = p2 ./ div16
+            let hi2: u8x16 = p2 .>> shr4
             let p3: u8x16 = load(k_packed, wb1 + 16)
             let lo3: u8x16 = p3 .& mask15
-            let hi3: u8x16 = p3 ./ div16
+            let hi3: u8x16 = p3 .>> shr4
 
             // === Dequant V[kv_h, t] ===
             let vvs0: f32x4 = splat(v_scales[g0])
@@ -77,20 +77,20 @@ export func fused_causal_attn_gqa_f32(
             let vw0: i32 = g0 * 32
             let vp0: u8x16 = load(v_packed, vw0)
             let vlo0: u8x16 = vp0 .& mask15
-            let vhi0: u8x16 = vp0 ./ div16
+            let vhi0: u8x16 = vp0 .>> shr4
             let vp1: u8x16 = load(v_packed, vw0 + 16)
             let vlo1: u8x16 = vp1 .& mask15
-            let vhi1: u8x16 = vp1 ./ div16
+            let vhi1: u8x16 = vp1 .>> shr4
 
             let vvs1: f32x4 = splat(v_scales[g1])
             let vvb1: f32x4 = splat(v_biases[g1])
             let vw1: i32 = g1 * 32
             let vp2: u8x16 = load(v_packed, vw1)
             let vlo2: u8x16 = vp2 .& mask15
-            let vhi2: u8x16 = vp2 ./ div16
+            let vhi2: u8x16 = vp2 .>> shr4
             let vp3: u8x16 = load(v_packed, vw1 + 16)
             let vlo3: u8x16 = vp3 .& mask15
-            let vhi3: u8x16 = vp3 ./ div16
+            let vhi3: u8x16 = vp3 .>> shr4
 
             // === Process all queries qi >= t ===
             let mut qi: i32 = t
@@ -108,38 +108,38 @@ export func fused_causal_attn_gqa_f32(
                     let mut acc: f32x4 = zero4
                     // Group 0: lo0(16) + lo1(16) + hi0(16) + hi1(16) = 64 dims
                     acc = acc .+ fma(fma(widen_u8_f32x4(lo0), vs0, vb0), load(q_vecs, qbase), zero4)
-                    acc = acc .+ fma(fma(widen_u8_f32x4(shuffle(lo0, [4,5,6,7,0,0,0,0,0,0,0,0,0,0,0,0])), vs0, vb0), load(q_vecs, qbase+4), zero4)
-                    acc = acc .+ fma(fma(widen_u8_f32x4(shuffle(lo0, [8,9,10,11,0,0,0,0,0,0,0,0,0,0,0,0])), vs0, vb0), load(q_vecs, qbase+8), zero4)
-                    acc = acc .+ fma(fma(widen_u8_f32x4(shuffle(lo0, [12,13,14,15,0,0,0,0,0,0,0,0,0,0,0,0])), vs0, vb0), load(q_vecs, qbase+12), zero4)
+                    acc = acc .+ fma(fma(widen_u8_f32x4_4(lo0), vs0, vb0), load(q_vecs, qbase+4), zero4)
+                    acc = acc .+ fma(fma(widen_u8_f32x4_8(lo0), vs0, vb0), load(q_vecs, qbase+8), zero4)
+                    acc = acc .+ fma(fma(widen_u8_f32x4_12(lo0), vs0, vb0), load(q_vecs, qbase+12), zero4)
                     acc = acc .+ fma(fma(widen_u8_f32x4(lo1), vs0, vb0), load(q_vecs, qbase+16), zero4)
-                    acc = acc .+ fma(fma(widen_u8_f32x4(shuffle(lo1, [4,5,6,7,0,0,0,0,0,0,0,0,0,0,0,0])), vs0, vb0), load(q_vecs, qbase+20), zero4)
-                    acc = acc .+ fma(fma(widen_u8_f32x4(shuffle(lo1, [8,9,10,11,0,0,0,0,0,0,0,0,0,0,0,0])), vs0, vb0), load(q_vecs, qbase+24), zero4)
-                    acc = acc .+ fma(fma(widen_u8_f32x4(shuffle(lo1, [12,13,14,15,0,0,0,0,0,0,0,0,0,0,0,0])), vs0, vb0), load(q_vecs, qbase+28), zero4)
+                    acc = acc .+ fma(fma(widen_u8_f32x4_4(lo1), vs0, vb0), load(q_vecs, qbase+20), zero4)
+                    acc = acc .+ fma(fma(widen_u8_f32x4_8(lo1), vs0, vb0), load(q_vecs, qbase+24), zero4)
+                    acc = acc .+ fma(fma(widen_u8_f32x4_12(lo1), vs0, vb0), load(q_vecs, qbase+28), zero4)
                     acc = acc .+ fma(fma(widen_u8_f32x4(hi0), vs0, vb0), load(q_vecs, qbase+32), zero4)
-                    acc = acc .+ fma(fma(widen_u8_f32x4(shuffle(hi0, [4,5,6,7,0,0,0,0,0,0,0,0,0,0,0,0])), vs0, vb0), load(q_vecs, qbase+36), zero4)
-                    acc = acc .+ fma(fma(widen_u8_f32x4(shuffle(hi0, [8,9,10,11,0,0,0,0,0,0,0,0,0,0,0,0])), vs0, vb0), load(q_vecs, qbase+40), zero4)
-                    acc = acc .+ fma(fma(widen_u8_f32x4(shuffle(hi0, [12,13,14,15,0,0,0,0,0,0,0,0,0,0,0,0])), vs0, vb0), load(q_vecs, qbase+44), zero4)
+                    acc = acc .+ fma(fma(widen_u8_f32x4_4(hi0), vs0, vb0), load(q_vecs, qbase+36), zero4)
+                    acc = acc .+ fma(fma(widen_u8_f32x4_8(hi0), vs0, vb0), load(q_vecs, qbase+40), zero4)
+                    acc = acc .+ fma(fma(widen_u8_f32x4_12(hi0), vs0, vb0), load(q_vecs, qbase+44), zero4)
                     acc = acc .+ fma(fma(widen_u8_f32x4(hi1), vs0, vb0), load(q_vecs, qbase+48), zero4)
-                    acc = acc .+ fma(fma(widen_u8_f32x4(shuffle(hi1, [4,5,6,7,0,0,0,0,0,0,0,0,0,0,0,0])), vs0, vb0), load(q_vecs, qbase+52), zero4)
-                    acc = acc .+ fma(fma(widen_u8_f32x4(shuffle(hi1, [8,9,10,11,0,0,0,0,0,0,0,0,0,0,0,0])), vs0, vb0), load(q_vecs, qbase+56), zero4)
-                    acc = acc .+ fma(fma(widen_u8_f32x4(shuffle(hi1, [12,13,14,15,0,0,0,0,0,0,0,0,0,0,0,0])), vs0, vb0), load(q_vecs, qbase+60), zero4)
+                    acc = acc .+ fma(fma(widen_u8_f32x4_4(hi1), vs0, vb0), load(q_vecs, qbase+52), zero4)
+                    acc = acc .+ fma(fma(widen_u8_f32x4_8(hi1), vs0, vb0), load(q_vecs, qbase+56), zero4)
+                    acc = acc .+ fma(fma(widen_u8_f32x4_12(hi1), vs0, vb0), load(q_vecs, qbase+60), zero4)
                     // Group 1: lo2+lo3+hi2+hi3 = 64 dims
                     acc = acc .+ fma(fma(widen_u8_f32x4(lo2), vs1, vb1), load(q_vecs, qbase+64), zero4)
-                    acc = acc .+ fma(fma(widen_u8_f32x4(shuffle(lo2, [4,5,6,7,0,0,0,0,0,0,0,0,0,0,0,0])), vs1, vb1), load(q_vecs, qbase+68), zero4)
-                    acc = acc .+ fma(fma(widen_u8_f32x4(shuffle(lo2, [8,9,10,11,0,0,0,0,0,0,0,0,0,0,0,0])), vs1, vb1), load(q_vecs, qbase+72), zero4)
-                    acc = acc .+ fma(fma(widen_u8_f32x4(shuffle(lo2, [12,13,14,15,0,0,0,0,0,0,0,0,0,0,0,0])), vs1, vb1), load(q_vecs, qbase+76), zero4)
+                    acc = acc .+ fma(fma(widen_u8_f32x4_4(lo2), vs1, vb1), load(q_vecs, qbase+68), zero4)
+                    acc = acc .+ fma(fma(widen_u8_f32x4_8(lo2), vs1, vb1), load(q_vecs, qbase+72), zero4)
+                    acc = acc .+ fma(fma(widen_u8_f32x4_12(lo2), vs1, vb1), load(q_vecs, qbase+76), zero4)
                     acc = acc .+ fma(fma(widen_u8_f32x4(lo3), vs1, vb1), load(q_vecs, qbase+80), zero4)
-                    acc = acc .+ fma(fma(widen_u8_f32x4(shuffle(lo3, [4,5,6,7,0,0,0,0,0,0,0,0,0,0,0,0])), vs1, vb1), load(q_vecs, qbase+84), zero4)
-                    acc = acc .+ fma(fma(widen_u8_f32x4(shuffle(lo3, [8,9,10,11,0,0,0,0,0,0,0,0,0,0,0,0])), vs1, vb1), load(q_vecs, qbase+88), zero4)
-                    acc = acc .+ fma(fma(widen_u8_f32x4(shuffle(lo3, [12,13,14,15,0,0,0,0,0,0,0,0,0,0,0,0])), vs1, vb1), load(q_vecs, qbase+92), zero4)
+                    acc = acc .+ fma(fma(widen_u8_f32x4_4(lo3), vs1, vb1), load(q_vecs, qbase+84), zero4)
+                    acc = acc .+ fma(fma(widen_u8_f32x4_8(lo3), vs1, vb1), load(q_vecs, qbase+88), zero4)
+                    acc = acc .+ fma(fma(widen_u8_f32x4_12(lo3), vs1, vb1), load(q_vecs, qbase+92), zero4)
                     acc = acc .+ fma(fma(widen_u8_f32x4(hi2), vs1, vb1), load(q_vecs, qbase+96), zero4)
-                    acc = acc .+ fma(fma(widen_u8_f32x4(shuffle(hi2, [4,5,6,7,0,0,0,0,0,0,0,0,0,0,0,0])), vs1, vb1), load(q_vecs, qbase+100), zero4)
-                    acc = acc .+ fma(fma(widen_u8_f32x4(shuffle(hi2, [8,9,10,11,0,0,0,0,0,0,0,0,0,0,0,0])), vs1, vb1), load(q_vecs, qbase+104), zero4)
-                    acc = acc .+ fma(fma(widen_u8_f32x4(shuffle(hi2, [12,13,14,15,0,0,0,0,0,0,0,0,0,0,0,0])), vs1, vb1), load(q_vecs, qbase+108), zero4)
+                    acc = acc .+ fma(fma(widen_u8_f32x4_4(hi2), vs1, vb1), load(q_vecs, qbase+100), zero4)
+                    acc = acc .+ fma(fma(widen_u8_f32x4_8(hi2), vs1, vb1), load(q_vecs, qbase+104), zero4)
+                    acc = acc .+ fma(fma(widen_u8_f32x4_12(hi2), vs1, vb1), load(q_vecs, qbase+108), zero4)
                     acc = acc .+ fma(fma(widen_u8_f32x4(hi3), vs1, vb1), load(q_vecs, qbase+112), zero4)
-                    acc = acc .+ fma(fma(widen_u8_f32x4(shuffle(hi3, [4,5,6,7,0,0,0,0,0,0,0,0,0,0,0,0])), vs1, vb1), load(q_vecs, qbase+116), zero4)
-                    acc = acc .+ fma(fma(widen_u8_f32x4(shuffle(hi3, [8,9,10,11,0,0,0,0,0,0,0,0,0,0,0,0])), vs1, vb1), load(q_vecs, qbase+120), zero4)
-                    acc = acc .+ fma(fma(widen_u8_f32x4(shuffle(hi3, [12,13,14,15,0,0,0,0,0,0,0,0,0,0,0,0])), vs1, vb1), load(q_vecs, qbase+124), zero4)
+                    acc = acc .+ fma(fma(widen_u8_f32x4_4(hi3), vs1, vb1), load(q_vecs, qbase+116), zero4)
+                    acc = acc .+ fma(fma(widen_u8_f32x4_8(hi3), vs1, vb1), load(q_vecs, qbase+120), zero4)
+                    acc = acc .+ fma(fma(widen_u8_f32x4_12(hi3), vs1, vb1), load(q_vecs, qbase+124), zero4)
 
                     let score: f32 = reduce_add(acc) * rsqrt_d
 
@@ -164,37 +164,37 @@ export func fused_causal_attn_gqa_f32(
 
                     // V accumulate — dequant V inline (reusing packed data)
                     store(state, sb,    fma(fma(widen_u8_f32x4(vlo0), vvs0, vvb0), vw, load(state, sb)))
-                    store(state, sb+4,  fma(fma(widen_u8_f32x4(shuffle(vlo0, [4,5,6,7,0,0,0,0,0,0,0,0,0,0,0,0])), vvs0, vvb0), vw, load(state, sb+4)))
-                    store(state, sb+8,  fma(fma(widen_u8_f32x4(shuffle(vlo0, [8,9,10,11,0,0,0,0,0,0,0,0,0,0,0,0])), vvs0, vvb0), vw, load(state, sb+8)))
-                    store(state, sb+12, fma(fma(widen_u8_f32x4(shuffle(vlo0, [12,13,14,15,0,0,0,0,0,0,0,0,0,0,0,0])), vvs0, vvb0), vw, load(state, sb+12)))
+                    store(state, sb+4,  fma(fma(widen_u8_f32x4_4(vlo0), vvs0, vvb0), vw, load(state, sb+4)))
+                    store(state, sb+8,  fma(fma(widen_u8_f32x4_8(vlo0), vvs0, vvb0), vw, load(state, sb+8)))
+                    store(state, sb+12, fma(fma(widen_u8_f32x4_12(vlo0), vvs0, vvb0), vw, load(state, sb+12)))
                     store(state, sb+16, fma(fma(widen_u8_f32x4(vlo1), vvs0, vvb0), vw, load(state, sb+16)))
-                    store(state, sb+20, fma(fma(widen_u8_f32x4(shuffle(vlo1, [4,5,6,7,0,0,0,0,0,0,0,0,0,0,0,0])), vvs0, vvb0), vw, load(state, sb+20)))
-                    store(state, sb+24, fma(fma(widen_u8_f32x4(shuffle(vlo1, [8,9,10,11,0,0,0,0,0,0,0,0,0,0,0,0])), vvs0, vvb0), vw, load(state, sb+24)))
-                    store(state, sb+28, fma(fma(widen_u8_f32x4(shuffle(vlo1, [12,13,14,15,0,0,0,0,0,0,0,0,0,0,0,0])), vvs0, vvb0), vw, load(state, sb+28)))
+                    store(state, sb+20, fma(fma(widen_u8_f32x4_4(vlo1), vvs0, vvb0), vw, load(state, sb+20)))
+                    store(state, sb+24, fma(fma(widen_u8_f32x4_8(vlo1), vvs0, vvb0), vw, load(state, sb+24)))
+                    store(state, sb+28, fma(fma(widen_u8_f32x4_12(vlo1), vvs0, vvb0), vw, load(state, sb+28)))
                     store(state, sb+32, fma(fma(widen_u8_f32x4(vhi0), vvs0, vvb0), vw, load(state, sb+32)))
-                    store(state, sb+36, fma(fma(widen_u8_f32x4(shuffle(vhi0, [4,5,6,7,0,0,0,0,0,0,0,0,0,0,0,0])), vvs0, vvb0), vw, load(state, sb+36)))
-                    store(state, sb+40, fma(fma(widen_u8_f32x4(shuffle(vhi0, [8,9,10,11,0,0,0,0,0,0,0,0,0,0,0,0])), vvs0, vvb0), vw, load(state, sb+40)))
-                    store(state, sb+44, fma(fma(widen_u8_f32x4(shuffle(vhi0, [12,13,14,15,0,0,0,0,0,0,0,0,0,0,0,0])), vvs0, vvb0), vw, load(state, sb+44)))
+                    store(state, sb+36, fma(fma(widen_u8_f32x4_4(vhi0), vvs0, vvb0), vw, load(state, sb+36)))
+                    store(state, sb+40, fma(fma(widen_u8_f32x4_8(vhi0), vvs0, vvb0), vw, load(state, sb+40)))
+                    store(state, sb+44, fma(fma(widen_u8_f32x4_12(vhi0), vvs0, vvb0), vw, load(state, sb+44)))
                     store(state, sb+48, fma(fma(widen_u8_f32x4(vhi1), vvs0, vvb0), vw, load(state, sb+48)))
-                    store(state, sb+52, fma(fma(widen_u8_f32x4(shuffle(vhi1, [4,5,6,7,0,0,0,0,0,0,0,0,0,0,0,0])), vvs0, vvb0), vw, load(state, sb+52)))
-                    store(state, sb+56, fma(fma(widen_u8_f32x4(shuffle(vhi1, [8,9,10,11,0,0,0,0,0,0,0,0,0,0,0,0])), vvs0, vvb0), vw, load(state, sb+56)))
-                    store(state, sb+60, fma(fma(widen_u8_f32x4(shuffle(vhi1, [12,13,14,15,0,0,0,0,0,0,0,0,0,0,0,0])), vvs0, vvb0), vw, load(state, sb+60)))
+                    store(state, sb+52, fma(fma(widen_u8_f32x4_4(vhi1), vvs0, vvb0), vw, load(state, sb+52)))
+                    store(state, sb+56, fma(fma(widen_u8_f32x4_8(vhi1), vvs0, vvb0), vw, load(state, sb+56)))
+                    store(state, sb+60, fma(fma(widen_u8_f32x4_12(vhi1), vvs0, vvb0), vw, load(state, sb+60)))
                     store(state, sb+64, fma(fma(widen_u8_f32x4(vlo2), vvs1, vvb1), vw, load(state, sb+64)))
-                    store(state, sb+68, fma(fma(widen_u8_f32x4(shuffle(vlo2, [4,5,6,7,0,0,0,0,0,0,0,0,0,0,0,0])), vvs1, vvb1), vw, load(state, sb+68)))
-                    store(state, sb+72, fma(fma(widen_u8_f32x4(shuffle(vlo2, [8,9,10,11,0,0,0,0,0,0,0,0,0,0,0,0])), vvs1, vvb1), vw, load(state, sb+72)))
-                    store(state, sb+76, fma(fma(widen_u8_f32x4(shuffle(vlo2, [12,13,14,15,0,0,0,0,0,0,0,0,0,0,0,0])), vvs1, vvb1), vw, load(state, sb+76)))
+                    store(state, sb+68, fma(fma(widen_u8_f32x4_4(vlo2), vvs1, vvb1), vw, load(state, sb+68)))
+                    store(state, sb+72, fma(fma(widen_u8_f32x4_8(vlo2), vvs1, vvb1), vw, load(state, sb+72)))
+                    store(state, sb+76, fma(fma(widen_u8_f32x4_12(vlo2), vvs1, vvb1), vw, load(state, sb+76)))
                     store(state, sb+80, fma(fma(widen_u8_f32x4(vlo3), vvs1, vvb1), vw, load(state, sb+80)))
-                    store(state, sb+84, fma(fma(widen_u8_f32x4(shuffle(vlo3, [4,5,6,7,0,0,0,0,0,0,0,0,0,0,0,0])), vvs1, vvb1), vw, load(state, sb+84)))
-                    store(state, sb+88, fma(fma(widen_u8_f32x4(shuffle(vlo3, [8,9,10,11,0,0,0,0,0,0,0,0,0,0,0,0])), vvs1, vvb1), vw, load(state, sb+88)))
-                    store(state, sb+92, fma(fma(widen_u8_f32x4(shuffle(vlo3, [12,13,14,15,0,0,0,0,0,0,0,0,0,0,0,0])), vvs1, vvb1), vw, load(state, sb+92)))
+                    store(state, sb+84, fma(fma(widen_u8_f32x4_4(vlo3), vvs1, vvb1), vw, load(state, sb+84)))
+                    store(state, sb+88, fma(fma(widen_u8_f32x4_8(vlo3), vvs1, vvb1), vw, load(state, sb+88)))
+                    store(state, sb+92, fma(fma(widen_u8_f32x4_12(vlo3), vvs1, vvb1), vw, load(state, sb+92)))
                     store(state, sb+96, fma(fma(widen_u8_f32x4(vhi2), vvs1, vvb1), vw, load(state, sb+96)))
-                    store(state, sb+100, fma(fma(widen_u8_f32x4(shuffle(vhi2, [4,5,6,7,0,0,0,0,0,0,0,0,0,0,0,0])), vvs1, vvb1), vw, load(state, sb+100)))
-                    store(state, sb+104, fma(fma(widen_u8_f32x4(shuffle(vhi2, [8,9,10,11,0,0,0,0,0,0,0,0,0,0,0,0])), vvs1, vvb1), vw, load(state, sb+104)))
-                    store(state, sb+108, fma(fma(widen_u8_f32x4(shuffle(vhi2, [12,13,14,15,0,0,0,0,0,0,0,0,0,0,0,0])), vvs1, vvb1), vw, load(state, sb+108)))
+                    store(state, sb+100, fma(fma(widen_u8_f32x4_4(vhi2), vvs1, vvb1), vw, load(state, sb+100)))
+                    store(state, sb+104, fma(fma(widen_u8_f32x4_8(vhi2), vvs1, vvb1), vw, load(state, sb+104)))
+                    store(state, sb+108, fma(fma(widen_u8_f32x4_12(vhi2), vvs1, vvb1), vw, load(state, sb+108)))
                     store(state, sb+112, fma(fma(widen_u8_f32x4(vhi3), vvs1, vvb1), vw, load(state, sb+112)))
-                    store(state, sb+116, fma(fma(widen_u8_f32x4(shuffle(vhi3, [4,5,6,7,0,0,0,0,0,0,0,0,0,0,0,0])), vvs1, vvb1), vw, load(state, sb+116)))
-                    store(state, sb+120, fma(fma(widen_u8_f32x4(shuffle(vhi3, [8,9,10,11,0,0,0,0,0,0,0,0,0,0,0,0])), vvs1, vvb1), vw, load(state, sb+120)))
-                    store(state, sb+124, fma(fma(widen_u8_f32x4(shuffle(vhi3, [12,13,14,15,0,0,0,0,0,0,0,0,0,0,0,0])), vvs1, vvb1), vw, load(state, sb+124)))
+                    store(state, sb+116, fma(fma(widen_u8_f32x4_4(vhi3), vvs1, vvb1), vw, load(state, sb+116)))
+                    store(state, sb+120, fma(fma(widen_u8_f32x4_8(vhi3), vvs1, vvb1), vw, load(state, sb+120)))
+                    store(state, sb+124, fma(fma(widen_u8_f32x4_12(vhi3), vvs1, vvb1), vw, load(state, sb+124)))
 
                     q_off = q_off + 1
                 }

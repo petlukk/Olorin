@@ -17,7 +17,7 @@ export func q4_k_score_gqa_f32(
     groups_per_head: i32
 ) {
     let mask15: u8x16 = splat(15)
-    let div16: u8x16 = splat(16)
+    let shr4: u8x16 = splat(4)
     let rsqrt_d: f32 = 1.0 / sqrt(to_f32(128))
     let q_per_kv: i32 = n_q_heads / n_kv_heads
 
@@ -35,43 +35,31 @@ export func q4_k_score_gqa_f32(
 
             let p0: u8x16 = load(k_packed, wb0)
             let lo0: u8x16 = p0 .& mask15
-            let hi0: u8x16 = p0 ./ div16
+            let hi0: u8x16 = p0 .>> shr4
             let p1: u8x16 = load(k_packed, wb0 + 16)
             let lo1: u8x16 = p1 .& mask15
-            let hi1: u8x16 = p1 ./ div16
+            let hi1: u8x16 = p1 .>> shr4
 
             // K[0..3]
             let k00: f32x4 = fma(widen_u8_f32x4(lo0), vs0, vb0)
-            let slo0a: u8x16 = shuffle(lo0, [4,5,6,7, 0,0,0,0, 0,0,0,0, 0,0,0,0])
-            let k01: f32x4 = fma(widen_u8_f32x4(slo0a), vs0, vb0)
-            let slo0b: u8x16 = shuffle(lo0, [8,9,10,11, 0,0,0,0, 0,0,0,0, 0,0,0,0])
-            let k02: f32x4 = fma(widen_u8_f32x4(slo0b), vs0, vb0)
-            let slo0c: u8x16 = shuffle(lo0, [12,13,14,15, 0,0,0,0, 0,0,0,0, 0,0,0,0])
-            let k03: f32x4 = fma(widen_u8_f32x4(slo0c), vs0, vb0)
+            let k01: f32x4 = fma(widen_u8_f32x4_4(lo0), vs0, vb0)
+            let k02: f32x4 = fma(widen_u8_f32x4_8(lo0), vs0, vb0)
+            let k03: f32x4 = fma(widen_u8_f32x4_12(lo0), vs0, vb0)
 
             let k04: f32x4 = fma(widen_u8_f32x4(lo1), vs0, vb0)
-            let slo1a: u8x16 = shuffle(lo1, [4,5,6,7, 0,0,0,0, 0,0,0,0, 0,0,0,0])
-            let k05: f32x4 = fma(widen_u8_f32x4(slo1a), vs0, vb0)
-            let slo1b: u8x16 = shuffle(lo1, [8,9,10,11, 0,0,0,0, 0,0,0,0, 0,0,0,0])
-            let k06: f32x4 = fma(widen_u8_f32x4(slo1b), vs0, vb0)
-            let slo1c: u8x16 = shuffle(lo1, [12,13,14,15, 0,0,0,0, 0,0,0,0, 0,0,0,0])
-            let k07: f32x4 = fma(widen_u8_f32x4(slo1c), vs0, vb0)
+            let k05: f32x4 = fma(widen_u8_f32x4_4(lo1), vs0, vb0)
+            let k06: f32x4 = fma(widen_u8_f32x4_8(lo1), vs0, vb0)
+            let k07: f32x4 = fma(widen_u8_f32x4_12(lo1), vs0, vb0)
 
             let k08: f32x4 = fma(widen_u8_f32x4(hi0), vs0, vb0)
-            let shi0a: u8x16 = shuffle(hi0, [4,5,6,7, 0,0,0,0, 0,0,0,0, 0,0,0,0])
-            let k09: f32x4 = fma(widen_u8_f32x4(shi0a), vs0, vb0)
-            let shi0b: u8x16 = shuffle(hi0, [8,9,10,11, 0,0,0,0, 0,0,0,0, 0,0,0,0])
-            let k10: f32x4 = fma(widen_u8_f32x4(shi0b), vs0, vb0)
-            let shi0c: u8x16 = shuffle(hi0, [12,13,14,15, 0,0,0,0, 0,0,0,0, 0,0,0,0])
-            let k11: f32x4 = fma(widen_u8_f32x4(shi0c), vs0, vb0)
+            let k09: f32x4 = fma(widen_u8_f32x4_4(hi0), vs0, vb0)
+            let k10: f32x4 = fma(widen_u8_f32x4_8(hi0), vs0, vb0)
+            let k11: f32x4 = fma(widen_u8_f32x4_12(hi0), vs0, vb0)
 
             let k12: f32x4 = fma(widen_u8_f32x4(hi1), vs0, vb0)
-            let shi1a: u8x16 = shuffle(hi1, [4,5,6,7, 0,0,0,0, 0,0,0,0, 0,0,0,0])
-            let k13: f32x4 = fma(widen_u8_f32x4(shi1a), vs0, vb0)
-            let shi1b: u8x16 = shuffle(hi1, [8,9,10,11, 0,0,0,0, 0,0,0,0, 0,0,0,0])
-            let k14: f32x4 = fma(widen_u8_f32x4(shi1b), vs0, vb0)
-            let shi1c: u8x16 = shuffle(hi1, [12,13,14,15, 0,0,0,0, 0,0,0,0, 0,0,0,0])
-            let k15: f32x4 = fma(widen_u8_f32x4(shi1c), vs0, vb0)
+            let k13: f32x4 = fma(widen_u8_f32x4_4(hi1), vs0, vb0)
+            let k14: f32x4 = fma(widen_u8_f32x4_8(hi1), vs0, vb0)
+            let k15: f32x4 = fma(widen_u8_f32x4_12(hi1), vs0, vb0)
 
             // Group 1: K[64..127]
             let g1: i32 = g0 + 1
@@ -81,42 +69,30 @@ export func q4_k_score_gqa_f32(
 
             let p2: u8x16 = load(k_packed, wb1)
             let lo2: u8x16 = p2 .& mask15
-            let hi2: u8x16 = p2 ./ div16
+            let hi2: u8x16 = p2 .>> shr4
             let p3: u8x16 = load(k_packed, wb1 + 16)
             let lo3: u8x16 = p3 .& mask15
-            let hi3: u8x16 = p3 ./ div16
+            let hi3: u8x16 = p3 .>> shr4
 
             let k16: f32x4 = fma(widen_u8_f32x4(lo2), vs1, vb1)
-            let slo2a: u8x16 = shuffle(lo2, [4,5,6,7, 0,0,0,0, 0,0,0,0, 0,0,0,0])
-            let k17: f32x4 = fma(widen_u8_f32x4(slo2a), vs1, vb1)
-            let slo2b: u8x16 = shuffle(lo2, [8,9,10,11, 0,0,0,0, 0,0,0,0, 0,0,0,0])
-            let k18: f32x4 = fma(widen_u8_f32x4(slo2b), vs1, vb1)
-            let slo2c: u8x16 = shuffle(lo2, [12,13,14,15, 0,0,0,0, 0,0,0,0, 0,0,0,0])
-            let k19: f32x4 = fma(widen_u8_f32x4(slo2c), vs1, vb1)
+            let k17: f32x4 = fma(widen_u8_f32x4_4(lo2), vs1, vb1)
+            let k18: f32x4 = fma(widen_u8_f32x4_8(lo2), vs1, vb1)
+            let k19: f32x4 = fma(widen_u8_f32x4_12(lo2), vs1, vb1)
 
             let k20: f32x4 = fma(widen_u8_f32x4(lo3), vs1, vb1)
-            let slo3a: u8x16 = shuffle(lo3, [4,5,6,7, 0,0,0,0, 0,0,0,0, 0,0,0,0])
-            let k21: f32x4 = fma(widen_u8_f32x4(slo3a), vs1, vb1)
-            let slo3b: u8x16 = shuffle(lo3, [8,9,10,11, 0,0,0,0, 0,0,0,0, 0,0,0,0])
-            let k22: f32x4 = fma(widen_u8_f32x4(slo3b), vs1, vb1)
-            let slo3c: u8x16 = shuffle(lo3, [12,13,14,15, 0,0,0,0, 0,0,0,0, 0,0,0,0])
-            let k23: f32x4 = fma(widen_u8_f32x4(slo3c), vs1, vb1)
+            let k21: f32x4 = fma(widen_u8_f32x4_4(lo3), vs1, vb1)
+            let k22: f32x4 = fma(widen_u8_f32x4_8(lo3), vs1, vb1)
+            let k23: f32x4 = fma(widen_u8_f32x4_12(lo3), vs1, vb1)
 
             let k24: f32x4 = fma(widen_u8_f32x4(hi2), vs1, vb1)
-            let shi2a: u8x16 = shuffle(hi2, [4,5,6,7, 0,0,0,0, 0,0,0,0, 0,0,0,0])
-            let k25: f32x4 = fma(widen_u8_f32x4(shi2a), vs1, vb1)
-            let shi2b: u8x16 = shuffle(hi2, [8,9,10,11, 0,0,0,0, 0,0,0,0, 0,0,0,0])
-            let k26: f32x4 = fma(widen_u8_f32x4(shi2b), vs1, vb1)
-            let shi2c: u8x16 = shuffle(hi2, [12,13,14,15, 0,0,0,0, 0,0,0,0, 0,0,0,0])
-            let k27: f32x4 = fma(widen_u8_f32x4(shi2c), vs1, vb1)
+            let k25: f32x4 = fma(widen_u8_f32x4_4(hi2), vs1, vb1)
+            let k26: f32x4 = fma(widen_u8_f32x4_8(hi2), vs1, vb1)
+            let k27: f32x4 = fma(widen_u8_f32x4_12(hi2), vs1, vb1)
 
             let k28: f32x4 = fma(widen_u8_f32x4(hi3), vs1, vb1)
-            let shi3a: u8x16 = shuffle(hi3, [4,5,6,7, 0,0,0,0, 0,0,0,0, 0,0,0,0])
-            let k29: f32x4 = fma(widen_u8_f32x4(shi3a), vs1, vb1)
-            let shi3b: u8x16 = shuffle(hi3, [8,9,10,11, 0,0,0,0, 0,0,0,0, 0,0,0,0])
-            let k30: f32x4 = fma(widen_u8_f32x4(shi3b), vs1, vb1)
-            let shi3c: u8x16 = shuffle(hi3, [12,13,14,15, 0,0,0,0, 0,0,0,0, 0,0,0,0])
-            let k31: f32x4 = fma(widen_u8_f32x4(shi3c), vs1, vb1)
+            let k29: f32x4 = fma(widen_u8_f32x4_4(hi3), vs1, vb1)
+            let k30: f32x4 = fma(widen_u8_f32x4_8(hi3), vs1, vb1)
+            let k31: f32x4 = fma(widen_u8_f32x4_12(hi3), vs1, vb1)
 
             // Dot with each Q head sharing this KV head
             let mut q_off: i32 = 0
@@ -188,7 +164,7 @@ export func q4_v_sum_gqa_f32(
     groups_per_head: i32
 ) {
     let mask15: u8x16 = splat(15)
-    let div16: u8x16 = splat(16)
+    let shr4: u8x16 = splat(4)
     let q_per_kv: i32 = n_q_heads / n_kv_heads
 
     let mut kv_h: i32 = 0
@@ -244,42 +220,30 @@ export func q4_v_sum_gqa_f32(
 
                 let p0: u8x16 = load(v_packed, wb0)
                 let lo0: u8x16 = p0 .& mask15
-                let hi0: u8x16 = p0 ./ div16
+                let hi0: u8x16 = p0 .>> shr4
                 let p1: u8x16 = load(v_packed, wb0 + 16)
                 let lo1: u8x16 = p1 .& mask15
-                let hi1: u8x16 = p1 ./ div16
+                let hi1: u8x16 = p1 .>> shr4
 
                 o00 = fma(fma(widen_u8_f32x4(lo0), vs0, vb0), vw, o00)
-                let a0a: u8x16 = shuffle(lo0, [4,5,6,7, 0,0,0,0, 0,0,0,0, 0,0,0,0])
-                o01 = fma(fma(widen_u8_f32x4(a0a), vs0, vb0), vw, o01)
-                let a0b: u8x16 = shuffle(lo0, [8,9,10,11, 0,0,0,0, 0,0,0,0, 0,0,0,0])
-                o02 = fma(fma(widen_u8_f32x4(a0b), vs0, vb0), vw, o02)
-                let a0c: u8x16 = shuffle(lo0, [12,13,14,15, 0,0,0,0, 0,0,0,0, 0,0,0,0])
-                o03 = fma(fma(widen_u8_f32x4(a0c), vs0, vb0), vw, o03)
+                o01 = fma(fma(widen_u8_f32x4_4(lo0), vs0, vb0), vw, o01)
+                o02 = fma(fma(widen_u8_f32x4_8(lo0), vs0, vb0), vw, o02)
+                o03 = fma(fma(widen_u8_f32x4_12(lo0), vs0, vb0), vw, o03)
 
                 o04 = fma(fma(widen_u8_f32x4(lo1), vs0, vb0), vw, o04)
-                let a1a: u8x16 = shuffle(lo1, [4,5,6,7, 0,0,0,0, 0,0,0,0, 0,0,0,0])
-                o05 = fma(fma(widen_u8_f32x4(a1a), vs0, vb0), vw, o05)
-                let a1b: u8x16 = shuffle(lo1, [8,9,10,11, 0,0,0,0, 0,0,0,0, 0,0,0,0])
-                o06 = fma(fma(widen_u8_f32x4(a1b), vs0, vb0), vw, o06)
-                let a1c: u8x16 = shuffle(lo1, [12,13,14,15, 0,0,0,0, 0,0,0,0, 0,0,0,0])
-                o07 = fma(fma(widen_u8_f32x4(a1c), vs0, vb0), vw, o07)
+                o05 = fma(fma(widen_u8_f32x4_4(lo1), vs0, vb0), vw, o05)
+                o06 = fma(fma(widen_u8_f32x4_8(lo1), vs0, vb0), vw, o06)
+                o07 = fma(fma(widen_u8_f32x4_12(lo1), vs0, vb0), vw, o07)
 
                 o08 = fma(fma(widen_u8_f32x4(hi0), vs0, vb0), vw, o08)
-                let b0a: u8x16 = shuffle(hi0, [4,5,6,7, 0,0,0,0, 0,0,0,0, 0,0,0,0])
-                o09 = fma(fma(widen_u8_f32x4(b0a), vs0, vb0), vw, o09)
-                let b0b: u8x16 = shuffle(hi0, [8,9,10,11, 0,0,0,0, 0,0,0,0, 0,0,0,0])
-                o10 = fma(fma(widen_u8_f32x4(b0b), vs0, vb0), vw, o10)
-                let b0c: u8x16 = shuffle(hi0, [12,13,14,15, 0,0,0,0, 0,0,0,0, 0,0,0,0])
-                o11 = fma(fma(widen_u8_f32x4(b0c), vs0, vb0), vw, o11)
+                o09 = fma(fma(widen_u8_f32x4_4(hi0), vs0, vb0), vw, o09)
+                o10 = fma(fma(widen_u8_f32x4_8(hi0), vs0, vb0), vw, o10)
+                o11 = fma(fma(widen_u8_f32x4_12(hi0), vs0, vb0), vw, o11)
 
                 o12 = fma(fma(widen_u8_f32x4(hi1), vs0, vb0), vw, o12)
-                let b1a: u8x16 = shuffle(hi1, [4,5,6,7, 0,0,0,0, 0,0,0,0, 0,0,0,0])
-                o13 = fma(fma(widen_u8_f32x4(b1a), vs0, vb0), vw, o13)
-                let b1b: u8x16 = shuffle(hi1, [8,9,10,11, 0,0,0,0, 0,0,0,0, 0,0,0,0])
-                o14 = fma(fma(widen_u8_f32x4(b1b), vs0, vb0), vw, o14)
-                let b1c: u8x16 = shuffle(hi1, [12,13,14,15, 0,0,0,0, 0,0,0,0, 0,0,0,0])
-                o15 = fma(fma(widen_u8_f32x4(b1c), vs0, vb0), vw, o15)
+                o13 = fma(fma(widen_u8_f32x4_4(hi1), vs0, vb0), vw, o13)
+                o14 = fma(fma(widen_u8_f32x4_8(hi1), vs0, vb0), vw, o14)
+                o15 = fma(fma(widen_u8_f32x4_12(hi1), vs0, vb0), vw, o15)
 
                 let g1: i32 = g0 + 1
                 let vs1: f32x4 = splat(v_scales[g1])
@@ -288,42 +252,30 @@ export func q4_v_sum_gqa_f32(
 
                 let p2: u8x16 = load(v_packed, wb1)
                 let lo2: u8x16 = p2 .& mask15
-                let hi2: u8x16 = p2 ./ div16
+                let hi2: u8x16 = p2 .>> shr4
                 let p3: u8x16 = load(v_packed, wb1 + 16)
                 let lo3: u8x16 = p3 .& mask15
-                let hi3: u8x16 = p3 ./ div16
+                let hi3: u8x16 = p3 .>> shr4
 
                 o16 = fma(fma(widen_u8_f32x4(lo2), vs1, vb1), vw, o16)
-                let c0a: u8x16 = shuffle(lo2, [4,5,6,7, 0,0,0,0, 0,0,0,0, 0,0,0,0])
-                o17 = fma(fma(widen_u8_f32x4(c0a), vs1, vb1), vw, o17)
-                let c0b: u8x16 = shuffle(lo2, [8,9,10,11, 0,0,0,0, 0,0,0,0, 0,0,0,0])
-                o18 = fma(fma(widen_u8_f32x4(c0b), vs1, vb1), vw, o18)
-                let c0c: u8x16 = shuffle(lo2, [12,13,14,15, 0,0,0,0, 0,0,0,0, 0,0,0,0])
-                o19 = fma(fma(widen_u8_f32x4(c0c), vs1, vb1), vw, o19)
+                o17 = fma(fma(widen_u8_f32x4_4(lo2), vs1, vb1), vw, o17)
+                o18 = fma(fma(widen_u8_f32x4_8(lo2), vs1, vb1), vw, o18)
+                o19 = fma(fma(widen_u8_f32x4_12(lo2), vs1, vb1), vw, o19)
 
                 o20 = fma(fma(widen_u8_f32x4(lo3), vs1, vb1), vw, o20)
-                let c1a: u8x16 = shuffle(lo3, [4,5,6,7, 0,0,0,0, 0,0,0,0, 0,0,0,0])
-                o21 = fma(fma(widen_u8_f32x4(c1a), vs1, vb1), vw, o21)
-                let c1b: u8x16 = shuffle(lo3, [8,9,10,11, 0,0,0,0, 0,0,0,0, 0,0,0,0])
-                o22 = fma(fma(widen_u8_f32x4(c1b), vs1, vb1), vw, o22)
-                let c1c: u8x16 = shuffle(lo3, [12,13,14,15, 0,0,0,0, 0,0,0,0, 0,0,0,0])
-                o23 = fma(fma(widen_u8_f32x4(c1c), vs1, vb1), vw, o23)
+                o21 = fma(fma(widen_u8_f32x4_4(lo3), vs1, vb1), vw, o21)
+                o22 = fma(fma(widen_u8_f32x4_8(lo3), vs1, vb1), vw, o22)
+                o23 = fma(fma(widen_u8_f32x4_12(lo3), vs1, vb1), vw, o23)
 
                 o24 = fma(fma(widen_u8_f32x4(hi2), vs1, vb1), vw, o24)
-                let d0a: u8x16 = shuffle(hi2, [4,5,6,7, 0,0,0,0, 0,0,0,0, 0,0,0,0])
-                o25 = fma(fma(widen_u8_f32x4(d0a), vs1, vb1), vw, o25)
-                let d0b: u8x16 = shuffle(hi2, [8,9,10,11, 0,0,0,0, 0,0,0,0, 0,0,0,0])
-                o26 = fma(fma(widen_u8_f32x4(d0b), vs1, vb1), vw, o26)
-                let d0c: u8x16 = shuffle(hi2, [12,13,14,15, 0,0,0,0, 0,0,0,0, 0,0,0,0])
-                o27 = fma(fma(widen_u8_f32x4(d0c), vs1, vb1), vw, o27)
+                o25 = fma(fma(widen_u8_f32x4_4(hi2), vs1, vb1), vw, o25)
+                o26 = fma(fma(widen_u8_f32x4_8(hi2), vs1, vb1), vw, o26)
+                o27 = fma(fma(widen_u8_f32x4_12(hi2), vs1, vb1), vw, o27)
 
                 o28 = fma(fma(widen_u8_f32x4(hi3), vs1, vb1), vw, o28)
-                let d1a: u8x16 = shuffle(hi3, [4,5,6,7, 0,0,0,0, 0,0,0,0, 0,0,0,0])
-                o29 = fma(fma(widen_u8_f32x4(d1a), vs1, vb1), vw, o29)
-                let d1b: u8x16 = shuffle(hi3, [8,9,10,11, 0,0,0,0, 0,0,0,0, 0,0,0,0])
-                o30 = fma(fma(widen_u8_f32x4(d1b), vs1, vb1), vw, o30)
-                let d1c: u8x16 = shuffle(hi3, [12,13,14,15, 0,0,0,0, 0,0,0,0, 0,0,0,0])
-                o31 = fma(fma(widen_u8_f32x4(d1c), vs1, vb1), vw, o31)
+                o29 = fma(fma(widen_u8_f32x4_4(hi3), vs1, vb1), vw, o29)
+                o30 = fma(fma(widen_u8_f32x4_8(hi3), vs1, vb1), vw, o30)
+                o31 = fma(fma(widen_u8_f32x4_12(hi3), vs1, vb1), vw, o31)
 
                 t = t + 1
             }

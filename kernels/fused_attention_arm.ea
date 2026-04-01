@@ -19,7 +19,7 @@ export func q4_fused_attention_multi_f32(
     groups_per_head: i32
 ) {
     let mask15: u8x16 = splat(15)
-    let div16: u8x16 = splat(16)
+    let shr4: u8x16 = splat(4)
     let rsqrt_d: f32 = 1.0 / sqrt(to_f32(128))
 
     let mut h: i32 = 0
@@ -43,46 +43,42 @@ export func q4_fused_attention_multi_f32(
 
                 let p0: u8x16 = load(k_packed, wb)
                 let lo0: u8x16 = p0 .& mask15
-                let hi0: u8x16 = p0 ./ div16
+                let hi0: u8x16 = p0 .>> shr4
                 let p1: u8x16 = load(k_packed, wb + 16)
                 let lo1: u8x16 = p1 .& mask15
-                let hi1: u8x16 = p1 ./ div16
+                let hi1: u8x16 = p1 .>> shr4
 
                 // lo0: 16 nibbles → 4 × f32x4 chunks (dims 0-15)
                 let lo0h: u8x16 = shuffle(lo0, [4,5,6,7,8,9,10,11,12,13,14,15,0,0,0,0])
                 let lo0c: u8x16 = shuffle(lo0, [8,9,10,11,12,13,14,15,0,0,0,0,0,0,0,0])
-                let lo0d: u8x16 = shuffle(lo0, [12,13,14,15,0,0,0,0,0,0,0,0,0,0,0,0])
                 dot = dot + reduce_add(fma(widen_u8_f32x4(lo0), vs, vb) .* load(q_vecs, qo))
                 dot = dot + reduce_add(fma(widen_u8_f32x4(lo0h), vs, vb) .* load(q_vecs, qo + 4))
                 dot = dot + reduce_add(fma(widen_u8_f32x4(lo0c), vs, vb) .* load(q_vecs, qo + 8))
-                dot = dot + reduce_add(fma(widen_u8_f32x4(lo0d), vs, vb) .* load(q_vecs, qo + 12))
+                dot = dot + reduce_add(fma(widen_u8_f32x4_12(lo0), vs, vb) .* load(q_vecs, qo + 12))
 
                 // lo1: dims 16-31
                 let lo1h: u8x16 = shuffle(lo1, [4,5,6,7,8,9,10,11,12,13,14,15,0,0,0,0])
                 let lo1c: u8x16 = shuffle(lo1, [8,9,10,11,12,13,14,15,0,0,0,0,0,0,0,0])
-                let lo1d: u8x16 = shuffle(lo1, [12,13,14,15,0,0,0,0,0,0,0,0,0,0,0,0])
                 dot = dot + reduce_add(fma(widen_u8_f32x4(lo1), vs, vb) .* load(q_vecs, qo + 16))
                 dot = dot + reduce_add(fma(widen_u8_f32x4(lo1h), vs, vb) .* load(q_vecs, qo + 20))
                 dot = dot + reduce_add(fma(widen_u8_f32x4(lo1c), vs, vb) .* load(q_vecs, qo + 24))
-                dot = dot + reduce_add(fma(widen_u8_f32x4(lo1d), vs, vb) .* load(q_vecs, qo + 28))
+                dot = dot + reduce_add(fma(widen_u8_f32x4_12(lo1), vs, vb) .* load(q_vecs, qo + 28))
 
                 // hi0: dims 32-47
                 let hi0h: u8x16 = shuffle(hi0, [4,5,6,7,8,9,10,11,12,13,14,15,0,0,0,0])
                 let hi0c: u8x16 = shuffle(hi0, [8,9,10,11,12,13,14,15,0,0,0,0,0,0,0,0])
-                let hi0d: u8x16 = shuffle(hi0, [12,13,14,15,0,0,0,0,0,0,0,0,0,0,0,0])
                 dot = dot + reduce_add(fma(widen_u8_f32x4(hi0), vs, vb) .* load(q_vecs, qo + 32))
                 dot = dot + reduce_add(fma(widen_u8_f32x4(hi0h), vs, vb) .* load(q_vecs, qo + 36))
                 dot = dot + reduce_add(fma(widen_u8_f32x4(hi0c), vs, vb) .* load(q_vecs, qo + 40))
-                dot = dot + reduce_add(fma(widen_u8_f32x4(hi0d), vs, vb) .* load(q_vecs, qo + 44))
+                dot = dot + reduce_add(fma(widen_u8_f32x4_12(hi0), vs, vb) .* load(q_vecs, qo + 44))
 
                 // hi1: dims 48-63
                 let hi1h: u8x16 = shuffle(hi1, [4,5,6,7,8,9,10,11,12,13,14,15,0,0,0,0])
                 let hi1c: u8x16 = shuffle(hi1, [8,9,10,11,12,13,14,15,0,0,0,0,0,0,0,0])
-                let hi1d: u8x16 = shuffle(hi1, [12,13,14,15,0,0,0,0,0,0,0,0,0,0,0,0])
                 dot = dot + reduce_add(fma(widen_u8_f32x4(hi1), vs, vb) .* load(q_vecs, qo + 48))
                 dot = dot + reduce_add(fma(widen_u8_f32x4(hi1h), vs, vb) .* load(q_vecs, qo + 52))
                 dot = dot + reduce_add(fma(widen_u8_f32x4(hi1c), vs, vb) .* load(q_vecs, qo + 56))
-                dot = dot + reduce_add(fma(widen_u8_f32x4(hi1d), vs, vb) .* load(q_vecs, qo + 60))
+                dot = dot + reduce_add(fma(widen_u8_f32x4_12(hi1), vs, vb) .* load(q_vecs, qo + 60))
 
                 g = g + 1
             }
@@ -124,39 +120,35 @@ export func q4_fused_attention_multi_f32(
 
                 let p0: u8x16 = load(k_packed, wb)
                 let lo0: u8x16 = p0 .& mask15
-                let hi0: u8x16 = p0 ./ div16
+                let hi0: u8x16 = p0 .>> shr4
                 let p1: u8x16 = load(k_packed, wb + 16)
                 let lo1: u8x16 = p1 .& mask15
-                let hi1: u8x16 = p1 ./ div16
+                let hi1: u8x16 = p1 .>> shr4
 
                 let lo0h: u8x16 = shuffle(lo0, [4,5,6,7,8,9,10,11,12,13,14,15,0,0,0,0])
                 let lo0c: u8x16 = shuffle(lo0, [8,9,10,11,12,13,14,15,0,0,0,0,0,0,0,0])
-                let lo0d: u8x16 = shuffle(lo0, [12,13,14,15,0,0,0,0,0,0,0,0,0,0,0,0])
                 dot = dot + reduce_add(fma(widen_u8_f32x4(lo0), vs, vb) .* load(q_vecs, qo))
                 dot = dot + reduce_add(fma(widen_u8_f32x4(lo0h), vs, vb) .* load(q_vecs, qo + 4))
                 dot = dot + reduce_add(fma(widen_u8_f32x4(lo0c), vs, vb) .* load(q_vecs, qo + 8))
-                dot = dot + reduce_add(fma(widen_u8_f32x4(lo0d), vs, vb) .* load(q_vecs, qo + 12))
+                dot = dot + reduce_add(fma(widen_u8_f32x4_12(lo0), vs, vb) .* load(q_vecs, qo + 12))
                 let lo1h: u8x16 = shuffle(lo1, [4,5,6,7,8,9,10,11,12,13,14,15,0,0,0,0])
                 let lo1c: u8x16 = shuffle(lo1, [8,9,10,11,12,13,14,15,0,0,0,0,0,0,0,0])
-                let lo1d: u8x16 = shuffle(lo1, [12,13,14,15,0,0,0,0,0,0,0,0,0,0,0,0])
                 dot = dot + reduce_add(fma(widen_u8_f32x4(lo1), vs, vb) .* load(q_vecs, qo + 16))
                 dot = dot + reduce_add(fma(widen_u8_f32x4(lo1h), vs, vb) .* load(q_vecs, qo + 20))
                 dot = dot + reduce_add(fma(widen_u8_f32x4(lo1c), vs, vb) .* load(q_vecs, qo + 24))
-                dot = dot + reduce_add(fma(widen_u8_f32x4(lo1d), vs, vb) .* load(q_vecs, qo + 28))
+                dot = dot + reduce_add(fma(widen_u8_f32x4_12(lo1), vs, vb) .* load(q_vecs, qo + 28))
                 let hi0h: u8x16 = shuffle(hi0, [4,5,6,7,8,9,10,11,12,13,14,15,0,0,0,0])
                 let hi0c: u8x16 = shuffle(hi0, [8,9,10,11,12,13,14,15,0,0,0,0,0,0,0,0])
-                let hi0d: u8x16 = shuffle(hi0, [12,13,14,15,0,0,0,0,0,0,0,0,0,0,0,0])
                 dot = dot + reduce_add(fma(widen_u8_f32x4(hi0), vs, vb) .* load(q_vecs, qo + 32))
                 dot = dot + reduce_add(fma(widen_u8_f32x4(hi0h), vs, vb) .* load(q_vecs, qo + 36))
                 dot = dot + reduce_add(fma(widen_u8_f32x4(hi0c), vs, vb) .* load(q_vecs, qo + 40))
-                dot = dot + reduce_add(fma(widen_u8_f32x4(hi0d), vs, vb) .* load(q_vecs, qo + 44))
+                dot = dot + reduce_add(fma(widen_u8_f32x4_12(hi0), vs, vb) .* load(q_vecs, qo + 44))
                 let hi1h: u8x16 = shuffle(hi1, [4,5,6,7,8,9,10,11,12,13,14,15,0,0,0,0])
                 let hi1c: u8x16 = shuffle(hi1, [8,9,10,11,12,13,14,15,0,0,0,0,0,0,0,0])
-                let hi1d: u8x16 = shuffle(hi1, [12,13,14,15,0,0,0,0,0,0,0,0,0,0,0,0])
                 dot = dot + reduce_add(fma(widen_u8_f32x4(hi1), vs, vb) .* load(q_vecs, qo + 48))
                 dot = dot + reduce_add(fma(widen_u8_f32x4(hi1h), vs, vb) .* load(q_vecs, qo + 52))
                 dot = dot + reduce_add(fma(widen_u8_f32x4(hi1c), vs, vb) .* load(q_vecs, qo + 56))
-                dot = dot + reduce_add(fma(widen_u8_f32x4(hi1d), vs, vb) .* load(q_vecs, qo + 60))
+                dot = dot + reduce_add(fma(widen_u8_f32x4_12(hi1), vs, vb) .* load(q_vecs, qo + 60))
 
                 g = g + 1
             }
@@ -176,43 +168,41 @@ export func q4_fused_attention_multi_f32(
 
                 let vp0: u8x16 = load(v_packed, vwb)
                 let vlo0: u8x16 = vp0 .& mask15
-                let vhi0: u8x16 = vp0 ./ div16
+                let vhi0: u8x16 = vp0 .>> shr4
                 let vp1: u8x16 = load(v_packed, vwb + 16)
                 let vlo1: u8x16 = vp1 .& mask15
-                let vhi1: u8x16 = vp1 ./ div16
+                let vhi1: u8x16 = vp1 .>> shr4
 
                 // 16 dims from lo0
                 let vlo0h: u8x16 = shuffle(vlo0, [4,5,6,7,8,9,10,11,12,13,14,15,0,0,0,0])
                 let vlo0c: u8x16 = shuffle(vlo0, [8,9,10,11,12,13,14,15,0,0,0,0,0,0,0,0])
-                let vlo0d: u8x16 = shuffle(vlo0, [12,13,14,15,0,0,0,0,0,0,0,0,0,0,0,0])
 
                 // Accumulate into o[oo..oo+3] based on group
                 if g == 0 {
                     o0 = fma(fma(widen_u8_f32x4(vlo0), vvs, vvb), wv, o0)
                     o1 = fma(fma(widen_u8_f32x4(vlo0h), vvs, vvb), wv, o1)
                     o2 = fma(fma(widen_u8_f32x4(vlo0c), vvs, vvb), wv, o2)
-                    o3 = fma(fma(widen_u8_f32x4(vlo0d), vvs, vvb), wv, o3)
+                    o3 = fma(fma(widen_u8_f32x4_12(vlo0), vvs, vvb), wv, o3)
                 } else {
                     o8 = fma(fma(widen_u8_f32x4(vlo0), vvs, vvb), wv, o8)
                     o9 = fma(fma(widen_u8_f32x4(vlo0h), vvs, vvb), wv, o9)
                     o10 = fma(fma(widen_u8_f32x4(vlo0c), vvs, vvb), wv, o10)
-                    o11 = fma(fma(widen_u8_f32x4(vlo0d), vvs, vvb), wv, o11)
+                    o11 = fma(fma(widen_u8_f32x4_12(vlo0), vvs, vvb), wv, o11)
                 }
 
                 // 16 dims from lo1
                 let vlo1h: u8x16 = shuffle(vlo1, [4,5,6,7,8,9,10,11,12,13,14,15,0,0,0,0])
                 let vlo1c: u8x16 = shuffle(vlo1, [8,9,10,11,12,13,14,15,0,0,0,0,0,0,0,0])
-                let vlo1d: u8x16 = shuffle(vlo1, [12,13,14,15,0,0,0,0,0,0,0,0,0,0,0,0])
                 if g == 0 {
                     o4 = fma(fma(widen_u8_f32x4(vlo1), vvs, vvb), wv, o4)
                     o5 = fma(fma(widen_u8_f32x4(vlo1h), vvs, vvb), wv, o5)
                     o6 = fma(fma(widen_u8_f32x4(vlo1c), vvs, vvb), wv, o6)
-                    o7 = fma(fma(widen_u8_f32x4(vlo1d), vvs, vvb), wv, o7)
+                    o7 = fma(fma(widen_u8_f32x4_12(vlo1), vvs, vvb), wv, o7)
                 } else {
                     o12 = fma(fma(widen_u8_f32x4(vlo1), vvs, vvb), wv, o12)
                     o13 = fma(fma(widen_u8_f32x4(vlo1h), vvs, vvb), wv, o13)
                     o14 = fma(fma(widen_u8_f32x4(vlo1c), vvs, vvb), wv, o14)
-                    o15 = fma(fma(widen_u8_f32x4(vlo1d), vvs, vvb), wv, o15)
+                    o15 = fma(fma(widen_u8_f32x4_12(vlo1), vvs, vvb), wv, o15)
                 }
 
                 // hi0: 16 dims → out[32..47] or out[96..111]
