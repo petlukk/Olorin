@@ -1,15 +1,8 @@
 // q4k_dot_arm.ea — ARM NEON Q4_K × Q8_K dot product kernel
 //
-// ARM NEON port of q4k_dot.ea. Same algorithm, different intrinsic:
-// vdot_i32(i8x16, i8x16) -> i32x4 maps to ARM vdotq_s32 (ARMv8.2-A+).
-//
-// Q4_K nibbles are 0-15, which fit in signed i8 — no bias correction needed.
-// Unlike x86 (logical shift on u8), ARM arithmetic shift on i8 requires
-// masking after high nibble extraction: (q4v >> 4) & 0x0F.
-//
-// Q4 weight pointer is *i8 (bit-identical to u8 data, reinterpreted for vdot).
-// d_arr/dmin_arr: per-block pre-multiplied scale arrays (length n_blocks).
-// q4_off uses raw Q4K stride (144 bytes/block, nibbles at offset 16).
+// Optimized: scale multiplication stays in i32x4 vector domain.
+// reduce_add called once per row per block instead of once per scale group.
+// Q4 nibbles 0-15, signed i8 domain. vdotq_s32 (ARMv8.2-A+).
 
 #[cfg(aarch64)]
 
@@ -35,41 +28,32 @@ export func q4k_dot_q8k(
         let sc_off: i32 = blk * 8
         let bs_off: i32 = blk * 16
 
-        let mut sumi: i32 = 0
+        let mut vacc: i32x4 = splat(0)
 
         let mut j: i32 = 0
         while j < 4 {
-            let mut acc_lo: i32x4 = splat(0)
-            let mut half: i32 = 0
-            while half < 2 {
-                let q4v: i8x16 = load(q4, q4_off + j * 32 + half * 16)
-                let q4_lo: i8x16 = q4v .& mask_lo
-                let q8v: i8x16 = load(q8, q8_off + j * 64 + half * 16)
-                acc_lo = acc_lo .+ vdot_i32(q4_lo, q8v)
-                half = half + 1
-            }
-            sumi = sumi + reduce_add(acc_lo) * to_i32(scales[sc_off + 2 * j])
+            let p0: i8x16 = load(q4, q4_off + j * 32)
+            let p1: i8x16 = load(q4, q4_off + j * 32 + 16)
+            let q8_a: i8x16 = load(q8, q8_off + j * 64)
+            let q8_b: i8x16 = load(q8, q8_off + j * 64 + 16)
+            let q8_c: i8x16 = load(q8, q8_off + j * 64 + 32)
+            let q8_d: i8x16 = load(q8, q8_off + j * 64 + 48)
 
-            let mut acc_hi: i32x4 = splat(0)
-            half = 0
-            while half < 2 {
-                let q4v2: i8x16 = load(q4, q4_off + j * 32 + half * 16)
-                let q4_hi: i8x16 = (q4v2 .>> shift4) .& mask_lo
-                let q8v2: i8x16 = load(q8, q8_off + j * 64 + 32 + half * 16)
-                acc_hi = acc_hi .+ vdot_i32(q4_hi, q8v2)
-                half = half + 1
-            }
-            sumi = sumi + reduce_add(acc_hi) * to_i32(scales[sc_off + 2 * j + 1])
+            let lo: i32x4 = vdot_i32(p0 .& mask_lo, q8_a) .+ vdot_i32(p1 .& mask_lo, q8_b)
+            vacc = vacc .+ lo .* splat(to_i32(scales[sc_off + 2 * j]))
+
+            let hi: i32x4 = vdot_i32((p0 .>> shift4) .& mask_lo, q8_c) .+ vdot_i32((p1 .>> shift4) .& mask_lo, q8_d)
+            vacc = vacc .+ hi .* splat(to_i32(scales[sc_off + 2 * j + 1]))
 
             j = j + 1
         }
 
+        let sumi: i32 = reduce_add(vacc)
+
         let mut summs: i32 = 0
         j = 0
         while j < 8 {
-            let m: i32 = to_i32(mins[sc_off + j])
-            let bs_pair: i32 = bsums[bs_off + 2 * j] + bsums[bs_off + 2 * j + 1]
-            summs = summs + m * bs_pair
+            summs = summs + to_i32(mins[sc_off + j]) * (bsums[bs_off + 2 * j] + bsums[bs_off + 2 * j + 1])
             j = j + 1
         }
 
@@ -81,6 +65,7 @@ export func q4k_dot_q8k(
 }
 
 // 4-row Q4_K × Q8_K dot product: 4 weight rows × shared activations.
+// Vector-domain scale accumulation: 4 reduces per block instead of 32.
 export func q4k_dot_q8k_4row(
     rw0: *restrict i8, rw1: *restrict i8, rw2: *restrict i8, rw3: *restrict i8,
     q8: *restrict i8,
@@ -106,44 +91,54 @@ export func q4k_dot_q8k_4row(
         let sc_off: i32 = blk * 8
         let bs_off: i32 = blk * 16
 
-        let mut sumi0: i32 = 0
-        let mut sumi1: i32 = 0
-        let mut sumi2: i32 = 0
-        let mut sumi3: i32 = 0
+        let mut vacc0: i32x4 = splat(0)
+        let mut vacc1: i32x4 = splat(0)
+        let mut vacc2: i32x4 = splat(0)
+        let mut vacc3: i32x4 = splat(0)
 
         let mut j: i32 = 0
         while j < 4 {
-            let q8_a0: i8x16 = load(q8, q8_off + j * 64)
-            let q8_a1: i8x16 = load(q8, q8_off + j * 64 + 16)
-            let q8_b0: i8x16 = load(q8, q8_off + j * 64 + 32)
-            let q8_b1: i8x16 = load(q8, q8_off + j * 64 + 48)
+            let q8_a: i8x16 = load(q8, q8_off + j * 64)
+            let q8_b: i8x16 = load(q8, q8_off + j * 64 + 16)
+            let q8_c: i8x16 = load(q8, q8_off + j * 64 + 32)
+            let q8_d: i8x16 = load(q8, q8_off + j * 64 + 48)
+
+            let s_lo0: i32x4 = splat(to_i32(sc0[sc_off + 2*j]))
+            let s_hi0: i32x4 = splat(to_i32(sc0[sc_off + 2*j + 1]))
+            let s_lo1: i32x4 = splat(to_i32(sc1[sc_off + 2*j]))
+            let s_hi1: i32x4 = splat(to_i32(sc1[sc_off + 2*j + 1]))
+            let s_lo2: i32x4 = splat(to_i32(sc2[sc_off + 2*j]))
+            let s_hi2: i32x4 = splat(to_i32(sc2[sc_off + 2*j + 1]))
+            let s_lo3: i32x4 = splat(to_i32(sc3[sc_off + 2*j]))
+            let s_hi3: i32x4 = splat(to_i32(sc3[sc_off + 2*j + 1]))
 
             let p0a: i8x16 = load(rw0, q4_off + j * 32)
             let p0b: i8x16 = load(rw0, q4_off + j * 32 + 16)
-            let d0_lo: i32 = reduce_add(vdot_i32(p0a .& mask_lo, q8_a0) .+ vdot_i32(p0b .& mask_lo, q8_a1))
-            let d0_hi: i32 = reduce_add(vdot_i32((p0a .>> shift4) .& mask_lo, q8_b0) .+ vdot_i32((p0b .>> shift4) .& mask_lo, q8_b1))
-            sumi0 = sumi0 + d0_lo * to_i32(sc0[sc_off + 2*j]) + d0_hi * to_i32(sc0[sc_off + 2*j + 1])
+            vacc0 = vacc0 .+ (vdot_i32(p0a .& mask_lo, q8_a) .+ vdot_i32(p0b .& mask_lo, q8_b)) .* s_lo0
+            vacc0 = vacc0 .+ (vdot_i32((p0a .>> shift4) .& mask_lo, q8_c) .+ vdot_i32((p0b .>> shift4) .& mask_lo, q8_d)) .* s_hi0
 
             let p1a: i8x16 = load(rw1, q4_off + j * 32)
             let p1b: i8x16 = load(rw1, q4_off + j * 32 + 16)
-            let d1_lo: i32 = reduce_add(vdot_i32(p1a .& mask_lo, q8_a0) .+ vdot_i32(p1b .& mask_lo, q8_a1))
-            let d1_hi: i32 = reduce_add(vdot_i32((p1a .>> shift4) .& mask_lo, q8_b0) .+ vdot_i32((p1b .>> shift4) .& mask_lo, q8_b1))
-            sumi1 = sumi1 + d1_lo * to_i32(sc1[sc_off + 2*j]) + d1_hi * to_i32(sc1[sc_off + 2*j + 1])
+            vacc1 = vacc1 .+ (vdot_i32(p1a .& mask_lo, q8_a) .+ vdot_i32(p1b .& mask_lo, q8_b)) .* s_lo1
+            vacc1 = vacc1 .+ (vdot_i32((p1a .>> shift4) .& mask_lo, q8_c) .+ vdot_i32((p1b .>> shift4) .& mask_lo, q8_d)) .* s_hi1
 
             let p2a: i8x16 = load(rw2, q4_off + j * 32)
             let p2b: i8x16 = load(rw2, q4_off + j * 32 + 16)
-            let d2_lo: i32 = reduce_add(vdot_i32(p2a .& mask_lo, q8_a0) .+ vdot_i32(p2b .& mask_lo, q8_a1))
-            let d2_hi: i32 = reduce_add(vdot_i32((p2a .>> shift4) .& mask_lo, q8_b0) .+ vdot_i32((p2b .>> shift4) .& mask_lo, q8_b1))
-            sumi2 = sumi2 + d2_lo * to_i32(sc2[sc_off + 2*j]) + d2_hi * to_i32(sc2[sc_off + 2*j + 1])
+            vacc2 = vacc2 .+ (vdot_i32(p2a .& mask_lo, q8_a) .+ vdot_i32(p2b .& mask_lo, q8_b)) .* s_lo2
+            vacc2 = vacc2 .+ (vdot_i32((p2a .>> shift4) .& mask_lo, q8_c) .+ vdot_i32((p2b .>> shift4) .& mask_lo, q8_d)) .* s_hi2
 
             let p3a: i8x16 = load(rw3, q4_off + j * 32)
             let p3b: i8x16 = load(rw3, q4_off + j * 32 + 16)
-            let d3_lo: i32 = reduce_add(vdot_i32(p3a .& mask_lo, q8_a0) .+ vdot_i32(p3b .& mask_lo, q8_a1))
-            let d3_hi: i32 = reduce_add(vdot_i32((p3a .>> shift4) .& mask_lo, q8_b0) .+ vdot_i32((p3b .>> shift4) .& mask_lo, q8_b1))
-            sumi3 = sumi3 + d3_lo * to_i32(sc3[sc_off + 2*j]) + d3_hi * to_i32(sc3[sc_off + 2*j + 1])
+            vacc3 = vacc3 .+ (vdot_i32(p3a .& mask_lo, q8_a) .+ vdot_i32(p3b .& mask_lo, q8_b)) .* s_lo3
+            vacc3 = vacc3 .+ (vdot_i32((p3a .>> shift4) .& mask_lo, q8_c) .+ vdot_i32((p3b .>> shift4) .& mask_lo, q8_d)) .* s_hi3
 
             j = j + 1
         }
+
+        let sumi0: i32 = reduce_add(vacc0)
+        let sumi1: i32 = reduce_add(vacc1)
+        let sumi2: i32 = reduce_add(vacc2)
+        let sumi3: i32 = reduce_add(vacc3)
 
         let mut summs0: i32 = 0
         let mut summs1: i32 = 0
@@ -173,7 +168,8 @@ export func q4k_dot_q8k_4row(
     scores[3] = res3
 }
 
-// Dual 4-row Q4_K × Q8_K: 4 gate rows + 4 up rows × shared activations.
+// Dual 4-row: 4 gate + 4 up rows × shared activations.
+// 8 vector accumulators, 8 reduces per block instead of 64.
 export func q4k_dot_q8k_4row_dual(
     gw0: *restrict i8, gw1: *restrict i8, gw2: *restrict i8, gw3: *restrict i8,
     uw0: *restrict i8, uw1: *restrict i8, uw2: *restrict i8, uw3: *restrict i8,
@@ -209,68 +205,90 @@ export func q4k_dot_q8k_4row_dual(
         let sc_off: i32 = blk * 8
         let bs_off: i32 = blk * 16
 
-        let mut gs0: i32 = 0
-        let mut gs1: i32 = 0
-        let mut gs2: i32 = 0
-        let mut gs3: i32 = 0
-        let mut us0: i32 = 0
-        let mut us1: i32 = 0
-        let mut us2: i32 = 0
-        let mut us3: i32 = 0
+        let mut gv0: i32x4 = splat(0)
+        let mut gv1: i32x4 = splat(0)
+        let mut gv2: i32x4 = splat(0)
+        let mut gv3: i32x4 = splat(0)
+        let mut uv0: i32x4 = splat(0)
+        let mut uv1: i32x4 = splat(0)
+        let mut uv2: i32x4 = splat(0)
+        let mut uv3: i32x4 = splat(0)
 
         let mut j: i32 = 0
         while j < 4 {
-            let q8_a0: i8x16 = load(q8, q8_off + j * 64)
-            let q8_a1: i8x16 = load(q8, q8_off + j * 64 + 16)
-            let q8_b0: i8x16 = load(q8, q8_off + j * 64 + 32)
-            let q8_b1: i8x16 = load(q8, q8_off + j * 64 + 48)
+            let q8_a: i8x16 = load(q8, q8_off + j * 64)
+            let q8_b: i8x16 = load(q8, q8_off + j * 64 + 16)
+            let q8_c: i8x16 = load(q8, q8_off + j * 64 + 32)
+            let q8_d: i8x16 = load(q8, q8_off + j * 64 + 48)
 
+            // Row 0: gate + up
             let gp0a: i8x16 = load(gw0, q4_off + j * 32)
             let gp0b: i8x16 = load(gw0, q4_off + j * 32 + 16)
             let up0a: i8x16 = load(uw0, q4_off + j * 32)
             let up0b: i8x16 = load(uw0, q4_off + j * 32 + 16)
-            let gv0_lo: i32 = reduce_add(vdot_i32(gp0a .& mask_lo, q8_a0) .+ vdot_i32(gp0b .& mask_lo, q8_a1))
-            let uv0_lo: i32 = reduce_add(vdot_i32(up0a .& mask_lo, q8_a0) .+ vdot_i32(up0b .& mask_lo, q8_a1))
-            let gv0_hi: i32 = reduce_add(vdot_i32((gp0a .>> shift4) .& mask_lo, q8_b0) .+ vdot_i32((gp0b .>> shift4) .& mask_lo, q8_b1))
-            let uv0_hi: i32 = reduce_add(vdot_i32((up0a .>> shift4) .& mask_lo, q8_b0) .+ vdot_i32((up0b .>> shift4) .& mask_lo, q8_b1))
-            gs0 = gs0 + gv0_lo * to_i32(gsc0[sc_off + 2*j]) + gv0_hi * to_i32(gsc0[sc_off + 2*j+1])
-            us0 = us0 + uv0_lo * to_i32(usc0[sc_off + 2*j]) + uv0_hi * to_i32(usc0[sc_off + 2*j+1])
+            let gs_lo: i32x4 = splat(to_i32(gsc0[sc_off + 2*j]))
+            let gs_hi: i32x4 = splat(to_i32(gsc0[sc_off + 2*j+1]))
+            let us_lo: i32x4 = splat(to_i32(usc0[sc_off + 2*j]))
+            let us_hi: i32x4 = splat(to_i32(usc0[sc_off + 2*j+1]))
+            gv0 = gv0 .+ (vdot_i32(gp0a .& mask_lo, q8_a) .+ vdot_i32(gp0b .& mask_lo, q8_b)) .* gs_lo
+            gv0 = gv0 .+ (vdot_i32((gp0a .>> shift4) .& mask_lo, q8_c) .+ vdot_i32((gp0b .>> shift4) .& mask_lo, q8_d)) .* gs_hi
+            uv0 = uv0 .+ (vdot_i32(up0a .& mask_lo, q8_a) .+ vdot_i32(up0b .& mask_lo, q8_b)) .* us_lo
+            uv0 = uv0 .+ (vdot_i32((up0a .>> shift4) .& mask_lo, q8_c) .+ vdot_i32((up0b .>> shift4) .& mask_lo, q8_d)) .* us_hi
 
+            // Row 1
             let gp1a: i8x16 = load(gw1, q4_off + j * 32)
             let gp1b: i8x16 = load(gw1, q4_off + j * 32 + 16)
             let up1a: i8x16 = load(uw1, q4_off + j * 32)
             let up1b: i8x16 = load(uw1, q4_off + j * 32 + 16)
-            let gv1_lo: i32 = reduce_add(vdot_i32(gp1a .& mask_lo, q8_a0) .+ vdot_i32(gp1b .& mask_lo, q8_a1))
-            let uv1_lo: i32 = reduce_add(vdot_i32(up1a .& mask_lo, q8_a0) .+ vdot_i32(up1b .& mask_lo, q8_a1))
-            let gv1_hi: i32 = reduce_add(vdot_i32((gp1a .>> shift4) .& mask_lo, q8_b0) .+ vdot_i32((gp1b .>> shift4) .& mask_lo, q8_b1))
-            let uv1_hi: i32 = reduce_add(vdot_i32((up1a .>> shift4) .& mask_lo, q8_b0) .+ vdot_i32((up1b .>> shift4) .& mask_lo, q8_b1))
-            gs1 = gs1 + gv1_lo * to_i32(gsc1[sc_off + 2*j]) + gv1_hi * to_i32(gsc1[sc_off + 2*j+1])
-            us1 = us1 + uv1_lo * to_i32(usc1[sc_off + 2*j]) + uv1_hi * to_i32(usc1[sc_off + 2*j+1])
+            let gs1_lo: i32x4 = splat(to_i32(gsc1[sc_off + 2*j]))
+            let gs1_hi: i32x4 = splat(to_i32(gsc1[sc_off + 2*j+1]))
+            let us1_lo: i32x4 = splat(to_i32(usc1[sc_off + 2*j]))
+            let us1_hi: i32x4 = splat(to_i32(usc1[sc_off + 2*j+1]))
+            gv1 = gv1 .+ (vdot_i32(gp1a .& mask_lo, q8_a) .+ vdot_i32(gp1b .& mask_lo, q8_b)) .* gs1_lo
+            gv1 = gv1 .+ (vdot_i32((gp1a .>> shift4) .& mask_lo, q8_c) .+ vdot_i32((gp1b .>> shift4) .& mask_lo, q8_d)) .* gs1_hi
+            uv1 = uv1 .+ (vdot_i32(up1a .& mask_lo, q8_a) .+ vdot_i32(up1b .& mask_lo, q8_b)) .* us1_lo
+            uv1 = uv1 .+ (vdot_i32((up1a .>> shift4) .& mask_lo, q8_c) .+ vdot_i32((up1b .>> shift4) .& mask_lo, q8_d)) .* us1_hi
 
+            // Row 2
             let gp2a: i8x16 = load(gw2, q4_off + j * 32)
             let gp2b: i8x16 = load(gw2, q4_off + j * 32 + 16)
             let up2a: i8x16 = load(uw2, q4_off + j * 32)
             let up2b: i8x16 = load(uw2, q4_off + j * 32 + 16)
-            let gv2_lo: i32 = reduce_add(vdot_i32(gp2a .& mask_lo, q8_a0) .+ vdot_i32(gp2b .& mask_lo, q8_a1))
-            let uv2_lo: i32 = reduce_add(vdot_i32(up2a .& mask_lo, q8_a0) .+ vdot_i32(up2b .& mask_lo, q8_a1))
-            let gv2_hi: i32 = reduce_add(vdot_i32((gp2a .>> shift4) .& mask_lo, q8_b0) .+ vdot_i32((gp2b .>> shift4) .& mask_lo, q8_b1))
-            let uv2_hi: i32 = reduce_add(vdot_i32((up2a .>> shift4) .& mask_lo, q8_b0) .+ vdot_i32((up2b .>> shift4) .& mask_lo, q8_b1))
-            gs2 = gs2 + gv2_lo * to_i32(gsc2[sc_off + 2*j]) + gv2_hi * to_i32(gsc2[sc_off + 2*j+1])
-            us2 = us2 + uv2_lo * to_i32(usc2[sc_off + 2*j]) + uv2_hi * to_i32(usc2[sc_off + 2*j+1])
+            let gs2_lo: i32x4 = splat(to_i32(gsc2[sc_off + 2*j]))
+            let gs2_hi: i32x4 = splat(to_i32(gsc2[sc_off + 2*j+1]))
+            let us2_lo: i32x4 = splat(to_i32(usc2[sc_off + 2*j]))
+            let us2_hi: i32x4 = splat(to_i32(usc2[sc_off + 2*j+1]))
+            gv2 = gv2 .+ (vdot_i32(gp2a .& mask_lo, q8_a) .+ vdot_i32(gp2b .& mask_lo, q8_b)) .* gs2_lo
+            gv2 = gv2 .+ (vdot_i32((gp2a .>> shift4) .& mask_lo, q8_c) .+ vdot_i32((gp2b .>> shift4) .& mask_lo, q8_d)) .* gs2_hi
+            uv2 = uv2 .+ (vdot_i32(up2a .& mask_lo, q8_a) .+ vdot_i32(up2b .& mask_lo, q8_b)) .* us2_lo
+            uv2 = uv2 .+ (vdot_i32((up2a .>> shift4) .& mask_lo, q8_c) .+ vdot_i32((up2b .>> shift4) .& mask_lo, q8_d)) .* us2_hi
 
+            // Row 3
             let gp3a: i8x16 = load(gw3, q4_off + j * 32)
             let gp3b: i8x16 = load(gw3, q4_off + j * 32 + 16)
             let up3a: i8x16 = load(uw3, q4_off + j * 32)
             let up3b: i8x16 = load(uw3, q4_off + j * 32 + 16)
-            let gv3_lo: i32 = reduce_add(vdot_i32(gp3a .& mask_lo, q8_a0) .+ vdot_i32(gp3b .& mask_lo, q8_a1))
-            let uv3_lo: i32 = reduce_add(vdot_i32(up3a .& mask_lo, q8_a0) .+ vdot_i32(up3b .& mask_lo, q8_a1))
-            let gv3_hi: i32 = reduce_add(vdot_i32((gp3a .>> shift4) .& mask_lo, q8_b0) .+ vdot_i32((gp3b .>> shift4) .& mask_lo, q8_b1))
-            let uv3_hi: i32 = reduce_add(vdot_i32((up3a .>> shift4) .& mask_lo, q8_b0) .+ vdot_i32((up3b .>> shift4) .& mask_lo, q8_b1))
-            gs3 = gs3 + gv3_lo * to_i32(gsc3[sc_off + 2*j]) + gv3_hi * to_i32(gsc3[sc_off + 2*j+1])
-            us3 = us3 + uv3_lo * to_i32(usc3[sc_off + 2*j]) + uv3_hi * to_i32(usc3[sc_off + 2*j+1])
+            let gs3_lo: i32x4 = splat(to_i32(gsc3[sc_off + 2*j]))
+            let gs3_hi: i32x4 = splat(to_i32(gsc3[sc_off + 2*j+1]))
+            let us3_lo: i32x4 = splat(to_i32(usc3[sc_off + 2*j]))
+            let us3_hi: i32x4 = splat(to_i32(usc3[sc_off + 2*j+1]))
+            gv3 = gv3 .+ (vdot_i32(gp3a .& mask_lo, q8_a) .+ vdot_i32(gp3b .& mask_lo, q8_b)) .* gs3_lo
+            gv3 = gv3 .+ (vdot_i32((gp3a .>> shift4) .& mask_lo, q8_c) .+ vdot_i32((gp3b .>> shift4) .& mask_lo, q8_d)) .* gs3_hi
+            uv3 = uv3 .+ (vdot_i32(up3a .& mask_lo, q8_a) .+ vdot_i32(up3b .& mask_lo, q8_b)) .* us3_lo
+            uv3 = uv3 .+ (vdot_i32((up3a .>> shift4) .& mask_lo, q8_c) .+ vdot_i32((up3b .>> shift4) .& mask_lo, q8_d)) .* us3_hi
 
             j = j + 1
         }
+
+        // 8 reduces instead of 64
+        let gs0: i32 = reduce_add(gv0)
+        let gs1: i32 = reduce_add(gv1)
+        let gs2: i32 = reduce_add(gv2)
+        let gs3: i32 = reduce_add(gv3)
+        let us0: i32 = reduce_add(uv0)
+        let us1: i32 = reduce_add(uv1)
+        let us2: i32 = reduce_add(uv2)
+        let us3: i32 = reduce_add(uv3)
 
         let mut gm0: i32 = 0
         let mut gm1: i32 = 0
