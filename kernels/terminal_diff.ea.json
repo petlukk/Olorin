@@ -1,5 +1,5 @@
 {
-  "library": "/tmp/libterminal_diff.so",
+  "library": "/home/peter/projects/olorin1/target/debug/build/olorin-b8f6e5b7101c0541/out/libterminal_diff.so",
   "exports": [
     {
       "name": "terminal_diff",

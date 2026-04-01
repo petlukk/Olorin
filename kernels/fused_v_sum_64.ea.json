@@ -1,5 +1,5 @@
 {
-  "library": "/home/peter/projects/olorin1/target/release/build/olorin-83a3a20f43db2862/out/libfused_v_sum_64.so",
+  "library": "/home/peter/projects/olorin1/target/debug/build/olorin-b8f6e5b7101c0541/out/libfused_v_sum_64.so",
   "exports": [
     {
       "name": "q4_fused_v_sum_64_f32",

@@ -1,5 +1,5 @@
 {
-  "library": "/home/peter/projects/olorin1/target/release/build/olorin-83a3a20f43db2862/out/libexpr_eval.so",
+  "library": "/home/peter/projects/olorin1/target/debug/build/olorin-b8f6e5b7101c0541/out/libexpr_eval.so",
   "exports": [
     {
       "name": "eval_expr",

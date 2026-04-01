@@ -1,5 +1,5 @@
 {
-  "library": "/tmp/libansi_parser.so",
+  "library": "/home/peter/projects/olorin1/target/debug/build/olorin-b8f6e5b7101c0541/out/libansi_parser.so",
   "exports": [
     {
       "name": "ansi_classify",
