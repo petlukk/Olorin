@@ -40,6 +40,17 @@ pub type Q4kDot4RowDualFn = unsafe extern "C" fn(
     *const f32, *const f32, *const f32, *const f32,
     *const f32, *const f32, *const f32, *const f32,
     *const f32, *const f32, *const f32, *const f32);
+pub type Q4kFusedDotFn = unsafe extern "C" fn(
+    *const u8, *const f32,
+    i32, *const f32, *const f32,
+    *mut f32, *mut i32) -> f32;
+pub type Q4kFusedDot4RowFn = unsafe extern "C" fn(
+    *const u8, *const u8, *const u8, *const u8,
+    *const f32,
+    *mut f32, i32,
+    *const f32, *const f32, *const f32, *const f32,
+    *const f32, *const f32, *const f32, *const f32,
+    *mut f32, *mut i32);
 pub type Q6kDotQ8kFn = unsafe extern "C" fn(
     *const u8, *const i8, *const i32,
     i32, *const f32) -> f32;

@@ -204,3 +204,186 @@ pub(crate) fn q4k_fused_silu_gemm_mt(
         }
     });
 }
+
+/// Fused GEMM: f32 activations × Q4K weights → f32 output.
+/// No Q8K intermediate buffer — quantization happens inside the kernel.
+/// Weight d/dmin scales cached once, reused across all tokens.
+pub(crate) fn q4k_fused_gemm_f32_mt(
+    weight: *const u8, row_stride: usize, n_blocks: usize,
+    activations: &[f32], act_stride: usize, n_tokens: usize,
+    out: &mut [f32], out_dim: usize,
+    pool: &ThreadPool,
+) {
+    let total = pool.thread_count().min(out_dim / 4).max(1);
+    let chunk = ((out_dim + total - 1) / total + 3) & !3;
+    let w = SendPtr(weight);
+    let act = SendPtr(activations.as_ptr());
+    let o = SendMutPtr(out.as_mut_ptr());
+    let nt = n_tokens;
+
+    pool.run(total, move |tid, _n| {
+        let start = tid * chunk;
+        let end = (start + chunk).min(out_dim);
+        if start >= end { return; }
+        let mut scores4 = [0.0f32; 4];
+        let mut scratch = vec![0.0f32; 8];  // for kernel max-reduce (heap — must survive FFI)
+        let mut bs = vec![0i32; 16];        // for kernel bsums (heap — must survive FFI)
+        // Pre-cache f16→f32 weight scales ONCE (invariant across tokens)
+        let mut da_w = [[0.0f32; MAX_BLOCKS]; 4];
+        let mut dma_w = [[0.0f32; MAX_BLOCKS]; 4];
+        let mut r = start;
+        unsafe {
+            while r + 4 <= end {
+                let ws = [
+                    w.ptr().add(r * row_stride),
+                    w.ptr().add((r+1) * row_stride),
+                    w.ptr().add((r+2) * row_stride),
+                    w.ptr().add((r+3) * row_stride),
+                ];
+                for ri in 0..4 {
+                    for blk in 0..n_blocks {
+                        let bp = ws[ri].add(blk * Q4K_BLOCK_BYTES);
+                        da_w[ri][blk] = f16_to_f32(*(bp as *const u16));
+                        dma_w[ri][blk] = f16_to_f32(*(bp.add(2) as *const u16));
+                    }
+                }
+                for t in 0..nt {
+                    ffi::q4k_fused_dot_4row(
+                        ws[0], ws[1], ws[2], ws[3],
+                        act.ptr().add(t * act_stride),
+                        scores4.as_mut_ptr(), n_blocks as i32,
+                        da_w[0].as_ptr(), da_w[1].as_ptr(),
+                        da_w[2].as_ptr(), da_w[3].as_ptr(),
+                        dma_w[0].as_ptr(), dma_w[1].as_ptr(),
+                        dma_w[2].as_ptr(), dma_w[3].as_ptr(),
+                        scratch.as_mut_ptr(), bs.as_mut_ptr(),
+                    );
+                    let base = o.ptr().add(t * out_dim + r);
+                    for j in 0..4 { *base.add(j) = scores4[j]; }
+                }
+                r += 4;
+            }
+            while r < end {
+                let wr = w.ptr().add(r * row_stride);
+                let mut dw = [0f32; MAX_BLOCKS];
+                let mut dmw = [0f32; MAX_BLOCKS];
+                for blk in 0..n_blocks {
+                    let bp = wr.add(blk * Q4K_BLOCK_BYTES);
+                    dw[blk] = f16_to_f32(*(bp as *const u16));
+                    dmw[blk] = f16_to_f32(*(bp.add(2) as *const u16));
+                }
+                for t in 0..nt {
+                    let v = ffi::q4k_fused_dot(
+                        wr, act.ptr().add(t * act_stride),
+                        n_blocks as i32, dw.as_ptr(), dmw.as_ptr(),
+                        scratch.as_mut_ptr(), bs.as_mut_ptr(),
+                    );
+                    *o.ptr().add(t * out_dim + r) = v;
+                }
+                r += 1;
+            }
+        }
+    });
+}
+
+/// Fused gate+up+SiLU GEMM with f32 activations (no Q8K buffer).
+pub(crate) fn q4k_fused_silu_gemm_f32_mt(
+    w_gate: *const u8, w_up: *const u8,
+    row_stride: usize, n_blocks: usize,
+    activations: &[f32], act_stride: usize, n_tokens: usize,
+    out: &mut [f32], out_dim: usize,
+    pool: &ThreadPool,
+) {
+    let total = pool.thread_count().min(out_dim / 4).max(1);
+    let chunk = ((out_dim + total - 1) / total + 3) & !3;
+    let wg = SendPtr(w_gate);
+    let wu = SendPtr(w_up);
+    let act = SendPtr(activations.as_ptr());
+    let o = SendMutPtr(out.as_mut_ptr());
+    let nt = n_tokens;
+
+    pool.run(total, move |tid, _n| {
+        let start = tid * chunk;
+        let end = (start + chunk).min(out_dim);
+        if start >= end { return; }
+        let mut gd_w = [[0f32; MAX_BLOCKS]; 4];
+        let mut gdm_w = [[0f32; MAX_BLOCKS]; 4];
+        let mut ud_w = [[0f32; MAX_BLOCKS]; 4];
+        let mut udm_w = [[0f32; MAX_BLOCKS]; 4];
+        let mut g_scores = [0.0f32; 4];
+        let mut u_scores = [0.0f32; 4];
+        let mut scratch = vec![0.0f32; 8];
+        let mut bs_buf = vec![0i32; 16];
+        let mut r = start;
+        unsafe {
+            while r + 4 <= end {
+                let gws = [wg.ptr().add(r * row_stride), wg.ptr().add((r+1) * row_stride),
+                           wg.ptr().add((r+2) * row_stride), wg.ptr().add((r+3) * row_stride)];
+                let uws = [wu.ptr().add(r * row_stride), wu.ptr().add((r+1) * row_stride),
+                           wu.ptr().add((r+2) * row_stride), wu.ptr().add((r+3) * row_stride)];
+                for i in 0..4 {
+                    for blk in 0..n_blocks {
+                        let gbp = gws[i].add(blk * Q4K_BLOCK_BYTES);
+                        let ubp = uws[i].add(blk * Q4K_BLOCK_BYTES);
+                        gd_w[i][blk] = f16_to_f32(*(gbp as *const u16));
+                        gdm_w[i][blk] = f16_to_f32(*(gbp.add(2) as *const u16));
+                        ud_w[i][blk] = f16_to_f32(*(ubp as *const u16));
+                        udm_w[i][blk] = f16_to_f32(*(ubp.add(2) as *const u16));
+                    }
+                }
+                for t in 0..nt {
+                    let act_ptr = act.ptr().add(t * act_stride);
+                    ffi::q4k_fused_dot_4row(
+                        gws[0], gws[1], gws[2], gws[3],
+                        act_ptr, g_scores.as_mut_ptr(), n_blocks as i32,
+                        gd_w[0].as_ptr(), gd_w[1].as_ptr(),
+                        gd_w[2].as_ptr(), gd_w[3].as_ptr(),
+                        gdm_w[0].as_ptr(), gdm_w[1].as_ptr(),
+                        gdm_w[2].as_ptr(), gdm_w[3].as_ptr(),
+                        scratch.as_mut_ptr(), bs_buf.as_mut_ptr(),
+                    );
+                    ffi::q4k_fused_dot_4row(
+                        uws[0], uws[1], uws[2], uws[3],
+                        act_ptr, u_scores.as_mut_ptr(), n_blocks as i32,
+                        ud_w[0].as_ptr(), ud_w[1].as_ptr(),
+                        ud_w[2].as_ptr(), ud_w[3].as_ptr(),
+                        udm_w[0].as_ptr(), udm_w[1].as_ptr(),
+                        udm_w[2].as_ptr(), udm_w[3].as_ptr(),
+                        scratch.as_mut_ptr(), bs_buf.as_mut_ptr(),
+                    );
+                    let base = o.ptr().add(t * out_dim + r);
+                    for i in 0..4 {
+                        let g = g_scores[i];
+                        *base.add(i) = (g / (1.0 + (-g).exp())) * u_scores[i];
+                    }
+                }
+                r += 4;
+            }
+            while r < end {
+                let gw = wg.ptr().add(r * row_stride);
+                let uw = wu.ptr().add(r * row_stride);
+                let mut gdw = [0f32; MAX_BLOCKS];
+                let mut gdmw = [0f32; MAX_BLOCKS];
+                let mut udw = [0f32; MAX_BLOCKS];
+                let mut udmw = [0f32; MAX_BLOCKS];
+                for blk in 0..n_blocks {
+                    let gbp = gw.add(blk * Q4K_BLOCK_BYTES);
+                    let ubp = uw.add(blk * Q4K_BLOCK_BYTES);
+                    gdw[blk] = f16_to_f32(*(gbp as *const u16));
+                    gdmw[blk] = f16_to_f32(*(gbp.add(2) as *const u16));
+                    udw[blk] = f16_to_f32(*(ubp as *const u16));
+                    udmw[blk] = f16_to_f32(*(ubp.add(2) as *const u16));
+                }
+                for t in 0..nt {
+                    let act_ptr = act.ptr().add(t * act_stride);
+                    let g = ffi::q4k_fused_dot(gw, act_ptr, n_blocks as i32, gdw.as_ptr(), gdmw.as_ptr(),
+                        scratch.as_mut_ptr(), bs_buf.as_mut_ptr());
+                    let u = ffi::q4k_fused_dot(uw, act_ptr, n_blocks as i32, udw.as_ptr(), udmw.as_ptr(),
+                        scratch.as_mut_ptr(), bs_buf.as_mut_ptr());
+                    *o.ptr().add(t * out_dim + r) = (g / (1.0 + (-g).exp())) * u;
+                }
+                r += 1;
+            }
+        }
+    });
+}

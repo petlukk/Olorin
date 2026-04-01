@@ -22,6 +22,8 @@ pub struct KernelTableInference {
     pub q4k_dot_q8k_4row:      Q4kDot4RowFn,
     pub q4k_dot_q8k_4row_fused: Q4kDot4RowFusedFn,
     pub q4k_dot_q8k_4row_dual: Q4kDot4RowDualFn,
+    pub q4k_fused_dot:          Q4kFusedDotFn,
+    pub q4k_fused_dot_4row:     Q4kFusedDot4RowFn,
     pub q6k_dot_q8k:           Q6kDotQ8kFn,
     pub q6k_dot_q8k_4row:      Q6kDot4RowFn,
     pub apply_rope_f32:        ApplyRopeFn,
@@ -82,6 +84,7 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
     let vadd = load("bitnet_vecadd")?;
     let q4kq = load("q4k_quant")?;
     let q4kd = load("q4k_dot")?;
+    let q4kfg = load("q4k_fused_gemm")?;
     let q6kd = load("q6k_dot")?;
     let rope = load("rope")?;
     let gemm_tile = load("q4k_gemm_tile")?;
@@ -146,6 +149,8 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
             q4k_dot_q8k_4row:      std::mem::transmute(sym(&q4kd, b"q4k_dot_q8k_4row\0")?),
             q4k_dot_q8k_4row_fused: std::mem::transmute(sym(&q4kd, b"q4k_dot_q8k_4row_fused\0")?),
             q4k_dot_q8k_4row_dual: std::mem::transmute(sym(&q4kd, b"q4k_dot_q8k_4row_dual\0")?),
+            q4k_fused_dot:          std::mem::transmute(sym(&q4kfg, b"q4k_fused_dot\0")?),
+            q4k_fused_dot_4row:     std::mem::transmute(sym(&q4kfg, b"q4k_fused_dot_4row\0")?),
             q6k_dot_q8k:           std::mem::transmute(sym(&q6kd, b"q6k_dot_q8k\0")?),
             q6k_dot_q8k_4row:      std::mem::transmute(sym(&q6kd, b"q6k_dot_q8k_4row\0")?),
             apply_rope_f32:        std::mem::transmute(sym(&rope, b"apply_rope_f32\0")?),
@@ -167,7 +172,7 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
             libs: {
                 let mut v = vec![
                     i2s, quant, rms, attn, i8d, act, vadd,
-                    q4kq, q4kd, q6kd, rope, gemm_tile,
+                    q4kq, q4kd, q4kfg, q6kd, rope, gemm_tile,
                     quantize_lib, deq_lib,
                     k_score_lib, k_score_64_lib,
                     k_score_gqa_lib, k_score_gqa64_lib,
@@ -298,6 +303,30 @@ pub unsafe fn q4k_dot_q8k_4row_dual(
         gate_scores, up_scores, n_blocks,
         gd0, gd1, gd2, gd3, gdm0, gdm1, gdm2, gdm3,
         ud0, ud1, ud2, ud3, udm0, udm1, udm2, udm3)
+}
+
+pub unsafe fn q4k_fused_dot(
+    q4: *const u8, act: *const f32,
+    n_blocks: i32, d_w: *const f32, dm_w: *const f32,
+    scratch: *mut f32, bs: *mut i32,
+) -> f32 {
+    (k().q4k_fused_dot)(q4, act, n_blocks, d_w, dm_w, scratch, bs)
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+pub unsafe fn q4k_fused_dot_4row(
+    rw0: *const u8, rw1: *const u8, rw2: *const u8, rw3: *const u8,
+    act: *const f32,
+    scores: *mut f32, n_blocks: i32,
+    d0_w: *const f32, d1_w: *const f32, d2_w: *const f32, d3_w: *const f32,
+    dm0_w: *const f32, dm1_w: *const f32, dm2_w: *const f32, dm3_w: *const f32,
+    scratch: *mut f32, bs: *mut i32,
+) {
+    (k().q4k_fused_dot_4row)(
+        rw0, rw1, rw2, rw3, act,
+        scores, n_blocks, d0_w, d1_w, d2_w, d3_w, dm0_w, dm1_w, dm2_w, dm3_w,
+        scratch, bs)
 }
 
 pub unsafe fn q6k_dot_q8k(
