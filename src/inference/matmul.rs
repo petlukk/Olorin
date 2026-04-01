@@ -4,20 +4,27 @@ use crate::kernels::ffi_inference as ffi;
 use crate::inference::ptr::{SendPtr, SendMutPtr};
 use crate::inference::threadpool::ThreadPool;
 
+/// Convert IEEE 754 half-precision (f16) to single-precision (f32).
+/// Fast path for normal values (no branch for the common case).
+#[inline(always)]
 pub(crate) fn f16_to_f32(h: u16) -> f32 {
     let sign = ((h >> 15) & 1) as u32;
     let exp = ((h >> 10) & 0x1f) as u32;
     let frac = (h & 0x3ff) as u32;
+    // Fast path: normal f16 values (exp 1..30) — the overwhelmingly common case
+    // for model weight scales (d, dmin). Subnormals/inf/nan are vanishingly rare.
+    if exp != 0 && exp != 31 {
+        return f32::from_bits((sign << 31) | ((exp + 112) << 23) | (frac << 13));
+    }
     if exp == 0 {
         if frac == 0 { return f32::from_bits(sign << 31); }
         let mut e = 0i32;
         let mut f = frac;
         while f & 0x400 == 0 { f <<= 1; e -= 1; }
         f &= 0x3ff;
-        return f32::from_bits((sign << 31) | (((127 - 15 + 1 + e) as u32) << 23) | (f << 13));
+        return f32::from_bits((sign << 31) | (((113 + e) as u32) << 23) | (f << 13));
     }
-    if exp == 31 { return f32::from_bits((sign << 31) | (0xff << 23) | (frac << 13)); }
-    f32::from_bits((sign << 31) | ((exp + 127 - 15) << 23) | (frac << 13))
+    f32::from_bits((sign << 31) | (0xff << 23) | (frac << 13))
 }
 
 pub(crate) fn embed_f16_lookup(embed: *const u8, token: u32, out: &mut [f32], hidden_dim: usize) {
