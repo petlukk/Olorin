@@ -209,7 +209,6 @@ impl LlamaState {
 
         softmax_rows(scores, nh, seq_len);
         cache::attention::attention_output(&self.kv_cache, scores, layer as i32, nh as i32, nkv as i32, seq_len as i32, &mut self.attn_out);
-
         unsafe {
             ffi::quant_f32_q8k(self.attn_out.as_ptr(), self.attn_q8_qs.as_mut_ptr(),
                 self.attn_q8_d.as_mut_ptr(), self.attn_q8_bsums.as_mut_ptr(), h as i32);

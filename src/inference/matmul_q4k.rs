@@ -116,7 +116,6 @@ pub(crate) fn q4k_matmul_mt(
         return;
     }
 
-    let chunk = ((out_dim + n_thr - 1) / n_thr + 3) & !3;
     let w = SendPtr(weight);
     let qs = SendPtr(q8_qs);
     let qd = SendPtr(q8_d);
@@ -124,27 +123,9 @@ pub(crate) fn q4k_matmul_mt(
     let o = SendMutPtr(out.as_mut_ptr());
 
     pool.run(n_thr, move |tid, _n| {
-        let start = tid * chunk;
-        let end = (start + chunk).min(out_dim);
-        if start >= end { return; }
-        let count = end - start;
-        let out_slice = unsafe { std::slice::from_raw_parts_mut(o.ptr().add(start), count) };
-        let mut scores4 = [0.0f32; 4];
-        let mut r = 0;
         unsafe {
-            while r + 4 <= count {
-                let row = start + r;
-                q4k_4row_dot(w.ptr().add(row * row_stride), w.ptr().add((row+1) * row_stride),
-                    w.ptr().add((row+2) * row_stride), w.ptr().add((row+3) * row_stride),
-                    n_blocks, qs.ptr(), qd.ptr(), qb.ptr(), &mut scores4);
-                for j in 0..4 { out_slice[r+j] = scores4[j]; }
-                r += 4;
-            }
-            while r < count {
-                let row = start + r;
-                out_slice[r] = q4k_row_dot(w.ptr().add(row * row_stride), n_blocks, qs.ptr(), qd.ptr(), qb.ptr());
-                r += 1;
-            }
+            q4k_matmul_work(w.ptr(), row_stride, n_blocks,
+                qs.ptr(), qd.ptr(), qb.ptr(), o.ptr(), out_dim, tid, n_thr);
         }
     });
 }
@@ -182,6 +163,7 @@ pub(crate) fn q4k_embed_lookup(
 }
 
 /// Per-thread work function for Q4_K matmul.
+/// Buffers allocated once per thread, reused across row iterations.
 pub(crate) unsafe fn q4k_matmul_work(
     weight: *const u8, row_stride: usize, n_blocks: usize,
     q8_qs: *const i8, q8_d: *const f32, q8_bsums: *const i32,
@@ -193,13 +175,30 @@ pub(crate) unsafe fn q4k_matmul_work(
     if start >= end { return; }
     let count = end - start;
     let out_slice = std::slice::from_raw_parts_mut(out.add(start), count);
+
+    let mut sc = [[0u8; MAX_BLOCKS * 8]; 4];
+    let mut mn = [[0u8; MAX_BLOCKS * 8]; 4];
+    let mut da = [[0f32; MAX_BLOCKS]; 4];
+    let mut dma = [[0f32; MAX_BLOCKS]; 4];
     let mut scores4 = [0.0f32; 4];
+
     let mut r = 0;
     while r + 4 <= count {
         let row = start + r;
-        q4k_4row_dot(weight.add(row * row_stride), weight.add((row+1) * row_stride),
-            weight.add((row+2) * row_stride), weight.add((row+3) * row_stride),
-            n_blocks, q8_qs, q8_d, q8_bsums, &mut scores4);
+        let ws = [weight.add(row * row_stride), weight.add((row+1) * row_stride),
+                  weight.add((row+2) * row_stride), weight.add((row+3) * row_stride)];
+        for ri in 0..4 {
+            unpack_row(ws[ri], n_blocks, q8_d, &mut sc[ri], &mut mn[ri], &mut da[ri], &mut dma[ri]);
+        }
+        ffi::q4k_dot_q8k_4row(
+            ws[0], ws[1], ws[2], ws[3],
+            q8_qs, q8_bsums,
+            sc[0].as_ptr(), sc[1].as_ptr(), sc[2].as_ptr(), sc[3].as_ptr(),
+            mn[0].as_ptr(), mn[1].as_ptr(), mn[2].as_ptr(), mn[3].as_ptr(),
+            scores4.as_mut_ptr(), n_blocks as i32,
+            da[0].as_ptr(), da[1].as_ptr(), da[2].as_ptr(), da[3].as_ptr(),
+            dma[0].as_ptr(), dma[1].as_ptr(), dma[2].as_ptr(), dma[3].as_ptr(),
+        );
         for j in 0..4 { out_slice[r+j] = scores4[j]; }
         r += 4;
     }
@@ -252,6 +251,7 @@ pub(crate) unsafe fn q4k_dual_4row_dot(
 }
 
 /// Fused gate+up+SiLU per-thread work function.
+/// Buffers allocated once per thread, reused across all row iterations.
 pub(crate) unsafe fn q4k_fused_gate_up_silu_work(
     w_gate: *const u8, w_up: *const u8,
     row_stride: usize, n_blocks: usize,
@@ -264,17 +264,43 @@ pub(crate) unsafe fn q4k_fused_gate_up_silu_work(
     if start >= end { return; }
     let count = end - start;
     let out = std::slice::from_raw_parts_mut(hidden_out.add(start), count);
+
+    // Pre-allocate buffers ONCE per thread (not per iteration)
+    let mut gsc = [[0u8; MAX_BLOCKS * 8]; 4];
+    let mut gmn = [[0u8; MAX_BLOCKS * 8]; 4];
+    let mut usc = [[0u8; MAX_BLOCKS * 8]; 4];
+    let mut umn = [[0u8; MAX_BLOCKS * 8]; 4];
+    let mut gd = [[0f32; MAX_BLOCKS]; 4];
+    let mut gdm = [[0f32; MAX_BLOCKS]; 4];
+    let mut ud = [[0f32; MAX_BLOCKS]; 4];
+    let mut udm = [[0f32; MAX_BLOCKS]; 4];
     let mut g_scores = [0.0f32; 4];
     let mut u_scores = [0.0f32; 4];
+
     let mut r = 0;
     while r + 4 <= count {
         let row = start + r;
-        q4k_dual_4row_dot(
-            w_gate.add(row * row_stride), w_gate.add((row+1) * row_stride),
-            w_gate.add((row+2) * row_stride), w_gate.add((row+3) * row_stride),
-            w_up.add(row * row_stride), w_up.add((row+1) * row_stride),
-            w_up.add((row+2) * row_stride), w_up.add((row+3) * row_stride),
-            n_blocks, q8_qs, q8_d, q8_bsums, &mut g_scores, &mut u_scores,
+        let gws = [w_gate.add(row * row_stride), w_gate.add((row+1) * row_stride),
+                    w_gate.add((row+2) * row_stride), w_gate.add((row+3) * row_stride)];
+        let uws = [w_up.add(row * row_stride), w_up.add((row+1) * row_stride),
+                    w_up.add((row+2) * row_stride), w_up.add((row+3) * row_stride)];
+        for i in 0..4 {
+            unpack_row(gws[i], n_blocks, q8_d, &mut gsc[i], &mut gmn[i], &mut gd[i], &mut gdm[i]);
+            unpack_row(uws[i], n_blocks, q8_d, &mut usc[i], &mut umn[i], &mut ud[i], &mut udm[i]);
+        }
+        ffi::q4k_dot_q8k_4row_dual(
+            gws[0], gws[1], gws[2], gws[3],
+            uws[0], uws[1], uws[2], uws[3],
+            q8_qs, q8_bsums,
+            gsc[0].as_ptr(), gsc[1].as_ptr(), gsc[2].as_ptr(), gsc[3].as_ptr(),
+            gmn[0].as_ptr(), gmn[1].as_ptr(), gmn[2].as_ptr(), gmn[3].as_ptr(),
+            usc[0].as_ptr(), usc[1].as_ptr(), usc[2].as_ptr(), usc[3].as_ptr(),
+            umn[0].as_ptr(), umn[1].as_ptr(), umn[2].as_ptr(), umn[3].as_ptr(),
+            g_scores.as_mut_ptr(), u_scores.as_mut_ptr(), n_blocks as i32,
+            gd[0].as_ptr(), gd[1].as_ptr(), gd[2].as_ptr(), gd[3].as_ptr(),
+            gdm[0].as_ptr(), gdm[1].as_ptr(), gdm[2].as_ptr(), gdm[3].as_ptr(),
+            ud[0].as_ptr(), ud[1].as_ptr(), ud[2].as_ptr(), ud[3].as_ptr(),
+            udm[0].as_ptr(), udm[1].as_ptr(), udm[2].as_ptr(), udm[3].as_ptr(),
         );
         for i in 0..4 {
             let g = g_scores[i];
