@@ -73,11 +73,9 @@ pub(crate) fn q4k_gemm_mt(
             let end = (start + chunk).min(out_dim);
             if start >= end { return; }
                 let mut scores4 = [0.0f32; 4];
-                // Pre-cache f16→f32 weight scales (invariant across tokens)
+                // Pre-cache f16→f32 weight scales ONCE (invariant across tokens)
                 let mut da_w = [[0.0f32; MAX_BLOCKS]; 4];
                 let mut dma_w = [[0.0f32; MAX_BLOCKS]; 4];
-                let mut da = [[0.0f32; MAX_BLOCKS]; 4];
-                let mut dma = [[0.0f32; MAX_BLOCKS]; 4];
                 let mut r = start;
                 unsafe {
                     while r + 4 <= end {
@@ -95,20 +93,14 @@ pub(crate) fn q4k_gemm_mt(
                             }
                         }
                         for t in 0..nt {
-                            let q8_d_ptr = ds[t] as *const f32;
-                            for ri in 0..4 {
-                                for blk in 0..n_blocks {
-                                    let q = *q8_d_ptr.add(blk);
-                                    da[ri][blk] = da_w[ri][blk] * q;
-                                    dma[ri][blk] = dma_w[ri][blk] * q;
-                                }
-                            }
-                            ffi::q4k_dot_q8k_4row(
+                            // Fused: kernel multiplies d_w * q8_d inline
+                            ffi::q4k_dot_q8k_4row_fused(
                                 ws[0], ws[1], ws[2], ws[3],
                                 qs[t] as _, bs[t] as _,
                                 scores4.as_mut_ptr(), n_blocks as i32,
-                                da[0].as_ptr(), da[1].as_ptr(), da[2].as_ptr(), da[3].as_ptr(),
-                                dma[0].as_ptr(), dma[1].as_ptr(), dma[2].as_ptr(), dma[3].as_ptr(),
+                                da_w[0].as_ptr(), da_w[1].as_ptr(), da_w[2].as_ptr(), da_w[3].as_ptr(),
+                                dma_w[0].as_ptr(), dma_w[1].as_ptr(), dma_w[2].as_ptr(), dma_w[3].as_ptr(),
+                                ds[t] as _,
                             );
                             let base = o.ptr().add(t * out_dim + r);
                             for j in 0..4 { *base.add(j) = scores4[j]; }
@@ -149,16 +141,11 @@ pub(crate) fn q4k_fused_silu_gemm_mt(
         let start = tid * chunk;
         let end = (start + chunk).min(out_dim);
         if start >= end { return; }
-        // Pre-cache f16→f32 weight scales: computed ONCE per 4-row group,
-        // then multiplied by per-token q8_d in the inner loop.
-        let mut gd_w = [[0f32; MAX_BLOCKS]; 4];  // gate d (weight-only)
-        let mut gdm_w = [[0f32; MAX_BLOCKS]; 4]; // gate dmin
-        let mut ud_w = [[0f32; MAX_BLOCKS]; 4];  // up d
-        let mut udm_w = [[0f32; MAX_BLOCKS]; 4]; // up dmin
-        let mut gd = [[0f32; MAX_BLOCKS]; 4];
-        let mut gdm = [[0f32; MAX_BLOCKS]; 4];
-        let mut ud = [[0f32; MAX_BLOCKS]; 4];
-        let mut udm = [[0f32; MAX_BLOCKS]; 4];
+        // Pre-cache f16→f32 weight scales ONCE per 4-row group
+        let mut gd_w = [[0f32; MAX_BLOCKS]; 4];
+        let mut gdm_w = [[0f32; MAX_BLOCKS]; 4];
+        let mut ud_w = [[0f32; MAX_BLOCKS]; 4];
+        let mut udm_w = [[0f32; MAX_BLOCKS]; 4];
         let mut g_scores = [0.0f32; 4];
         let mut u_scores = [0.0f32; 4];
         let mut r = start;
@@ -168,7 +155,6 @@ pub(crate) fn q4k_fused_silu_gemm_mt(
                            wg.ptr().add((r+2) * row_stride), wg.ptr().add((r+3) * row_stride)];
                 let uws = [wu.ptr().add(r * row_stride), wu.ptr().add((r+1) * row_stride),
                            wu.ptr().add((r+2) * row_stride), wu.ptr().add((r+3) * row_stride)];
-                // f16→f32 ONCE per 4-row group (invariant across tokens)
                 for i in 0..4 {
                     for blk in 0..n_blocks {
                         let gbp = gws[i].add(blk * Q4K_BLOCK_BYTES);
@@ -180,26 +166,22 @@ pub(crate) fn q4k_fused_silu_gemm_mt(
                     }
                 }
                 for t in 0..nt {
-                    // Multiply cached weight-d by per-token q8_d (cheap: just n_blocks muls)
-                    let q8_d_ptr = ds[t] as *const f32;
-                    for i in 0..4 {
-                        for blk in 0..n_blocks {
-                            let q = *q8_d_ptr.add(blk);
-                            gd[i][blk] = gd_w[i][blk] * q;
-                            gdm[i][blk] = gdm_w[i][blk] * q;
-                            ud[i][blk] = ud_w[i][blk] * q;
-                            udm[i][blk] = udm_w[i][blk] * q;
-                        }
-                    }
-                    ffi::q4k_dot_q8k_4row_dual(
+                    // Fused: kernel multiplies d_w * q8_d inline (no Rust pre-multiply)
+                    ffi::q4k_dot_q8k_4row_fused(
                         gws[0], gws[1], gws[2], gws[3],
+                        qs[t] as _, bs[t] as _,
+                        g_scores.as_mut_ptr(), n_blocks as i32,
+                        gd_w[0].as_ptr(), gd_w[1].as_ptr(), gd_w[2].as_ptr(), gd_w[3].as_ptr(),
+                        gdm_w[0].as_ptr(), gdm_w[1].as_ptr(), gdm_w[2].as_ptr(), gdm_w[3].as_ptr(),
+                        ds[t] as _,
+                    );
+                    ffi::q4k_dot_q8k_4row_fused(
                         uws[0], uws[1], uws[2], uws[3],
                         qs[t] as _, bs[t] as _,
-                        g_scores.as_mut_ptr(), u_scores.as_mut_ptr(), n_blocks as i32,
-                        gd[0].as_ptr(), gd[1].as_ptr(), gd[2].as_ptr(), gd[3].as_ptr(),
-                        gdm[0].as_ptr(), gdm[1].as_ptr(), gdm[2].as_ptr(), gdm[3].as_ptr(),
-                        ud[0].as_ptr(), ud[1].as_ptr(), ud[2].as_ptr(), ud[3].as_ptr(),
-                        udm[0].as_ptr(), udm[1].as_ptr(), udm[2].as_ptr(), udm[3].as_ptr(),
+                        u_scores.as_mut_ptr(), n_blocks as i32,
+                        ud_w[0].as_ptr(), ud_w[1].as_ptr(), ud_w[2].as_ptr(), ud_w[3].as_ptr(),
+                        udm_w[0].as_ptr(), udm_w[1].as_ptr(), udm_w[2].as_ptr(), udm_w[3].as_ptr(),
+                        ds[t] as _,
                     );
                     let base = o.ptr().add(t * out_dim + r);
                     for i in 0..4 {

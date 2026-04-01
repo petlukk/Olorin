@@ -20,6 +20,7 @@ pub struct KernelTableInference {
     pub quant_f32_q8k:         QuantF32Q8kFn,
     pub q4k_dot_q8k:           Q4kDotQ8kFn,
     pub q4k_dot_q8k_4row:      Q4kDot4RowFn,
+    pub q4k_dot_q8k_4row_fused: Q4kDot4RowFusedFn,
     pub q4k_dot_q8k_4row_dual: Q4kDot4RowDualFn,
     pub q6k_dot_q8k:           Q6kDotQ8kFn,
     pub q6k_dot_q8k_4row:      Q6kDot4RowFn,
@@ -143,6 +144,7 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
             quant_f32_q8k:         std::mem::transmute(sym(&q4kq, b"quant_f32_q8k\0")?),
             q4k_dot_q8k:           std::mem::transmute(sym(&q4kd, b"q4k_dot_q8k\0")?),
             q4k_dot_q8k_4row:      std::mem::transmute(sym(&q4kd, b"q4k_dot_q8k_4row\0")?),
+            q4k_dot_q8k_4row_fused: std::mem::transmute(sym(&q4kd, b"q4k_dot_q8k_4row_fused\0")?),
             q4k_dot_q8k_4row_dual: std::mem::transmute(sym(&q4kd, b"q4k_dot_q8k_4row_dual\0")?),
             q6k_dot_q8k:           std::mem::transmute(sym(&q6kd, b"q6k_dot_q8k\0")?),
             q6k_dot_q8k_4row:      std::mem::transmute(sym(&q6kd, b"q6k_dot_q8k_4row\0")?),
@@ -263,6 +265,20 @@ pub unsafe fn q4k_dot_q8k_4row(
     (k().q4k_dot_q8k_4row)(
         rw0, rw1, rw2, rw3, q8, bsums,
         scores, n_blocks, d0, d1, d2, d3, dm0, dm1, dm2, dm3)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn q4k_dot_q8k_4row_fused(
+    rw0: *const u8, rw1: *const u8, rw2: *const u8, rw3: *const u8,
+    q8: *const i8, bsums: *const i32,
+    scores: *mut f32, n_blocks: i32,
+    d0_w: *const f32, d1_w: *const f32, d2_w: *const f32, d3_w: *const f32,
+    dm0_w: *const f32, dm1_w: *const f32, dm2_w: *const f32, dm3_w: *const f32,
+    q8_d: *const f32,
+) {
+    (k().q4k_dot_q8k_4row_fused)(
+        rw0, rw1, rw2, rw3, q8, bsums,
+        scores, n_blocks, d0_w, d1_w, d2_w, d3_w, dm0_w, dm1_w, dm2_w, dm3_w, q8_d)
 }
 
 #[allow(clippy::too_many_arguments)]

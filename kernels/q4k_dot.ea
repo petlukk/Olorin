@@ -156,6 +156,82 @@ export func q4k_dot_q8k_4row(
     scores[3] = res3
 }
 
+// 4-row Q4_K × Q8_K with fused d×q8_d multiply (for GEMM: avoids Rust-side pre-multiply).
+// d0_w..d3_w: weight-only f16→f32 scales (cached across tokens).
+// q8_d: per-token Q8_K block scales.
+export func q4k_dot_q8k_4row_fused(
+    rw0: *restrict u8, rw1: *restrict u8, rw2: *restrict u8, rw3: *restrict u8,
+    q8: *restrict i8,
+    bsums: *restrict i32,
+    out scores: *mut f32 [cap: 4],
+    n_blocks: i32,
+    d0_w: *restrict f32, d1_w: *restrict f32, d2_w: *restrict f32, d3_w: *restrict f32,
+    dm0_w: *restrict f32, dm1_w: *restrict f32, dm2_w: *restrict f32, dm3_w: *restrict f32,
+    q8_d: *restrict f32
+) {
+    let mask_lo: u8x32 = splat(15)
+    let shift4: u8x32 = splat(4)
+    let mut res0: f32 = 0.0
+    let mut res1: f32 = 0.0
+    let mut res2: f32 = 0.0
+    let mut res3: f32 = 0.0
+
+    let mut blk: i32 = 0
+    while blk < n_blocks {
+        let q4_off: i32 = blk * 144 + 16
+        let q8_off: i32 = blk * 256
+        let sp: i32 = blk * 144 + 4
+        let bs: i32 = blk * 16
+
+        let mut sumi0: i32 = 0
+        let mut sumi1: i32 = 0
+        let mut sumi2: i32 = 0
+        let mut sumi3: i32 = 0
+
+        let mut j: i32 = 0
+        while j < 4 {
+            let q8_lo: i8x32 = load(q8, q8_off + j * 64)
+            let q8_hi: i8x32 = load(q8, q8_off + j * 64 + 32)
+
+            let p0: u8x32 = load(rw0, q4_off + j * 32)
+            let d0_lo: i32 = reduce_add(maddubs_i32(p0 .& mask_lo, q8_lo))
+            let d0_hi: i32 = reduce_add(maddubs_i32(p0 .>> shift4, q8_hi))
+            sumi0 = sumi0 + d0_lo * get_scale(rw0, sp, j) + d0_hi * get_scale_hi(rw0, sp, j)
+
+            let p1: u8x32 = load(rw1, q4_off + j * 32)
+            let d1_lo: i32 = reduce_add(maddubs_i32(p1 .& mask_lo, q8_lo))
+            let d1_hi: i32 = reduce_add(maddubs_i32(p1 .>> shift4, q8_hi))
+            sumi1 = sumi1 + d1_lo * get_scale(rw1, sp, j) + d1_hi * get_scale_hi(rw1, sp, j)
+
+            let p2: u8x32 = load(rw2, q4_off + j * 32)
+            let d2_lo: i32 = reduce_add(maddubs_i32(p2 .& mask_lo, q8_lo))
+            let d2_hi: i32 = reduce_add(maddubs_i32(p2 .>> shift4, q8_hi))
+            sumi2 = sumi2 + d2_lo * get_scale(rw2, sp, j) + d2_hi * get_scale_hi(rw2, sp, j)
+
+            let p3: u8x32 = load(rw3, q4_off + j * 32)
+            let d3_lo: i32 = reduce_add(maddubs_i32(p3 .& mask_lo, q8_lo))
+            let d3_hi: i32 = reduce_add(maddubs_i32(p3 .>> shift4, q8_hi))
+            sumi3 = sumi3 + d3_lo * get_scale(rw3, sp, j) + d3_hi * get_scale_hi(rw3, sp, j)
+
+            j = j + 1
+        }
+
+        // Fused: d_w[blk] * q8_d[blk] inline instead of Rust pre-multiply
+        let qd: f32 = q8_d[blk]
+        res0 = res0 + d0_w[blk] * qd * to_f32(sumi0) - dm0_w[blk] * qd * to_f32(row_mins(rw0, sp, bsums, bs))
+        res1 = res1 + d1_w[blk] * qd * to_f32(sumi1) - dm1_w[blk] * qd * to_f32(row_mins(rw1, sp, bsums, bs))
+        res2 = res2 + d2_w[blk] * qd * to_f32(sumi2) - dm2_w[blk] * qd * to_f32(row_mins(rw2, sp, bsums, bs))
+        res3 = res3 + d3_w[blk] * qd * to_f32(sumi3) - dm3_w[blk] * qd * to_f32(row_mins(rw3, sp, bsums, bs))
+
+        blk = blk + 1
+    }
+
+    scores[0] = res0
+    scores[1] = res1
+    scores[2] = res2
+    scores[3] = res3
+}
+
 // Dual 4-row Q4_K × Q8_K: 4 gate rows + 4 up rows × shared activations.
 export func q4k_dot_q8k_4row_dual(
     gw0: *restrict u8, gw1: *restrict u8, gw2: *restrict u8, gw3: *restrict u8,
