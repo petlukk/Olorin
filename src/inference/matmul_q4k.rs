@@ -23,7 +23,7 @@ pub(crate) fn unpack_q4k_scales(packed: &[u8], scales: &mut [u8; 8], mins: &mut 
 }
 
 /// Pre-compute per-block d and dmin (f16→f32 × q8_d) for one weight row.
-unsafe fn unpack_d(
+pub(crate) unsafe fn unpack_d(
     weight: *const u8, n_blocks: usize, q8_d: *const f32,
     d_buf: &mut [f32], dm_buf: &mut [f32],
 ) {

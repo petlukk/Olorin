@@ -73,11 +73,9 @@ pub(crate) fn q4k_gemm_mt(
             let end = (start + chunk).min(out_dim);
             if start >= end { return; }
                 let mut scores4 = [0.0f32; 4];
-                // Pre-cache f16→f32 weight scales (invariant across tokens)
-                let mut da_w = [[0.0f32; MAX_BLOCKS]; 4];
-                let mut dma_w = [[0.0f32; MAX_BLOCKS]; 4];
-                let mut da = [[0.0f32; MAX_BLOCKS]; 4];
-                let mut dma = [[0.0f32; MAX_BLOCKS]; 4];
+                let mut scores16 = [0.0f32; 16];
+                let mut dw = [[0.0f32; MAX_BLOCKS]; 4];
+                let mut dmw = [[0.0f32; MAX_BLOCKS]; 4];
                 let mut r = start;
                 unsafe {
                     while r + 4 <= end {
@@ -87,21 +85,40 @@ pub(crate) fn q4k_gemm_mt(
                             w.ptr().add((r+2) * row_stride),
                             w.ptr().add((r+3) * row_stride),
                         ];
+                        // f16→f32 once per 4-row group
                         for ri in 0..4 {
                             for blk in 0..n_blocks {
                                 let bp = ws[ri].add(blk * Q4K_BLOCK_BYTES);
-                                da_w[ri][blk] = f16_to_f32(*(bp as *const u16));
-                                dma_w[ri][blk] = f16_to_f32(*(bp.add(2) as *const u16));
+                                dw[ri][blk] = f16_to_f32(*(bp as *const u16));
+                                dmw[ri][blk] = f16_to_f32(*(bp.add(2) as *const u16));
                             }
                         }
-                        for t in 0..nt {
-                            let q8_d_ptr = ds[t] as *const f32;
+                        // Tiled 4×4: 4 tokens at a time
+                        let mut t = 0;
+                        while t + 4 <= nt {
+                            ffi::q4k_gemm_4x4(
+                                ws[0], ws[1], ws[2], ws[3],
+                                qs[t] as _, qs[t+1] as _, qs[t+2] as _, qs[t+3] as _,
+                                bs[t] as _, bs[t+1] as _, bs[t+2] as _, bs[t+3] as _,
+                                dw[0].as_ptr(), dw[1].as_ptr(), dw[2].as_ptr(), dw[3].as_ptr(),
+                                dmw[0].as_ptr(), dmw[1].as_ptr(), dmw[2].as_ptr(), dmw[3].as_ptr(),
+                                ds[t] as _, ds[t+1] as _, ds[t+2] as _, ds[t+3] as _,
+                                scores16.as_mut_ptr(), n_blocks as i32,
+                            );
                             for ri in 0..4 {
-                                for blk in 0..n_blocks {
-                                    let q = *q8_d_ptr.add(blk);
-                                    da[ri][blk] = da_w[ri][blk] * q;
-                                    dma[ri][blk] = dma_w[ri][blk] * q;
+                                for ti in 0..4 {
+                                    *o.ptr().add((t + ti) * out_dim + r + ri) = scores16[ri * 4 + ti];
                                 }
+                            }
+                            t += 4;
+                        }
+                        // Remainder tokens: per-token 4-row
+                        while t < nt {
+                            use crate::inference::matmul_q4k::unpack_d;
+                            let mut da = [[0f32; MAX_BLOCKS]; 4];
+                            let mut dma = [[0f32; MAX_BLOCKS]; 4];
+                            for ri in 0..4 {
+                                unpack_d(ws[ri], n_blocks, ds[t] as _, &mut da[ri], &mut dma[ri]);
                             }
                             ffi::q4k_dot_q8k_4row(
                                 ws[0], ws[1], ws[2], ws[3],
@@ -112,6 +129,7 @@ pub(crate) fn q4k_gemm_mt(
                             );
                             let base = o.ptr().add(t * out_dim + r);
                             for j in 0..4 { *base.add(j) = scores4[j]; }
+                            t += 1;
                         }
                         r += 4;
                     }

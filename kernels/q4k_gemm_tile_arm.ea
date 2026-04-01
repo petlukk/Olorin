@@ -1,26 +1,49 @@
 // q4k_gemm_tile_arm.ea — ARM NEON tiled Q4_K × Q8_K GEMM: 4 rows × 4 tokens.
 //
-// ARM port of q4k_gemm_tile.ea. Uses vdot_i32(i8x16, i8x16) → i32x4.
-// Q4 nibbles 0-15 fit in signed i8. High nibble extraction needs mask
-// after arithmetic shift: ((q4 >> 4) & 0x0F).
+// Weight-stationary: load weight nibbles + inline scales once per row,
+// dot against 4 tokens. d_w/dm_w are weight-only f16→f32, q8d per token.
 
 #[cfg(aarch64)]
+
+func ubyte(p: *restrict i8, off: i32) -> i32 { return to_i32(p[off]) & 255 }
+
+func get_sc(p: *restrict i8, sp: i32, j: i32) -> i32 {
+    if j < 2 { return ubyte(p, sp + j*2) & 63 }
+    return (ubyte(p, sp + j*2 + 4) & 15) | ((ubyte(p, sp + j*2 - 4) >> 6) << 4)
+}
+
+func get_sc_hi(p: *restrict i8, sp: i32, j: i32) -> i32 {
+    if j < 2 { return ubyte(p, sp + j*2 + 1) & 63 }
+    return (ubyte(p, sp + j*2 + 5) & 15) | ((ubyte(p, sp + j*2 - 3) >> 6) << 4)
+}
+
+func row_mins(p: *restrict i8, sp: i32, bsums: *restrict i32, bs: i32) -> i32 {
+    let mut s: i32 = 0
+    let mut k: i32 = 0
+    while k < 4 {
+        s = s + (ubyte(p, sp + 4 + k) & 63) * (bsums[bs + k*2] + bsums[bs + k*2 + 1])
+        k = k + 1
+    }
+    k = 0
+    while k < 4 {
+        s = s + ((ubyte(p, sp + 8 + k) >> 4) | ((ubyte(p, sp + 4 + k) >> 6) << 4)) * (bsums[bs + 8 + k*2] + bsums[bs + 8 + k*2 + 1])
+        k = k + 1
+    }
+    return s
+}
 
 export func q4k_gemm_4x4(
     rw0: *restrict i8, rw1: *restrict i8, rw2: *restrict i8, rw3: *restrict i8,
     q8_0: *restrict i8, q8_1: *restrict i8, q8_2: *restrict i8, q8_3: *restrict i8,
-    bsums_0: *restrict i32, bsums_1: *restrict i32, bsums_2: *restrict i32, bsums_3: *restrict i32,
-    sc0: *restrict u8, sc1: *restrict u8, sc2: *restrict u8, sc3: *restrict u8,
-    mn0: *restrict u8, mn1: *restrict u8, mn2: *restrict u8, mn3: *restrict u8,
-    d_arr0: *restrict f32, d_arr1: *restrict f32, d_arr2: *restrict f32, d_arr3: *restrict f32,
-    dm_arr0: *restrict f32, dm_arr1: *restrict f32, dm_arr2: *restrict f32, dm_arr3: *restrict f32,
-    q8d_0: *restrict f32, q8d_1: *restrict f32, q8d_2: *restrict f32, q8d_3: *restrict f32,
-    out scores: *mut f32 [cap: 16],
+    bs0: *restrict i32, bs1: *restrict i32, bs2: *restrict i32, bs3: *restrict i32,
+    dw0: *restrict f32, dw1: *restrict f32, dw2: *restrict f32, dw3: *restrict f32,
+    dmw0: *restrict f32, dmw1: *restrict f32, dmw2: *restrict f32, dmw3: *restrict f32,
+    q8d0: *restrict f32, q8d1: *restrict f32, q8d2: *restrict f32, q8d3: *restrict f32,
+    out scores: *mut f32,
     n_blocks: i32
 ) {
     let mask_lo: i8x16 = splat(15)
     let shift4: i8x16 = splat(4)
-
     let mut r0t0: f32 = 0.0
     let mut r0t1: f32 = 0.0
     let mut r0t2: f32 = 0.0
@@ -40,185 +63,131 @@ export func q4k_gemm_4x4(
 
     let mut blk: i32 = 0
     while blk < n_blocks {
-        let q4_off: i32 = blk * 144 + 16
-        let q8_off: i32 = blk * 256
-        let sc_off: i32 = blk * 8
-        let bs_off: i32 = blk * 16
-
-        let mut s0t0: i32 = 0
-        let mut s0t1: i32 = 0
-        let mut s0t2: i32 = 0
-        let mut s0t3: i32 = 0
-        let mut s1t0: i32 = 0
-        let mut s1t1: i32 = 0
-        let mut s1t2: i32 = 0
-        let mut s1t3: i32 = 0
-        let mut s2t0: i32 = 0
-        let mut s2t1: i32 = 0
-        let mut s2t2: i32 = 0
-        let mut s2t3: i32 = 0
-        let mut s3t0: i32 = 0
-        let mut s3t1: i32 = 0
-        let mut s3t2: i32 = 0
-        let mut s3t3: i32 = 0
+        let bp: i32 = blk * 144
+        let nib: i32 = bp + 16
+        let sp: i32 = bp + 4
+        let q8b: i32 = blk * 256
+        let bsb: i32 = blk * 16
 
         let mut j: i32 = 0
         while j < 4 {
-            let sc_lo: i32 = 2 * j
-            let sc_hi: i32 = 2 * j + 1
+            // Weight: load + unpack nibbles ONCE for 4 rows
+            let p0a: i8x16 = load(rw0, nib + j*32)
+            let p0b: i8x16 = load(rw0, nib + j*32 + 16)
+            let p0la: i8x16 = p0a .& mask_lo
+            let p0lb: i8x16 = p0b .& mask_lo
+            let p0ha: i8x16 = (p0a .>> shift4) .& mask_lo
+            let p0hb: i8x16 = (p0b .>> shift4) .& mask_lo
+            let s0l: i32x4 = splat(get_sc(rw0, sp, j))
+            let s0h: i32x4 = splat(get_sc_hi(rw0, sp, j))
 
-            // Per half (2 × 16 bytes = 32 bytes per chunk)
-            let mut half: i32 = 0
-            while half < 2 {
-                let pw: i32 = q4_off + j * 32 + half * 16
-                let qa: i32 = q8_off + j * 64 + half * 16
-                let qb: i32 = q8_off + j * 64 + 32 + half * 16
+            let p1a: i8x16 = load(rw1, nib + j*32)
+            let p1b: i8x16 = load(rw1, nib + j*32 + 16)
+            let p1la: i8x16 = p1a .& mask_lo
+            let p1lb: i8x16 = p1b .& mask_lo
+            let p1ha: i8x16 = (p1a .>> shift4) .& mask_lo
+            let p1hb: i8x16 = (p1b .>> shift4) .& mask_lo
+            let s1l: i32x4 = splat(get_sc(rw1, sp, j))
+            let s1h: i32x4 = splat(get_sc_hi(rw1, sp, j))
 
-                let p0: i8x16 = load(rw0, pw)
-                let p1: i8x16 = load(rw1, pw)
-                let p2: i8x16 = load(rw2, pw)
-                let p3: i8x16 = load(rw3, pw)
-                let p0_lo: i8x16 = p0 .& mask_lo
-                let p0_hi: i8x16 = (p0 .>> shift4) .& mask_lo
-                let p1_lo: i8x16 = p1 .& mask_lo
-                let p1_hi: i8x16 = (p1 .>> shift4) .& mask_lo
-                let p2_lo: i8x16 = p2 .& mask_lo
-                let p2_hi: i8x16 = (p2 .>> shift4) .& mask_lo
-                let p3_lo: i8x16 = p3 .& mask_lo
-                let p3_hi: i8x16 = (p3 .>> shift4) .& mask_lo
+            let p2a: i8x16 = load(rw2, nib + j*32)
+            let p2b: i8x16 = load(rw2, nib + j*32 + 16)
+            let p2la: i8x16 = p2a .& mask_lo
+            let p2lb: i8x16 = p2b .& mask_lo
+            let p2ha: i8x16 = (p2a .>> shift4) .& mask_lo
+            let p2hb: i8x16 = (p2b .>> shift4) .& mask_lo
+            let s2l: i32x4 = splat(get_sc(rw2, sp, j))
+            let s2h: i32x4 = splat(get_sc_hi(rw2, sp, j))
 
-                // Token 0
-                let a0: i8x16 = load(q8_0, qa)
-                let b0: i8x16 = load(q8_0, qb)
-                s0t0 = s0t0 + reduce_add(vdot_i32(p0_lo, a0)) * to_i32(sc0[sc_off+sc_lo]) + reduce_add(vdot_i32(p0_hi, b0)) * to_i32(sc0[sc_off+sc_hi])
-                s1t0 = s1t0 + reduce_add(vdot_i32(p1_lo, a0)) * to_i32(sc1[sc_off+sc_lo]) + reduce_add(vdot_i32(p1_hi, b0)) * to_i32(sc1[sc_off+sc_hi])
-                s2t0 = s2t0 + reduce_add(vdot_i32(p2_lo, a0)) * to_i32(sc2[sc_off+sc_lo]) + reduce_add(vdot_i32(p2_hi, b0)) * to_i32(sc2[sc_off+sc_hi])
-                s3t0 = s3t0 + reduce_add(vdot_i32(p3_lo, a0)) * to_i32(sc3[sc_off+sc_lo]) + reduce_add(vdot_i32(p3_hi, b0)) * to_i32(sc3[sc_off+sc_hi])
+            let p3a: i8x16 = load(rw3, nib + j*32)
+            let p3b: i8x16 = load(rw3, nib + j*32 + 16)
+            let p3la: i8x16 = p3a .& mask_lo
+            let p3lb: i8x16 = p3b .& mask_lo
+            let p3ha: i8x16 = (p3a .>> shift4) .& mask_lo
+            let p3hb: i8x16 = (p3b .>> shift4) .& mask_lo
+            let s3l: i32x4 = splat(get_sc(rw3, sp, j))
+            let s3h: i32x4 = splat(get_sc_hi(rw3, sp, j))
 
-                // Token 1
-                let a1: i8x16 = load(q8_1, qa)
-                let b1: i8x16 = load(q8_1, qb)
-                s0t1 = s0t1 + reduce_add(vdot_i32(p0_lo, a1)) * to_i32(sc0[sc_off+sc_lo]) + reduce_add(vdot_i32(p0_hi, b1)) * to_i32(sc0[sc_off+sc_hi])
-                s1t1 = s1t1 + reduce_add(vdot_i32(p1_lo, a1)) * to_i32(sc1[sc_off+sc_lo]) + reduce_add(vdot_i32(p1_hi, b1)) * to_i32(sc1[sc_off+sc_hi])
-                s2t1 = s2t1 + reduce_add(vdot_i32(p2_lo, a1)) * to_i32(sc2[sc_off+sc_lo]) + reduce_add(vdot_i32(p2_hi, b1)) * to_i32(sc2[sc_off+sc_hi])
-                s3t1 = s3t1 + reduce_add(vdot_i32(p3_lo, a1)) * to_i32(sc3[sc_off+sc_lo]) + reduce_add(vdot_i32(p3_hi, b1)) * to_i32(sc3[sc_off+sc_hi])
+            // Token 0: load Q8, dot with all 4 rows
+            let qa: i8x16 = load(q8_0, q8b + j*64)
+            let qbb: i8x16 = load(q8_0, q8b + j*64 + 16)
+            let qc: i8x16 = load(q8_0, q8b + j*64 + 32)
+            let qd: i8x16 = load(q8_0, q8b + j*64 + 48)
+            r0t0 = r0t0 + dw0[blk] * q8d0[blk] * to_f32(reduce_add((vdot_i32(p0la, qa) .+ vdot_i32(p0lb, qbb)) .* s0l .+ (vdot_i32(p0ha, qc) .+ vdot_i32(p0hb, qd)) .* s0h))
+            r1t0 = r1t0 + dw1[blk] * q8d0[blk] * to_f32(reduce_add((vdot_i32(p1la, qa) .+ vdot_i32(p1lb, qbb)) .* s1l .+ (vdot_i32(p1ha, qc) .+ vdot_i32(p1hb, qd)) .* s1h))
+            r2t0 = r2t0 + dw2[blk] * q8d0[blk] * to_f32(reduce_add((vdot_i32(p2la, qa) .+ vdot_i32(p2lb, qbb)) .* s2l .+ (vdot_i32(p2ha, qc) .+ vdot_i32(p2hb, qd)) .* s2h))
+            r3t0 = r3t0 + dw3[blk] * q8d0[blk] * to_f32(reduce_add((vdot_i32(p3la, qa) .+ vdot_i32(p3lb, qbb)) .* s3l .+ (vdot_i32(p3ha, qc) .+ vdot_i32(p3hb, qd)) .* s3h))
 
-                // Token 2
-                let a2: i8x16 = load(q8_2, qa)
-                let b2: i8x16 = load(q8_2, qb)
-                s0t2 = s0t2 + reduce_add(vdot_i32(p0_lo, a2)) * to_i32(sc0[sc_off+sc_lo]) + reduce_add(vdot_i32(p0_hi, b2)) * to_i32(sc0[sc_off+sc_hi])
-                s1t2 = s1t2 + reduce_add(vdot_i32(p1_lo, a2)) * to_i32(sc1[sc_off+sc_lo]) + reduce_add(vdot_i32(p1_hi, b2)) * to_i32(sc1[sc_off+sc_hi])
-                s2t2 = s2t2 + reduce_add(vdot_i32(p2_lo, a2)) * to_i32(sc2[sc_off+sc_lo]) + reduce_add(vdot_i32(p2_hi, b2)) * to_i32(sc2[sc_off+sc_hi])
-                s3t2 = s3t2 + reduce_add(vdot_i32(p3_lo, a2)) * to_i32(sc3[sc_off+sc_lo]) + reduce_add(vdot_i32(p3_hi, b2)) * to_i32(sc3[sc_off+sc_hi])
+            // Token 1
+            let qa1: i8x16 = load(q8_1, q8b + j*64)
+            let qb1: i8x16 = load(q8_1, q8b + j*64 + 16)
+            let qc1: i8x16 = load(q8_1, q8b + j*64 + 32)
+            let qd1: i8x16 = load(q8_1, q8b + j*64 + 48)
+            r0t1 = r0t1 + dw0[blk] * q8d1[blk] * to_f32(reduce_add((vdot_i32(p0la, qa1) .+ vdot_i32(p0lb, qb1)) .* s0l .+ (vdot_i32(p0ha, qc1) .+ vdot_i32(p0hb, qd1)) .* s0h))
+            r1t1 = r1t1 + dw1[blk] * q8d1[blk] * to_f32(reduce_add((vdot_i32(p1la, qa1) .+ vdot_i32(p1lb, qb1)) .* s1l .+ (vdot_i32(p1ha, qc1) .+ vdot_i32(p1hb, qd1)) .* s1h))
+            r2t1 = r2t1 + dw2[blk] * q8d1[blk] * to_f32(reduce_add((vdot_i32(p2la, qa1) .+ vdot_i32(p2lb, qb1)) .* s2l .+ (vdot_i32(p2ha, qc1) .+ vdot_i32(p2hb, qd1)) .* s2h))
+            r3t1 = r3t1 + dw3[blk] * q8d1[blk] * to_f32(reduce_add((vdot_i32(p3la, qa1) .+ vdot_i32(p3lb, qb1)) .* s3l .+ (vdot_i32(p3ha, qc1) .+ vdot_i32(p3hb, qd1)) .* s3h))
 
-                // Token 3
-                let a3: i8x16 = load(q8_3, qa)
-                let b3: i8x16 = load(q8_3, qb)
-                s0t3 = s0t3 + reduce_add(vdot_i32(p0_lo, a3)) * to_i32(sc0[sc_off+sc_lo]) + reduce_add(vdot_i32(p0_hi, b3)) * to_i32(sc0[sc_off+sc_hi])
-                s1t3 = s1t3 + reduce_add(vdot_i32(p1_lo, a3)) * to_i32(sc1[sc_off+sc_lo]) + reduce_add(vdot_i32(p1_hi, b3)) * to_i32(sc1[sc_off+sc_hi])
-                s2t3 = s2t3 + reduce_add(vdot_i32(p2_lo, a3)) * to_i32(sc2[sc_off+sc_lo]) + reduce_add(vdot_i32(p2_hi, b3)) * to_i32(sc2[sc_off+sc_hi])
-                s3t3 = s3t3 + reduce_add(vdot_i32(p3_lo, a3)) * to_i32(sc3[sc_off+sc_lo]) + reduce_add(vdot_i32(p3_hi, b3)) * to_i32(sc3[sc_off+sc_hi])
+            // Token 2
+            let qa2: i8x16 = load(q8_2, q8b + j*64)
+            let qb2: i8x16 = load(q8_2, q8b + j*64 + 16)
+            let qc2: i8x16 = load(q8_2, q8b + j*64 + 32)
+            let qd2: i8x16 = load(q8_2, q8b + j*64 + 48)
+            r0t2 = r0t2 + dw0[blk] * q8d2[blk] * to_f32(reduce_add((vdot_i32(p0la, qa2) .+ vdot_i32(p0lb, qb2)) .* s0l .+ (vdot_i32(p0ha, qc2) .+ vdot_i32(p0hb, qd2)) .* s0h))
+            r1t2 = r1t2 + dw1[blk] * q8d2[blk] * to_f32(reduce_add((vdot_i32(p1la, qa2) .+ vdot_i32(p1lb, qb2)) .* s1l .+ (vdot_i32(p1ha, qc2) .+ vdot_i32(p1hb, qd2)) .* s1h))
+            r2t2 = r2t2 + dw2[blk] * q8d2[blk] * to_f32(reduce_add((vdot_i32(p2la, qa2) .+ vdot_i32(p2lb, qb2)) .* s2l .+ (vdot_i32(p2ha, qc2) .+ vdot_i32(p2hb, qd2)) .* s2h))
+            r3t2 = r3t2 + dw3[blk] * q8d2[blk] * to_f32(reduce_add((vdot_i32(p3la, qa2) .+ vdot_i32(p3lb, qb2)) .* s3l .+ (vdot_i32(p3ha, qc2) .+ vdot_i32(p3hb, qd2)) .* s3h))
 
-                half = half + 1
-            }
+            // Token 3
+            let qa3: i8x16 = load(q8_3, q8b + j*64)
+            let qb3: i8x16 = load(q8_3, q8b + j*64 + 16)
+            let qc3: i8x16 = load(q8_3, q8b + j*64 + 32)
+            let qd3: i8x16 = load(q8_3, q8b + j*64 + 48)
+            r0t3 = r0t3 + dw0[blk] * q8d3[blk] * to_f32(reduce_add((vdot_i32(p0la, qa3) .+ vdot_i32(p0lb, qb3)) .* s0l .+ (vdot_i32(p0ha, qc3) .+ vdot_i32(p0hb, qd3)) .* s0h))
+            r1t3 = r1t3 + dw1[blk] * q8d3[blk] * to_f32(reduce_add((vdot_i32(p1la, qa3) .+ vdot_i32(p1lb, qb3)) .* s1l .+ (vdot_i32(p1ha, qc3) .+ vdot_i32(p1hb, qd3)) .* s1h))
+            r2t3 = r2t3 + dw2[blk] * q8d3[blk] * to_f32(reduce_add((vdot_i32(p2la, qa3) .+ vdot_i32(p2lb, qb3)) .* s2l .+ (vdot_i32(p2ha, qc3) .+ vdot_i32(p2hb, qd3)) .* s2h))
+            r3t3 = r3t3 + dw3[blk] * q8d3[blk] * to_f32(reduce_add((vdot_i32(p3la, qa3) .+ vdot_i32(p3lb, qb3)) .* s3l .+ (vdot_i32(p3ha, qc3) .+ vdot_i32(p3hb, qd3)) .* s3h))
+
             j = j + 1
         }
 
-        // Min correction (identical to x86 — scalar)
-        let mut mb0_t0: i32 = 0
-        let mut mb0_t1: i32 = 0
-        let mut mb0_t2: i32 = 0
-        let mut mb0_t3: i32 = 0
-        let mut mb1_t0: i32 = 0
-        let mut mb1_t1: i32 = 0
-        let mut mb1_t2: i32 = 0
-        let mut mb1_t3: i32 = 0
-        let mut mb2_t0: i32 = 0
-        let mut mb2_t1: i32 = 0
-        let mut mb2_t2: i32 = 0
-        let mut mb2_t3: i32 = 0
-        let mut mb3_t0: i32 = 0
-        let mut mb3_t1: i32 = 0
-        let mut mb3_t2: i32 = 0
-        let mut mb3_t3: i32 = 0
-        j = 0
-        while j < 8 {
-            let m0: i32 = to_i32(mn0[sc_off + j])
-            let m1: i32 = to_i32(mn1[sc_off + j])
-            let m2: i32 = to_i32(mn2[sc_off + j])
-            let m3: i32 = to_i32(mn3[sc_off + j])
-            let bp0: i32 = bsums_0[bs_off + 2*j] + bsums_0[bs_off + 2*j+1]
-            let bp1: i32 = bsums_1[bs_off + 2*j] + bsums_1[bs_off + 2*j+1]
-            let bp2: i32 = bsums_2[bs_off + 2*j] + bsums_2[bs_off + 2*j+1]
-            let bp3: i32 = bsums_3[bs_off + 2*j] + bsums_3[bs_off + 2*j+1]
-            mb0_t0 = mb0_t0 + m0 * bp0
-            mb0_t1 = mb0_t1 + m0 * bp1
-            mb0_t2 = mb0_t2 + m0 * bp2
-            mb0_t3 = mb0_t3 + m0 * bp3
-            mb1_t0 = mb1_t0 + m1 * bp0
-            mb1_t1 = mb1_t1 + m1 * bp1
-            mb1_t2 = mb1_t2 + m1 * bp2
-            mb1_t3 = mb1_t3 + m1 * bp3
-            mb2_t0 = mb2_t0 + m2 * bp0
-            mb2_t1 = mb2_t1 + m2 * bp1
-            mb2_t2 = mb2_t2 + m2 * bp2
-            mb2_t3 = mb2_t3 + m2 * bp3
-            mb3_t0 = mb3_t0 + m3 * bp0
-            mb3_t1 = mb3_t1 + m3 * bp1
-            mb3_t2 = mb3_t2 + m3 * bp2
-            mb3_t3 = mb3_t3 + m3 * bp3
-            j = j + 1
-        }
+        // Mins correction: 4 rows × 4 tokens
+        let dm00: f32 = dmw0[blk] * q8d0[blk]
+        let dm01: f32 = dmw0[blk] * q8d1[blk]
+        let dm02: f32 = dmw0[blk] * q8d2[blk]
+        let dm03: f32 = dmw0[blk] * q8d3[blk]
+        let mm0: i32 = row_mins(rw0, sp, bs0, bsb)
+        r0t0 = r0t0 - dm00 * to_f32(mm0)
+        r0t1 = r0t1 - dm01 * to_f32(row_mins(rw0, sp, bs1, bsb))
+        r0t2 = r0t2 - dm02 * to_f32(row_mins(rw0, sp, bs2, bsb))
+        r0t3 = r0t3 - dm03 * to_f32(row_mins(rw0, sp, bs3, bsb))
 
-        let db0_t0: f32 = d_arr0[blk] * q8d_0[blk]
-        let db0_t1: f32 = d_arr0[blk] * q8d_1[blk]
-        let db0_t2: f32 = d_arr0[blk] * q8d_2[blk]
-        let db0_t3: f32 = d_arr0[blk] * q8d_3[blk]
-        let db1_t0: f32 = d_arr1[blk] * q8d_0[blk]
-        let db1_t1: f32 = d_arr1[blk] * q8d_1[blk]
-        let db1_t2: f32 = d_arr1[blk] * q8d_2[blk]
-        let db1_t3: f32 = d_arr1[blk] * q8d_3[blk]
-        let db2_t0: f32 = d_arr2[blk] * q8d_0[blk]
-        let db2_t1: f32 = d_arr2[blk] * q8d_1[blk]
-        let db2_t2: f32 = d_arr2[blk] * q8d_2[blk]
-        let db2_t3: f32 = d_arr2[blk] * q8d_3[blk]
-        let db3_t0: f32 = d_arr3[blk] * q8d_0[blk]
-        let db3_t1: f32 = d_arr3[blk] * q8d_1[blk]
-        let db3_t2: f32 = d_arr3[blk] * q8d_2[blk]
-        let db3_t3: f32 = d_arr3[blk] * q8d_3[blk]
-        let mb0_q0: f32 = dm_arr0[blk] * q8d_0[blk]
-        let mb0_q1: f32 = dm_arr0[blk] * q8d_1[blk]
-        let mb0_q2: f32 = dm_arr0[blk] * q8d_2[blk]
-        let mb0_q3: f32 = dm_arr0[blk] * q8d_3[blk]
-        let mb1_q0: f32 = dm_arr1[blk] * q8d_0[blk]
-        let mb1_q1: f32 = dm_arr1[blk] * q8d_1[blk]
-        let mb1_q2: f32 = dm_arr1[blk] * q8d_2[blk]
-        let mb1_q3: f32 = dm_arr1[blk] * q8d_3[blk]
-        let mb2_q0: f32 = dm_arr2[blk] * q8d_0[blk]
-        let mb2_q1: f32 = dm_arr2[blk] * q8d_1[blk]
-        let mb2_q2: f32 = dm_arr2[blk] * q8d_2[blk]
-        let mb2_q3: f32 = dm_arr2[blk] * q8d_3[blk]
-        let mb3_q0: f32 = dm_arr3[blk] * q8d_0[blk]
-        let mb3_q1: f32 = dm_arr3[blk] * q8d_1[blk]
-        let mb3_q2: f32 = dm_arr3[blk] * q8d_2[blk]
-        let mb3_q3: f32 = dm_arr3[blk] * q8d_3[blk]
+        let dm10: f32 = dmw1[blk] * q8d0[blk]
+        let dm11: f32 = dmw1[blk] * q8d1[blk]
+        let dm12: f32 = dmw1[blk] * q8d2[blk]
+        let dm13: f32 = dmw1[blk] * q8d3[blk]
+        r1t0 = r1t0 - dm10 * to_f32(row_mins(rw1, sp, bs0, bsb))
+        r1t1 = r1t1 - dm11 * to_f32(row_mins(rw1, sp, bs1, bsb))
+        r1t2 = r1t2 - dm12 * to_f32(row_mins(rw1, sp, bs2, bsb))
+        r1t3 = r1t3 - dm13 * to_f32(row_mins(rw1, sp, bs3, bsb))
 
-        r0t0 = r0t0 + db0_t0 * to_f32(s0t0) - mb0_q0 * to_f32(mb0_t0)
-        r0t1 = r0t1 + db0_t1 * to_f32(s0t1) - mb0_q1 * to_f32(mb0_t1)
-        r0t2 = r0t2 + db0_t2 * to_f32(s0t2) - mb0_q2 * to_f32(mb0_t2)
-        r0t3 = r0t3 + db0_t3 * to_f32(s0t3) - mb0_q3 * to_f32(mb0_t3)
-        r1t0 = r1t0 + db1_t0 * to_f32(s1t0) - mb1_q0 * to_f32(mb1_t0)
-        r1t1 = r1t1 + db1_t1 * to_f32(s1t1) - mb1_q1 * to_f32(mb1_t1)
-        r1t2 = r1t2 + db1_t2 * to_f32(s1t2) - mb1_q2 * to_f32(mb1_t2)
-        r1t3 = r1t3 + db1_t3 * to_f32(s1t3) - mb1_q3 * to_f32(mb1_t3)
-        r2t0 = r2t0 + db2_t0 * to_f32(s2t0) - mb2_q0 * to_f32(mb2_t0)
-        r2t1 = r2t1 + db2_t1 * to_f32(s2t1) - mb2_q1 * to_f32(mb2_t1)
-        r2t2 = r2t2 + db2_t2 * to_f32(s2t2) - mb2_q2 * to_f32(mb2_t2)
-        r2t3 = r2t3 + db2_t3 * to_f32(s2t3) - mb2_q3 * to_f32(mb2_t3)
-        r3t0 = r3t0 + db3_t0 * to_f32(s3t0) - mb3_q0 * to_f32(mb3_t0)
-        r3t1 = r3t1 + db3_t1 * to_f32(s3t1) - mb3_q1 * to_f32(mb3_t1)
-        r3t2 = r3t2 + db3_t2 * to_f32(s3t2) - mb3_q2 * to_f32(mb3_t2)
-        r3t3 = r3t3 + db3_t3 * to_f32(s3t3) - mb3_q3 * to_f32(mb3_t3)
+        let dm20: f32 = dmw2[blk] * q8d0[blk]
+        let dm21: f32 = dmw2[blk] * q8d1[blk]
+        let dm22: f32 = dmw2[blk] * q8d2[blk]
+        let dm23: f32 = dmw2[blk] * q8d3[blk]
+        r2t0 = r2t0 - dm20 * to_f32(row_mins(rw2, sp, bs0, bsb))
+        r2t1 = r2t1 - dm21 * to_f32(row_mins(rw2, sp, bs1, bsb))
+        r2t2 = r2t2 - dm22 * to_f32(row_mins(rw2, sp, bs2, bsb))
+        r2t3 = r2t3 - dm23 * to_f32(row_mins(rw2, sp, bs3, bsb))
+
+        let dm30: f32 = dmw3[blk] * q8d0[blk]
+        let dm31: f32 = dmw3[blk] * q8d1[blk]
+        let dm32: f32 = dmw3[blk] * q8d2[blk]
+        let dm33: f32 = dmw3[blk] * q8d3[blk]
+        r3t0 = r3t0 - dm30 * to_f32(row_mins(rw3, sp, bs0, bsb))
+        r3t1 = r3t1 - dm31 * to_f32(row_mins(rw3, sp, bs1, bsb))
+        r3t2 = r3t2 - dm32 * to_f32(row_mins(rw3, sp, bs2, bsb))
+        r3t3 = r3t3 - dm33 * to_f32(row_mins(rw3, sp, bs3, bsb))
 
         blk = blk + 1
     }

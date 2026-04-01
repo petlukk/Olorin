@@ -43,15 +43,13 @@ pub type Q6kDot4RowFn = unsafe extern "C" fn(
 pub type ApplyRopeFn = unsafe extern "C" fn(*const f32, *const f32, *mut f32, i32, i32);
 #[allow(clippy::type_complexity)]
 pub type Q4kGemm4x4Fn = unsafe extern "C" fn(
-    *const u8, *const u8, *const u8, *const u8,
-    *const i8, *const i8, *const i8, *const i8,
-    *const i32, *const i32, *const i32, *const i32,
-    *const u8, *const u8, *const u8, *const u8,
-    *const u8, *const u8, *const u8, *const u8,
-    *const f32, *const f32, *const f32, *const f32,
-    *const f32, *const f32, *const f32, *const f32,
-    *const f32, *const f32, *const f32, *const f32,
-    *mut f32, i32,
+    *const u8, *const u8, *const u8, *const u8,     // rw0-3
+    *const i8, *const i8, *const i8, *const i8,     // q8_0-3
+    *const i32, *const i32, *const i32, *const i32,  // bs0-3
+    *const f32, *const f32, *const f32, *const f32,  // dw0-3
+    *const f32, *const f32, *const f32, *const f32,  // dmw0-3
+    *const f32, *const f32, *const f32, *const f32,  // q8d0-3
+    *mut f32, i32,                                    // scores, n_blocks
 );
 
 pub type QuantizeSIMDFn   = unsafe extern "C" fn(*const f32, *mut i32, *mut f32, *mut f32, i32);
