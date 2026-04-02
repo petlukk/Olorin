@@ -1,28 +1,29 @@
 //! GEMM-style batched prefill for Llama/Q4_K models.
+//! Quantize all tokens to Q8K once, then batch-matmul against Q4K weights.
 
 use crate::kernels::ffi_inference as ffi;
 use crate::inference::forward::{apply_rope, build_rope_freqs};
 use crate::inference::forward_llama::{LlamaState, embed_token, add_bias, q8k_blocks};
 use crate::inference::math::softmax_rows;
-use crate::inference::gemm_q4k::{BatchQ8K, q4k_fused_gemm_f32_mt, q4k_fused_silu_gemm_f32_mt};
+use crate::inference::gemm_q4k::{BatchQ8K, q4k_gemm_mt, q4k_fused_silu_gemm_mt};
 use crate::inference::gemm_q6k::q6k_gemm_mt;
 use crate::inference::matmul_q4k::Q4K_BLOCK_BYTES;
 use crate::inference::matmul_q6k::Q6K_BLOCK_BYTES;
 use crate::inference::engine::BitNetModel;
 use crate::inference::cache;
+
 /// Opaque pointer wrapper for vecadd thread dispatch.
 #[derive(Clone, Copy)]
 struct W {
-    xs_mut: usize,  // *const *mut f32
-    buf: usize,     // *const f32
+    xs_mut: usize,
+    buf: usize,
     h: usize,
     n: usize,
 }
 
 impl LlamaState {
-    /// GEMM-style batched prefill: load weight once, multiply all tokens.
-    /// Uses fused quant+matmul kernels where possible (Q4K).
-    /// Falls back to BatchQ8K for Q6K layers.
+    /// GEMM-style batched prefill: quantize all tokens to Q8K once,
+    /// then load each weight matrix once and multiply all tokens.
     pub fn prefill(&mut self, model: &BitNetModel, tokens: &[u32]) {
         let n = tokens.len();
         let (h, hd, nh, nkv, kv, f) = (
@@ -35,14 +36,9 @@ impl LlamaState {
             let mut x = vec![0.0f32; h]; embed_token(model, tok, &mut x); x
         }).collect();
 
-        // Flat f32 buffer for normalized activations (replaces BatchQ8K for Q4K path)
         let mut norm_all = vec![0.0f32; n * h];
-
-        // BatchQ8K only needed for Q6K fallback layers
-        let has_q6k_v = model.q4k_layers.iter().any(|lw| lw.wv_block_bytes == Q6K_BLOCK_BYTES);
-        let has_q6k_down = model.q4k_layers.iter().any(|lw| lw.w_down_block_bytes == Q6K_BLOCK_BYTES);
-        let mut bq_h = if has_q6k_v { Some(BatchQ8K::new(n, h)) } else { None };
-        let mut bq_f = if has_q6k_down { Some(BatchQ8K::new(n, f)) } else { None };
+        let mut bq_h = BatchQ8K::new(n, h);
+        let mut bq_f = BatchQ8K::new(n, f);
 
         let (mut qs_all, mut ks_all, mut vs_all) = (
             vec![0.0f32; n*h], vec![0.0f32; n*kv], vec![0.0f32; n*kv],
@@ -55,7 +51,7 @@ impl LlamaState {
         for layer in 0..model.n_layers {
             let lw = &model.q4k_layers[layer];
 
-            // ── Parallel rmsnorm (attn input) → norm_all ──
+            // ── Parallel rmsnorm → norm_all, then batch quantize to Q8K ──
             {
                 let xs_raw: Vec<*const f32> = xs.iter().map(|x| x.as_ptr()).collect();
                 let norm_ptr = norm_all.as_mut_ptr() as usize;
@@ -74,168 +70,125 @@ impl LlamaState {
                     }
                 });
             }
+            for t in 0..n { bq_h.quantize(t, &norm_all[t*h..(t+1)*h]); }
 
-            // ── QKV matmul: fused f32→kernel (no Q8K buffer) ──
-            q4k_fused_gemm_f32_mt(lw.wq, h_rs, h_nb, &norm_all, h, n, &mut qs_all, h, &self.pool);
-            q4k_fused_gemm_f32_mt(lw.wk, h_rs, h_nb, &norm_all, h, n, &mut ks_all, kv, &self.pool);
+            // ── QKV matmul: Q4K × Q8K (pre-quantized) ──
+            q4k_gemm_mt(lw.wq, h_rs, h_nb, &bq_h, &mut qs_all, h, &self.pool);
+            q4k_gemm_mt(lw.wk, h_rs, h_nb, &bq_h, &mut ks_all, kv, &self.pool);
             if lw.wv_block_bytes == Q6K_BLOCK_BYTES {
-                // Q6K fallback: need BatchQ8K
-                let bq = bq_h.as_mut().unwrap();
-                for t in 0..n { bq.quantize(t, &norm_all[t*h..(t+1)*h]); }
-                q6k_gemm_mt(lw.wv, h_nb * Q6K_BLOCK_BYTES, h_nb, bq, &mut vs_all, kv, &self.pool);
+                q6k_gemm_mt(lw.wv, h_nb * Q6K_BLOCK_BYTES, h_nb, &bq_h, &mut vs_all, kv, &self.pool);
             } else {
-                q4k_fused_gemm_f32_mt(lw.wv, h_rs, h_nb, &norm_all, h, n, &mut vs_all, kv, &self.pool);
+                q4k_gemm_mt(lw.wv, h_rs, h_nb, &bq_h, &mut vs_all, kv, &self.pool);
             }
 
             // ── Attention: batch bias+RoPE, bulk KV append, sequential scoring ──
-
-            // Apply biases and RoPE to all tokens first
             for t in 0..n {
-                let q = &mut qs_all[t*h..(t+1)*h];
-                let k = &mut ks_all[t*kv..(t+1)*kv];
-                let v = &mut vs_all[t*kv..(t+1)*kv];
-                add_bias(q, lw.q_bias, h);
-                add_bias(v, lw.v_bias, kv);
-                build_rope_freqs(&mut self.rope_freqs, hd, t, model.rope_theta);
-                apply_rope(q, &self.rope_freqs, hd, nh);
-                apply_rope(k, &self.rope_freqs, hd, nkv);
+                add_bias(&mut qs_all[t*h..(t+1)*h], lw.q_bias, h);
+                add_bias(&mut vs_all[t*kv..(t+1)*kv], lw.v_bias, kv);
             }
-
-            // Transpose K and V from [token][head*dim] to [head][token][dim] for bulk append
-            let mut k_transposed = vec![0.0f32; nkv * n * hd];
-            let mut v_transposed = vec![0.0f32; nkv * n * hd];
+            let mut rope_freqs = vec![0.0f32; hd];
+            let pos_base = self.kv_cache.seq_len() as usize;
             for t in 0..n {
-                for head in 0..nkv {
-                    let src_off = t * kv + head * hd;
-                    let dst_off = head * n * hd + t * hd;
-                    k_transposed[dst_off..dst_off + hd]
-                        .copy_from_slice(&ks_all[src_off..src_off + hd]);
-                    v_transposed[dst_off..dst_off + hd]
-                        .copy_from_slice(&vs_all[src_off..src_off + hd]);
+                build_rope_freqs(&mut rope_freqs, hd, pos_base + t, model.rope_theta);
+                apply_rope(&mut qs_all[t*h..(t+1)*h], &rope_freqs, hd, nh);
+                apply_rope(&mut ks_all[t*kv..(t+1)*kv], &rope_freqs, hd, nkv);
+            }
+            // Bulk KV append: all N tokens at once (head-major within each token)
+            // append() uses self.seq_len as write position, n_tokens controls how many.
+            // Data must be head-major: [head][n_tokens * head_dim]
+            // But ks_all is token-major: [token][kv_heads * head_dim]
+            // Transpose to head-major for bulk append:
+            {
+                let mut k_hm = vec![0.0f32; n * kv];  // head-major
+                let mut v_hm = vec![0.0f32; n * kv];
+                for h_idx in 0..nkv {
+                    for t in 0..n {
+                        let src_off = t * kv + h_idx * hd;
+                        let dst_off = h_idx * n * hd + t * hd;
+                        k_hm[dst_off..dst_off+hd].copy_from_slice(&ks_all[src_off..src_off+hd]);
+                        v_hm[dst_off..dst_off+hd].copy_from_slice(&vs_all[src_off..src_off+hd]);
+                    }
                 }
+                self.kv_cache.append(&k_hm, layer as i32, 0, n as i32).unwrap();
+                self.kv_cache.append(&v_hm, layer as i32, 1, n as i32).unwrap();
+                if layer == model.n_layers - 1 { self.kv_cache.advance(n as i32).unwrap(); }
             }
 
-            // Bulk append all N tokens to KV cache at once
-            self.kv_cache.restore(0).unwrap();
-            self.kv_cache.append(&k_transposed, layer as i32, 0, n as i32).unwrap();
-            self.kv_cache.append(&v_transposed, layer as i32, 1, n as i32).unwrap();
-            self.kv_cache.advance(n as i32).unwrap();
-
-            // Pre-compute K-bias correction for all positions (if model has K bias)
             let has_k_bias = !lw.k_bias.is_null();
-            let mut k_bias_dots: Vec<f32> = Vec::new();
-            if has_k_bias {
-                let q_per_kv = nh / nkv;
-                let rsqrt_hd = 1.0 / (hd as f32).sqrt();
-                let mut bias_freqs = vec![0.0f32; hd];
-                let mut rotated_biases = vec![0.0f32; n * kv];
-                for s in 0..n {
-                    for i in 0..kv { rotated_biases[s * kv + i] = unsafe { *lw.k_bias.add(i) }; }
-                    build_rope_freqs(&mut bias_freqs, hd, s, model.rope_theta);
-                    apply_rope(&mut rotated_biases[s * kv..(s + 1) * kv], &bias_freqs, hd, nkv);
-                }
-                k_bias_dots.resize(n * nh * n, 0.0);
-                for t in 0..n {
-                    let q = &qs_all[t * h..(t + 1) * h];
-                    let seq_len = t + 1;
-                    for s in 0..seq_len {
-                        let rb = &rotated_biases[s * kv..];
-                        for kv_h in 0..nkv {
-                            let kb_off = kv_h * hd;
-                            for q_off in 0..q_per_kv {
-                                let q_h = kv_h * q_per_kv + q_off;
-                                let qb = q_h * hd;
-                                let mut dot = 0.0f32;
-                                for d in 0..hd { dot += q[qb + d] * rb[kb_off + d]; }
-                                k_bias_dots[t * nh * n + q_h * n + s] = dot * rsqrt_hd;
-                            }
-                        }
-                    }
-                }
-            }
+            let seq_len = pos_base + n;
 
-            // Attention: fused causal kernel if available, else parallel per-token
             if !has_k_bias && ffi::has_fused_causal_attn() {
+                // Flash causal attention: single kernel for all N queries
                 let signs = self.kv_cache.jl_signs();
-                let n_q_groups = (nh * hd) / 64;
-                let mut rot_qs = qs_all[..n * h].to_vec();
-                for qi in 0..n {
-                    for g in 0..n_q_groups {
+                let n_groups = (nh * hd) / 64;
+                for t in 0..n {
+                    for g in 0..n_groups {
+                        let off = t * h + g * 64;
                         unsafe {
-                            let ptr = rot_qs.as_mut_ptr().add(qi * h + g * 64);
-                            crate::kernels::ffi::turbo_rotate(ptr, signs.as_ptr(), 64);
+                            crate::kernels::ffi::turbo_rotate(
+                                qs_all.as_mut_ptr().add(off), signs.as_ptr(), 64,
+                            );
                         }
                     }
                 }
-                let gph = self.kv_cache.max_seq_len() * (hd as i32 / 64);
-                let k_w = self.kv_cache.weights(layer as i32, 0);
-                let k_s = self.kv_cache.scales(layer as i32, 0);
-                let k_b = self.kv_cache.biases(layer as i32, 0);
-                let v_w = self.kv_cache.weights(layer as i32, 1);
-                let v_s = self.kv_cache.scales(layer as i32, 1);
-                let v_b = self.kv_cache.biases(layer as i32, 1);
+                let (k_w, k_s, k_b) = self.kv_cache.k_ptrs(layer as i32);
+                let (v_w, v_s, v_b) = self.kv_cache.v_ptrs(layer as i32);
+                let gph = self.kv_cache.groups_per_head();
                 let mut state = vec![0.0f32; n * nh * 130];
                 unsafe {
                     ffi::fused_causal_attn_gqa(
-                        rot_qs.as_ptr(), k_w.as_ptr(), k_s.as_ptr(), k_b.as_ptr(),
-                        v_w.as_ptr(), v_s.as_ptr(), v_b.as_ptr(),
+                        qs_all.as_ptr(), k_w, k_s, k_b, v_w, v_s, v_b,
                         state.as_mut_ptr(), attn_all.as_mut_ptr(),
-                        n as i32, n as i32, nh as i32, nkv as i32, gph,
+                        seq_len as i32, n as i32, nh as i32, nkv as i32, gph,
                     );
                 }
                 let n_out_groups = (nh * hd) / 64;
-                for qi in 0..n {
+                for t in 0..n {
                     for g in 0..n_out_groups {
+                        let off = t * h + g * 64;
                         unsafe {
-                            let ptr = attn_all.as_mut_ptr().add(qi * h + g * 64);
+                            let ptr = attn_all.as_mut_ptr().add(off);
                             crate::kernels::ffi::fwht_inplace(ptr, 64);
                             crate::kernels::ffi::sign_flip(ptr, signs.as_ptr(), 64);
                         }
                     }
                 }
             } else {
-                let cache_ptr = &self.kv_cache as *const cache::EakvCache as usize;
-                let qs_ptr = qs_all.as_ptr() as usize;
-                let attn_ptr = attn_all.as_mut_ptr() as usize;
-                let bias_ptr = if has_k_bias { k_bias_dots.as_ptr() as usize } else { 0 };
-                let layer_i32 = layer as i32;
-                let nh_i32 = nh as i32;
-                let nkv_i32 = nkv as i32;
-                let n_tokens = n;
-                self.pool.run(nt.min(n), move |tid, nt_used| {
-                    let mut t = tid;
-                    while t < n_tokens {
-                        let seq_len = (t + 1) as i32;
-                        let mut scores = vec![0.0f32; nh * (t + 1)];
-                        let q = unsafe { std::slice::from_raw_parts((qs_ptr as *const f32).add(t * h), h) };
-                        let cache_ref = unsafe { &*(cache_ptr as *const cache::EakvCache) };
-                        cache::attention::attention_scores(
-                            cache_ref, q, layer_i32, nh_i32, nkv_i32, seq_len, &mut scores,
-                        );
-                        if bias_ptr != 0 {
-                            let bias = unsafe { std::slice::from_raw_parts(
-                                (bias_ptr as *const f32).add(t * nh * n_tokens), nh * n_tokens,
-                            )};
-                            for q_h in 0..nh {
-                                for s in 0..(t + 1) {
-                                    scores[q_h * (t + 1) + s] += bias[q_h * n_tokens + s];
+                // Per-token 3-pass attention (with K-bias correction)
+                let max_scores = nh * seq_len;
+                let mut scores = vec![0.0f32; max_scores];
+                for t in 0..n {
+                    let qt = &qs_all[t*h..(t+1)*h];
+                    cache::attention::attention_scores(&self.kv_cache, qt, layer as i32, nh as i32, nkv as i32, (pos_base + t + 1) as i32, &mut scores[..nh*(pos_base+t+1)]);
+                    if has_k_bias {
+                        let q_per_kv = nh / nkv;
+                        let rsqrt_hd = 1.0 / (hd as f32).sqrt();
+                        let sl = pos_base + t + 1;
+                        let mut rotated_bias = vec![0.0f32; kv];
+                        let mut bias_freqs = vec![0.0f32; hd];
+                        for s in 0..sl {
+                            for i in 0..kv { rotated_bias[i] = unsafe { *lw.k_bias.add(i) }; }
+                            build_rope_freqs(&mut bias_freqs, hd, s, model.rope_theta);
+                            apply_rope(&mut rotated_bias, &bias_freqs, hd, nkv);
+                            for kv_h in 0..nkv {
+                                let kb_off = kv_h * hd;
+                                for q_off in 0..q_per_kv {
+                                    let q_h = kv_h * q_per_kv + q_off;
+                                    let mut dot = 0.0f32;
+                                    for d in 0..hd { dot += qt[q_h*hd+d] * rotated_bias[kb_off+d]; }
+                                    scores[q_h * sl + s] += dot * rsqrt_hd;
                                 }
                             }
                         }
-                        softmax_rows(&mut scores, nh, t + 1);
-                        let attn_out = unsafe { std::slice::from_raw_parts_mut(
-                            (attn_ptr as *mut f32).add(t * h), h,
-                        )};
-                        cache::attention::attention_output(
-                            cache_ref, &scores, layer_i32, nh_i32, nkv_i32, seq_len, attn_out,
-                        );
-                        t += nt_used;
                     }
-                });
+                    softmax_rows(&mut scores[..nh*(pos_base+t+1)], nh, pos_base + t + 1);
+                    cache::attention::attention_output(&self.kv_cache, &scores[..nh*(pos_base+t+1)], layer as i32, nh as i32, nkv as i32, (pos_base + t + 1) as i32, &mut attn_all[t*h..(t+1)*h]);
+                }
             }
 
-            // ── Wo matmul: fused f32→kernel (attn_all already f32) ──
-            q4k_fused_gemm_f32_mt(lw.wo, h_rs, h_nb, &attn_all, h, n, &mut tmp_all, h, &self.pool);
+            // ── Wo matmul: Q4K × Q8K ──
+            for t in 0..n { bq_h.quantize(t, &attn_all[t*h..(t+1)*h]); }
+            q4k_gemm_mt(lw.wo, h_rs, h_nb, &bq_h, &mut tmp_all, h, &self.pool);
 
             // ── Parallel vecadd residual (attn) ──
             {
@@ -253,7 +206,7 @@ impl LlamaState {
                 });
             }
 
-            // ── Parallel rmsnorm (ffn input) → norm_all ──
+            // ── Parallel rmsnorm (FFN) → norm_all, then batch quantize ──
             {
                 let xs_raw: Vec<*const f32> = xs.iter().map(|x| x.as_ptr()).collect();
                 let norm_ptr = norm_all.as_mut_ptr() as usize;
@@ -272,20 +225,20 @@ impl LlamaState {
                     }
                 });
             }
+            for t in 0..n { bq_h.quantize(t, &norm_all[t*h..(t+1)*h]); }
 
-            // ── FFN gate+up+SiLU: fused f32→kernel ──
-            q4k_fused_silu_gemm_f32_mt(lw.w_gate, lw.w_up, h_rs, h_nb, &norm_all, h, n, &mut hidden_all, f, &self.pool);
+            // ── FFN gate+up+SiLU: Q4K × Q8K ──
+            q4k_fused_silu_gemm_mt(lw.w_gate, lw.w_up, h_rs, h_nb, &bq_h, &mut hidden_all, f, &self.pool);
 
-            // ── Down projection: fused or Q6K fallback ──
+            // ── Down projection: Q4K or Q6K ──
+            for t in 0..n { bq_f.quantize(t, &hidden_all[t*f..(t+1)*f]); }
             if lw.w_down_block_bytes == Q6K_BLOCK_BYTES {
-                let bq = bq_f.as_mut().unwrap();
-                for t in 0..n { bq.quantize(t, &hidden_all[t*f..(t+1)*f]); }
-                q6k_gemm_mt(lw.w_down, f_nb * Q6K_BLOCK_BYTES, f_nb, bq, &mut tmp_all, h, &self.pool);
+                q6k_gemm_mt(lw.w_down, f_nb * Q6K_BLOCK_BYTES, f_nb, &bq_f, &mut tmp_all, h, &self.pool);
             } else {
-                q4k_fused_gemm_f32_mt(lw.w_down, f_nb * Q4K_BLOCK_BYTES, f_nb, &hidden_all, f, n, &mut tmp_all, h, &self.pool);
+                q4k_gemm_mt(lw.w_down, f_nb * Q4K_BLOCK_BYTES, f_nb, &bq_f, &mut tmp_all, h, &self.pool);
             }
 
-            // ── Parallel vecadd residual (ffn) ──
+            // ── Parallel vecadd residual (FFN) ──
             {
                 let xs_raw: Vec<*mut f32> = xs.iter_mut().map(|x| x.as_mut_ptr()).collect();
                 let w = W { xs_mut: xs_raw.as_ptr() as usize, buf: tmp_all.as_ptr() as usize, h, n };
