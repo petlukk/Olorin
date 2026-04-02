@@ -91,4 +91,9 @@ pub type FusedCausalAttnFn = unsafe extern "C" fn(
     *const f32, *const u8, *const f32, *const f32,
     *const u8, *const f32, *const f32,
     *mut f32, *mut f32, i32, i32, i32, i32, i32);
+pub type FlashDecodeAttnFn = unsafe extern "C" fn(
+    *const f32, *const u8, *const f32, *const f32,
+    *const u8, *const f32, *const f32,
+    *mut f32, *mut f32,
+    i32, i32, i32, i32);
 pub type ValidateFn = unsafe extern "C" fn(*const f32, *const f32, *const i32, *const i32, i32) -> i32;

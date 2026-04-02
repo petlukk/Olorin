@@ -42,6 +42,7 @@ pub struct LlamaState {
     pub(crate) tmp: Vec<f32>,
     pub(crate) kv_cache: EakvCache,
     pub(crate) attn_scores: Vec<f32>,
+    pub(crate) flash_state: Vec<f32>,
     pub(crate) rope_freqs: Vec<f32>,
     pub(crate) sample_logits_buf: Vec<f32>,
     pub(crate) sample_probs: Vec<f32>,
@@ -96,6 +97,7 @@ impl LlamaState {
             tmp: vec![0.0; h.max(f)],
             kv_cache,
             attn_scores: vec![0.0; nh * max_seq_len],
+            flash_state: vec![0.0; nh * 130],
             rope_freqs: vec![0.0; model.head_dim],
             sample_logits_buf: vec![0.0; v],
             sample_probs: vec![0.0; v],
@@ -171,44 +173,67 @@ impl LlamaState {
         if layer == model.n_layers - 1 { self.kv_cache.advance(1).unwrap(); }
 
         let seq_len = pos + 1;
-        let scores = &mut self.attn_scores[..nh * seq_len];
-        cache::attention::attention_scores(&self.kv_cache, &self.q, layer as i32, nh as i32, nkv as i32, seq_len as i32, scores);
-
-        // K-bias correction: the original score is Q·(K+bias) with RoPE on both.
-        // Since RoPE is linear: RoPE(K+bias) = RoPE(K) + RoPE(bias).
-        // We stored only RoPE(K) in cache. Correction per (q_head, position t):
-        //   score[q_h, t] += RoPE(Q, pos) · RoPE(k_bias, t) / sqrt(hd)
-        // RoPE(k_bias, t) must be computed per position since RoPE depends on t.
-        if !lw.k_bias.is_null() {
-            let q_per_kv = nh / nkv;
-            let rsqrt_hd = 1.0 / (hd as f32).sqrt();
-            let mut rotated_bias = vec![0.0f32; kv];
-            let mut bias_freqs = vec![0.0f32; hd];
-            for t in 0..seq_len {
-                // Copy k_bias and apply RoPE at position t
-                for i in 0..kv {
-                    rotated_bias[i] = unsafe { *lw.k_bias.add(i) };
+        if lw.k_bias.is_null() && ffi::has_flash_decode_attn() {
+            // Flash decode: single-pass Q·K + softmax + V
+            let signs = self.kv_cache.jl_signs();
+            let n_q_groups = (nh * hd) / 64;
+            for g in 0..n_q_groups {
+                unsafe {
+                    crate::kernels::ffi::turbo_rotate(
+                        self.q.as_mut_ptr().add(g * 64), signs.as_ptr(), 64,
+                    );
                 }
-                build_rope_freqs(&mut bias_freqs, hd, t, model.rope_theta);
-                apply_rope(&mut rotated_bias, &bias_freqs, hd, nkv);
-                // Dot with Q (already RoPE'd at pos) for each query head
-                for kv_h in 0..nkv {
-                    let kb_off = kv_h * hd;
-                    for q_off in 0..q_per_kv {
-                        let q_h = kv_h * q_per_kv + q_off;
-                        let qb = q_h * hd;
-                        let mut dot = 0.0f32;
-                        for d in 0..hd {
-                            dot += self.q[qb + d] * rotated_bias[kb_off + d];
+            }
+            let (k_w, k_s, k_b) = self.kv_cache.k_ptrs(layer as i32);
+            let (v_w, v_s, v_b) = self.kv_cache.v_ptrs(layer as i32);
+            let gph = self.kv_cache.groups_per_head();
+            unsafe {
+                ffi::flash_decode_attn(
+                    self.q.as_ptr(), k_w, k_s, k_b, v_w, v_s, v_b,
+                    self.flash_state.as_mut_ptr(), self.attn_out.as_mut_ptr(),
+                    seq_len as i32, nh as i32, nkv as i32, gph,
+                );
+            }
+            let n_out_groups = (nh * hd) / 64;
+            for g in 0..n_out_groups {
+                unsafe {
+                    let ptr = self.attn_out.as_mut_ptr().add(g * 64);
+                    crate::kernels::ffi::fwht_inplace(ptr, 64);
+                    crate::kernels::ffi::sign_flip(ptr, signs.as_ptr(), 64);
+                }
+            }
+        } else {
+            // 3-pass fallback (required when K-bias exists)
+            let scores = &mut self.attn_scores[..nh * seq_len];
+            cache::attention::attention_scores(&self.kv_cache, &self.q, layer as i32, nh as i32, nkv as i32, seq_len as i32, scores);
+            if !lw.k_bias.is_null() {
+                let q_per_kv = nh / nkv;
+                let rsqrt_hd = 1.0 / (hd as f32).sqrt();
+                let mut rotated_bias = vec![0.0f32; kv];
+                let mut bias_freqs = vec![0.0f32; hd];
+                for t in 0..seq_len {
+                    for i in 0..kv {
+                        rotated_bias[i] = unsafe { *lw.k_bias.add(i) };
+                    }
+                    build_rope_freqs(&mut bias_freqs, hd, t, model.rope_theta);
+                    apply_rope(&mut rotated_bias, &bias_freqs, hd, nkv);
+                    for kv_h in 0..nkv {
+                        let kb_off = kv_h * hd;
+                        for q_off in 0..q_per_kv {
+                            let q_h = kv_h * q_per_kv + q_off;
+                            let qb = q_h * hd;
+                            let mut dot = 0.0f32;
+                            for d in 0..hd {
+                                dot += self.q[qb + d] * rotated_bias[kb_off + d];
+                            }
+                            scores[q_h * seq_len + t] += dot * rsqrt_hd;
                         }
-                        scores[q_h * seq_len + t] += dot * rsqrt_hd;
                     }
                 }
             }
+            softmax_rows(scores, nh, seq_len);
+            cache::attention::attention_output(&self.kv_cache, scores, layer as i32, nh as i32, nkv as i32, seq_len as i32, &mut self.attn_out);
         }
-
-        softmax_rows(scores, nh, seq_len);
-        cache::attention::attention_output(&self.kv_cache, scores, layer as i32, nh as i32, nkv as i32, seq_len as i32, &mut self.attn_out);
         unsafe {
             ffi::quant_f32_q8k(self.attn_out.as_ptr(), self.attn_q8_qs.as_mut_ptr(),
                 self.attn_q8_d.as_mut_ptr(), self.attn_q8_bsums.as_mut_ptr(), h as i32);
@@ -372,6 +397,7 @@ impl Drop for LlamaState {
         wipe_f32(&mut self.k);
         wipe_f32(&mut self.v);
         wipe_f32(&mut self.attn_out);
+        wipe_f32(&mut self.flash_state);
         wipe_i8(&mut self.attn_q8_qs);
         wipe_f32(&mut self.attn_q8_d);
         wipe_i32(&mut self.attn_q8_bsums);

@@ -105,6 +105,28 @@ impl EakvCache {
     pub fn groups_per_token(&self) -> i32  { self.groups_per_token }
     pub fn jl_signs(&self) -> &[f32; 64]   { &self.jl_signs }
 
+    pub fn groups_per_head(&self) -> i32 {
+        self.max_seq_len * (self.head_dim / 64)
+    }
+
+    pub fn k_ptrs(&self, layer: i32) -> (*const u8, *const f32, *const f32) {
+        let s = self.kv[layer as usize * 2];
+        unsafe {(
+            self.data_buf.as_ptr().add(s.weights_offset),
+            self.data_buf.as_ptr().add(s.scales_offset) as *const f32,
+            self.data_buf.as_ptr().add(s.biases_offset) as *const f32,
+        )}
+    }
+
+    pub fn v_ptrs(&self, layer: i32) -> (*const u8, *const f32, *const f32) {
+        let s = self.kv[layer as usize * 2 + 1];
+        unsafe {(
+            self.data_buf.as_ptr().add(s.weights_offset),
+            self.data_buf.as_ptr().add(s.scales_offset) as *const f32,
+            self.data_buf.as_ptr().add(s.biases_offset) as *const f32,
+        )}
+    }
+
     pub fn checkpoint(&self) -> i32 { self.seq_len }
 
     pub fn restore(&mut self, seq_len: i32) -> Result<()> {
