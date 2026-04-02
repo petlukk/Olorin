@@ -5,6 +5,8 @@
 // AVX2 port of flash_decode_attn_arm.ea: f32x8 (256-bit) vectors.
 // Each u8x16 nibble channel yields 2 x f32x8 via widen + shuffle.
 
+#[cfg(x86_64)]
+
 export func flash_decode_attn_f32(
     q_vecs:          *restrict f32,
     k_packed:        *restrict u8,
