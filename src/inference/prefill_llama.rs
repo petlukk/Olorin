@@ -139,7 +139,7 @@ impl LlamaState {
             let has_k_bias = !lw.k_bias.is_null();
             let seq_len = pos_base + n;
 
-            if !has_k_bias && ffi::has_fused_causal_attn() {
+            if !has_k_bias && hd == 128 && ffi::has_fused_causal_attn() {
                 // Flash causal attention: single kernel for all N queries
                 let signs = self.kv_cache.jl_signs();
                 let n_groups = (nh * hd) / 64;

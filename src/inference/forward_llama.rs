@@ -185,7 +185,7 @@ impl LlamaState {
 
 
         let seq_len = pos + 1;
-        if lw.k_bias.is_null() && ffi::has_flash_decode_attn() {
+        if lw.k_bias.is_null() && hd == 128 && ffi::has_flash_decode_attn() {
             // Flash decode: single-pass Q·K + softmax + V
             let signs = self.kv_cache.jl_signs();
             let n_q_groups = (nh * hd) / 64;
