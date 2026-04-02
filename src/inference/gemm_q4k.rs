@@ -56,6 +56,7 @@ impl BatchQ8K {
 /// GEMM: weight[out_dim] x batch[n_tokens] -> out[n_tokens * out_dim]
 /// 16×16 block-tiling (like llama.cpp): 16 weight rows × 16 tokens per chunk.
 /// Work-stealing via atomic counter across threads.
+/// Scales read inline inside kernel — no pre-caching of weight d/dmin.
 pub(crate) fn q4k_gemm_mt(
     weight: *const u8, row_stride: usize, n_blocks: usize,
     batch: &BatchQ8K, out: &mut [f32], out_dim: usize,
@@ -71,67 +72,83 @@ pub(crate) fn q4k_gemm_mt(
     let w = SendPtr(weight);
     let o = SendMutPtr(out.as_mut_ptr());
 
-    // Block tiling: 16 rows × 16 tokens (matching llama.cpp chunk_size=16)
-    let blk_r = 16usize;
-    let blk_t = 16usize;
-    let nchunk_r = (out_dim + blk_r - 1) / blk_r;
-    let nchunk_t = (nt + blk_t - 1) / blk_t;
+    // llama.cpp-style 2D tiling: chunk_size=16, token-outer/row-inner,
+    // with rechunk heuristic when total chunks < threads*4.
+    let chunk_size = 16usize;
+    let mut nchunk_r = (out_dim + chunk_size - 1) / chunk_size;
+    let mut nchunk_t = (nt + chunk_size - 1) / chunk_size;
+    // Rechunk: if not enough chunks for good load-balancing, collapse to 1D
+    if nchunk_r * nchunk_t < n_threads * 4 {
+        if out_dim > nt {
+            nchunk_r = n_threads;
+            nchunk_t = 1;
+        } else {
+            nchunk_r = 1;
+            nchunk_t = n_threads;
+        }
+    }
     let total_chunks = nchunk_r * nchunk_t;
     let counter = AtomicUsize::new(0);
 
     pool.run(n_threads.min(total_chunks), move |_tid, _n| {
         let mut scores4 = [0.0f32; 4];
-        let mut da_w = [[0.0f32; MAX_BLOCKS]; 4];
-        let mut dma_w = [[0.0f32; MAX_BLOCKS]; 4];
+        let pow2 = crate::inference::matmul_q4k::F16_POW2.as_ptr();
 
         loop {
             let chunk_id = counter.fetch_add(1, Ordering::Relaxed);
             if chunk_id >= total_chunks { break; }
 
+            // 2D chunk → row/token ranges
             let cr = chunk_id % nchunk_r;
             let ct = chunk_id / nchunk_r;
-            let r_start = cr * blk_r;
-            let r_end = (r_start + blk_r).min(out_dim);
-            let t_start = ct * blk_t;
-            let t_end = (t_start + blk_t).min(nt);
+            let dr = (out_dim + nchunk_r - 1) / nchunk_r;
+            let dt = (nt + nchunk_t - 1) / nchunk_t;
+            let r_start = cr * dr;
+            let r_end = (r_start + dr).min(out_dim);
+            let t_start = ct * dt;
+            let t_end = (t_start + dt).min(nt);
+            if r_start >= r_end || t_start >= t_end { continue; }
 
-            let mut r = r_start;
+            // Token-outer, row-inner (llama.cpp order)
             unsafe {
-                while r + 4 <= r_end {
-                    let ws = [
-                        w.ptr().add(r * row_stride),
-                        w.ptr().add((r+1) * row_stride),
-                        w.ptr().add((r+2) * row_stride),
-                        w.ptr().add((r+3) * row_stride),
-                    ];
-                    for ri in 0..4 {
-                        for blk in 0..n_blocks {
-                            let bp = ws[ri].add(blk * Q4K_BLOCK_BYTES);
-                            da_w[ri][blk] = f16_to_f32(*(bp as *const u16));
-                            dma_w[ri][blk] = f16_to_f32(*(bp.add(2) as *const u16));
+                let mut iit = t_start;
+                while iit < t_end {
+                    let tile_t_end = (iit + chunk_size).min(t_end);
+                    let mut iir = r_start;
+                    while iir < r_end {
+                        let tile_r_end = (iir + chunk_size).min(r_end);
+                        // Process 4 rows at a time within this tile
+                        let mut r = iir;
+                        while r + 4 <= tile_r_end {
+                            let ws = [
+                                w.ptr().add(r * row_stride),
+                                w.ptr().add((r+1) * row_stride),
+                                w.ptr().add((r+2) * row_stride),
+                                w.ptr().add((r+3) * row_stride),
+                            ];
+                            for t in iit..tile_t_end {
+                                ffi::q4k_dot_q8k_4row(
+                                    ws[0], ws[1], ws[2], ws[3],
+                                    qs[t] as _, bs[t] as _,
+                                    scores4.as_mut_ptr(), n_blocks as i32, ds[t] as _,
+                                    pow2,
+                                );
+                                let base = o.ptr().add(t * out_dim + r);
+                                for j in 0..4 { *base.add(j) = scores4[j]; }
+                            }
+                            r += 4;
                         }
+                        while r < tile_r_end {
+                            let wr = w.ptr().add(r * row_stride);
+                            for t in iit..tile_t_end {
+                                let v = q4k_row_dot(wr, n_blocks, qs[t] as _, ds[t] as _, bs[t] as _);
+                                *o.ptr().add(t * out_dim + r) = v;
+                            }
+                            r += 1;
+                        }
+                        iir += chunk_size;
                     }
-                    for t in t_start..t_end {
-                        ffi::q4k_dot_q8k_4row_fused(
-                            ws[0], ws[1], ws[2], ws[3],
-                            qs[t] as _, bs[t] as _,
-                            scores4.as_mut_ptr(), n_blocks as i32,
-                            da_w[0].as_ptr(), da_w[1].as_ptr(), da_w[2].as_ptr(), da_w[3].as_ptr(),
-                            dma_w[0].as_ptr(), dma_w[1].as_ptr(), dma_w[2].as_ptr(), dma_w[3].as_ptr(),
-                            ds[t] as _,
-                        );
-                        let base = o.ptr().add(t * out_dim + r);
-                        for j in 0..4 { *base.add(j) = scores4[j]; }
-                    }
-                    r += 4;
-                }
-                while r < r_end {
-                    let wr = w.ptr().add(r * row_stride);
-                    for t in t_start..t_end {
-                        let v = q4k_row_dot(wr, n_blocks, qs[t] as _, ds[t] as _, bs[t] as _);
-                        *o.ptr().add(t * out_dim + r) = v;
-                    }
-                    r += 1;
+                    iit += chunk_size;
                 }
             }
         }
@@ -139,6 +156,7 @@ pub(crate) fn q4k_gemm_mt(
 }
 
 /// Fused gate+up+SiLU GEMM with 16×16 block-tiling and work-stealing.
+/// Scales read inline inside kernel — no pre-caching.
 pub(crate) fn q4k_fused_silu_gemm_mt(
     w_gate: *const u8, w_up: *const u8,
     row_stride: usize, n_blocks: usize,
@@ -156,20 +174,21 @@ pub(crate) fn q4k_fused_silu_gemm_mt(
     let wu = SendPtr(w_up);
     let o = SendMutPtr(out.as_mut_ptr());
 
-    let blk_r = 16usize;
-    let blk_t = 16usize;
-    let nchunk_r = (out_dim + blk_r - 1) / blk_r;
-    let nchunk_t = (nt + blk_t - 1) / blk_t;
+    // llama.cpp-style 2D tiling with rechunk heuristic
+    let chunk_size = 16usize;
+    let mut nchunk_r = (out_dim + chunk_size - 1) / chunk_size;
+    let mut nchunk_t = (nt + chunk_size - 1) / chunk_size;
+    if nchunk_r * nchunk_t < n_threads * 4 {
+        if out_dim > nt { nchunk_r = n_threads; nchunk_t = 1; }
+        else { nchunk_r = 1; nchunk_t = n_threads; }
+    }
     let total_chunks = nchunk_r * nchunk_t;
     let counter = AtomicUsize::new(0);
 
     pool.run(n_threads.min(total_chunks), move |_tid, _n| {
-        let mut gd_w = [[0f32; MAX_BLOCKS]; 4];
-        let mut gdm_w = [[0f32; MAX_BLOCKS]; 4];
-        let mut ud_w = [[0f32; MAX_BLOCKS]; 4];
-        let mut udm_w = [[0f32; MAX_BLOCKS]; 4];
         let mut g_scores = [0.0f32; 4];
         let mut u_scores = [0.0f32; 4];
+        let pow2 = crate::inference::matmul_q4k::F16_POW2.as_ptr();
 
         loop {
             let chunk_id = counter.fetch_add(1, Ordering::Relaxed);
@@ -177,62 +196,62 @@ pub(crate) fn q4k_fused_silu_gemm_mt(
 
             let cr = chunk_id % nchunk_r;
             let ct = chunk_id / nchunk_r;
-            let r_start = cr * blk_r;
-            let r_end = (r_start + blk_r).min(out_dim);
-            let t_start = ct * blk_t;
-            let t_end = (t_start + blk_t).min(nt);
+            let dr = (out_dim + nchunk_r - 1) / nchunk_r;
+            let dt = (nt + nchunk_t - 1) / nchunk_t;
+            let r_start = cr * dr;
+            let r_end = (r_start + dr).min(out_dim);
+            let t_start = ct * dt;
+            let t_end = (t_start + dt).min(nt);
+            if r_start >= r_end || t_start >= t_end { continue; }
 
-            let mut r = r_start;
+            // Token-outer, row-inner (llama.cpp order)
             unsafe {
-                while r + 4 <= r_end {
-                    let gws = [wg.ptr().add(r * row_stride), wg.ptr().add((r+1) * row_stride),
-                               wg.ptr().add((r+2) * row_stride), wg.ptr().add((r+3) * row_stride)];
-                    let uws = [wu.ptr().add(r * row_stride), wu.ptr().add((r+1) * row_stride),
-                               wu.ptr().add((r+2) * row_stride), wu.ptr().add((r+3) * row_stride)];
-                    for i in 0..4 {
-                        for blk in 0..n_blocks {
-                            let gbp = gws[i].add(blk * Q4K_BLOCK_BYTES);
-                            let ubp = uws[i].add(blk * Q4K_BLOCK_BYTES);
-                            gd_w[i][blk] = f16_to_f32(*(gbp as *const u16));
-                            gdm_w[i][blk] = f16_to_f32(*(gbp.add(2) as *const u16));
-                            ud_w[i][blk] = f16_to_f32(*(ubp as *const u16));
-                            udm_w[i][blk] = f16_to_f32(*(ubp.add(2) as *const u16));
+                let mut iit = t_start;
+                while iit < t_end {
+                    let tile_t_end = (iit + chunk_size).min(t_end);
+                    let mut iir = r_start;
+                    while iir < r_end {
+                        let tile_r_end = (iir + chunk_size).min(r_end);
+                        let mut r = iir;
+                        while r + 4 <= tile_r_end {
+                            let gws = [wg.ptr().add(r * row_stride), wg.ptr().add((r+1) * row_stride),
+                                       wg.ptr().add((r+2) * row_stride), wg.ptr().add((r+3) * row_stride)];
+                            let uws = [wu.ptr().add(r * row_stride), wu.ptr().add((r+1) * row_stride),
+                                       wu.ptr().add((r+2) * row_stride), wu.ptr().add((r+3) * row_stride)];
+                            for t in iit..tile_t_end {
+                                ffi::q4k_dot_q8k_4row(
+                                    gws[0], gws[1], gws[2], gws[3],
+                                    qs[t] as _, bs[t] as _,
+                                    g_scores.as_mut_ptr(), n_blocks as i32, ds[t] as _,
+                                    pow2,
+                                );
+                                ffi::q4k_dot_q8k_4row(
+                                    uws[0], uws[1], uws[2], uws[3],
+                                    qs[t] as _, bs[t] as _,
+                                    u_scores.as_mut_ptr(), n_blocks as i32, ds[t] as _,
+                                    pow2,
+                                );
+                                let base = o.ptr().add(t * out_dim + r);
+                                for i in 0..4 {
+                                    let g = g_scores[i];
+                                    *base.add(i) = (g / (1.0 + (-g).exp())) * u_scores[i];
+                                }
+                            }
+                            r += 4;
                         }
-                    }
-                    for t in t_start..t_end {
-                        ffi::q4k_dot_q8k_4row_fused(
-                            gws[0], gws[1], gws[2], gws[3],
-                            qs[t] as _, bs[t] as _,
-                            g_scores.as_mut_ptr(), n_blocks as i32,
-                            gd_w[0].as_ptr(), gd_w[1].as_ptr(), gd_w[2].as_ptr(), gd_w[3].as_ptr(),
-                            gdm_w[0].as_ptr(), gdm_w[1].as_ptr(), gdm_w[2].as_ptr(), gdm_w[3].as_ptr(),
-                            ds[t] as _,
-                        );
-                        ffi::q4k_dot_q8k_4row_fused(
-                            uws[0], uws[1], uws[2], uws[3],
-                            qs[t] as _, bs[t] as _,
-                            u_scores.as_mut_ptr(), n_blocks as i32,
-                            ud_w[0].as_ptr(), ud_w[1].as_ptr(), ud_w[2].as_ptr(), ud_w[3].as_ptr(),
-                            udm_w[0].as_ptr(), udm_w[1].as_ptr(), udm_w[2].as_ptr(), udm_w[3].as_ptr(),
-                            ds[t] as _,
-                        );
-                        let base = o.ptr().add(t * out_dim + r);
-                        for i in 0..4 {
-                            let g = g_scores[i];
-                            *base.add(i) = (g / (1.0 + (-g).exp())) * u_scores[i];
+                        while r < tile_r_end {
+                            let gw = wg.ptr().add(r * row_stride);
+                            let uw = wu.ptr().add(r * row_stride);
+                            for t in iit..tile_t_end {
+                                let g = q4k_row_dot(gw, n_blocks, qs[t] as _, ds[t] as _, bs[t] as _);
+                                let u = q4k_row_dot(uw, n_blocks, qs[t] as _, ds[t] as _, bs[t] as _);
+                                *o.ptr().add(t * out_dim + r) = (g / (1.0 + (-g).exp())) * u;
+                            }
+                            r += 1;
                         }
+                        iir += chunk_size;
                     }
-                    r += 4;
-                }
-                while r < r_end {
-                    let gw = wg.ptr().add(r * row_stride);
-                    let uw = wu.ptr().add(r * row_stride);
-                    for t in t_start..t_end {
-                        let g = q4k_row_dot(gw, n_blocks, qs[t] as _, ds[t] as _, bs[t] as _);
-                        let u = q4k_row_dot(uw, n_blocks, qs[t] as _, ds[t] as _, bs[t] as _);
-                        *o.ptr().add(t * out_dim + r) = (g / (1.0 + (-g).exp())) * u;
-                    }
-                    r += 1;
+                    iit += chunk_size;
                 }
             }
         }

@@ -47,10 +47,28 @@ impl LlamaState {
         );
         let nt = self.pool.thread_count();
 
+        // Profiling accumulators (microseconds per step, summed across all layers)
+        let mut t_rmsnorm1 = 0u64;
+        let mut t_quant1 = 0u64;
+        let mut t_qkv_gemm = 0u64;
+        let mut t_bias_rope = 0u64;
+        let mut t_kv_append = 0u64;
+        let mut t_attention = 0u64;
+        let mut t_quant_wo = 0u64;
+        let mut t_wo_gemm = 0u64;
+        let mut t_resid1 = 0u64;
+        let mut t_rmsnorm2 = 0u64;
+        let mut t_quant2 = 0u64;
+        let mut t_ffn_gemm = 0u64;
+        let mut t_quant_down = 0u64;
+        let mut t_down_gemm = 0u64;
+        let mut t_resid2 = 0u64;
+
         for layer in 0..model.n_layers {
             let lw = &model.q4k_layers[layer];
 
             // ── Parallel rmsnorm → norm_all, then batch quantize to Q8K ──
+            let _t0 = std::time::Instant::now();
             {
                 let xs_raw: Vec<*const f32> = xs.iter().map(|x| x.as_ptr()).collect();
                 let norm_ptr = norm_all.as_mut_ptr() as usize;
@@ -69,6 +87,8 @@ impl LlamaState {
                     }
                 });
             }
+            t_rmsnorm1 += _t0.elapsed().as_micros() as u64;
+            let _t0 = std::time::Instant::now();
             // Parallel Q8K quantization of all N tokens
             {
                 let qs_ptr = bq_h.qs.as_mut_ptr() as usize;
@@ -94,7 +114,9 @@ impl LlamaState {
                 });
             }
 
+            t_quant1 += _t0.elapsed().as_micros() as u64;
             // ── QKV matmul: Q4K × Q8K (pre-quantized) ──
+            let _t0 = std::time::Instant::now();
             q4k_gemm_mt(lw.wq, h_rs, h_nb, &bq_h, &mut qs_all, h, &self.pool);
             q4k_gemm_mt(lw.wk, h_rs, h_nb, &bq_h, &mut ks_all, kv, &self.pool);
             if lw.wv_block_bytes == Q6K_BLOCK_BYTES {
@@ -103,7 +125,9 @@ impl LlamaState {
                 q4k_gemm_mt(lw.wv, h_rs, h_nb, &bq_h, &mut vs_all, kv, &self.pool);
             }
 
+            t_qkv_gemm += _t0.elapsed().as_micros() as u64;
             // ── Attention: batch bias+RoPE, bulk KV append, sequential scoring ──
+            let _t0 = std::time::Instant::now();
             for t in 0..n {
                 add_bias(&mut qs_all[t*h..(t+1)*h], lw.q_bias, h);
                 add_bias(&mut vs_all[t*kv..(t+1)*kv], lw.v_bias, kv);
@@ -115,7 +139,9 @@ impl LlamaState {
                 apply_rope(&mut qs_all[t*h..(t+1)*h], &rope_freqs, hd, nh);
                 apply_rope(&mut ks_all[t*kv..(t+1)*kv], &rope_freqs, hd, nkv);
             }
+            t_bias_rope += _t0.elapsed().as_micros() as u64;
             // Bulk KV append: all N tokens at once (head-major within each token)
+            let _t0 = std::time::Instant::now();
             // append() uses self.seq_len as write position, n_tokens controls how many.
             // Data must be head-major: [head][n_tokens * head_dim]
             // But ks_all is token-major: [token][kv_heads * head_dim]
@@ -136,6 +162,9 @@ impl LlamaState {
                 if layer == model.n_layers - 1 { self.kv_cache.advance(n as i32).unwrap(); }
             }
 
+            t_kv_append += _t0.elapsed().as_micros() as u64;
+
+            let _t0 = std::time::Instant::now();
             let has_k_bias = !lw.k_bias.is_null();
             let seq_len = pos_base + n;
 
@@ -208,7 +237,10 @@ impl LlamaState {
                 }
             }
 
+            t_attention += _t0.elapsed().as_micros() as u64;
+
             // ── Wo matmul: Q4K × Q8K ──
+            let _t0 = std::time::Instant::now();
             {
                 let qs_ptr = bq_h.qs.as_mut_ptr() as usize;
                 let d_ptr = bq_h.d.as_mut_ptr() as usize;
@@ -232,9 +264,13 @@ impl LlamaState {
                     }
                 });
             }
+            t_quant_wo += _t0.elapsed().as_micros() as u64;
+            let _t0 = std::time::Instant::now();
             q4k_gemm_mt(lw.wo, h_rs, h_nb, &bq_h, &mut tmp_all, h, &self.pool);
+            t_wo_gemm += _t0.elapsed().as_micros() as u64;
 
             // ── Parallel vecadd residual (attn) ──
+            let _t0 = std::time::Instant::now();
             {
                 let xs_raw: Vec<*mut f32> = xs.iter_mut().map(|x| x.as_mut_ptr()).collect();
                 let w = W { xs_mut: xs_raw.as_ptr() as usize, buf: tmp_all.as_ptr() as usize, h, n };
@@ -250,7 +286,9 @@ impl LlamaState {
                 });
             }
 
+            t_resid1 += _t0.elapsed().as_micros() as u64;
             // ── Parallel rmsnorm (FFN) → norm_all, then batch quantize ──
+            let _t0 = std::time::Instant::now();
             {
                 let xs_raw: Vec<*const f32> = xs.iter().map(|x| x.as_ptr()).collect();
                 let norm_ptr = norm_all.as_mut_ptr() as usize;
@@ -293,10 +331,15 @@ impl LlamaState {
                 });
             }
 
+            t_rmsnorm2 += _t0.elapsed().as_micros() as u64;
+            // note: t_quant2 is zero — rmsnorm2 includes the quant block above
             // ── FFN gate+up+SiLU: Q4K × Q8K ──
+            let _t0 = std::time::Instant::now();
             q4k_fused_silu_gemm_mt(lw.w_gate, lw.w_up, h_rs, h_nb, &bq_h, &mut hidden_all, f, &self.pool);
 
+            t_ffn_gemm += _t0.elapsed().as_micros() as u64;
             // ── Down projection: Q4K or Q6K ──
+            let _t0 = std::time::Instant::now();
             {
                 let qs_ptr = bq_f.qs.as_mut_ptr() as usize;
                 let d_ptr = bq_f.d.as_mut_ptr() as usize;
@@ -320,13 +363,17 @@ impl LlamaState {
                     }
                 });
             }
+            t_quant_down += _t0.elapsed().as_micros() as u64;
+            let _t0 = std::time::Instant::now();
             if lw.w_down_block_bytes == Q6K_BLOCK_BYTES {
                 q6k_gemm_mt(lw.w_down, f_nb * Q6K_BLOCK_BYTES, f_nb, &bq_f, &mut tmp_all, h, &self.pool);
             } else {
                 q4k_gemm_mt(lw.w_down, f_nb * Q4K_BLOCK_BYTES, f_nb, &bq_f, &mut tmp_all, h, &self.pool);
             }
 
+            t_down_gemm += _t0.elapsed().as_micros() as u64;
             // ── Parallel vecadd residual (FFN) ──
+            let _t0 = std::time::Instant::now();
             {
                 let xs_raw: Vec<*mut f32> = xs.iter_mut().map(|x| x.as_mut_ptr()).collect();
                 let w = W { xs_mut: xs_raw.as_ptr() as usize, buf: tmp_all.as_ptr() as usize, h, n };
@@ -341,7 +388,51 @@ impl LlamaState {
                     }
                 });
             }
+            t_resid2 += _t0.elapsed().as_micros() as u64;
         }
+
+        // Print profiling summary
+        let total = t_rmsnorm1 + t_quant1 + t_qkv_gemm + t_bias_rope + t_kv_append
+            + t_attention + t_quant_wo + t_wo_gemm + t_resid1 + t_rmsnorm2
+            + t_ffn_gemm + t_quant_down + t_down_gemm + t_resid2;
+        let nl = model.n_layers as u64;
+        let ms = |us: u64| us as f64 / 1000.0;
+        let pct = |us: u64| if total > 0 { us as f64 / total as f64 * 100.0 } else { 0.0 };
+        // FLOP estimates: 2*M*N*K per matmul, N=n_tokens
+        let nt = n as f64;
+        let hf = h as f64;
+        let kvf = kv as f64;
+        let ff = f as f64;
+        let qkv_flops = 2.0 * nt * hf * (hf + kvf + kvf); // Q+K+V
+        let wo_flops = 2.0 * nt * hf * hf;
+        let ffn_flops = 2.0 * nt * hf * ff * 2.0; // gate + up (fused)
+        let down_flops = 2.0 * nt * ff * hf;
+        let total_flops = (qkv_flops + wo_flops + ffn_flops + down_flops) * nl as f64;
+        let tops = |flops: f64, us: u64| if us > 0 { flops * nl as f64 / (us as f64 * 1e-6) / 1e9 } else { 0.0 };
+
+        eprintln!("\n--- prefill profile ({n} tokens, {nl} layers, {total}µs total = {:.1}ms) ---", ms(total));
+        eprintln!("┌─────────────────────┬──────────┬───────┬──────────┐");
+        eprintln!("│ Step                │   ms     │   %   │  GFLOPS  │");
+        eprintln!("├─────────────────────┼──────────┼───────┼──────────┤");
+        eprintln!("│ rmsnorm (attn)      │ {:7.1} │ {:4.1}% │          │", ms(t_rmsnorm1), pct(t_rmsnorm1));
+        eprintln!("│ quant_q8k (attn)    │ {:7.1} │ {:4.1}% │          │", ms(t_quant1), pct(t_quant1));
+        eprintln!("│ QKV gemm            │ {:7.1} │ {:4.1}% │ {:7.1}  │", ms(t_qkv_gemm), pct(t_qkv_gemm), tops(qkv_flops, t_qkv_gemm));
+        eprintln!("│ bias+rope           │ {:7.1} │ {:4.1}% │          │", ms(t_bias_rope), pct(t_bias_rope));
+        eprintln!("│ kv_append           │ {:7.1} │ {:4.1}% │          │", ms(t_kv_append), pct(t_kv_append));
+        eprintln!("│ attention           │ {:7.1} │ {:4.1}% │          │", ms(t_attention), pct(t_attention));
+        eprintln!("│ quant_q8k (Wo)      │ {:7.1} │ {:4.1}% │          │", ms(t_quant_wo), pct(t_quant_wo));
+        eprintln!("│ Wo gemm             │ {:7.1} │ {:4.1}% │ {:7.1}  │", ms(t_wo_gemm), pct(t_wo_gemm), tops(wo_flops, t_wo_gemm));
+        eprintln!("│ residual (attn)     │ {:7.1} │ {:4.1}% │          │", ms(t_resid1), pct(t_resid1));
+        eprintln!("│ rmsnorm+quant (FFN) │ {:7.1} │ {:4.1}% │          │", ms(t_rmsnorm2), pct(t_rmsnorm2));
+        eprintln!("│ FFN gate+up+SiLU    │ {:7.1} │ {:4.1}% │ {:7.1}  │", ms(t_ffn_gemm), pct(t_ffn_gemm), tops(ffn_flops, t_ffn_gemm));
+        eprintln!("│ quant_q8k (down)    │ {:7.1} │ {:4.1}% │          │", ms(t_quant_down), pct(t_quant_down));
+        eprintln!("│ down gemm           │ {:7.1} │ {:4.1}% │ {:7.1}  │", ms(t_down_gemm), pct(t_down_gemm), tops(down_flops, t_down_gemm));
+        eprintln!("│ residual (FFN)      │ {:7.1} │ {:4.1}% │          │", ms(t_resid2), pct(t_resid2));
+        eprintln!("├─────────────────────┼──────────┼───────┼──────────┤");
+        eprintln!("│ TOTAL               │ {:7.1} │ 100%  │ {:7.1}  │", ms(total), total_flops / (total as f64 * 1e-6) / 1e9);
+        eprintln!("│ per token           │ {:7.1} │       │          │", ms(total) / n as f64);
+        eprintln!("└─────────────────────┴──────────┴───────┴──────────┘");
+
         xs
     }
 

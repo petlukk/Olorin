@@ -36,7 +36,6 @@ pub struct KernelTableInference {
     pub quant_f32_q8k:         QuantF32Q8kFn,
     pub q4k_dot_q8k:           Q4kDotQ8kFn,
     pub q4k_dot_q8k_4row:      Q4kDot4RowFn,
-    pub q4k_dot_q8k_4row_fused: Q4kDot4RowFusedFn,
     pub q4k_dot_q8k_4row_dual: Q4kDot4RowDualFn,
     pub q4k_fused_dot:          Q4kFusedDotFn,
     pub q4k_fused_dot_4row:     Q4kFusedDot4RowFn,
@@ -181,7 +180,6 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
             quant_f32_q8k:         std::mem::transmute(sym(&q4kq, b"quant_f32_q8k\0")?),
             q4k_dot_q8k:           std::mem::transmute(sym(&q4kd, b"q4k_dot_q8k\0")?),
             q4k_dot_q8k_4row:      std::mem::transmute(sym(&q4kd, b"q4k_dot_q8k_4row\0")?),
-            q4k_dot_q8k_4row_fused: std::mem::transmute(sym(&q4kd, b"q4k_dot_q8k_4row_fused\0")?),
             q4k_dot_q8k_4row_dual: std::mem::transmute(sym(&q4kd, b"q4k_dot_q8k_4row_dual\0")?),
             q4k_fused_dot:          std::mem::transmute(sym(&q4kfg, b"q4k_fused_dot\0")?),
             q4k_fused_dot_4row:     std::mem::transmute(sym(&q4kfg, b"q4k_fused_dot_4row\0")?),
@@ -291,36 +289,18 @@ pub unsafe fn quant_f32_q8k(
 
 pub unsafe fn q4k_dot_q8k(
     q4: *const u8, q8: *const i8, bsums: *const i32,
-    n_blocks: i32, d_arr: *const f32, dmin_arr: *const f32,
+    n_blocks: i32, q8_d: *const f32, pow2: *const f32,
 ) -> f32 {
-    (k().q4k_dot_q8k)(q4, q8, bsums, n_blocks, d_arr, dmin_arr)
+    (k().q4k_dot_q8k)(q4, q8, bsums, n_blocks, q8_d, pow2)
 }
 
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn q4k_dot_q8k_4row(
     rw0: *const u8, rw1: *const u8, rw2: *const u8, rw3: *const u8,
     q8: *const i8, bsums: *const i32,
-    scores: *mut f32, n_blocks: i32,
-    d0: *const f32, d1: *const f32, d2: *const f32, d3: *const f32,
-    dm0: *const f32, dm1: *const f32, dm2: *const f32, dm3: *const f32,
+    scores: *mut f32, n_blocks: i32, q8_d: *const f32, pow2: *const f32,
 ) {
-    (k().q4k_dot_q8k_4row)(
-        rw0, rw1, rw2, rw3, q8, bsums,
-        scores, n_blocks, d0, d1, d2, d3, dm0, dm1, dm2, dm3)
-}
-
-#[allow(clippy::too_many_arguments)]
-pub unsafe fn q4k_dot_q8k_4row_fused(
-    rw0: *const u8, rw1: *const u8, rw2: *const u8, rw3: *const u8,
-    q8: *const i8, bsums: *const i32,
-    scores: *mut f32, n_blocks: i32,
-    d0_w: *const f32, d1_w: *const f32, d2_w: *const f32, d3_w: *const f32,
-    dm0_w: *const f32, dm1_w: *const f32, dm2_w: *const f32, dm3_w: *const f32,
-    q8_d: *const f32,
-) {
-    (k().q4k_dot_q8k_4row_fused)(
-        rw0, rw1, rw2, rw3, q8, bsums,
-        scores, n_blocks, d0_w, d1_w, d2_w, d3_w, dm0_w, dm1_w, dm2_w, dm3_w, q8_d)
+    (k().q4k_dot_q8k_4row)(rw0, rw1, rw2, rw3, q8, bsums, scores, n_blocks, q8_d, pow2)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -329,17 +309,11 @@ pub unsafe fn q4k_dot_q8k_4row_dual(
     uw0: *const u8, uw1: *const u8, uw2: *const u8, uw3: *const u8,
     q8: *const i8, bsums: *const i32,
     gate_scores: *mut f32, up_scores: *mut f32, n_blocks: i32,
-    gd0: *const f32, gd1: *const f32, gd2: *const f32, gd3: *const f32,
-    gdm0: *const f32, gdm1: *const f32, gdm2: *const f32, gdm3: *const f32,
-    ud0: *const f32, ud1: *const f32, ud2: *const f32, ud3: *const f32,
-    udm0: *const f32, udm1: *const f32, udm2: *const f32, udm3: *const f32,
+    q8_d: *const f32, pow2: *const f32,
 ) {
     (k().q4k_dot_q8k_4row_dual)(
         gw0, gw1, gw2, gw3, uw0, uw1, uw2, uw3,
-        q8, bsums,
-        gate_scores, up_scores, n_blocks,
-        gd0, gd1, gd2, gd3, gdm0, gdm1, gdm2, gdm3,
-        ud0, ud1, ud2, ud3, udm0, udm1, udm2, udm3)
+        q8, bsums, gate_scores, up_scores, n_blocks, q8_d, pow2)
 }
 
 pub unsafe fn q4k_fused_dot(

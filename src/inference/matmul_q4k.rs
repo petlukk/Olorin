@@ -1,4 +1,4 @@
-//! Q4_K matmul dispatch: unpacks 6-bit scales, calls SIMD dot-product kernels.
+//! Q4_K matmul dispatch: inline f16→f32 scale reading inside SIMD kernels.
 
 use crate::kernels::ffi_inference as ffi;
 use crate::inference::matmul::f16_to_f32;
@@ -9,6 +9,20 @@ pub(crate) const Q4K_BLOCK_BYTES: usize = 144;
 
 /// Max blocks we support on the stack (32k dim / 256 = 128).
 pub(crate) const MAX_BLOCKS: usize = 128;
+
+/// Power-of-2 table for f16→f32 conversion inside kernels.
+/// pow2[i] = 2^(i-15) for i=1..30 (normal f16 exponents).
+/// Index 0 and 31 are unused (zero/subnormal and inf/nan).
+pub(crate) const F16_POW2: [f32; 32] = {
+    let mut t = [0.0f32; 32];
+    let mut i = 1u32;
+    while i <= 30 {
+        // 2^(i-15) = f32 with exponent (i-15+127) = (i+112)
+        t[i as usize] = f32::from_bits((i + 112) << 23);
+        i += 1;
+    }
+    t
+};
 
 /// Unpack Q4_K 12-byte packed scales into 8 scales + 8 mins.
 pub(crate) fn unpack_q4k_scales(packed: &[u8], scales: &mut [u8; 8], mins: &mut [u8; 8]) {
@@ -22,31 +36,16 @@ pub(crate) fn unpack_q4k_scales(packed: &[u8], scales: &mut [u8; 8], mins: &mut 
     }
 }
 
-/// Pre-compute per-block d and dmin (f16→f32 × q8_d) for one weight row.
-pub(crate) unsafe fn unpack_d(
-    weight: *const u8, n_blocks: usize, q8_d: *const f32,
-    d_buf: &mut [f32], dm_buf: &mut [f32],
-) {
-    for blk in 0..n_blocks {
-        let bp = weight.add(blk * Q4K_BLOCK_BYTES);
-        let blk_q8_d = *q8_d.add(blk);
-        d_buf[blk] = f16_to_f32(*(bp as *const u16)) * blk_q8_d;
-        dm_buf[blk] = f16_to_f32(*(bp.add(2) as *const u16)) * blk_q8_d;
-    }
-}
-
 /// Dot product of one Q4_K weight row against Q8_K activations.
+/// Scales read inline inside the kernel — no pre-computation.
 pub(crate) unsafe fn q4k_row_dot(
     weight: *const u8, n_blocks: usize,
     q8_qs: *const i8, q8_d: *const f32, q8_bsums: *const i32,
 ) -> f32 {
     debug_assert!(n_blocks <= MAX_BLOCKS);
-    let mut da = [0f32; MAX_BLOCKS];
-    let mut dma = [0f32; MAX_BLOCKS];
-    unpack_d(weight, n_blocks, q8_d, &mut da, &mut dma);
     ffi::q4k_dot_q8k(
         weight, q8_qs, q8_bsums,
-        n_blocks as i32, da.as_ptr(), dma.as_ptr(),
+        n_blocks as i32, q8_d, F16_POW2.as_ptr(),
     )
 }
 
@@ -58,18 +57,10 @@ pub(crate) unsafe fn q4k_4row_dot(
     scores: &mut [f32; 4],
 ) {
     debug_assert!(n_blocks <= MAX_BLOCKS);
-    let mut da = [[0f32; MAX_BLOCKS]; 4];
-    let mut dma = [[0f32; MAX_BLOCKS]; 4];
-    let ws = [w0, w1, w2, w3];
-    for ri in 0..4 {
-        unpack_d(ws[ri], n_blocks, q8_d, &mut da[ri], &mut dma[ri]);
-    }
     ffi::q4k_dot_q8k_4row(
         w0, w1, w2, w3,
         q8_qs, q8_bsums,
-        scores.as_mut_ptr(), n_blocks as i32,
-        da[0].as_ptr(), da[1].as_ptr(), da[2].as_ptr(), da[3].as_ptr(),
-        dma[0].as_ptr(), dma[1].as_ptr(), dma[2].as_ptr(), dma[3].as_ptr(),
+        scores.as_mut_ptr(), n_blocks as i32, q8_d, F16_POW2.as_ptr(),
     );
 }
 
@@ -148,7 +139,6 @@ pub(crate) fn q4k_embed_lookup(
 }
 
 /// Per-thread work function for Q4_K matmul.
-/// Buffers allocated once per thread, reused across row iterations.
 pub(crate) unsafe fn q4k_matmul_work(
     weight: *const u8, row_stride: usize, n_blocks: usize,
     q8_qs: *const i8, q8_d: *const f32, q8_bsums: *const i32,
@@ -161,8 +151,6 @@ pub(crate) unsafe fn q4k_matmul_work(
     let count = end - start;
     let out_slice = std::slice::from_raw_parts_mut(out.add(start), count);
 
-    let mut da = [[0f32; MAX_BLOCKS]; 4];
-    let mut dma = [[0f32; MAX_BLOCKS]; 4];
     let mut scores4 = [0.0f32; 4];
 
     let mut r = 0;
@@ -170,15 +158,10 @@ pub(crate) unsafe fn q4k_matmul_work(
         let row = start + r;
         let ws = [weight.add(row * row_stride), weight.add((row+1) * row_stride),
                   weight.add((row+2) * row_stride), weight.add((row+3) * row_stride)];
-        for ri in 0..4 {
-            unpack_d(ws[ri], n_blocks, q8_d, &mut da[ri], &mut dma[ri]);
-        }
         ffi::q4k_dot_q8k_4row(
             ws[0], ws[1], ws[2], ws[3],
             q8_qs, q8_bsums,
-            scores4.as_mut_ptr(), n_blocks as i32,
-            da[0].as_ptr(), da[1].as_ptr(), da[2].as_ptr(), da[3].as_ptr(),
-            dma[0].as_ptr(), dma[1].as_ptr(), dma[2].as_ptr(), dma[3].as_ptr(),
+            scores4.as_mut_ptr(), n_blocks as i32, q8_d, F16_POW2.as_ptr(),
         );
         for j in 0..4 { out_slice[r+j] = scores4[j]; }
         r += 4;
@@ -203,8 +186,6 @@ pub(crate) unsafe fn q4k_matmul_residual_work(
     if start >= end { return; }
     let count = end - start;
 
-    let mut da = [[0f32; MAX_BLOCKS]; 4];
-    let mut dma = [[0f32; MAX_BLOCKS]; 4];
     let mut scores4 = [0.0f32; 4];
 
     let mut r = 0;
@@ -212,15 +193,10 @@ pub(crate) unsafe fn q4k_matmul_residual_work(
         let row = start + r;
         let ws = [weight.add(row * row_stride), weight.add((row+1) * row_stride),
                   weight.add((row+2) * row_stride), weight.add((row+3) * row_stride)];
-        for ri in 0..4 {
-            unpack_d(ws[ri], n_blocks, q8_d, &mut da[ri], &mut dma[ri]);
-        }
         ffi::q4k_dot_q8k_4row(
             ws[0], ws[1], ws[2], ws[3],
             q8_qs, q8_bsums,
-            scores4.as_mut_ptr(), n_blocks as i32,
-            da[0].as_ptr(), da[1].as_ptr(), da[2].as_ptr(), da[3].as_ptr(),
-            dma[0].as_ptr(), dma[1].as_ptr(), dma[2].as_ptr(), dma[3].as_ptr(),
+            scores4.as_mut_ptr(), n_blocks as i32, q8_d, F16_POW2.as_ptr(),
         );
         for j in 0..4 { *out.add(start + r + j) += scores4[j]; }
         r += 4;
@@ -241,30 +217,16 @@ pub(crate) unsafe fn q4k_dual_4row_dot(
     g_scores: &mut [f32; 4], u_scores: &mut [f32; 4],
 ) {
     debug_assert!(n_blocks <= MAX_BLOCKS);
-    let mut gd = [[0f32; MAX_BLOCKS]; 4];
-    let mut gdm = [[0f32; MAX_BLOCKS]; 4];
-    let mut ud = [[0f32; MAX_BLOCKS]; 4];
-    let mut udm = [[0f32; MAX_BLOCKS]; 4];
-    let gws = [gw0, gw1, gw2, gw3];
-    let uws = [uw0, uw1, uw2, uw3];
-    for i in 0..4 {
-        unpack_d(gws[i], n_blocks, q8_d, &mut gd[i], &mut gdm[i]);
-        unpack_d(uws[i], n_blocks, q8_d, &mut ud[i], &mut udm[i]);
-    }
     ffi::q4k_dot_q8k_4row_dual(
         gw0, gw1, gw2, gw3,
         uw0, uw1, uw2, uw3,
         q8_qs, q8_bsums,
         g_scores.as_mut_ptr(), u_scores.as_mut_ptr(), n_blocks as i32,
-        gd[0].as_ptr(), gd[1].as_ptr(), gd[2].as_ptr(), gd[3].as_ptr(),
-        gdm[0].as_ptr(), gdm[1].as_ptr(), gdm[2].as_ptr(), gdm[3].as_ptr(),
-        ud[0].as_ptr(), ud[1].as_ptr(), ud[2].as_ptr(), ud[3].as_ptr(),
-        udm[0].as_ptr(), udm[1].as_ptr(), udm[2].as_ptr(), udm[3].as_ptr(),
+        q8_d, F16_POW2.as_ptr(),
     );
 }
 
 /// Fused gate+up+SiLU per-thread work function.
-/// Buffers allocated once per thread, reused across all row iterations.
 pub(crate) unsafe fn q4k_fused_gate_up_silu_work(
     w_gate: *const u8, w_up: *const u8,
     row_stride: usize, n_blocks: usize,
@@ -278,10 +240,6 @@ pub(crate) unsafe fn q4k_fused_gate_up_silu_work(
     let count = end - start;
     let out = std::slice::from_raw_parts_mut(hidden_out.add(start), count);
 
-    let mut gd = [[0f32; MAX_BLOCKS]; 4];
-    let mut gdm = [[0f32; MAX_BLOCKS]; 4];
-    let mut ud = [[0f32; MAX_BLOCKS]; 4];
-    let mut udm = [[0f32; MAX_BLOCKS]; 4];
     let mut g_scores = [0.0f32; 4];
     let mut u_scores = [0.0f32; 4];
 
@@ -292,19 +250,12 @@ pub(crate) unsafe fn q4k_fused_gate_up_silu_work(
                     w_gate.add((row+2) * row_stride), w_gate.add((row+3) * row_stride)];
         let uws = [w_up.add(row * row_stride), w_up.add((row+1) * row_stride),
                     w_up.add((row+2) * row_stride), w_up.add((row+3) * row_stride)];
-        for i in 0..4 {
-            unpack_d(gws[i], n_blocks, q8_d, &mut gd[i], &mut gdm[i]);
-            unpack_d(uws[i], n_blocks, q8_d, &mut ud[i], &mut udm[i]);
-        }
         ffi::q4k_dot_q8k_4row_dual(
             gws[0], gws[1], gws[2], gws[3],
             uws[0], uws[1], uws[2], uws[3],
             q8_qs, q8_bsums,
             g_scores.as_mut_ptr(), u_scores.as_mut_ptr(), n_blocks as i32,
-            gd[0].as_ptr(), gd[1].as_ptr(), gd[2].as_ptr(), gd[3].as_ptr(),
-            gdm[0].as_ptr(), gdm[1].as_ptr(), gdm[2].as_ptr(), gdm[3].as_ptr(),
-            ud[0].as_ptr(), ud[1].as_ptr(), ud[2].as_ptr(), ud[3].as_ptr(),
-            udm[0].as_ptr(), udm[1].as_ptr(), udm[2].as_ptr(), udm[3].as_ptr(),
+            q8_d, F16_POW2.as_ptr(),
         );
         for i in 0..4 {
             let g = g_scores[i];
