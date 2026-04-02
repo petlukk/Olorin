@@ -1,0 +1,369 @@
+// q4k_dot_arm_i8mm.ea — ARM I8MM Q4_K × Q8_K dot product kernel
+//
+// Uses usmmla_i32 (unsigned × signed 2×8 matrix multiply-accumulate)
+// instead of vdot_i32 for ~2× throughput on ARMv8.6+ cores.
+// Identical results to q4k_dot_arm.ea (DOTPROD variant).
+
+#[cfg(aarch64)]
+
+// Read unsigned byte from i8 pointer
+func ubyte(p: *restrict i8, off: i32) -> i32 {
+    return to_i32(p[off]) & 255
+}
+
+// Unpack scale at group j (0..3) from 12-byte packed header at p+sp
+func get_scale(p: *restrict i8, sp: i32, j: i32) -> i32 {
+    if j < 2 {
+        return ubyte(p, sp + j*2) & 63
+    }
+    return (ubyte(p, sp + j*2 + 4) & 15) | ((ubyte(p, sp + j*2 - 4) >> 6) << 4)
+}
+
+func get_scale_hi(p: *restrict i8, sp: i32, j: i32) -> i32 {
+    if j < 2 {
+        return ubyte(p, sp + j*2 + 1) & 63
+    }
+    return (ubyte(p, sp + j*2 + 5) & 15) | ((ubyte(p, sp + j*2 - 3) >> 6) << 4)
+}
+
+// Mins correction for one row
+func row_mins(p: *restrict i8, sp: i32, bsums: *restrict i32, bs: i32) -> i32 {
+    let mut s: i32 = 0
+    let mut k: i32 = 0
+    while k < 4 {
+        s = s + (ubyte(p, sp + 4 + k) & 63) * (bsums[bs + k*2] + bsums[bs + k*2 + 1])
+        k = k + 1
+    }
+    k = 0
+    while k < 4 {
+        s = s + ((ubyte(p, sp + 8 + k) >> 4) | ((ubyte(p, sp + 4 + k) >> 6) << 4)) * (bsums[bs + 8 + k*2] + bsums[bs + 8 + k*2 + 1])
+        k = k + 1
+    }
+    return s
+}
+
+// usmmla_i32 dot helper: compute full 16-element dot product from 2×2 matrix result.
+// usmmla_i32 treats u8x16 as 2 rows of 8, i8x16 as 2 rows of 8.
+// Result: acc[0] = row0_a · row0_b, acc[3] = row1_a · row1_b (diagonal = true dot)
+// acc[1], acc[2] are cross-products (discarded).
+func mmla_dot(a: u8x16, b: i8x16) -> i32 {
+    let z: i32x4 = splat(0)
+    let m: i32x4 = usmmla_i32(z, a, b)
+    return m[0] + m[3]
+}
+
+// Chained usmmla: accumulate two pairs into one 2×2, extract diagonal.
+func mmla_dot2(a0: u8x16, b0: i8x16, a1: u8x16, b1: i8x16) -> i32 {
+    let z: i32x4 = splat(0)
+    let m: i32x4 = usmmla_i32(usmmla_i32(z, a0, b0), a1, b1)
+    return m[0] + m[3]
+}
+
+// Single-row Q4_K × Q8_K with I8MM.
+export func q4k_dot_q8k(
+    q4: *restrict i8,
+    q8: *restrict i8,
+    bsums: *restrict i32,
+    n_blocks: i32,
+    d_arr: *restrict f32,
+    dmin_arr: *restrict f32
+) -> f32 {
+    let mask_lo: u8x16 = splat(15)
+    let shift4: u8x16 = splat(4)
+    let mut result: f32 = 0.0
+
+    let mut blk: i32 = 0
+    while blk < n_blocks {
+        let bp: i32 = blk * 144
+        let nib: i32 = bp + 16
+        let q8_off: i32 = blk * 256
+        let sp: i32 = bp + 4
+
+        let mut sumi: i32 = 0
+        let mut j: i32 = 0
+        while j < 4 {
+            let pa: u8x16 = load(q4, nib + j * 32)
+            let pb: u8x16 = load(q4, nib + j * 32 + 16)
+            let qa: i8x16 = load(q8, q8_off + j * 64)
+            let qb: i8x16 = load(q8, q8_off + j * 64 + 16)
+            let qc: i8x16 = load(q8, q8_off + j * 64 + 32)
+            let qd: i8x16 = load(q8, q8_off + j * 64 + 48)
+
+            sumi = sumi + mmla_dot2(pa .& mask_lo, qa, pb .& mask_lo, qb) * get_scale(q4, sp, j)
+            sumi = sumi + mmla_dot2((pa .>> shift4) .& mask_lo, qc, (pb .>> shift4) .& mask_lo, qd) * get_scale_hi(q4, sp, j)
+            j = j + 1
+        }
+
+        result = result + d_arr[blk] * to_f32(sumi) - dmin_arr[blk] * to_f32(row_mins(q4, sp, bsums, blk * 16))
+        blk = blk + 1
+    }
+    return result
+}
+
+// 4-row Q4_K × Q8_K — I8MM, shared Q8 loads.
+export func q4k_dot_q8k_4row(
+    rw0: *restrict i8, rw1: *restrict i8, rw2: *restrict i8, rw3: *restrict i8,
+    q8: *restrict i8,
+    bsums: *restrict i32,
+    out scores: *mut f32,
+    n_blocks: i32,
+    d0: *restrict f32, d1: *restrict f32, d2: *restrict f32, d3: *restrict f32,
+    dm0: *restrict f32, dm1: *restrict f32, dm2: *restrict f32, dm3: *restrict f32
+) {
+    let mask_lo: u8x16 = splat(15)
+    let shift4: u8x16 = splat(4)
+    let mut res0: f32 = 0.0
+    let mut res1: f32 = 0.0
+    let mut res2: f32 = 0.0
+    let mut res3: f32 = 0.0
+
+    let mut blk: i32 = 0
+    while blk < n_blocks {
+        let bp: i32 = blk * 144
+        let nib: i32 = bp + 16
+        let q8_off: i32 = blk * 256
+        let sp: i32 = bp + 4
+        let bs: i32 = blk * 16
+
+        let mut s0: i32 = 0
+        let mut s1: i32 = 0
+        let mut s2: i32 = 0
+        let mut s3: i32 = 0
+
+        let mut j: i32 = 0
+        while j < 4 {
+            let qa: i8x16 = load(q8, q8_off + j * 64)
+            let qb: i8x16 = load(q8, q8_off + j * 64 + 16)
+            let qc: i8x16 = load(q8, q8_off + j * 64 + 32)
+            let qd: i8x16 = load(q8, q8_off + j * 64 + 48)
+
+            let p0a: u8x16 = load(rw0, nib + j*32)
+            let p0b: u8x16 = load(rw0, nib + j*32 + 16)
+            let sc0: i32 = get_scale(rw0, sp, j)
+            let sh0: i32 = get_scale_hi(rw0, sp, j)
+            s0 = s0 + mmla_dot2(p0a .& mask_lo, qa, p0b .& mask_lo, qb) * sc0
+            s0 = s0 + mmla_dot2((p0a .>> shift4) .& mask_lo, qc, (p0b .>> shift4) .& mask_lo, qd) * sh0
+
+            let p1a: u8x16 = load(rw1, nib + j*32)
+            let p1b: u8x16 = load(rw1, nib + j*32 + 16)
+            let sc1: i32 = get_scale(rw1, sp, j)
+            let sh1: i32 = get_scale_hi(rw1, sp, j)
+            s1 = s1 + mmla_dot2(p1a .& mask_lo, qa, p1b .& mask_lo, qb) * sc1
+            s1 = s1 + mmla_dot2((p1a .>> shift4) .& mask_lo, qc, (p1b .>> shift4) .& mask_lo, qd) * sh1
+
+            let p2a: u8x16 = load(rw2, nib + j*32)
+            let p2b: u8x16 = load(rw2, nib + j*32 + 16)
+            let sc2: i32 = get_scale(rw2, sp, j)
+            let sh2: i32 = get_scale_hi(rw2, sp, j)
+            s2 = s2 + mmla_dot2(p2a .& mask_lo, qa, p2b .& mask_lo, qb) * sc2
+            s2 = s2 + mmla_dot2((p2a .>> shift4) .& mask_lo, qc, (p2b .>> shift4) .& mask_lo, qd) * sh2
+
+            let p3a: u8x16 = load(rw3, nib + j*32)
+            let p3b: u8x16 = load(rw3, nib + j*32 + 16)
+            let sc3: i32 = get_scale(rw3, sp, j)
+            let sh3: i32 = get_scale_hi(rw3, sp, j)
+            s3 = s3 + mmla_dot2(p3a .& mask_lo, qa, p3b .& mask_lo, qb) * sc3
+            s3 = s3 + mmla_dot2((p3a .>> shift4) .& mask_lo, qc, (p3b .>> shift4) .& mask_lo, qd) * sh3
+
+            j = j + 1
+        }
+
+        res0 = res0 + d0[blk] * to_f32(s0) - dm0[blk] * to_f32(row_mins(rw0, sp, bsums, bs))
+        res1 = res1 + d1[blk] * to_f32(s1) - dm1[blk] * to_f32(row_mins(rw1, sp, bsums, bs))
+        res2 = res2 + d2[blk] * to_f32(s2) - dm2[blk] * to_f32(row_mins(rw2, sp, bsums, bs))
+        res3 = res3 + d3[blk] * to_f32(s3) - dm3[blk] * to_f32(row_mins(rw3, sp, bsums, bs))
+
+        blk = blk + 1
+    }
+
+    scores[0] = res0
+    scores[1] = res1
+    scores[2] = res2
+    scores[3] = res3
+}
+
+// 4-row with fused d×q8_d multiply (GEMM path).
+export func q4k_dot_q8k_4row_fused(
+    rw0: *restrict i8, rw1: *restrict i8, rw2: *restrict i8, rw3: *restrict i8,
+    q8: *restrict i8,
+    bsums: *restrict i32,
+    out scores: *mut f32,
+    n_blocks: i32,
+    d0_w: *restrict f32, d1_w: *restrict f32, d2_w: *restrict f32, d3_w: *restrict f32,
+    dm0_w: *restrict f32, dm1_w: *restrict f32, dm2_w: *restrict f32, dm3_w: *restrict f32,
+    q8_d: *restrict f32
+) {
+    let mask_lo: u8x16 = splat(15)
+    let shift4: u8x16 = splat(4)
+    let mut res0: f32 = 0.0
+    let mut res1: f32 = 0.0
+    let mut res2: f32 = 0.0
+    let mut res3: f32 = 0.0
+
+    let mut blk: i32 = 0
+    while blk < n_blocks {
+        let bp: i32 = blk * 144
+        let nib: i32 = bp + 16
+        let q8_off: i32 = blk * 256
+        let sp: i32 = bp + 4
+        let bs: i32 = blk * 16
+
+        let mut s0: i32 = 0
+        let mut s1: i32 = 0
+        let mut s2: i32 = 0
+        let mut s3: i32 = 0
+
+        let mut j: i32 = 0
+        while j < 4 {
+            let qa: i8x16 = load(q8, q8_off + j * 64)
+            let qb: i8x16 = load(q8, q8_off + j * 64 + 16)
+            let qc: i8x16 = load(q8, q8_off + j * 64 + 32)
+            let qd: i8x16 = load(q8, q8_off + j * 64 + 48)
+
+            let p0a: u8x16 = load(rw0, nib + j*32)
+            let p0b: u8x16 = load(rw0, nib + j*32 + 16)
+            s0 = s0 + mmla_dot2(p0a .& mask_lo, qa, p0b .& mask_lo, qb) * get_scale(rw0, sp, j)
+            s0 = s0 + mmla_dot2((p0a .>> shift4) .& mask_lo, qc, (p0b .>> shift4) .& mask_lo, qd) * get_scale_hi(rw0, sp, j)
+
+            let p1a: u8x16 = load(rw1, nib + j*32)
+            let p1b: u8x16 = load(rw1, nib + j*32 + 16)
+            s1 = s1 + mmla_dot2(p1a .& mask_lo, qa, p1b .& mask_lo, qb) * get_scale(rw1, sp, j)
+            s1 = s1 + mmla_dot2((p1a .>> shift4) .& mask_lo, qc, (p1b .>> shift4) .& mask_lo, qd) * get_scale_hi(rw1, sp, j)
+
+            let p2a: u8x16 = load(rw2, nib + j*32)
+            let p2b: u8x16 = load(rw2, nib + j*32 + 16)
+            s2 = s2 + mmla_dot2(p2a .& mask_lo, qa, p2b .& mask_lo, qb) * get_scale(rw2, sp, j)
+            s2 = s2 + mmla_dot2((p2a .>> shift4) .& mask_lo, qc, (p2b .>> shift4) .& mask_lo, qd) * get_scale_hi(rw2, sp, j)
+
+            let p3a: u8x16 = load(rw3, nib + j*32)
+            let p3b: u8x16 = load(rw3, nib + j*32 + 16)
+            s3 = s3 + mmla_dot2(p3a .& mask_lo, qa, p3b .& mask_lo, qb) * get_scale(rw3, sp, j)
+            s3 = s3 + mmla_dot2((p3a .>> shift4) .& mask_lo, qc, (p3b .>> shift4) .& mask_lo, qd) * get_scale_hi(rw3, sp, j)
+
+            j = j + 1
+        }
+
+        let qd: f32 = q8_d[blk]
+        res0 = res0 + d0_w[blk] * qd * to_f32(s0) - dm0_w[blk] * qd * to_f32(row_mins(rw0, sp, bsums, bs))
+        res1 = res1 + d1_w[blk] * qd * to_f32(s1) - dm1_w[blk] * qd * to_f32(row_mins(rw1, sp, bsums, bs))
+        res2 = res2 + d2_w[blk] * qd * to_f32(s2) - dm2_w[blk] * qd * to_f32(row_mins(rw2, sp, bsums, bs))
+        res3 = res3 + d3_w[blk] * qd * to_f32(s3) - dm3_w[blk] * qd * to_f32(row_mins(rw3, sp, bsums, bs))
+
+        blk = blk + 1
+    }
+
+    scores[0] = res0
+    scores[1] = res1
+    scores[2] = res2
+    scores[3] = res3
+}
+
+// Dual 4-row: 4 gate + 4 up rows × shared activations.
+export func q4k_dot_q8k_4row_dual(
+    gw0: *restrict i8, gw1: *restrict i8, gw2: *restrict i8, gw3: *restrict i8,
+    uw0: *restrict i8, uw1: *restrict i8, uw2: *restrict i8, uw3: *restrict i8,
+    q8: *restrict i8,
+    bsums: *restrict i32,
+    out gate_scores: *mut f32,
+    out up_scores: *mut f32,
+    n_blocks: i32,
+    gd0: *restrict f32, gd1: *restrict f32, gd2: *restrict f32, gd3: *restrict f32,
+    gdm0: *restrict f32, gdm1: *restrict f32, gdm2: *restrict f32, gdm3: *restrict f32,
+    ud0: *restrict f32, ud1: *restrict f32, ud2: *restrict f32, ud3: *restrict f32,
+    udm0: *restrict f32, udm1: *restrict f32, udm2: *restrict f32, udm3: *restrict f32
+) {
+    let mask_lo: u8x16 = splat(15)
+    let shift4: u8x16 = splat(4)
+    let mut gr0: f32 = 0.0
+    let mut gr1: f32 = 0.0
+    let mut gr2: f32 = 0.0
+    let mut gr3: f32 = 0.0
+    let mut ur0: f32 = 0.0
+    let mut ur1: f32 = 0.0
+    let mut ur2: f32 = 0.0
+    let mut ur3: f32 = 0.0
+
+    let mut blk: i32 = 0
+    while blk < n_blocks {
+        let bp: i32 = blk * 144
+        let nib: i32 = bp + 16
+        let q8_off: i32 = blk * 256
+        let sp: i32 = bp + 4
+        let bs: i32 = blk * 16
+
+        let mut gs0: i32 = 0
+        let mut gs1: i32 = 0
+        let mut gs2: i32 = 0
+        let mut gs3: i32 = 0
+        let mut us0: i32 = 0
+        let mut us1: i32 = 0
+        let mut us2: i32 = 0
+        let mut us3: i32 = 0
+
+        let mut j: i32 = 0
+        while j < 4 {
+            let qa: i8x16 = load(q8, q8_off + j * 64)
+            let qb: i8x16 = load(q8, q8_off + j * 64 + 16)
+            let qc: i8x16 = load(q8, q8_off + j * 64 + 32)
+            let qd: i8x16 = load(q8, q8_off + j * 64 + 48)
+
+            let gp0a: u8x16 = load(gw0, nib + j*32)
+            let gp0b: u8x16 = load(gw0, nib + j*32 + 16)
+            let up0a: u8x16 = load(uw0, nib + j*32)
+            let up0b: u8x16 = load(uw0, nib + j*32 + 16)
+            gs0 = gs0 + mmla_dot2(gp0a .& mask_lo, qa, gp0b .& mask_lo, qb) * get_scale(gw0, sp, j)
+            gs0 = gs0 + mmla_dot2((gp0a .>> shift4) .& mask_lo, qc, (gp0b .>> shift4) .& mask_lo, qd) * get_scale_hi(gw0, sp, j)
+            us0 = us0 + mmla_dot2(up0a .& mask_lo, qa, up0b .& mask_lo, qb) * get_scale(uw0, sp, j)
+            us0 = us0 + mmla_dot2((up0a .>> shift4) .& mask_lo, qc, (up0b .>> shift4) .& mask_lo, qd) * get_scale_hi(uw0, sp, j)
+
+            let gp1a: u8x16 = load(gw1, nib + j*32)
+            let gp1b: u8x16 = load(gw1, nib + j*32 + 16)
+            let up1a: u8x16 = load(uw1, nib + j*32)
+            let up1b: u8x16 = load(uw1, nib + j*32 + 16)
+            gs1 = gs1 + mmla_dot2(gp1a .& mask_lo, qa, gp1b .& mask_lo, qb) * get_scale(gw1, sp, j)
+            gs1 = gs1 + mmla_dot2((gp1a .>> shift4) .& mask_lo, qc, (gp1b .>> shift4) .& mask_lo, qd) * get_scale_hi(gw1, sp, j)
+            us1 = us1 + mmla_dot2(up1a .& mask_lo, qa, up1b .& mask_lo, qb) * get_scale(uw1, sp, j)
+            us1 = us1 + mmla_dot2((up1a .>> shift4) .& mask_lo, qc, (up1b .>> shift4) .& mask_lo, qd) * get_scale_hi(uw1, sp, j)
+
+            let gp2a: u8x16 = load(gw2, nib + j*32)
+            let gp2b: u8x16 = load(gw2, nib + j*32 + 16)
+            let up2a: u8x16 = load(uw2, nib + j*32)
+            let up2b: u8x16 = load(uw2, nib + j*32 + 16)
+            gs2 = gs2 + mmla_dot2(gp2a .& mask_lo, qa, gp2b .& mask_lo, qb) * get_scale(gw2, sp, j)
+            gs2 = gs2 + mmla_dot2((gp2a .>> shift4) .& mask_lo, qc, (gp2b .>> shift4) .& mask_lo, qd) * get_scale_hi(gw2, sp, j)
+            us2 = us2 + mmla_dot2(up2a .& mask_lo, qa, up2b .& mask_lo, qb) * get_scale(uw2, sp, j)
+            us2 = us2 + mmla_dot2((up2a .>> shift4) .& mask_lo, qc, (up2b .>> shift4) .& mask_lo, qd) * get_scale_hi(uw2, sp, j)
+
+            let gp3a: u8x16 = load(gw3, nib + j*32)
+            let gp3b: u8x16 = load(gw3, nib + j*32 + 16)
+            let up3a: u8x16 = load(uw3, nib + j*32)
+            let up3b: u8x16 = load(uw3, nib + j*32 + 16)
+            gs3 = gs3 + mmla_dot2(gp3a .& mask_lo, qa, gp3b .& mask_lo, qb) * get_scale(gw3, sp, j)
+            gs3 = gs3 + mmla_dot2((gp3a .>> shift4) .& mask_lo, qc, (gp3b .>> shift4) .& mask_lo, qd) * get_scale_hi(gw3, sp, j)
+            us3 = us3 + mmla_dot2(up3a .& mask_lo, qa, up3b .& mask_lo, qb) * get_scale(uw3, sp, j)
+            us3 = us3 + mmla_dot2((up3a .>> shift4) .& mask_lo, qc, (up3b .>> shift4) .& mask_lo, qd) * get_scale_hi(uw3, sp, j)
+
+            j = j + 1
+        }
+
+        gr0 = gr0 + gd0[blk] * to_f32(gs0) - gdm0[blk] * to_f32(row_mins(gw0, sp, bsums, bs))
+        gr1 = gr1 + gd1[blk] * to_f32(gs1) - gdm1[blk] * to_f32(row_mins(gw1, sp, bsums, bs))
+        gr2 = gr2 + gd2[blk] * to_f32(gs2) - gdm2[blk] * to_f32(row_mins(gw2, sp, bsums, bs))
+        gr3 = gr3 + gd3[blk] * to_f32(gs3) - gdm3[blk] * to_f32(row_mins(gw3, sp, bsums, bs))
+        ur0 = ur0 + ud0[blk] * to_f32(us0) - udm0[blk] * to_f32(row_mins(uw0, sp, bsums, bs))
+        ur1 = ur1 + ud1[blk] * to_f32(us1) - udm1[blk] * to_f32(row_mins(uw1, sp, bsums, bs))
+        ur2 = ur2 + ud2[blk] * to_f32(us2) - udm2[blk] * to_f32(row_mins(uw2, sp, bsums, bs))
+        ur3 = ur3 + ud3[blk] * to_f32(us3) - udm3[blk] * to_f32(row_mins(uw3, sp, bsums, bs))
+
+        blk = blk + 1
+    }
+
+    gate_scores[0] = gr0
+    gate_scores[1] = gr1
+    gate_scores[2] = gr2
+    gate_scores[3] = gr3
+    up_scores[0] = ur0
+    up_scores[1] = ur1
+    up_scores[2] = ur2
+    up_scores[3] = ur3
+}
