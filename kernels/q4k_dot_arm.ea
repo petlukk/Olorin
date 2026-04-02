@@ -5,9 +5,10 @@
 
 #[cfg(aarch64)]
 
-// Read little-endian u32 from i8 pointer at byte offset
+// Read i32 from i8 pointer at byte offset (must be 4-aligned)
 func read_u32(p: *restrict i8, off: i32) -> i32 {
-    return (to_i32(p[off]) & 255) | ((to_i32(p[off+1]) & 255) << 8) | ((to_i32(p[off+2]) & 255) << 16) | ((to_i32(p[off+3]) & 255) << 24)
+    let p32: *restrict i32 = ptr_as_i32(p)
+    return p32[off / 4]
 }
 
 // Extract scale at index 0..7 from pre-unpacked sc0 (bytes 0-3) and sc1 (bytes 4-7)
