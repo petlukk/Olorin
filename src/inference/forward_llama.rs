@@ -4,8 +4,8 @@ use crate::kernels::ffi_inference as ffi;
 use crate::inference::forward::{apply_rope, build_rope_freqs, sample_into};
 use crate::inference::math::{softmax_rows, wipe_f32, wipe_i8, wipe_i32};
 use crate::inference::matmul::embed_f16_lookup;
-use crate::inference::matmul_q4k::{Q4K_BLOCK_BYTES, q4k_matmul_mt, q4k_matmul_work, q4k_fused_gate_up_silu_work};
-use crate::inference::matmul_q6k::{Q6K_BLOCK_BYTES, q6k_matmul_mt, q6k_matmul_work};
+use crate::inference::matmul_q4k::{Q4K_BLOCK_BYTES, q4k_matmul_mt, q4k_matmul_work, q4k_matmul_residual_work, q4k_fused_gate_up_silu_work};
+use crate::inference::matmul_q6k::{Q6K_BLOCK_BYTES, q6k_matmul_mt, q6k_matmul_work, q6k_matmul_residual_work};
 use crate::inference::matmul_q4k::q4k_embed_lookup;
 use crate::inference::matmul_q6k::q6k_embed_lookup;
 use crate::inference::engine::BitNetModel;
@@ -238,10 +238,22 @@ impl LlamaState {
             ffi::quant_f32_q8k(self.attn_out.as_ptr(), self.attn_q8_qs.as_mut_ptr(),
                 self.attn_q8_d.as_mut_ptr(), self.attn_q8_bsums.as_mut_ptr(), h as i32);
         }
-        q4k_matmul_mt(lw.wo, h_row_stride, h_nb, self.attn_q8_qs.as_ptr(), self.attn_q8_d.as_ptr(),
-            self.attn_q8_bsums.as_ptr(), &mut self.tmp, h, &self.pool);
-        unsafe { ffi::vecadd_f32(x.as_ptr(), self.tmp.as_ptr(), self.attn_out.as_mut_ptr(), h as i32); }
-        x[..h].copy_from_slice(&self.attn_out[..h]);
+        // Wo projection + residual (fused per-thread: x[r] += matmul[r])
+        {
+            let n_thr = self.pool.thread_count().min(h / 4).max(1);
+            let w = SendPtr(lw.wo);
+            let qs = SendPtr(self.attn_q8_qs.as_ptr());
+            let qd = SendPtr(self.attn_q8_d.as_ptr());
+            let qb = SendPtr(self.attn_q8_bsums.as_ptr());
+            let o = SendMutPtr(x.as_mut_ptr());
+            self.pool.run(n_thr, move |tid, _n| unsafe {
+                q4k_matmul_residual_work(
+                    w.ptr(), h_row_stride, h_nb,
+                    qs.ptr(), qd.ptr(), qb.ptr(),
+                    o.ptr(), h, tid, n_thr,
+                );
+            });
+        }
 
         unsafe {
             ffi::rmsnorm_f32(x.as_ptr(), lw.ffn_norm, self.x_norm.as_mut_ptr(), h as i32, model.rms_eps);
@@ -266,15 +278,33 @@ impl LlamaState {
             ffi::quant_f32_q8k(self.hidden.as_ptr(), self.hidden_q8_qs.as_mut_ptr(),
                 self.hidden_q8_d.as_mut_ptr(), self.hidden_q8_bsums.as_mut_ptr(), f as i32);
         }
-        if lw.w_down_block_bytes == Q6K_BLOCK_BYTES {
-            q6k_matmul_mt(lw.w_down, f_nb * Q6K_BLOCK_BYTES, f_nb, self.hidden_q8_qs.as_ptr(),
-                self.hidden_q8_d.as_ptr(), self.hidden_q8_bsums.as_ptr(), &mut self.tmp, h, &self.pool);
-        } else {
-            q4k_matmul_mt(lw.w_down, f_nb * Q4K_BLOCK_BYTES, f_nb, self.hidden_q8_qs.as_ptr(),
-                self.hidden_q8_d.as_ptr(), self.hidden_q8_bsums.as_ptr(), &mut self.tmp, h, &self.pool);
+        // Down projection + residual (fused per-thread: x[r] += matmul[r])
+        {
+            let n_thr = self.pool.thread_count().min(h / 4).max(1);
+            let w = SendPtr(lw.w_down);
+            let qs = SendPtr(self.hidden_q8_qs.as_ptr());
+            let qd = SendPtr(self.hidden_q8_d.as_ptr());
+            let qb = SendPtr(self.hidden_q8_bsums.as_ptr());
+            let o = SendMutPtr(x.as_mut_ptr());
+            let down_q6k = lw.w_down_block_bytes == Q6K_BLOCK_BYTES;
+            let f_row_stride_q6 = f_nb * Q6K_BLOCK_BYTES;
+            let f_row_stride_q4 = f_nb * Q4K_BLOCK_BYTES;
+            self.pool.run(n_thr, move |tid, _n| unsafe {
+                if down_q6k {
+                    q6k_matmul_residual_work(
+                        w.ptr(), f_row_stride_q6, f_nb,
+                        qs.ptr(), qd.ptr(), qb.ptr(),
+                        o.ptr(), h, tid, n_thr,
+                    );
+                } else {
+                    q4k_matmul_residual_work(
+                        w.ptr(), f_row_stride_q4, f_nb,
+                        qs.ptr(), qd.ptr(), qb.ptr(),
+                        o.ptr(), h, tid, n_thr,
+                    );
+                }
+            });
         }
-        unsafe { ffi::vecadd_f32(x.as_ptr(), self.tmp.as_ptr(), self.attn_out.as_mut_ptr(), h as i32); }
-        x[..h].copy_from_slice(&self.attn_out[..h]);
     }
 
     /// Output projection: RMSNorm + quantize + matmul -> logits.

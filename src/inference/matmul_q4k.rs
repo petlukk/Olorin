@@ -190,6 +190,48 @@ pub(crate) unsafe fn q4k_matmul_work(
     }
 }
 
+/// Per-thread matmul + residual add. Computes out[r] += matmul(w, q8)[r].
+/// Eliminates the separate vecadd pass after projection.
+pub(crate) unsafe fn q4k_matmul_residual_work(
+    weight: *const u8, row_stride: usize, n_blocks: usize,
+    q8_qs: *const i8, q8_d: *const f32, q8_bsums: *const i32,
+    out: *mut f32, out_dim: usize, tid: usize, n_threads: usize,
+) {
+    let chunk = ((out_dim + n_threads - 1) / n_threads + 3) & !3;
+    let start = tid * chunk;
+    let end = (start + chunk).min(out_dim);
+    if start >= end { return; }
+    let count = end - start;
+
+    let mut da = [[0f32; MAX_BLOCKS]; 4];
+    let mut dma = [[0f32; MAX_BLOCKS]; 4];
+    let mut scores4 = [0.0f32; 4];
+
+    let mut r = 0;
+    while r + 4 <= count {
+        let row = start + r;
+        let ws = [weight.add(row * row_stride), weight.add((row+1) * row_stride),
+                  weight.add((row+2) * row_stride), weight.add((row+3) * row_stride)];
+        for ri in 0..4 {
+            unpack_d(ws[ri], n_blocks, q8_d, &mut da[ri], &mut dma[ri]);
+        }
+        ffi::q4k_dot_q8k_4row(
+            ws[0], ws[1], ws[2], ws[3],
+            q8_qs, q8_bsums,
+            scores4.as_mut_ptr(), n_blocks as i32,
+            da[0].as_ptr(), da[1].as_ptr(), da[2].as_ptr(), da[3].as_ptr(),
+            dma[0].as_ptr(), dma[1].as_ptr(), dma[2].as_ptr(), dma[3].as_ptr(),
+        );
+        for j in 0..4 { *out.add(start + r + j) += scores4[j]; }
+        r += 4;
+    }
+    while r < count {
+        let row = start + r;
+        *out.add(start + r) += q4k_row_dot(weight.add(row * row_stride), n_blocks, q8_qs, q8_d, q8_bsums);
+        r += 1;
+    }
+}
+
 /// Fused 4-row gate+up dot product using dual kernel.
 pub(crate) unsafe fn q4k_dual_4row_dot(
     gw0: *const u8, gw1: *const u8, gw2: *const u8, gw3: *const u8,
