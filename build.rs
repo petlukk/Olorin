@@ -55,6 +55,7 @@ fn main() {
         stem: String,
         arm_only: bool,
         x86_only: bool,
+        i8mm: bool,
         path: PathBuf,
     }
 
@@ -63,9 +64,10 @@ fn main() {
         .map(|e| {
             let fname = e.file_name().to_string_lossy().to_string();
             let stem = fname.strip_suffix(".ea").unwrap().to_string();
-            let arm_only = stem.ends_with("_arm");
+            let i8mm = stem.ends_with("_arm_i8mm");
+            let arm_only = !i8mm && stem.ends_with("_arm");
             let x86_only = stem.contains("_avx2") || stem.contains("_avx512");
-            KernelSrc { stem, arm_only, x86_only, path: e.path() }
+            KernelSrc { stem, arm_only, x86_only, i8mm, path: e.path() }
         })
         .collect();
 
@@ -75,14 +77,14 @@ fn main() {
         .filter(|s| {
             if is_arm {
                 if s.x86_only { return false; }
-                if !s.arm_only {
-                    let arm_variant = format!("{}_arm", s.stem);
-                    !sources.iter().any(|o| o.stem == arm_variant)
-                } else {
-                    true
+                if s.i8mm || s.arm_only {
+                    return true;
                 }
+                // Skip generic if ARM variant exists
+                let arm_variant = format!("{}_arm", s.stem);
+                !sources.iter().any(|o| o.stem == arm_variant)
             } else {
-                !s.arm_only
+                !s.arm_only && !s.i8mm
             }
         })
         .collect();
@@ -91,7 +93,13 @@ fn main() {
     let mut compiled: Vec<(String, String, PathBuf)> = Vec::new();
 
     for src in &filtered {
-        let out_stem = src.stem.strip_suffix("_arm").unwrap_or(&src.stem);
+        let out_stem = if src.i8mm {
+            // foo_arm_i8mm -> foo_i8mm
+            let base = src.stem.strip_suffix("_arm_i8mm").unwrap();
+            format!("{base}_i8mm")
+        } else {
+            src.stem.strip_suffix("_arm").unwrap_or(&src.stem).to_string()
+        };
         let so_path = out_dir.join(format!("lib{out_stem}.so"));
 
         let mut cmd = Command::new(&ea);
@@ -104,6 +112,9 @@ fn main() {
             cmd.arg("--target-triple=aarch64-unknown-linux-gnu");
             cmd.arg("--target=cortex-a76");
             cmd.arg("--dotprod");
+            if src.i8mm {
+                cmd.arg("--i8mm");
+            }
             cmd.env("CC", "aarch64-linux-gnu-gcc");
         }
 

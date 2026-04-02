@@ -5,6 +5,22 @@ use std::path::Path;
 use std::sync::OnceLock;
 use crate::kernels::ffi_inference_types::*;
 
+// I8MM (ARMv8.6+ integer matrix multiply) detection
+#[cfg(target_arch = "aarch64")]
+fn detect_i8mm() -> bool {
+    // HWCAP2 = 26, HWCAP2_I8MM = (1 << 13)
+    unsafe { libc::getauxval(26) & (1 << 13) != 0 }
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+fn detect_i8mm() -> bool { false }
+
+static I8MM_AVAILABLE: OnceLock<bool> = OnceLock::new();
+
+pub fn has_i8mm() -> bool {
+    *I8MM_AVAILABLE.get_or_init(detect_i8mm)
+}
+
 pub struct KernelTableInference {
     pub libs: Vec<Library>,
     pub i2_dot_i8:             I2DotI8Fn,
@@ -68,12 +84,28 @@ pub fn init_from(lib_dir: &Path) -> Result<(), String> {
 }
 
 fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String> {
+    let has_i8mm_hw = detect_i8mm();
+    let _ = I8MM_AVAILABLE.set(has_i8mm_hw);
+
     let load = |name: &str| -> Result<Library, String> {
         let path = lib_dir.join(format!("lib{name}.so"));
         unsafe {
             Library::new(&path)
                 .map_err(|e| format!("failed to load {}: {e}", path.display()))
         }
+    };
+
+    // Try I8MM variant first on ARM, fall back to base
+    let load_best = |name: &str| -> Result<Library, String> {
+        #[cfg(target_arch = "aarch64")]
+        if has_i8mm_hw {
+            let i8mm_name = format!("{name}_i8mm");
+            if let Ok(lib) = load(&i8mm_name) {
+                eprintln!("olorin: {name}=i8mm");
+                return Ok(lib);
+            }
+        }
+        load(name)
     };
 
     let i2s  = load("bitnet_i2s")?;
@@ -84,11 +116,11 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
     let act  = load("bitnet_activate")?;
     let vadd = load("bitnet_vecadd")?;
     let q4kq = load("q4k_quant")?;
-    let q4kd = load("q4k_dot")?;
-    let q4kfg = load("q4k_fused_gemm")?;
+    let q4kd = load_best("q4k_dot")?;
+    let q4kfg = load_best("q4k_fused_gemm")?;
     let q6kd = load("q6k_dot")?;
     let rope = load("rope")?;
-    let gemm_tile = load("q4k_gemm_tile")?;
+    let gemm_tile = load_best("q4k_gemm_tile")?;
 
     let quantize_lib      = load("quantize_simd")?;
     let k_score_lib       = load("fused_k_score")?;
