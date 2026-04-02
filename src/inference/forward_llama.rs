@@ -125,6 +125,7 @@ impl LlamaState {
                 self.x_q8_d.as_mut_ptr(), self.x_q8_bsums.as_mut_ptr(), h as i32);
         }
 
+
         // QKV — concurrent dispatch via ThreadPool
         let total = self.pool.thread_count();
         let wv_bb = lw.wv_block_bytes;
@@ -159,6 +160,7 @@ impl LlamaState {
             }
         }
 
+
         add_bias(&mut self.q, lw.q_bias, h);
         // K-bias: do NOT add to K before cache — it destroys TurboQuant precision.
         // Instead, apply bias correction to attention scores after Q·K computation.
@@ -168,9 +170,11 @@ impl LlamaState {
         build_rope_freqs(&mut self.rope_freqs, hd, pos, model.rope_theta);
         apply_rope(&mut self.q, &self.rope_freqs, hd, nh);
         apply_rope(&mut self.k, &self.rope_freqs, hd, nkv);
+
         self.kv_cache.append(&self.k[..kv], layer as i32, 0, 1).unwrap();
         self.kv_cache.append(&self.v[..kv], layer as i32, 1, 1).unwrap();
         if layer == model.n_layers - 1 { self.kv_cache.advance(1).unwrap(); }
+
 
         let seq_len = pos + 1;
         if lw.k_bias.is_null() && ffi::has_flash_decode_attn() {
@@ -234,6 +238,7 @@ impl LlamaState {
             softmax_rows(scores, nh, seq_len);
             cache::attention::attention_output(&self.kv_cache, scores, layer as i32, nh as i32, nkv as i32, seq_len as i32, &mut self.attn_out);
         }
+
         unsafe {
             ffi::quant_f32_q8k(self.attn_out.as_ptr(), self.attn_q8_qs.as_mut_ptr(),
                 self.attn_q8_d.as_mut_ptr(), self.attn_q8_bsums.as_mut_ptr(), h as i32);
@@ -254,6 +259,7 @@ impl LlamaState {
                 );
             });
         }
+
 
         unsafe {
             ffi::rmsnorm_f32(x.as_ptr(), lw.ffn_norm, self.x_norm.as_mut_ptr(), h as i32, model.rms_eps);
