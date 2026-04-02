@@ -16,3 +16,4 @@ pub mod forward;
 pub mod forward_llama;
 pub mod prefill;
 pub mod prefill_llama;
+pub mod speculative;
