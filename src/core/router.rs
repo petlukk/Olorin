@@ -67,10 +67,24 @@ impl DispatchContext {
     /// Create a new dispatch context.
     /// `api_key`: optional Anthropic API key for cloud inference.
     /// `model_arg`: optional model selector ("bitnet", "llama", or path).
-    pub fn new(api_key: Option<String>, model_arg: Option<&str>) -> Self {
+    pub fn new(api_key: Option<String>, model_arg: Option<&str>, draft_arg: Option<&str>, draft_k: Option<usize>) -> Self {
         let anthropic = api_key.map(AnthropicClient::new);
         let vault = Self::open_vault();
-        let engine = Self::load_engine(model_arg);
+        let mut engine = Self::load_engine(model_arg);
+        // Load draft model for speculative decoding if requested
+        if let (Some(ref mut eng), Some(draft_path)) = (&mut engine, draft_arg) {
+            use crate::inference::generate;
+            if let Some(draft_model_path) = generate::resolve_model(Some(draft_path)) {
+                if let Err(e) = eng.load_draft(&draft_model_path) {
+                    eprintln!("[Olorin] Draft model load failed: {e}");
+                }
+            } else {
+                eprintln!("[Olorin] Draft model not found: {draft_path}");
+            }
+            if let Some(k) = draft_k {
+                eng.draft_k = k;
+            }
+        }
         let mut ctx = Self {
             messages:      Vec::new(),
             recall:        VectorStore::new(1024),

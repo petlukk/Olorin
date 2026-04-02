@@ -6,7 +6,7 @@ use crate::interface::exec;
 use crate::interface::server::{extract_json_string, escape_json};
 
 /// Start the WhatsApp bridge subprocess and run the JSONL message loop.
-pub fn run_whatsapp(model_arg: Option<&str>) {
+pub fn run_whatsapp(model_arg: Option<&str>, draft_arg: Option<&str>, draft_k: Option<usize>) {
     let bridge_path = find_bridge();
 
     let home        = std::env::var("HOME").unwrap_or_default();
@@ -22,7 +22,7 @@ pub fn run_whatsapp(model_arg: Option<&str>) {
     };
 
     let api_key = std::env::var("ANTHROPIC_API_KEY").ok();
-    let ctx     = Arc::new(Mutex::new(DispatchContext::new(api_key, model_arg)));
+    let ctx     = Arc::new(Mutex::new(DispatchContext::new(api_key, model_arg, draft_arg, draft_k)));
 
     eprintln!("[olorin] WhatsApp bridge started (pid={})", child.pid);
     eprintln!("[olorin] Waiting for bridge connection...");

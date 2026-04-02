@@ -7,6 +7,9 @@ fn main() {
     let serve    = args.contains(&"--serve".into());
     let whatsapp = args.contains(&"--whatsapp".into());
     let model_arg = get_opt(&args, "--model");
+    let draft_arg = get_opt(&args, "--draft");
+    let draft_k: Option<usize> = get_opt(&args, "--draft-k")
+        .and_then(|s| s.parse().ok());
     let port: u16 = get_opt(&args, "--port")
         .and_then(|s| s.parse().ok())
         .unwrap_or(8080);
@@ -23,11 +26,11 @@ fn main() {
     std::fs::create_dir_all(olorin_home.join("models")).ok();
 
     if serve {
-        interface::server::run(port, model_arg);
+        interface::server::run(port, model_arg, draft_arg, draft_k);
     } else if whatsapp {
-        interface::whatsapp::run_whatsapp(model_arg);
+        interface::whatsapp::run_whatsapp(model_arg, draft_arg, draft_k);
     } else {
-        interface::terminal::run(model_arg);
+        interface::terminal::run(model_arg, draft_arg, draft_k);
     }
 }
 

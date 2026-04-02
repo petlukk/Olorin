@@ -23,6 +23,10 @@ pub struct Engine {
     pub top_p: f32,
     pub min_p: f32,
     pub repetition_penalty: f32,
+    /// Draft model for speculative decoding (optional).
+    draft_gguf: Option<GgufFile>,
+    draft_model: Option<BitNetModel>,
+    pub draft_k: usize,
 }
 
 impl Engine {
@@ -42,7 +46,20 @@ impl Engine {
             top_p: 0.95,
             min_p: 0.05,
             repetition_penalty: 1.1,
+            draft_gguf: None,
+            draft_model: None,
+            draft_k: 5,
         })
+    }
+
+    /// Load a draft model for speculative decoding.
+    pub fn load_draft(&mut self, path: &Path) -> Result<()> {
+        let gguf = GgufFile::open(path)?;
+        let model = BitNetModel::from_gguf(&gguf)?;
+        eprintln!("[Olorin] Draft model loaded: {} layers, {} dim", model.n_layers, model.hidden_dim);
+        self.draft_gguf = Some(gguf);
+        self.draft_model = Some(model);
+        Ok(())
     }
 
     /// Detect quantization type of the loaded model.
@@ -78,13 +95,23 @@ impl Engine {
         };
 
         let mut generated = if is_q4k {
-            use crate::inference::forward_llama;
-            let (gen, _, _) = forward_llama::generate(
-                &model, &tokens, self.max_tokens, self.temperature,
-                self.top_k, self.top_p, self.min_p, self.repetition_penalty,
-                &tokenizer.stop_ids, self.max_seq_len, on_tok,
-            );
-            gen
+            if let Some(ref draft_model) = self.draft_model {
+                use crate::inference::speculative;
+                let (gen, _, _) = speculative::speculative_generate(
+                    model, draft_model, &tokens, self.max_tokens, self.draft_k,
+                    self.temperature, self.top_k, self.top_p, self.min_p,
+                    self.repetition_penalty, &tokenizer.stop_ids, self.max_seq_len, on_tok,
+                );
+                gen
+            } else {
+                use crate::inference::forward_llama;
+                let (gen, _, _) = forward_llama::generate(
+                    model, &tokens, self.max_tokens, self.temperature,
+                    self.top_k, self.top_p, self.min_p, self.repetition_penalty,
+                    &tokenizer.stop_ids, self.max_seq_len, on_tok,
+                );
+                gen
+            }
         } else {
             use crate::inference::forward::InferenceState;
             let (gen, _, _) = InferenceState::generate(
