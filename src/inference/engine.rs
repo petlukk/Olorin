@@ -104,8 +104,8 @@ fn load_qk_tensor(gguf: &GgufFile, name: &str) -> Result<(*const u8, usize, usiz
     let data = gguf.tensor_data(name)
         .ok_or_else(|| Error::Inference(format!("missing tensor data: {name}")))?;
     let block_bytes = match dtype {
-        12 => 144,  // Q4_K
-        14 => 210,  // Q6_K
+        12 | 13 => 144,  // Q4_K_M / Q4_K_S (same block format)
+        14 => 210,        // Q6_K
         _ => return Err(Error::Inference(format!("{name}: unsupported dtype {dtype} (expected Q4_K or Q6_K)"))),
     };
     let n_blocks = data.len() / block_bytes;
@@ -219,7 +219,7 @@ impl BitNetModel {
             match first_weight {
                 Some(&idx) => match gguf.tensors[idx].dtype {
                     36 => QuantType::I2S,
-                    12 | 14 => QuantType::Q4K, // Q4_K or Q6_K (same forward path)
+                    12 | 13 | 14 => QuantType::Q4K, // Q4_K_M / Q4_K_S / Q6_K (same forward path)
                     dt => return Err(Error::Inference(format!("unsupported weight quant type: {dt}"))),
                 },
                 None => return Err(Error::Inference("cannot find weight tensor to detect quant type".into())),
