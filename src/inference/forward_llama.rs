@@ -13,6 +13,14 @@ use crate::inference::cache::{self, EakvCache};
 use crate::inference::ptr::{SendPtr, SendMutPtr};
 use crate::inference::threadpool::ThreadPool;
 
+/// Return the index of the largest element in `logits`.
+pub fn argmax(logits: &[f32]) -> u32 {
+    logits.iter().enumerate()
+        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+        .map(|(i, _)| i as u32)
+        .unwrap_or(0)
+}
+
 /// Add bias vector to output buffer. No-op if bias is null (Llama models).
 #[inline]
 pub(crate) fn add_bias(buf: &mut [f32], bias: *const f32, n: usize) {

@@ -22,9 +22,8 @@ struct W {
 }
 
 impl LlamaState {
-    /// GEMM-style batched prefill: quantize all tokens to Q8K once,
-    /// then load each weight matrix once and multiply all tokens.
-    pub fn prefill(&mut self, model: &BitNetModel, tokens: &[u32]) {
+    /// Run all transformer layers for N tokens, return per-token hidden states.
+    fn prefill_layers(&mut self, model: &BitNetModel, tokens: &[u32]) -> Vec<Vec<f32>> {
         let n = tokens.len();
         let (h, hd, nh, nkv, kv, f) = (
             model.hidden_dim, model.head_dim, model.n_heads,
@@ -343,7 +342,30 @@ impl LlamaState {
                 });
             }
         }
+        xs
+    }
+
+    /// GEMM-style batched prefill: quantize all tokens to Q8K once,
+    /// then load each weight matrix once and multiply all tokens.
+    pub fn prefill(&mut self, model: &BitNetModel, tokens: &[u32]) {
+        let xs = self.prefill_layers(model, tokens);
+        let h = model.hidden_dim;
+        let n = tokens.len();
         self.x[..h].copy_from_slice(&xs[n - 1]);
         self.output_proj(model);
+    }
+
+    /// Batched prefill that returns per-token argmax token IDs.
+    /// Used by speculative decoding to verify draft tokens.
+    pub fn prefill_verify(&mut self, model: &BitNetModel, tokens: &[u32]) -> Vec<u32> {
+        let xs = self.prefill_layers(model, tokens);
+        let h = model.hidden_dim;
+        let mut result = Vec::with_capacity(xs.len());
+        for hidden in &xs {
+            self.x[..h].copy_from_slice(hidden);
+            self.output_proj(model);
+            result.push(super::forward_llama::argmax(&self.logits));
+        }
+        result
     }
 }
