@@ -70,7 +70,30 @@ impl LlamaState {
                     }
                 });
             }
-            for t in 0..n { bq_h.quantize(t, &norm_all[t*h..(t+1)*h]); }
+            // Parallel Q8K quantization of all N tokens
+            {
+                let qs_ptr = bq_h.qs.as_mut_ptr() as usize;
+                let d_ptr = bq_h.d.as_mut_ptr() as usize;
+                let bs_ptr = bq_h.bsums.as_mut_ptr() as usize;
+                let norm_ptr = norm_all.as_ptr() as usize;
+                let qs_stride = bq_h.qs_stride;
+                let nb = bq_h.n_blocks;
+                let h_dim = h;
+                let n_tok = n;
+                self.pool.run(nt.min(n), move |tid, nt_used| unsafe {
+                    let mut t = tid;
+                    while t < n_tok {
+                        ffi::quant_f32_q8k(
+                            (norm_ptr as *const f32).add(t * h_dim),
+                            (qs_ptr as *mut i8).add(t * qs_stride),
+                            (d_ptr as *mut f32).add(t * nb),
+                            (bs_ptr as *mut i32).add(t * nb * 16),
+                            h_dim as i32,
+                        );
+                        t += nt_used;
+                    }
+                });
+            }
 
             // ── QKV matmul: Q4K × Q8K (pre-quantized) ──
             q4k_gemm_mt(lw.wq, h_rs, h_nb, &bq_h, &mut qs_all, h, &self.pool);
@@ -187,7 +210,29 @@ impl LlamaState {
             }
 
             // ── Wo matmul: Q4K × Q8K ──
-            for t in 0..n { bq_h.quantize(t, &attn_all[t*h..(t+1)*h]); }
+            {
+                let qs_ptr = bq_h.qs.as_mut_ptr() as usize;
+                let d_ptr = bq_h.d.as_mut_ptr() as usize;
+                let bs_ptr = bq_h.bsums.as_mut_ptr() as usize;
+                let src_ptr = attn_all.as_ptr() as usize;
+                let qs_stride = bq_h.qs_stride;
+                let nb = bq_h.n_blocks;
+                let h_dim = h;
+                let n_tok = n;
+                self.pool.run(nt.min(n), move |tid, nt_used| unsafe {
+                    let mut t = tid;
+                    while t < n_tok {
+                        ffi::quant_f32_q8k(
+                            (src_ptr as *const f32).add(t * h_dim),
+                            (qs_ptr as *mut i8).add(t * qs_stride),
+                            (d_ptr as *mut f32).add(t * nb),
+                            (bs_ptr as *mut i32).add(t * nb * 16),
+                            h_dim as i32,
+                        );
+                        t += nt_used;
+                    }
+                });
+            }
             q4k_gemm_mt(lw.wo, h_rs, h_nb, &bq_h, &mut tmp_all, h, &self.pool);
 
             // ── Parallel vecadd residual (attn) ──
@@ -225,13 +270,57 @@ impl LlamaState {
                     }
                 });
             }
-            for t in 0..n { bq_h.quantize(t, &norm_all[t*h..(t+1)*h]); }
+            {
+                let qs_ptr = bq_h.qs.as_mut_ptr() as usize;
+                let d_ptr = bq_h.d.as_mut_ptr() as usize;
+                let bs_ptr = bq_h.bsums.as_mut_ptr() as usize;
+                let src_ptr = norm_all.as_ptr() as usize;
+                let qs_stride = bq_h.qs_stride;
+                let nb = bq_h.n_blocks;
+                let h_dim = h;
+                let n_tok = n;
+                self.pool.run(nt.min(n), move |tid, nt_used| unsafe {
+                    let mut t = tid;
+                    while t < n_tok {
+                        ffi::quant_f32_q8k(
+                            (src_ptr as *const f32).add(t * h_dim),
+                            (qs_ptr as *mut i8).add(t * qs_stride),
+                            (d_ptr as *mut f32).add(t * nb),
+                            (bs_ptr as *mut i32).add(t * nb * 16),
+                            h_dim as i32,
+                        );
+                        t += nt_used;
+                    }
+                });
+            }
 
             // ── FFN gate+up+SiLU: Q4K × Q8K ──
             q4k_fused_silu_gemm_mt(lw.w_gate, lw.w_up, h_rs, h_nb, &bq_h, &mut hidden_all, f, &self.pool);
 
             // ── Down projection: Q4K or Q6K ──
-            for t in 0..n { bq_f.quantize(t, &hidden_all[t*f..(t+1)*f]); }
+            {
+                let qs_ptr = bq_f.qs.as_mut_ptr() as usize;
+                let d_ptr = bq_f.d.as_mut_ptr() as usize;
+                let bs_ptr = bq_f.bsums.as_mut_ptr() as usize;
+                let src_ptr = hidden_all.as_ptr() as usize;
+                let qs_stride = bq_f.qs_stride;
+                let nb = bq_f.n_blocks;
+                let f_dim = f;
+                let n_tok = n;
+                self.pool.run(nt.min(n), move |tid, nt_used| unsafe {
+                    let mut t = tid;
+                    while t < n_tok {
+                        ffi::quant_f32_q8k(
+                            (src_ptr as *const f32).add(t * f_dim),
+                            (qs_ptr as *mut i8).add(t * qs_stride),
+                            (d_ptr as *mut f32).add(t * nb),
+                            (bs_ptr as *mut i32).add(t * nb * 16),
+                            f_dim as i32,
+                        );
+                        t += nt_used;
+                    }
+                });
+            }
             if lw.w_down_block_bytes == Q6K_BLOCK_BYTES {
                 q6k_gemm_mt(lw.w_down, f_nb * Q6K_BLOCK_BYTES, f_nb, &bq_f, &mut tmp_all, h, &self.pool);
             } else {
