@@ -42,7 +42,7 @@ func unpack_sc(p: *restrict i8, sp: i32, out dst: *mut i32) {
     dst[3] = ((u2 >> 4) & 0x0f0f0f0f) | (((u1 >> 6) & 0x03030303) << 4)
 }
 
-// Dot product one row against shared q8, accumulate into sumi1+sumi2
+// Dot product one row against shared q8. Advancing offsets for LLVM LSR.
 func dot_row(
     rw: *restrict i8, nib: i32, sc0: i32, sc1: i32,
     q8: *restrict i8, q8_off: i32,
@@ -50,19 +50,23 @@ func dot_row(
 ) -> i32 {
     let mut sumi1: i32 = 0
     let mut sumi2: i32 = 0
-    let mut j: i32 = 0
-    while j < 4 {
-        let pa: i8x16 = load(rw, nib + j * 32)
-        let pb: i8x16 = load(rw, nib + j * 32 + 16)
-        let qa: i8x16 = load(q8, q8_off + j * 64)
-        let qb: i8x16 = load(q8, q8_off + j * 64 + 16)
+    let mut wi: i32 = nib
+    let mut qi: i32 = q8_off
+    let mut si: i32 = 0
+    while si < 8 {
+        let pa: i8x16 = load(rw, wi)
+        let pb: i8x16 = load(rw, wi + 16)
+        let qa: i8x16 = load(q8, qi)
+        let qb: i8x16 = load(q8, qi + 16)
         let p1: i32x4 = vdot_i32(pa .& mask_lo, qa) .+ vdot_i32(pb .& mask_lo, qb)
-        sumi1 = sumi1 + reduce_add(p1) * scale_at(sc0, sc1, 2*j)
-        let qc: i8x16 = load(q8, q8_off + j * 64 + 32)
-        let qd: i8x16 = load(q8, q8_off + j * 64 + 48)
+        sumi1 = sumi1 + reduce_add(p1) * scale_at(sc0, sc1, si)
+        let qc: i8x16 = load(q8, qi + 32)
+        let qd: i8x16 = load(q8, qi + 48)
         let p2: i32x4 = vdot_i32((pa .>> shift4) .& mask_lo, qc) .+ vdot_i32((pb .>> shift4) .& mask_lo, qd)
-        sumi2 = sumi2 + reduce_add(p2) * scale_at(sc0, sc1, 2*j+1)
-        j = j + 1
+        sumi2 = sumi2 + reduce_add(p2) * scale_at(sc0, sc1, si + 1)
+        wi = wi + 32
+        qi = qi + 64
+        si = si + 2
     }
     return sumi1 + sumi2
 }
@@ -79,14 +83,13 @@ export func q4k_dot_q8k(
     let mask_lo: i8x16 = splat(15)
     let shift4: i8x16 = splat(4)
     let mut result: f32 = 0.0
+    let mut sp: i32 = 4
+    let mut nib: i32 = 16
+    let mut qi: i32 = 0
+    let mut bsi: i32 = 0
 
     let mut blk: i32 = 0
     while blk < n_blocks {
-        let bp: i32 = blk * 144
-        let nib: i32 = bp + 16
-        let q8_off: i32 = blk * 256
-        let sp: i32 = bp + 4
-
         let u0: i32 = read_u32(q4, sp)
         let u1: i32 = read_u32(q4, sp + 4)
         let u2: i32 = read_u32(q4, sp + 8)
@@ -95,8 +98,12 @@ export func q4k_dot_q8k(
         let mn0: i32 = u1 & 0x3f3f3f3f
         let mn1: i32 = ((u2 >> 4) & 0x0f0f0f0f) | (((u1 >> 6) & 0x03030303) << 4)
 
-        let sumi: i32 = dot_row(q4, nib, sc0, sc1, q8, q8_off, mask_lo, shift4)
-        result = result + d_arr[blk] * to_f32(sumi) - dmin_arr[blk] * to_f32(mins_corr(mn0, mn1, bsums, blk * 16))
+        let sumi: i32 = dot_row(q4, nib, sc0, sc1, q8, qi, mask_lo, shift4)
+        result = result + d_arr[blk] * to_f32(sumi) - dmin_arr[blk] * to_f32(mins_corr(mn0, mn1, bsums, bsi))
+        sp = sp + 144
+        nib = nib + 144
+        qi = qi + 256
+        bsi = bsi + 16
         blk = blk + 1
     }
     return result
@@ -119,14 +126,12 @@ export func q4k_dot_q8k_4row(
     let mut res2: f32 = 0.0
     let mut res3: f32 = 0.0
 
+    let mut sp: i32 = 4
+    let mut nib: i32 = 16
+    let mut qi: i32 = 0
+    let mut bs: i32 = 0
     let mut blk: i32 = 0
     while blk < n_blocks {
-        let bp: i32 = blk * 144
-        let nib: i32 = bp + 16
-        let q8_off: i32 = blk * 256
-        let sp: i32 = bp + 4
-        let bs: i32 = blk * 16
-
         let r0u0: i32 = read_u32(rw0, sp)
         let r0u1: i32 = read_u32(rw0, sp + 4)
         let r0u2: i32 = read_u32(rw0, sp + 8)
@@ -168,42 +173,46 @@ export func q4k_dot_q8k_4row(
         let mut s3a: i32 = 0
         let mut s3b: i32 = 0
 
-        let mut j: i32 = 0
-        while j < 4 {
-            let qa: i8x16 = load(q8, q8_off + j * 64)
-            let qb: i8x16 = load(q8, q8_off + j * 64 + 16)
-            let qc: i8x16 = load(q8, q8_off + j * 64 + 32)
-            let qd: i8x16 = load(q8, q8_off + j * 64 + 48)
+        let mut wi: i32 = nib
+        let mut qp: i32 = qi
+        let mut si: i32 = 0
+        while si < 8 {
+            let qa: i8x16 = load(q8, qp)
+            let qb: i8x16 = load(q8, qp + 16)
+            let qc: i8x16 = load(q8, qp + 32)
+            let qd: i8x16 = load(q8, qp + 48)
 
-            let p0a: i8x16 = load(rw0, nib + j*32)
-            let p0b: i8x16 = load(rw0, nib + j*32 + 16)
+            let p0a: i8x16 = load(rw0, wi)
+            let p0b: i8x16 = load(rw0, wi + 16)
             let lo0: i32x4 = vdot_i32(p0a .& mask_lo, qa) .+ vdot_i32(p0b .& mask_lo, qb)
             let hi0: i32x4 = vdot_i32((p0a .>> shift4) .& mask_lo, qc) .+ vdot_i32((p0b .>> shift4) .& mask_lo, qd)
-            s0a = s0a + reduce_add(lo0) * scale_at(r0sc0, r0sc1, 2*j)
-            s0b = s0b + reduce_add(hi0) * scale_at(r0sc0, r0sc1, 2*j+1)
+            s0a = s0a + reduce_add(lo0) * scale_at(r0sc0, r0sc1, si)
+            s0b = s0b + reduce_add(hi0) * scale_at(r0sc0, r0sc1, si + 1)
 
-            let p1a: i8x16 = load(rw1, nib + j*32)
-            let p1b: i8x16 = load(rw1, nib + j*32 + 16)
+            let p1a: i8x16 = load(rw1, wi)
+            let p1b: i8x16 = load(rw1, wi + 16)
             let lo1: i32x4 = vdot_i32(p1a .& mask_lo, qa) .+ vdot_i32(p1b .& mask_lo, qb)
             let hi1: i32x4 = vdot_i32((p1a .>> shift4) .& mask_lo, qc) .+ vdot_i32((p1b .>> shift4) .& mask_lo, qd)
-            s1a = s1a + reduce_add(lo1) * scale_at(r1sc0, r1sc1, 2*j)
-            s1b = s1b + reduce_add(hi1) * scale_at(r1sc0, r1sc1, 2*j+1)
+            s1a = s1a + reduce_add(lo1) * scale_at(r1sc0, r1sc1, si)
+            s1b = s1b + reduce_add(hi1) * scale_at(r1sc0, r1sc1, si + 1)
 
-            let p2a: i8x16 = load(rw2, nib + j*32)
-            let p2b: i8x16 = load(rw2, nib + j*32 + 16)
+            let p2a: i8x16 = load(rw2, wi)
+            let p2b: i8x16 = load(rw2, wi + 16)
             let lo2: i32x4 = vdot_i32(p2a .& mask_lo, qa) .+ vdot_i32(p2b .& mask_lo, qb)
             let hi2: i32x4 = vdot_i32((p2a .>> shift4) .& mask_lo, qc) .+ vdot_i32((p2b .>> shift4) .& mask_lo, qd)
-            s2a = s2a + reduce_add(lo2) * scale_at(r2sc0, r2sc1, 2*j)
-            s2b = s2b + reduce_add(hi2) * scale_at(r2sc0, r2sc1, 2*j+1)
+            s2a = s2a + reduce_add(lo2) * scale_at(r2sc0, r2sc1, si)
+            s2b = s2b + reduce_add(hi2) * scale_at(r2sc0, r2sc1, si + 1)
 
-            let p3a: i8x16 = load(rw3, nib + j*32)
-            let p3b: i8x16 = load(rw3, nib + j*32 + 16)
+            let p3a: i8x16 = load(rw3, wi)
+            let p3b: i8x16 = load(rw3, wi + 16)
             let lo3: i32x4 = vdot_i32(p3a .& mask_lo, qa) .+ vdot_i32(p3b .& mask_lo, qb)
             let hi3: i32x4 = vdot_i32((p3a .>> shift4) .& mask_lo, qc) .+ vdot_i32((p3b .>> shift4) .& mask_lo, qd)
-            s3a = s3a + reduce_add(lo3) * scale_at(r3sc0, r3sc1, 2*j)
-            s3b = s3b + reduce_add(hi3) * scale_at(r3sc0, r3sc1, 2*j+1)
+            s3a = s3a + reduce_add(lo3) * scale_at(r3sc0, r3sc1, si)
+            s3b = s3b + reduce_add(hi3) * scale_at(r3sc0, r3sc1, si + 1)
 
-            j = j + 1
+            wi = wi + 32
+            qp = qp + 64
+            si = si + 2
         }
 
         res0 = res0 + d0[blk] * to_f32(s0a + s0b) - dm0[blk] * to_f32(mins_corr(r0mn0, r0mn1, bsums, bs))
@@ -211,6 +220,10 @@ export func q4k_dot_q8k_4row(
         res2 = res2 + d2[blk] * to_f32(s2a + s2b) - dm2[blk] * to_f32(mins_corr(r2mn0, r2mn1, bsums, bs))
         res3 = res3 + d3[blk] * to_f32(s3a + s3b) - dm3[blk] * to_f32(mins_corr(r3mn0, r3mn1, bsums, bs))
 
+        sp = sp + 144
+        nib = nib + 144
+        qi = qi + 256
+        bs = bs + 16
         blk = blk + 1
     }
 
