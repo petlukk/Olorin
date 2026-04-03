@@ -2,14 +2,14 @@
 
 use crate::kernels::ffi_inference as ffi;
 use crate::inference::forward::{apply_rope, build_rope_freqs, sample_into};
-use crate::inference::math::{softmax_rows, wipe_f32, wipe_i8, wipe_i32};
+use crate::inference::math::{wipe_f32, wipe_i8, wipe_i32};
 use crate::inference::matmul::embed_f16_lookup;
 use crate::inference::matmul_q4k::{Q4K_BLOCK_BYTES, q4k_matmul_mt, q4k_matmul_work, q4k_matmul_residual_work, q4k_fused_gate_up_silu_work};
 use crate::inference::matmul_q6k::{Q6K_BLOCK_BYTES, q6k_matmul_mt, q6k_matmul_work, q6k_matmul_residual_work};
 use crate::inference::matmul_q4k::q4k_embed_lookup;
 use crate::inference::matmul_q6k::q6k_embed_lookup;
 use crate::inference::engine::BitNetModel;
-use crate::inference::cache::{self, EakvCache};
+use crate::inference::cache::F16KvCache;
 use crate::inference::ptr::{SendPtr, SendMutPtr};
 use crate::inference::threadpool::ThreadPool;
 
@@ -48,9 +48,8 @@ pub struct LlamaState {
     hidden_q8_bsums: Vec<i32>,
     pub(crate) logits: Vec<f32>,
     pub(crate) tmp: Vec<f32>,
-    pub(crate) kv_cache: EakvCache,
+    pub(crate) kv_cache: F16KvCache,
     pub(crate) attn_scores: Vec<f32>,
-    pub(crate) flash_state: Vec<f32>,
     pub(crate) rope_freqs: Vec<f32>,
     pub(crate) sample_logits_buf: Vec<f32>,
     pub(crate) sample_probs: Vec<f32>,
@@ -77,12 +76,10 @@ impl LlamaState {
         let hb = q8k_blocks(h);
         let fb = q8k_blocks(f);
         let nh = model.n_heads;
-        let kt = cache::KernelTable::init()
-            .expect("kv_cache kernels not found");
-        let kv_cache = EakvCache::new(
-            model.n_layers as i32, model.n_kv_heads as i32,
-            model.head_dim as i32, max_seq_len as i32, kt,
-        ).expect("failed to create EakvCache");
+        let kv_cache = F16KvCache::new(
+            model.n_layers, model.n_kv_heads,
+            model.head_dim, max_seq_len,
+        ).expect("failed to create F16KvCache");
         LlamaState {
             pool: ThreadPool::new(),
             x: vec![0.0; h],
@@ -105,7 +102,6 @@ impl LlamaState {
             tmp: vec![0.0; h.max(f)],
             kv_cache,
             attn_scores: vec![0.0; nh * max_seq_len],
-            flash_state: vec![0.0; nh * 130],
             rope_freqs: vec![0.0; model.head_dim],
             sample_logits_buf: vec![0.0; v],
             sample_probs: vec![0.0; v],
@@ -169,82 +165,43 @@ impl LlamaState {
         }
 
 
+        // Bias — all applied BEFORE cache (llama.cpp style)
         add_bias(&mut self.q, lw.q_bias, h);
-        // K-bias: do NOT add to K before cache — it destroys TurboQuant precision.
-        // Instead, apply bias correction to attention scores after Q·K computation.
-        // V-bias: small enough to apply directly (mean_abs ≈ 0.05).
+        add_bias(&mut self.k, lw.k_bias, kv);
         add_bias(&mut self.v, lw.v_bias, kv);
 
         build_rope_freqs(&mut self.rope_freqs, hd, pos, model.rope_theta);
         apply_rope(&mut self.q, &self.rope_freqs, hd, nh);
         apply_rope(&mut self.k, &self.rope_freqs, hd, nkv);
 
-        self.kv_cache.append(&self.k[..kv], layer as i32, 0, 1).unwrap();
-        self.kv_cache.append(&self.v[..kv], layer as i32, 1, 1).unwrap();
+        // KV store (f32 -> f16)
+        self.kv_cache.store(layer, 0, &self.k[..kv], 1).unwrap();
+        self.kv_cache.store(layer, 1, &self.v[..kv], 1).unwrap();
         if layer == model.n_layers - 1 { self.kv_cache.advance(1).unwrap(); }
 
-
+        // Attention: per-head Q*K -> softmax -> V*weights (f16 cache)
         let seq_len = pos + 1;
-        if lw.k_bias.is_null() && hd == 128 && ffi::has_flash_decode_attn() {
-            // Flash decode: single-pass Q·K + softmax + V
-            let signs = self.kv_cache.jl_signs();
-            let n_q_groups = (nh * hd) / 64;
-            for g in 0..n_q_groups {
+        let q_per_kv = nh / nkv;
+        let rsqrt_hd = 1.0 / (hd as f32).sqrt();
+        for kv_h in 0..nkv {
+            let k_ptr = self.kv_cache.k_head_ptr(layer, kv_h);
+            let v_ptr = self.kv_cache.v_head_ptr(layer, kv_h);
+            for q_off in 0..q_per_kv {
+                let q_h = kv_h * q_per_kv + q_off;
+                let scores = &mut self.attn_scores[q_h * self.max_seq_len..q_h * self.max_seq_len + seq_len];
                 unsafe {
-                    crate::kernels::ffi::turbo_rotate(
-                        self.q.as_mut_ptr().add(g * 64), signs.as_ptr(), 64,
+                    ffi::attn_dot_f16(
+                        self.q[q_h * hd..].as_ptr(), k_ptr,
+                        scores.as_mut_ptr(), seq_len as i32, hd as i32,
+                    );
+                    ffi::softmax_f32(scores.as_mut_ptr(), seq_len as i32, rsqrt_hd);
+                    ffi::attn_vsum_f16(
+                        scores.as_ptr(), v_ptr,
+                        self.attn_out[q_h * hd..].as_mut_ptr(),
+                        seq_len as i32, hd as i32,
                     );
                 }
             }
-            let (k_w, k_s, k_b) = self.kv_cache.k_ptrs(layer as i32);
-            let (v_w, v_s, v_b) = self.kv_cache.v_ptrs(layer as i32);
-            let gph = self.kv_cache.groups_per_head();
-            unsafe {
-                ffi::flash_decode_attn(
-                    self.q.as_ptr(), k_w, k_s, k_b, v_w, v_s, v_b,
-                    self.flash_state.as_mut_ptr(), self.attn_out.as_mut_ptr(),
-                    seq_len as i32, nh as i32, nkv as i32, gph,
-                );
-            }
-            let n_out_groups = (nh * hd) / 64;
-            for g in 0..n_out_groups {
-                unsafe {
-                    let ptr = self.attn_out.as_mut_ptr().add(g * 64);
-                    crate::kernels::ffi::fwht_inplace(ptr, 64);
-                    crate::kernels::ffi::sign_flip(ptr, signs.as_ptr(), 64);
-                }
-            }
-        } else {
-            // 3-pass fallback (required when K-bias exists)
-            let scores = &mut self.attn_scores[..nh * seq_len];
-            cache::attention::attention_scores(&self.kv_cache, &self.q, layer as i32, nh as i32, nkv as i32, seq_len as i32, scores);
-            if !lw.k_bias.is_null() {
-                let q_per_kv = nh / nkv;
-                let rsqrt_hd = 1.0 / (hd as f32).sqrt();
-                let mut rotated_bias = vec![0.0f32; kv];
-                let mut bias_freqs = vec![0.0f32; hd];
-                for t in 0..seq_len {
-                    for i in 0..kv {
-                        rotated_bias[i] = unsafe { *lw.k_bias.add(i) };
-                    }
-                    build_rope_freqs(&mut bias_freqs, hd, t, model.rope_theta);
-                    apply_rope(&mut rotated_bias, &bias_freqs, hd, nkv);
-                    for kv_h in 0..nkv {
-                        let kb_off = kv_h * hd;
-                        for q_off in 0..q_per_kv {
-                            let q_h = kv_h * q_per_kv + q_off;
-                            let qb = q_h * hd;
-                            let mut dot = 0.0f32;
-                            for d in 0..hd {
-                                dot += self.q[qb + d] * rotated_bias[kb_off + d];
-                            }
-                            scores[q_h * seq_len + t] += dot * rsqrt_hd;
-                        }
-                    }
-                }
-            }
-            softmax_rows(scores, nh, seq_len);
-            cache::attention::attention_output(&self.kv_cache, scores, layer as i32, nh as i32, nkv as i32, seq_len as i32, &mut self.attn_out);
         }
 
         unsafe {
@@ -441,7 +398,6 @@ impl Drop for LlamaState {
         wipe_f32(&mut self.k);
         wipe_f32(&mut self.v);
         wipe_f32(&mut self.attn_out);
-        wipe_f32(&mut self.flash_state);
         wipe_i8(&mut self.attn_q8_qs);
         wipe_f32(&mut self.attn_q8_d);
         wipe_i32(&mut self.attn_q8_bsums);
