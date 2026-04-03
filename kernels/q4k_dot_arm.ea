@@ -2,7 +2,7 @@
 //
 // Inline f16→f32 d/dmin via cvt_f16_f32 (fcvtl) + lane extract.
 // NEON DOTPROD (sdot/vdot) for accumulation.
-// Matches x86 q4k_dot.ea signature: (q4, q8, bsums, n_blocks, q8_d, pow2)
+// SIMD mins: addp_i16 bsums pairing + vector literal mins + wmul_i32.
 // pow2 unused on ARM — kept for ABI compat with x86 kernel.
 
 #[cfg(aarch64)]
@@ -19,66 +19,92 @@ func f16_d_dm(p: *restrict i8, bp: i32) -> f32x4 {
     return cvt_f16_f32(raw)
 }
 
-func scale_at(sc0: i32, sc1: i32, idx: i32) -> i32 {
-    if idx < 4 {
-        return (sc0 >> (idx * 8)) & 255
-    }
-    return (sc1 >> ((idx - 4) * 8)) & 255
-}
-
-// Mins correction — SIMD bsums pairing via addp_i16 (vpaddq_s16).
-// 16 i16 bsums → 8 paired i16 in one instruction, then scalar mins multiply.
+// Mins correction — fully SIMD: addp_i16 + vector literal mins + wmul_i32.
+// Matches llama.cpp NEON: vpaddq_s16 + vmovl_u8 + vmull_s16 + vaddvq_s32.
 func mins_corr(rw: *restrict i8, sp: i32, bsums: *restrict i16, bs: i32) -> i32 {
     let u1: i32 = read_u32(rw, sp + 4)
     let u2: i32 = read_u32(rw, sp + 8)
     let mn0: i32 = u1 & 0x3f3f3f3f
     let mn1: i32 = ((u2 >> 4) & 0x0f0f0f0f) | (((u1 >> 6) & 0x03030303) << 4)
 
-    // SIMD bsums pairing: load 16 × i16, pairwise add → 8 × i16
     let bs_lo: i16x8 = load(bsums, bs)
     let bs_hi: i16x8 = load(bsums, bs + 8)
-    let bp: i16x8 = addp_i16(bs_lo, bs_hi)
+    let paired: i16x8 = addp_i16(bs_lo, bs_hi)
 
-    return (mn0 & 255) * to_i32(bp[0])
-         + ((mn0 >> 8) & 255) * to_i32(bp[1])
-         + ((mn0 >> 16) & 255) * to_i32(bp[2])
-         + ((mn0 >> 24) & 255) * to_i32(bp[3])
-         + (mn1 & 255) * to_i32(bp[4])
-         + ((mn1 >> 8) & 255) * to_i32(bp[5])
-         + ((mn1 >> 16) & 255) * to_i32(bp[6])
-         + ((mn1 >> 24) & 255) * to_i32(bp[7])
+    let m_lo: i16x4 = [to_i16(mn0 & 255), to_i16((mn0 >> 8) & 255),
+                        to_i16((mn0 >> 16) & 255), to_i16((mn0 >> 24) & 255)]
+    let m_hi: i16x4 = [to_i16(mn1 & 255), to_i16((mn1 >> 8) & 255),
+                        to_i16((mn1 >> 16) & 255), to_i16((mn1 >> 24) & 255)]
+    let p_lo: i16x4 = shuffle(paired, [0, 1, 2, 3])
+    let p_hi: i16x4 = shuffle(paired, [4, 5, 6, 7])
+    return reduce_add(wmul_i32(m_lo, p_lo) .+ wmul_i32(m_hi, p_hi))
 }
 
-// SIMD dot for one block: 4 groups × (lo nibbles + hi nibbles)
+// Mins correction with pre-paired bsums (avoids redundant addp in 4row/dual).
+func mins_corr_bp(rw: *restrict i8, sp: i32, paired: i16x8) -> i32 {
+    let u1: i32 = read_u32(rw, sp + 4)
+    let u2: i32 = read_u32(rw, sp + 8)
+    let mn0: i32 = u1 & 0x3f3f3f3f
+    let mn1: i32 = ((u2 >> 4) & 0x0f0f0f0f) | (((u1 >> 6) & 0x03030303) << 4)
+
+    let m_lo: i16x4 = [to_i16(mn0 & 255), to_i16((mn0 >> 8) & 255),
+                        to_i16((mn0 >> 16) & 255), to_i16((mn0 >> 24) & 255)]
+    let m_hi: i16x4 = [to_i16(mn1 & 255), to_i16((mn1 >> 8) & 255),
+                        to_i16((mn1 >> 16) & 255), to_i16((mn1 >> 24) & 255)]
+    let p_lo: i16x4 = shuffle(paired, [0, 1, 2, 3])
+    let p_hi: i16x4 = shuffle(paired, [4, 5, 6, 7])
+    return reduce_add(wmul_i32(m_lo, p_lo) .+ wmul_i32(m_hi, p_hi))
+}
+
+// SIMD dot for one block: pre-extract scales via 2×u32, 4 groups × (lo + hi nibbles)
 func dot_row(
     rw: *restrict i8, nib: i32, sp: i32,
     q8: *restrict i8, q8_off: i32,
     mask_lo: i8x16, shift4: i8x16
 ) -> i32 {
+    // Pre-extract all 8 scales from 2 u32 reads
     let u0: i32 = read_u32(rw, sp)
     let u2: i32 = read_u32(rw, sp + 8)
-    let sc0: i32 = u0 & 0x3f3f3f3f
-    let sc1: i32 = (u2 & 0x0f0f0f0f) | (((u0 >> 6) & 0x03030303) << 4)
+    let sc03: i32 = u0 & 0x3f3f3f3f
+    let sc47: i32 = (u2 & 0x0f0f0f0f) | (((u0 >> 6) & 0x03030303) << 4)
 
     let mut sumi1: i32 = 0
     let mut sumi2: i32 = 0
     let mut wi: i32 = nib
     let mut qi: i32 = q8_off
     let mut si: i32 = 0
-    while si < 8 {
+    while si < 4 {
         let pa: i8x16 = load(rw, wi)
         let pb: i8x16 = load(rw, wi + 16)
         let qa: i8x16 = load(q8, qi)
         let qb: i8x16 = load(q8, qi + 16)
         let p1: i32x4 = vdot_i32(pa .& mask_lo, qa) .+ vdot_i32(pb .& mask_lo, qb)
-        sumi1 = sumi1 + reduce_add(p1) * scale_at(sc0, sc1, si)
+        sumi1 = sumi1 + reduce_add(p1) * ((sc03 >> (si * 16)) & 255)
         let qc: i8x16 = load(q8, qi + 32)
         let qd: i8x16 = load(q8, qi + 48)
         let p2: i32x4 = vdot_i32((pa .>> shift4) .& mask_lo, qc) .+ vdot_i32((pb .>> shift4) .& mask_lo, qd)
-        sumi2 = sumi2 + reduce_add(p2) * scale_at(sc0, sc1, si + 1)
+        sumi2 = sumi2 + reduce_add(p2) * ((sc03 >> (si * 16 + 8)) & 255)
         wi = wi + 32
         qi = qi + 64
-        si = si + 2
+        si = si + 1
+    }
+
+    // Scales 4-7 (second half)
+    si = 0
+    while si < 4 {
+        let pa: i8x16 = load(rw, wi)
+        let pb: i8x16 = load(rw, wi + 16)
+        let qa: i8x16 = load(q8, qi)
+        let qb: i8x16 = load(q8, qi + 16)
+        let p1: i32x4 = vdot_i32(pa .& mask_lo, qa) .+ vdot_i32(pb .& mask_lo, qb)
+        sumi1 = sumi1 + reduce_add(p1) * ((sc47 >> (si * 16)) & 255)
+        let qc: i8x16 = load(q8, qi + 32)
+        let qd: i8x16 = load(q8, qi + 48)
+        let p2: i32x4 = vdot_i32((pa .>> shift4) .& mask_lo, qc) .+ vdot_i32((pb .>> shift4) .& mask_lo, qd)
+        sumi2 = sumi2 + reduce_add(p2) * ((sc47 >> (si * 16 + 8)) & 255)
+        wi = wi + 32
+        qi = qi + 64
+        si = si + 1
     }
     return sumi1 + sumi2
 }
@@ -110,7 +136,7 @@ export func q4k_dot_q8k(
     return result
 }
 
-// 4-row — inline f16 scales, shared q8
+// 4-row — inline f16 scales, shared q8, hoisted bsums pairing
 export func q4k_dot_q8k_4row(
     rw0: *restrict i8, rw1: *restrict i8, rw2: *restrict i8, rw3: *restrict i8,
     q8: *restrict i8,
@@ -133,22 +159,26 @@ export func q4k_dot_q8k_4row(
         let sp: i32 = bp + 4
         let nib: i32 = bp + 16
         let q8o: i32 = blk * 256
-        let bs: i32 = blk * 16
 
         let s0: i32 = dot_row(rw0, nib, sp, q8, q8o, mask_lo, shift4)
         let s1: i32 = dot_row(rw1, nib, sp, q8, q8o, mask_lo, shift4)
         let s2: i32 = dot_row(rw2, nib, sp, q8, q8o, mask_lo, shift4)
         let s3: i32 = dot_row(rw3, nib, sp, q8, q8o, mask_lo, shift4)
 
+        // Hoist bsums pairing — shared across all 4 rows
+        let blo: i16x8 = load(bsums, blk * 16)
+        let bhi: i16x8 = load(bsums, blk * 16 + 8)
+        let paired: i16x8 = addp_i16(blo, bhi)
+
         let qd: f32 = q8_d[blk]
         let dd0: f32x4 = f16_d_dm(rw0, bp)
         let dd1: f32x4 = f16_d_dm(rw1, bp)
         let dd2: f32x4 = f16_d_dm(rw2, bp)
         let dd3: f32x4 = f16_d_dm(rw3, bp)
-        res0 = res0 + dd0[0]*qd*to_f32(s0) - dd0[1]*qd*to_f32(mins_corr(rw0, sp, bsums, bs))
-        res1 = res1 + dd1[0]*qd*to_f32(s1) - dd1[1]*qd*to_f32(mins_corr(rw1, sp, bsums, bs))
-        res2 = res2 + dd2[0]*qd*to_f32(s2) - dd2[1]*qd*to_f32(mins_corr(rw2, sp, bsums, bs))
-        res3 = res3 + dd3[0]*qd*to_f32(s3) - dd3[1]*qd*to_f32(mins_corr(rw3, sp, bsums, bs))
+        res0 = res0 + dd0[0]*qd*to_f32(s0) - dd0[1]*qd*to_f32(mins_corr_bp(rw0, sp, paired))
+        res1 = res1 + dd1[0]*qd*to_f32(s1) - dd1[1]*qd*to_f32(mins_corr_bp(rw1, sp, paired))
+        res2 = res2 + dd2[0]*qd*to_f32(s2) - dd2[1]*qd*to_f32(mins_corr_bp(rw2, sp, paired))
+        res3 = res3 + dd3[0]*qd*to_f32(s3) - dd3[1]*qd*to_f32(mins_corr_bp(rw3, sp, paired))
 
         blk = blk + 1
     }
@@ -158,7 +188,7 @@ export func q4k_dot_q8k_4row(
     scores[3] = res3
 }
 
-// Dual 4-row (gate+up) — inline f16 scales
+// Dual 4-row (gate+up) — hoisted bsums pairing
 export func q4k_dot_q8k_4row_dual(
     gw0: *restrict i8, gw1: *restrict i8, gw2: *restrict i8, gw3: *restrict i8,
     uw0: *restrict i8, uw1: *restrict i8, uw2: *restrict i8, uw3: *restrict i8,
@@ -187,7 +217,6 @@ export func q4k_dot_q8k_4row_dual(
         let sp: i32 = bp + 4
         let nib: i32 = bp + 16
         let q8o: i32 = blk * 256
-        let bs: i32 = blk * 16
 
         let gs0: i32 = dot_row(gw0, nib, sp, q8, q8o, mask_lo, shift4)
         let gs1: i32 = dot_row(gw1, nib, sp, q8, q8o, mask_lo, shift4)
@@ -198,6 +227,11 @@ export func q4k_dot_q8k_4row_dual(
         let us2: i32 = dot_row(uw2, nib, sp, q8, q8o, mask_lo, shift4)
         let us3: i32 = dot_row(uw3, nib, sp, q8, q8o, mask_lo, shift4)
 
+        // Hoist bsums pairing — shared across all 8 rows
+        let blo: i16x8 = load(bsums, blk * 16)
+        let bhi: i16x8 = load(bsums, blk * 16 + 8)
+        let paired: i16x8 = addp_i16(blo, bhi)
+
         let qd: f32 = q8_d[blk]
         let gd0: f32x4 = f16_d_dm(gw0, bp)
         let gd1: f32x4 = f16_d_dm(gw1, bp)
@@ -207,14 +241,14 @@ export func q4k_dot_q8k_4row_dual(
         let ud1: f32x4 = f16_d_dm(uw1, bp)
         let ud2: f32x4 = f16_d_dm(uw2, bp)
         let ud3: f32x4 = f16_d_dm(uw3, bp)
-        gr0 = gr0 + gd0[0]*qd*to_f32(gs0) - gd0[1]*qd*to_f32(mins_corr(gw0, sp, bsums, bs))
-        gr1 = gr1 + gd1[0]*qd*to_f32(gs1) - gd1[1]*qd*to_f32(mins_corr(gw1, sp, bsums, bs))
-        gr2 = gr2 + gd2[0]*qd*to_f32(gs2) - gd2[1]*qd*to_f32(mins_corr(gw2, sp, bsums, bs))
-        gr3 = gr3 + gd3[0]*qd*to_f32(gs3) - gd3[1]*qd*to_f32(mins_corr(gw3, sp, bsums, bs))
-        ur0 = ur0 + ud0[0]*qd*to_f32(us0) - ud0[1]*qd*to_f32(mins_corr(uw0, sp, bsums, bs))
-        ur1 = ur1 + ud1[0]*qd*to_f32(us1) - ud1[1]*qd*to_f32(mins_corr(uw1, sp, bsums, bs))
-        ur2 = ur2 + ud2[0]*qd*to_f32(us2) - ud2[1]*qd*to_f32(mins_corr(uw2, sp, bsums, bs))
-        ur3 = ur3 + ud3[0]*qd*to_f32(us3) - ud3[1]*qd*to_f32(mins_corr(uw3, sp, bsums, bs))
+        gr0 = gr0 + gd0[0]*qd*to_f32(gs0) - gd0[1]*qd*to_f32(mins_corr_bp(gw0, sp, paired))
+        gr1 = gr1 + gd1[0]*qd*to_f32(gs1) - gd1[1]*qd*to_f32(mins_corr_bp(gw1, sp, paired))
+        gr2 = gr2 + gd2[0]*qd*to_f32(gs2) - gd2[1]*qd*to_f32(mins_corr_bp(gw2, sp, paired))
+        gr3 = gr3 + gd3[0]*qd*to_f32(gs3) - gd3[1]*qd*to_f32(mins_corr_bp(gw3, sp, paired))
+        ur0 = ur0 + ud0[0]*qd*to_f32(us0) - ud0[1]*qd*to_f32(mins_corr_bp(uw0, sp, paired))
+        ur1 = ur1 + ud1[0]*qd*to_f32(us1) - ud1[1]*qd*to_f32(mins_corr_bp(uw1, sp, paired))
+        ur2 = ur2 + ud2[0]*qd*to_f32(us2) - ud2[1]*qd*to_f32(mins_corr_bp(uw2, sp, paired))
+        ur3 = ur3 + ud3[0]*qd*to_f32(us3) - ud3[1]*qd*to_f32(mins_corr_bp(uw3, sp, paired))
 
         blk = blk + 1
     }
