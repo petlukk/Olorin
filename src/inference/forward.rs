@@ -5,8 +5,8 @@ use crate::inference::matmul::{embed_f16_lookup, i8_output_matmul_mt, ternary_ma
 #[cfg(target_arch = "aarch64")]
 use crate::inference::matmul::{i8_output_matmul_speculative, SpeculativeWork};
 use crate::inference::engine::BitNetModel;
-use crate::inference::cache::{self, EakvCache};
-use crate::inference::math::{softmax_rows, wipe_f32, wipe_i8};
+use crate::inference::cache::F16KvCache;
+use crate::inference::math::{wipe_f32, wipe_i8};
 use crate::inference::threadpool::ThreadPool;
 
 pub struct InferenceState {
@@ -25,7 +25,7 @@ pub struct InferenceState {
     pub(crate) hidden_quant: Vec<i8>,
     pub(crate) logits: Vec<f32>,
     pub(crate) tmp: Vec<f32>,
-    pub(crate) kv_cache: EakvCache,
+    pub(crate) kv_cache: F16KvCache,
     pub(crate) attn_scores: Vec<f32>,
     pub(crate) rope_freqs: Vec<f32>,
     pub(crate) sample_logits_buf: Vec<f32>,
@@ -168,12 +168,10 @@ impl InferenceState {
         let f = model.ffn_dim;
         let v = model.vocab_size;
         let nh = model.n_heads;
-        let kt = cache::KernelTable::init()
-            .expect("kv_cache kernels not found");
-        let kv_cache = EakvCache::new(
-            model.n_layers as i32, model.n_kv_heads as i32,
-            model.head_dim as i32, max_seq_len as i32, kt,
-        ).expect("failed to create EakvCache");
+        let kv_cache = F16KvCache::new(
+            model.n_layers, model.n_kv_heads,
+            model.head_dim, max_seq_len,
+        ).expect("failed to create F16KvCache");
         InferenceState {
             pool: ThreadPool::new(),
             x: vec![0.0; h],
@@ -238,18 +236,34 @@ impl InferenceState {
             build_rope_freqs(&mut self.rope_freqs, hd, pos, model.rope_theta);
             apply_rope(&mut self.q, &self.rope_freqs, hd, nh);
             apply_rope(&mut self.k, &self.rope_freqs, hd, nkv);
-            self.kv_cache.append(&self.k[..kv], layer as i32, 0, 1).unwrap();
-            self.kv_cache.append(&self.v[..kv], layer as i32, 1, 1).unwrap();
+            // KV store (f32 -> f16)
+            self.kv_cache.store(layer, 0, &self.k[..kv], 1).unwrap();
+            self.kv_cache.store(layer, 1, &self.v[..kv], 1).unwrap();
             if layer == model.n_layers - 1 { self.kv_cache.advance(1).unwrap(); }
 
-            let scores = &mut self.attn_scores[..nh * seq_len];
-            cache::attention::attention_scores(
-                &self.kv_cache, &self.q, layer as i32, nh as i32, nkv as i32, seq_len as i32, scores,
-            );
-            softmax_rows(scores, nh, seq_len);
-            cache::attention::attention_output(
-                &self.kv_cache, scores, layer as i32, nh as i32, nkv as i32, seq_len as i32, &mut self.attn_out,
-            );
+            // Attention: per-head Q*K -> softmax -> V*weights (f16 cache)
+            let q_per_kv = nh / nkv;
+            let rsqrt_hd = 1.0 / (hd as f32).sqrt();
+            for kv_h in 0..nkv {
+                let k_ptr = self.kv_cache.k_head_ptr(layer, kv_h);
+                let v_ptr = self.kv_cache.v_head_ptr(layer, kv_h);
+                for q_off in 0..q_per_kv {
+                    let q_h = kv_h * q_per_kv + q_off;
+                    let scores = &mut self.attn_scores[q_h * self.max_seq_len..q_h * self.max_seq_len + seq_len];
+                    unsafe {
+                        ffi::attn_dot_f16(
+                            self.q[q_h * hd..].as_ptr(), k_ptr,
+                            scores.as_mut_ptr(), seq_len as i32, hd as i32,
+                        );
+                        ffi::softmax_f32(scores.as_mut_ptr(), seq_len as i32, rsqrt_hd);
+                        ffi::attn_vsum_f16(
+                            scores.as_ptr(), v_ptr,
+                            self.attn_out[q_h * hd..].as_mut_ptr(),
+                            seq_len as i32, hd as i32,
+                        );
+                    }
+                }
+            }
 
             unsafe {
                 ffi::rmsnorm_f32(

@@ -264,40 +264,28 @@ fn embed_bytes(input: &[u8], out: &mut [u8]) {
     }
 }
 
-/// JL projection: normalize raw → sign-flip → FWHT → truncate to PROJ_DIM.
+/// JL projection: sign-flip → FWHT → truncate to PROJ_DIM via Eä kernel.
 fn jl_project_inplace(raw: &mut [u8], signs: &[f32], proj: &mut [u8]) {
-    let n = raw.len() / 4;
-
-    // Apply sign-flip via SIMD kernel
-    unsafe {
-        ffi::sign_flip(
-            raw.as_mut_ptr() as *mut f32,
-            signs.as_ptr(),
-            n as i32,
-        );
-    }
-
-    // FWHT in-place
-    unsafe {
-        ffi::fwht_inplace(raw.as_mut_ptr() as *mut f32, n as i32);
-    }
-
-    // L2-normalize
+    let in_dim = raw.len() / 4;
+    let out_dim = proj.len() / 4;
     let raw_f32 = raw.as_mut_ptr() as *mut f32;
-    unsafe {
-        ffi::normalize_vectors(raw_f32, n as i32, 1);
-    }
-
-    // Truncate to PROJ_DIM
-    let proj_n = proj.len() / 4;
     let proj_f32 = proj.as_mut_ptr() as *mut f32;
-    for i in 0..proj_n {
-        unsafe { *proj_f32.add(i) = *(raw_f32 as *const f32).add(i); }
+
+    // jl_project does sign-flip + FWHT + truncation in one kernel call
+    unsafe {
+        ffi::jl_project(
+            raw_f32 as *const f32,
+            signs.as_ptr(),
+            in_dim as i32,
+            out_dim as i32,
+            proj_f32,
+            raw_f32, // scratch buffer (reuse raw)
+        );
     }
 
     // Normalize projected vector
     unsafe {
-        ffi::normalize_vectors(proj_f32, proj_n as i32, 1);
+        ffi::normalize_vectors(proj_f32, out_dim as i32, 1);
     }
 }
 

@@ -2,13 +2,12 @@
 
 use crate::kernels::ffi_inference as ffi;
 use crate::inference::forward::{apply_rope, build_rope_freqs, InferenceState};
-use crate::inference::math::softmax_rows;
 use crate::inference::gemm_i2s::{BatchI8, i2s_gemm_mt, i2s_fused_sqrelu_gemm_mt};
 use crate::inference::matmul::{embed_f16_lookup, i8_output_matmul_mt};
 #[cfg(target_arch = "aarch64")]
 use crate::inference::matmul::i8_output_matmul_speculative;
 use crate::inference::engine::BitNetModel;
-use crate::inference::cache;
+use crate::kernels::ffi_inference as ffi_inf;
 
 impl InferenceState {
     pub fn prefill(&mut self, model: &BitNetModel, tokens: &[u32]) {
@@ -57,51 +56,38 @@ impl InferenceState {
                 apply_rope(q, &self.rope_freqs, hd, nh);
                 apply_rope(k, &self.rope_freqs, hd, nkv);
             }
-            let mut k_tr = vec![0.0f32; nkv * n * hd];
-            let mut v_tr = vec![0.0f32; nkv * n * hd];
-            for t in 0..n {
-                for head in 0..nkv {
-                    let src = t * kv + head * hd;
-                    let dst = head * n * hd + t * hd;
-                    k_tr[dst..dst + hd].copy_from_slice(&ks_all[src..src + hd]);
-                    v_tr[dst..dst + hd].copy_from_slice(&vs_all[src..src + hd]);
-                }
-            }
+            // KV store: token-major, F16KvCache handles scatter
             self.kv_cache.restore(0).unwrap();
-            self.kv_cache.append(&k_tr, layer as i32, 0, n as i32).unwrap();
-            self.kv_cache.append(&v_tr, layer as i32, 1, n as i32).unwrap();
-            self.kv_cache.advance(n as i32).unwrap();
+            self.kv_cache.store(layer, 0, &ks_all[..n*kv], n).unwrap();
+            self.kv_cache.store(layer, 1, &vs_all[..n*kv], n).unwrap();
+            self.kv_cache.advance(n).unwrap();
 
-            // Parallel attention scoring
-            {
-                let pool_n = self.pool.thread_count().min(n);
-                let cache_ptr = &self.kv_cache as *const cache::EakvCache as usize;
-                let qs_ptr = qs_all.as_ptr() as usize;
-                let attn_ptr = attn_all.as_mut_ptr() as usize;
-                let layer_i32 = layer as i32;
-                let nh_i32 = nh as i32;
-                let nkv_i32 = nkv as i32;
-                let n_tokens = n;
-                self.pool.run(pool_n, move |tid, nt_used| {
-                    let mut t = tid;
-                    while t < n_tokens {
-                        let seq_len = (t + 1) as i32;
-                        let mut scores = vec![0.0f32; nh * (t + 1)];
-                        let q = unsafe { std::slice::from_raw_parts((qs_ptr as *const f32).add(t * h), h) };
-                        let cache_ref = unsafe { &*(cache_ptr as *const cache::EakvCache) };
-                        cache::attention::attention_scores(
-                            cache_ref, q, layer_i32, nh_i32, nkv_i32, seq_len, &mut scores,
-                        );
-                        softmax_rows(&mut scores, nh, t + 1);
-                        let attn_out = unsafe { std::slice::from_raw_parts_mut(
-                            (attn_ptr as *mut f32).add(t * h), h,
-                        )};
-                        cache::attention::attention_output(
-                            cache_ref, &scores, layer_i32, nh_i32, nkv_i32, seq_len, attn_out,
-                        );
-                        t += nt_used;
+            // Per-token f16 attention
+            let q_per_kv = nh / nkv;
+            let rsqrt_hd = 1.0 / (hd as f32).sqrt();
+            for t in 0..n {
+                let causal_len = t + 1;
+                let qt = &qs_all[t*h..(t+1)*h];
+                for kv_h in 0..nkv {
+                    let k_ptr = self.kv_cache.k_head_ptr(layer, kv_h);
+                    let v_ptr = self.kv_cache.v_head_ptr(layer, kv_h);
+                    for q_off in 0..q_per_kv {
+                        let q_h = kv_h * q_per_kv + q_off;
+                        let mut scores = vec![0.0f32; causal_len];
+                        unsafe {
+                            ffi_inf::attn_dot_f16(
+                                qt[q_h * hd..].as_ptr(), k_ptr,
+                                scores.as_mut_ptr(), causal_len as i32, hd as i32,
+                            );
+                            ffi_inf::softmax_f32(scores.as_mut_ptr(), causal_len as i32, rsqrt_hd);
+                            ffi_inf::attn_vsum_f16(
+                                scores.as_ptr(), v_ptr,
+                                attn_all[t*h + q_h*hd..].as_mut_ptr(),
+                                causal_len as i32, hd as i32,
+                            );
+                        }
                     }
-                });
+                }
             }
 
             for t in 0..n {
