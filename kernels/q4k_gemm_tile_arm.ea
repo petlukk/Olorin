@@ -9,7 +9,7 @@
 export func q4k_gemm_4x4(
     rw0: *restrict i8, rw1: *restrict i8, rw2: *restrict i8, rw3: *restrict i8,
     q8_0: *restrict i8, q8_1: *restrict i8, q8_2: *restrict i8, q8_3: *restrict i8,
-    bsums_0: *restrict i32, bsums_1: *restrict i32, bsums_2: *restrict i32, bsums_3: *restrict i32,
+    bsums_0: *restrict i16, bsums_1: *restrict i16, bsums_2: *restrict i16, bsums_3: *restrict i16,
     sc0: *restrict u8, sc1: *restrict u8, sc2: *restrict u8, sc3: *restrict u8,
     mn0: *restrict u8, mn1: *restrict u8, mn2: *restrict u8, mn3: *restrict u8,
     d_arr0: *restrict f32, d_arr1: *restrict f32, d_arr2: *restrict f32, d_arr3: *restrict f32,
@@ -147,10 +147,10 @@ export func q4k_gemm_4x4(
             let m1: i32 = to_i32(mn1[sc_off + j])
             let m2: i32 = to_i32(mn2[sc_off + j])
             let m3: i32 = to_i32(mn3[sc_off + j])
-            let bp0: i32 = bsums_0[bs_off + 2*j] + bsums_0[bs_off + 2*j+1]
-            let bp1: i32 = bsums_1[bs_off + 2*j] + bsums_1[bs_off + 2*j+1]
-            let bp2: i32 = bsums_2[bs_off + 2*j] + bsums_2[bs_off + 2*j+1]
-            let bp3: i32 = bsums_3[bs_off + 2*j] + bsums_3[bs_off + 2*j+1]
+            let bp0: i32 = to_i32(bsums_0[bs_off + 2*j]) + to_i32(bsums_0[bs_off + 2*j+1])
+            let bp1: i32 = to_i32(bsums_1[bs_off + 2*j]) + to_i32(bsums_1[bs_off + 2*j+1])
+            let bp2: i32 = to_i32(bsums_2[bs_off + 2*j]) + to_i32(bsums_2[bs_off + 2*j+1])
+            let bp3: i32 = to_i32(bsums_3[bs_off + 2*j]) + to_i32(bsums_3[bs_off + 2*j+1])
             mb0_t0 = mb0_t0 + m0 * bp0
             mb0_t1 = mb0_t1 + m0 * bp1
             mb0_t2 = mb0_t2 + m0 * bp2

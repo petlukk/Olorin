@@ -15,7 +15,7 @@ pub(crate) struct BatchQ8K {
     pub qs_stride: usize,
     pub qs: Vec<i8>,
     pub d: Vec<f32>,
-    pub bsums: Vec<i32>,
+    pub bsums: Vec<i16>,
 }
 
 impl BatchQ8K {
@@ -26,7 +26,7 @@ impl BatchQ8K {
             n_tokens, dim, n_blocks, qs_stride,
             qs: vec![0i8; n_tokens * qs_stride],
             d: vec![0.0f32; n_tokens * n_blocks],
-            bsums: vec![0i32; n_tokens * n_blocks * 16],
+            bsums: vec![0i16; n_tokens * n_blocks * 16],
         }
     }
 
@@ -48,7 +48,7 @@ impl BatchQ8K {
     pub fn d_ptr(&self, t: usize) -> *const f32 {
         unsafe { self.d.as_ptr().add(t * self.n_blocks) }
     }
-    pub fn bsums_ptr(&self, t: usize) -> *const i32 {
+    pub fn bsums_ptr(&self, t: usize) -> *const i16 {
         unsafe { self.bsums.as_ptr().add(t * self.n_blocks * 16) }
     }
 }
@@ -280,7 +280,7 @@ pub(crate) fn q4k_fused_gemm_f32_mt(
         if start >= end { return; }
         let mut scores4 = [0.0f32; 4];
         let mut scratch = vec![0.0f32; 8];  // for kernel max-reduce (heap — must survive FFI)
-        let mut bs = vec![0i32; 16];        // for kernel bsums (heap — must survive FFI)
+        let mut bs = vec![0i16; 16];        // for kernel bsums (heap — must survive FFI)
         // Pre-cache f16→f32 weight scales ONCE (invariant across tokens)
         let mut da_w = [[0.0f32; MAX_BLOCKS]; 4];
         let mut dma_w = [[0.0f32; MAX_BLOCKS]; 4];
@@ -366,7 +366,7 @@ pub(crate) fn q4k_fused_silu_gemm_f32_mt(
         let mut g_scores = [0.0f32; 4];
         let mut u_scores = [0.0f32; 4];
         let mut scratch = vec![0.0f32; 8];
-        let mut bs_buf = vec![0i32; 16];
+        let mut bs_buf = vec![0i16; 16];
         let mut r = start;
         unsafe {
             while r + 4 <= end {

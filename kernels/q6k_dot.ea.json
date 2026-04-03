@@ -1,14 +1,14 @@
 {
-  "library": "/home/peter/projects/olorin1/target/debug/build/olorin-b8f6e5b7101c0541/out/libq6k_dot.so",
+  "library": "/home/peter/projects/olorin1/target/release/build/olorin-83a3a20f43db2862/out/libq6k_dot.so",
   "exports": [
     {
       "name": "q6k_dot_q8k",
-      "args": [{"name": "weight", "type": "*restrict u8", "direction": "in", "cap": null, "count": null}, {"name": "q8", "type": "*restrict i8", "direction": "in", "cap": null, "count": null}, {"name": "bsums", "type": "*restrict i32", "direction": "in", "cap": null, "count": null}, {"name": "n_blocks", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "d_arr", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}],
+      "args": [{"name": "weight", "type": "*restrict u8", "direction": "in", "cap": null, "count": null}, {"name": "q8", "type": "*restrict i8", "direction": "in", "cap": null, "count": null}, {"name": "bsums", "type": "*restrict i16", "direction": "in", "cap": null, "count": null}, {"name": "n_blocks", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "d_arr", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}],
       "return_type": "f32"
     },
     {
       "name": "q6k_dot_q8k_4row",
-      "args": [{"name": "w0", "type": "*restrict u8", "direction": "in", "cap": null, "count": null}, {"name": "w1", "type": "*restrict u8", "direction": "in", "cap": null, "count": null}, {"name": "w2", "type": "*restrict u8", "direction": "in", "cap": null, "count": null}, {"name": "w3", "type": "*restrict u8", "direction": "in", "cap": null, "count": null}, {"name": "q8", "type": "*restrict i8", "direction": "in", "cap": null, "count": null}, {"name": "bsums", "type": "*restrict i32", "direction": "in", "cap": null, "count": null}, {"name": "scores", "type": "*mut f32", "direction": "out", "cap": "4", "count": null}, {"name": "n_blocks", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "d0_arr", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "d1_arr", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "d2_arr", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "d3_arr", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}],
+      "args": [{"name": "w0", "type": "*restrict u8", "direction": "in", "cap": null, "count": null}, {"name": "w1", "type": "*restrict u8", "direction": "in", "cap": null, "count": null}, {"name": "w2", "type": "*restrict u8", "direction": "in", "cap": null, "count": null}, {"name": "w3", "type": "*restrict u8", "direction": "in", "cap": null, "count": null}, {"name": "q8", "type": "*restrict i8", "direction": "in", "cap": null, "count": null}, {"name": "bsums", "type": "*restrict i16", "direction": "in", "cap": null, "count": null}, {"name": "scores", "type": "*mut f32", "direction": "out", "cap": "4", "count": null}, {"name": "n_blocks", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "d0_arr", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "d1_arr", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "d2_arr", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "d3_arr", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}],
       "return_type": null
     }
   ],

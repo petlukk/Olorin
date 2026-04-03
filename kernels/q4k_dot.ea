@@ -1,7 +1,8 @@
 // q4k_dot.ea — Q4_K × Q8_K dot product kernel (SSSE3/AVX2)
 //
-// Inline f16→f32 via pow2 table. Vector accumulation: scale applied in i32x8
-// domain, single reduce_add per block (not per j-iteration).
+// Inline f16→f32 via pow2 table (faster than F16C for 2 values per block).
+// maddubs_i16 (pmaddubsw) → madd_i16(scale, ...) (pmaddwd).
+// Scale baked into madd_i16 — 2 instructions, not 3.
 
 #[cfg(x86_64)]
 
@@ -29,60 +30,70 @@ func get_scale_hi(p: *restrict u8, sp: i32, j: i32) -> i32 {
     return (ubyte(p, sp + j*2 + 5) & 15) | ((ubyte(p, sp + j*2 - 3) >> 6) << 4)
 }
 
-func row_mins(p: *restrict u8, sp: i32, bsums: *restrict i32, bs: i32) -> i32 {
-    let mut s: i32 = 0
-    let mut k: i32 = 0
-    while k < 4 {
-        s = s + (ubyte(p, sp + 4 + k) & 63) * (bsums[bs + k*2] + bsums[bs + k*2 + 1])
-        k = k + 1
-    }
-    k = 0
-    while k < 4 {
-        s = s + ((ubyte(p, sp + 8 + k) >> 4) | ((ubyte(p, sp + 4 + k) >> 6) << 4)) * (bsums[bs + 8 + k*2] + bsums[bs + 8 + k*2 + 1])
-        k = k + 1
-    }
-    return s
+// Mins correction — SIMD bsums pairing via hadd_i16 (phaddw), scalar mins multiply.
+func row_mins(p: *restrict u8, sp: i32, bsums: *restrict i16, bs: i32) -> i32 {
+    // SIMD bsums pairing: load 16 × i16, hadd → 8 × i16
+    let bs_lo: i16x8 = load(bsums, bs)
+    let bs_hi: i16x8 = load(bsums, bs + 8)
+    let bp: i16x8 = hadd_i16(bs_lo, bs_hi)
+
+    return (ubyte(p, sp + 4) & 63) * to_i32(bp[0])
+         + (ubyte(p, sp + 5) & 63) * to_i32(bp[1])
+         + (ubyte(p, sp + 6) & 63) * to_i32(bp[2])
+         + (ubyte(p, sp + 7) & 63) * to_i32(bp[3])
+         + ((ubyte(p, sp + 8) >> 4) | ((ubyte(p, sp + 4) >> 6) << 4)) * to_i32(bp[4])
+         + ((ubyte(p, sp + 9) >> 4) | ((ubyte(p, sp + 5) >> 6) << 4)) * to_i32(bp[5])
+         + ((ubyte(p, sp + 10) >> 4) | ((ubyte(p, sp + 6) >> 6) << 4)) * to_i32(bp[6])
+         + ((ubyte(p, sp + 11) >> 4) | ((ubyte(p, sp + 7) >> 6) << 4)) * to_i32(bp[7])
 }
 
 // Vector-accumulating dot for one Q4K block (256 elements).
-// Returns i32x8 partial sums with scales applied — caller does one reduce_add.
+// maddubs_i16 (pmaddubsw) → madd_i16(scale, ...) (pmaddwd) — scale baked in.
+// Two instructions per dot group, matching llama.cpp AVX2.
 func dot_block_vec(
     q4: *restrict u8, nib: i32, q8: *restrict i8, q8_off: i32,
     sp: i32, mask_lo: u8x32, shift4: u8x32
 ) -> i32x8 {
-    let zero: i32x8 = splat(0)
-    let mut acc: i32x8 = zero
+    let mut acc: i32x8 = splat(0)
 
     let p0: u8x32 = load(q4, nib)
     let q8_0a: i8x32 = load(q8, q8_off)
     let q8_0b: i8x32 = load(q8, q8_off + 32)
-    acc = acc .+ maddubs_i32(p0 .& mask_lo, q8_0a) .* splat(get_scale(q4, sp, 0))
-              .+ maddubs_i32(p0 .>> shift4, q8_0b) .* splat(get_scale_hi(q4, sp, 0))
+    let s0l: i16x16 = splat(to_i16(get_scale(q4, sp, 0)))
+    let s0h: i16x16 = splat(to_i16(get_scale_hi(q4, sp, 0)))
+    acc = acc .+ madd_i16(s0l, maddubs_i16(p0 .& mask_lo, q8_0a))
+              .+ madd_i16(s0h, maddubs_i16(p0 .>> shift4, q8_0b))
 
     let p1: u8x32 = load(q4, nib + 32)
     let q8_1a: i8x32 = load(q8, q8_off + 64)
     let q8_1b: i8x32 = load(q8, q8_off + 96)
-    acc = acc .+ maddubs_i32(p1 .& mask_lo, q8_1a) .* splat(get_scale(q4, sp, 1))
-              .+ maddubs_i32(p1 .>> shift4, q8_1b) .* splat(get_scale_hi(q4, sp, 1))
+    let s1l: i16x16 = splat(to_i16(get_scale(q4, sp, 1)))
+    let s1h: i16x16 = splat(to_i16(get_scale_hi(q4, sp, 1)))
+    acc = acc .+ madd_i16(s1l, maddubs_i16(p1 .& mask_lo, q8_1a))
+              .+ madd_i16(s1h, maddubs_i16(p1 .>> shift4, q8_1b))
 
     let p2: u8x32 = load(q4, nib + 64)
     let q8_2a: i8x32 = load(q8, q8_off + 128)
     let q8_2b: i8x32 = load(q8, q8_off + 160)
-    acc = acc .+ maddubs_i32(p2 .& mask_lo, q8_2a) .* splat(get_scale(q4, sp, 2))
-              .+ maddubs_i32(p2 .>> shift4, q8_2b) .* splat(get_scale_hi(q4, sp, 2))
+    let s2l: i16x16 = splat(to_i16(get_scale(q4, sp, 2)))
+    let s2h: i16x16 = splat(to_i16(get_scale_hi(q4, sp, 2)))
+    acc = acc .+ madd_i16(s2l, maddubs_i16(p2 .& mask_lo, q8_2a))
+              .+ madd_i16(s2h, maddubs_i16(p2 .>> shift4, q8_2b))
 
     let p3: u8x32 = load(q4, nib + 96)
     let q8_3a: i8x32 = load(q8, q8_off + 192)
     let q8_3b: i8x32 = load(q8, q8_off + 224)
-    acc = acc .+ maddubs_i32(p3 .& mask_lo, q8_3a) .* splat(get_scale(q4, sp, 3))
-              .+ maddubs_i32(p3 .>> shift4, q8_3b) .* splat(get_scale_hi(q4, sp, 3))
+    let s3l: i16x16 = splat(to_i16(get_scale(q4, sp, 3)))
+    let s3h: i16x16 = splat(to_i16(get_scale_hi(q4, sp, 3)))
+    acc = acc .+ madd_i16(s3l, maddubs_i16(p3 .& mask_lo, q8_3a))
+              .+ madd_i16(s3h, maddubs_i16(p3 .>> shift4, q8_3b))
 
     return acc
 }
 
 // Single-row dot product.
 export func q4k_dot_q8k(
-    q4: *restrict u8, q8: *restrict i8, bsums: *restrict i32,
+    q4: *restrict u8, q8: *restrict i8, bsums: *restrict i16,
     n_blocks: i32, q8_d: *restrict f32, pow2: *restrict f32
 ) -> f32 {
     let mask_lo: u8x32 = splat(15)
@@ -105,7 +116,7 @@ export func q4k_dot_q8k(
 // 4-row dot product.
 export func q4k_dot_q8k_4row(
     rw0: *restrict u8, rw1: *restrict u8, rw2: *restrict u8, rw3: *restrict u8,
-    q8: *restrict i8, bsums: *restrict i32,
+    q8: *restrict i8, bsums: *restrict i16,
     out scores: *mut f32 [cap: 4],
     n_blocks: i32, q8_d: *restrict f32, pow2: *restrict f32
 ) {
@@ -147,7 +158,7 @@ export func q4k_dot_q8k_4row(
 export func q4k_dot_q8k_4row_dual(
     gw0: *restrict u8, gw1: *restrict u8, gw2: *restrict u8, gw3: *restrict u8,
     uw0: *restrict u8, uw1: *restrict u8, uw2: *restrict u8, uw3: *restrict u8,
-    q8: *restrict i8, bsums: *restrict i32,
+    q8: *restrict i8, bsums: *restrict i16,
     out gate_scores: *mut f32 [cap: 4], out up_scores: *mut f32 [cap: 4],
     n_blocks: i32, q8_d: *restrict f32, pow2: *restrict f32
 ) {

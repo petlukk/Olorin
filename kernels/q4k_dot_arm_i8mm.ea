@@ -27,16 +27,16 @@ func get_scale_hi(p: *restrict u8, sp: i32, j: i32) -> i32 {
 }
 
 // Mins correction for one row
-func row_mins(p: *restrict u8, sp: i32, bsums: *restrict i32, bs: i32) -> i32 {
+func row_mins(p: *restrict u8, sp: i32, bsums: *restrict i16, bs: i32) -> i32 {
     let mut s: i32 = 0
     let mut k: i32 = 0
     while k < 4 {
-        s = s + (ubyte(p, sp + 4 + k) & 63) * (bsums[bs + k*2] + bsums[bs + k*2 + 1])
+        s = s + (ubyte(p, sp + 4 + k) & 63) * (to_i32(bsums[bs + k*2]) + to_i32(bsums[bs + k*2 + 1]))
         k = k + 1
     }
     k = 0
     while k < 4 {
-        s = s + ((ubyte(p, sp + 8 + k) >> 4) | ((ubyte(p, sp + 4 + k) >> 6) << 4)) * (bsums[bs + 8 + k*2] + bsums[bs + 8 + k*2 + 1])
+        s = s + ((ubyte(p, sp + 8 + k) >> 4) | ((ubyte(p, sp + 4 + k) >> 6) << 4)) * (to_i32(bsums[bs + 8 + k*2]) + to_i32(bsums[bs + 8 + k*2 + 1]))
         k = k + 1
     }
     return s
@@ -63,7 +63,7 @@ func mmla_dot2(a0: u8x16, b0: i8x16, a1: u8x16, b1: i8x16) -> i32 {
 export func q4k_dot_q8k(
     q4: *restrict u8,
     q8: *restrict i8,
-    bsums: *restrict i32,
+    bsums: *restrict i16,
     n_blocks: i32,
     d_arr: *restrict f32,
     dmin_arr: *restrict f32
@@ -104,7 +104,7 @@ export func q4k_dot_q8k(
 export func q4k_dot_q8k_4row(
     rw0: *restrict u8, rw1: *restrict u8, rw2: *restrict u8, rw3: *restrict u8,
     q8: *restrict i8,
-    bsums: *restrict i32,
+    bsums: *restrict i16,
     out scores: *mut f32,
     n_blocks: i32,
     d0: *restrict f32, d1: *restrict f32, d2: *restrict f32, d3: *restrict f32,
@@ -186,7 +186,7 @@ export func q4k_dot_q8k_4row(
 export func q4k_dot_q8k_4row_fused(
     rw0: *restrict u8, rw1: *restrict u8, rw2: *restrict u8, rw3: *restrict u8,
     q8: *restrict i8,
-    bsums: *restrict i32,
+    bsums: *restrict i16,
     out scores: *mut f32,
     n_blocks: i32,
     d0_w: *restrict f32, d1_w: *restrict f32, d2_w: *restrict f32, d3_w: *restrict f32,
@@ -263,7 +263,7 @@ export func q4k_dot_q8k_4row_dual(
     gw0: *restrict u8, gw1: *restrict u8, gw2: *restrict u8, gw3: *restrict u8,
     uw0: *restrict u8, uw1: *restrict u8, uw2: *restrict u8, uw3: *restrict u8,
     q8: *restrict i8,
-    bsums: *restrict i32,
+    bsums: *restrict i16,
     out gate_scores: *mut f32,
     out up_scores: *mut f32,
     n_blocks: i32,

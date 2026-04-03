@@ -231,13 +231,13 @@ pub unsafe fn vecadd_f32(a: *const f32, b: *const f32, out: *mut f32, n: i32) {
 }
 
 pub unsafe fn quant_f32_q8k(
-    src: *const f32, dst_qs: *mut i8, dst_d: *mut f32, dst_bsums: *mut i32, n: i32,
+    src: *const f32, dst_qs: *mut i8, dst_d: *mut f32, dst_bsums: *mut i16, n: i32,
 ) {
     (k().quant_f32_q8k)(src, dst_qs, dst_d, dst_bsums, n)
 }
 
 pub unsafe fn q4k_dot_q8k(
-    q4: *const u8, q8: *const i8, bsums: *const i32,
+    q4: *const u8, q8: *const i8, bsums: *const i16,
     n_blocks: i32, q8_d: *const f32, pow2: *const f32,
 ) -> f32 {
     (k().q4k_dot_q8k)(q4, q8, bsums, n_blocks, q8_d, pow2)
@@ -246,7 +246,7 @@ pub unsafe fn q4k_dot_q8k(
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn q4k_dot_q8k_4row(
     rw0: *const u8, rw1: *const u8, rw2: *const u8, rw3: *const u8,
-    q8: *const i8, bsums: *const i32,
+    q8: *const i8, bsums: *const i16,
     scores: *mut f32, n_blocks: i32, q8_d: *const f32, pow2: *const f32,
 ) {
     (k().q4k_dot_q8k_4row)(rw0, rw1, rw2, rw3, q8, bsums, scores, n_blocks, q8_d, pow2)
@@ -256,7 +256,7 @@ pub unsafe fn q4k_dot_q8k_4row(
 pub unsafe fn q4k_dot_q8k_4row_dual(
     gw0: *const u8, gw1: *const u8, gw2: *const u8, gw3: *const u8,
     uw0: *const u8, uw1: *const u8, uw2: *const u8, uw3: *const u8,
-    q8: *const i8, bsums: *const i32,
+    q8: *const i8, bsums: *const i16,
     gate_scores: *mut f32, up_scores: *mut f32, n_blocks: i32,
     q8_d: *const f32, pow2: *const f32,
 ) {
@@ -268,7 +268,7 @@ pub unsafe fn q4k_dot_q8k_4row_dual(
 pub unsafe fn q4k_fused_dot(
     q4: *const u8, act: *const f32,
     n_blocks: i32, d_w: *const f32, dm_w: *const f32,
-    scratch: *mut f32, bs: *mut i32,
+    scratch: *mut f32, bs: *mut i16,
 ) -> f32 {
     (k().q4k_fused_dot)(q4, act, n_blocks, d_w, dm_w, scratch, bs)
 }
@@ -281,7 +281,7 @@ pub unsafe fn q4k_fused_dot_4row(
     scores: *mut f32, n_blocks: i32,
     d0_w: *const f32, d1_w: *const f32, d2_w: *const f32, d3_w: *const f32,
     dm0_w: *const f32, dm1_w: *const f32, dm2_w: *const f32, dm3_w: *const f32,
-    scratch: *mut f32, bs: *mut i32,
+    scratch: *mut f32, bs: *mut i16,
 ) {
     (k().q4k_fused_dot_4row)(
         rw0, rw1, rw2, rw3, act,
@@ -290,7 +290,7 @@ pub unsafe fn q4k_fused_dot_4row(
 }
 
 pub unsafe fn q6k_dot_q8k(
-    weight: *const u8, q8: *const i8, bsums: *const i32,
+    weight: *const u8, q8: *const i8, bsums: *const i16,
     n_blocks: i32, d_arr: *const f32,
 ) -> f32 {
     (k().q6k_dot_q8k)(weight, q8, bsums, n_blocks, d_arr)
@@ -298,7 +298,7 @@ pub unsafe fn q6k_dot_q8k(
 
 pub unsafe fn q6k_dot_q8k_4row(
     w0: *const u8, w1: *const u8, w2: *const u8, w3: *const u8,
-    q8: *const i8, bsums: *const i32, scores: *mut f32, n_blocks: i32,
+    q8: *const i8, bsums: *const i16, scores: *mut f32, n_blocks: i32,
     d0: *const f32, d1: *const f32, d2: *const f32, d3: *const f32,
 ) {
     (k().q6k_dot_q8k_4row)(
@@ -309,7 +309,7 @@ pub unsafe fn q6k_dot_q8k_4row(
 pub unsafe fn q4k_gemm_4x4(
     rw0: *const u8, rw1: *const u8, rw2: *const u8, rw3: *const u8,
     q8_0: *const i8, q8_1: *const i8, q8_2: *const i8, q8_3: *const i8,
-    bs0: *const i32, bs1: *const i32, bs2: *const i32, bs3: *const i32,
+    bs0: *const i16, bs1: *const i16, bs2: *const i16, bs3: *const i16,
     sc0: *const u8, sc1: *const u8, sc2: *const u8, sc3: *const u8,
     mn0: *const u8, mn1: *const u8, mn2: *const u8, mn3: *const u8,
     d0: *const f32, d1: *const f32, d2: *const f32, d3: *const f32,

@@ -105,7 +105,7 @@ impl LlamaState {
                             (norm_ptr as *const f32).add(t * h_dim),
                             (qs_ptr as *mut i8).add(t * qs_stride),
                             (d_ptr as *mut f32).add(t * nb),
-                            (bs_ptr as *mut i32).add(t * nb * 16),
+                            (bs_ptr as *mut i16).add(t * nb * 16),
                             h_dim as i32,
                         );
                         t += nt_used;
@@ -197,7 +197,7 @@ impl LlamaState {
                             (src_ptr as *const f32).add(t * h_dim),
                             (qs_ptr as *mut i8).add(t * qs_stride),
                             (d_ptr as *mut f32).add(t * nb),
-                            (bs_ptr as *mut i32).add(t * nb * 16),
+                            (bs_ptr as *mut i16).add(t * nb * 16),
                             h_dim as i32,
                         );
                         t += nt_used;
@@ -263,7 +263,7 @@ impl LlamaState {
                             (src_ptr as *const f32).add(t * h_dim),
                             (qs_ptr as *mut i8).add(t * qs_stride),
                             (d_ptr as *mut f32).add(t * nb),
-                            (bs_ptr as *mut i32).add(t * nb * 16),
+                            (bs_ptr as *mut i16).add(t * nb * 16),
                             h_dim as i32,
                         );
                         t += nt_used;
@@ -296,7 +296,7 @@ impl LlamaState {
                             (src_ptr as *const f32).add(t * f_dim),
                             (qs_ptr as *mut i8).add(t * qs_stride),
                             (d_ptr as *mut f32).add(t * nb),
-                            (bs_ptr as *mut i32).add(t * nb * 16),
+                            (bs_ptr as *mut i16).add(t * nb * 16),
                             f_dim as i32,
                         );
                         t += nt_used;

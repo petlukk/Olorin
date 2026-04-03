@@ -40,7 +40,7 @@ pub(crate) fn unpack_q4k_scales(packed: &[u8], scales: &mut [u8; 8], mins: &mut 
 /// Scales read inline inside the kernel — no pre-computation.
 pub(crate) unsafe fn q4k_row_dot(
     weight: *const u8, n_blocks: usize,
-    q8_qs: *const i8, q8_d: *const f32, q8_bsums: *const i32,
+    q8_qs: *const i8, q8_d: *const f32, q8_bsums: *const i16,
 ) -> f32 {
     debug_assert!(n_blocks <= MAX_BLOCKS);
     ffi::q4k_dot_q8k(
@@ -53,7 +53,7 @@ pub(crate) unsafe fn q4k_row_dot(
 pub(crate) unsafe fn q4k_4row_dot(
     w0: *const u8, w1: *const u8, w2: *const u8, w3: *const u8,
     n_blocks: usize,
-    q8_qs: *const i8, q8_d: *const f32, q8_bsums: *const i32,
+    q8_qs: *const i8, q8_d: *const f32, q8_bsums: *const i16,
     scores: &mut [f32; 4],
 ) {
     debug_assert!(n_blocks <= MAX_BLOCKS);
@@ -67,7 +67,7 @@ pub(crate) unsafe fn q4k_4row_dot(
 /// Multi-threaded Q4_K x Q8_K matrix multiplication.
 pub(crate) fn q4k_matmul_mt(
     weight: *const u8, row_stride: usize, n_blocks: usize,
-    q8_qs: *const i8, q8_d: *const f32, q8_bsums: *const i32,
+    q8_qs: *const i8, q8_d: *const f32, q8_bsums: *const i16,
     out: &mut [f32], out_dim: usize,
     pool: &crate::inference::threadpool::ThreadPool,
 ) {
@@ -141,7 +141,7 @@ pub(crate) fn q4k_embed_lookup(
 /// Per-thread work function for Q4_K matmul.
 pub(crate) unsafe fn q4k_matmul_work(
     weight: *const u8, row_stride: usize, n_blocks: usize,
-    q8_qs: *const i8, q8_d: *const f32, q8_bsums: *const i32,
+    q8_qs: *const i8, q8_d: *const f32, q8_bsums: *const i16,
     out: *mut f32, out_dim: usize, tid: usize, n_threads: usize,
 ) {
     let chunk = ((out_dim + n_threads - 1) / n_threads + 3) & !3;
@@ -177,7 +177,7 @@ pub(crate) unsafe fn q4k_matmul_work(
 /// Eliminates the separate vecadd pass after projection.
 pub(crate) unsafe fn q4k_matmul_residual_work(
     weight: *const u8, row_stride: usize, n_blocks: usize,
-    q8_qs: *const i8, q8_d: *const f32, q8_bsums: *const i32,
+    q8_qs: *const i8, q8_d: *const f32, q8_bsums: *const i16,
     out: *mut f32, out_dim: usize, tid: usize, n_threads: usize,
 ) {
     let chunk = ((out_dim + n_threads - 1) / n_threads + 3) & !3;
@@ -213,7 +213,7 @@ pub(crate) unsafe fn q4k_dual_4row_dot(
     gw0: *const u8, gw1: *const u8, gw2: *const u8, gw3: *const u8,
     uw0: *const u8, uw1: *const u8, uw2: *const u8, uw3: *const u8,
     n_blocks: usize,
-    q8_qs: *const i8, q8_d: *const f32, q8_bsums: *const i32,
+    q8_qs: *const i8, q8_d: *const f32, q8_bsums: *const i16,
     g_scores: &mut [f32; 4], u_scores: &mut [f32; 4],
 ) {
     debug_assert!(n_blocks <= MAX_BLOCKS);
@@ -230,7 +230,7 @@ pub(crate) unsafe fn q4k_dual_4row_dot(
 pub(crate) unsafe fn q4k_fused_gate_up_silu_work(
     w_gate: *const u8, w_up: *const u8,
     row_stride: usize, n_blocks: usize,
-    q8_qs: *const i8, q8_d: *const f32, q8_bsums: *const i32,
+    q8_qs: *const i8, q8_d: *const f32, q8_bsums: *const i16,
     hidden_out: *mut f32, out_dim: usize, tid: usize, n_threads: usize,
 ) {
     let chunk = ((out_dim + n_threads - 1) / n_threads + 3) & !3;

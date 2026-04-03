@@ -81,6 +81,7 @@ export func q4k_fused_dot_4row(
             let inv_s: f32x8 = splat(127.0 / max_val)
             let d_scale: f32 = max_val / 127.0
 
+            let ones: i16x16 = splat(1)
             let mut s0: i32 = 0
             let mut s1: i32 = 0
             let mut s2: i32 = 0
@@ -110,23 +111,23 @@ export func q4k_fused_dot_4row(
 
                 // 4-row dot product with shared q8
                 let p0: u8x32 = load(rw0, q4_off + j * 32)
-                let d0l: i32 = reduce_add(maddubs_i32(p0 .& mask_lo, q8_lo))
-                let d0h: i32 = reduce_add(maddubs_i32(p0 .>> shift4, q8_hi))
+                let d0l: i32 = reduce_add(madd_i16(ones, maddubs_i16(p0 .& mask_lo, q8_lo)))
+                let d0h: i32 = reduce_add(madd_i16(ones, maddubs_i16(p0 .>> shift4, q8_hi)))
                 s0 = s0 + d0l * get_scale(rw0, sp, j) + d0h * get_scale_hi(rw0, sp, j)
 
                 let p1: u8x32 = load(rw1, q4_off + j * 32)
-                let d1l: i32 = reduce_add(maddubs_i32(p1 .& mask_lo, q8_lo))
-                let d1h: i32 = reduce_add(maddubs_i32(p1 .>> shift4, q8_hi))
+                let d1l: i32 = reduce_add(madd_i16(ones, maddubs_i16(p1 .& mask_lo, q8_lo)))
+                let d1h: i32 = reduce_add(madd_i16(ones, maddubs_i16(p1 .>> shift4, q8_hi)))
                 s1 = s1 + d1l * get_scale(rw1, sp, j) + d1h * get_scale_hi(rw1, sp, j)
 
                 let p2: u8x32 = load(rw2, q4_off + j * 32)
-                let d2l: i32 = reduce_add(maddubs_i32(p2 .& mask_lo, q8_lo))
-                let d2h: i32 = reduce_add(maddubs_i32(p2 .>> shift4, q8_hi))
+                let d2l: i32 = reduce_add(madd_i16(ones, maddubs_i16(p2 .& mask_lo, q8_lo)))
+                let d2h: i32 = reduce_add(madd_i16(ones, maddubs_i16(p2 .>> shift4, q8_hi)))
                 s2 = s2 + d2l * get_scale(rw2, sp, j) + d2h * get_scale_hi(rw2, sp, j)
 
                 let p3: u8x32 = load(rw3, q4_off + j * 32)
-                let d3l: i32 = reduce_add(maddubs_i32(p3 .& mask_lo, q8_lo))
-                let d3h: i32 = reduce_add(maddubs_i32(p3 .>> shift4, q8_hi))
+                let d3l: i32 = reduce_add(madd_i16(ones, maddubs_i16(p3 .& mask_lo, q8_lo)))
+                let d3h: i32 = reduce_add(madd_i16(ones, maddubs_i16(p3 .>> shift4, q8_hi)))
                 s3 = s3 + d3l * get_scale(rw3, sp, j) + d3h * get_scale_hi(rw3, sp, j)
 
                 j = j + 1
@@ -214,6 +215,7 @@ export func q4k_fused_dot(
             let inv_s: f32x8 = splat(127.0 / max_val)
             let d_scale: f32 = max_val / 127.0
 
+            let ones: i16x16 = splat(1)
             let mut sumi: i32 = 0
 
             let mut j: i32 = 0
@@ -236,8 +238,8 @@ export func q4k_fused_dot(
                 bs[j*4 + 3] = reduce_add(hi2) + reduce_add(hi3)
 
                 let p: u8x32 = load(q4, nib + j * 32)
-                let dot_lo: i32 = reduce_add(maddubs_i32(p .& mask_lo, q8_lo))
-                let dot_hi: i32 = reduce_add(maddubs_i32(p .>> shift4, q8_hi))
+                let dot_lo: i32 = reduce_add(madd_i16(ones, maddubs_i16(p .& mask_lo, q8_lo)))
+                let dot_hi: i32 = reduce_add(madd_i16(ones, maddubs_i16(p .>> shift4, q8_hi)))
                 sumi = sumi + dot_lo * get_scale(q4, sp, j) + dot_hi * get_scale_hi(q4, sp, j)
 
                 j = j + 1

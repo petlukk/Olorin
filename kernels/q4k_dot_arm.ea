@@ -1,9 +1,9 @@
 // q4k_dot_arm.ea — ARM NEON Q4_K × Q8_K dot product kernel
 //
-// Inline f16→f32 d/dmin via cvt_f16_f32 intrinsic (fcvtl).
+// Inline f16→f32 d/dmin via cvt_f16_f32 (fcvtl) + lane extract.
 // NEON DOTPROD (sdot/vdot) for accumulation.
-// Mins correction via addp_i16 (vpaddq_s16) + scalar i16 multiply.
 // Matches x86 q4k_dot.ea signature: (q4, q8, bsums, n_blocks, q8_d, pow2)
+// pow2 unused on ARM — kept for ABI compat with x86 kernel.
 
 #[cfg(aarch64)]
 
@@ -12,12 +12,11 @@ func read_u32(p: *restrict i8, off: i32) -> i32 {
     return p32[off / 4]
 }
 
-// Read f16 from Q4K block header via pow2 table
-func f16_load(p: *restrict i8, off: i32, pow2: *restrict f32) -> f32 {
-    let pu8: *restrict u8 = ptr_as_u8(p)
-    let raw: i32 = (to_i32(pu8[off]) & 255) | ((to_i32(pu8[off + 1]) & 255) << 8)
-    let exp: i32 = (raw >> 10) & 31
-    if exp == 0 { return 0.0 } else { return pow2[exp] * (1.0 + to_f32(raw & 1023) * 0.0009765625) }
+// Read d (lane 0) and dmin (lane 1) from Q4K block header via fcvtl.
+func f16_d_dm(p: *restrict i8, bp: i32) -> f32x4 {
+    let ph: *restrict i16 = ptr_as_i16(p)
+    let raw: i16x4 = load(ph, bp / 2)
+    return cvt_f16_f32(raw)
 }
 
 func scale_at(sc0: i32, sc1: i32, idx: i32) -> i32 {
@@ -27,20 +26,27 @@ func scale_at(sc0: i32, sc1: i32, idx: i32) -> i32 {
     return (sc1 >> ((idx - 4) * 8)) & 255
 }
 
-// Mins correction — scalar pair-add bsums, multiply by mins bytes.
-func mins_corr(rw: *restrict i8, sp: i32, bsums: *restrict i32, bs: i32) -> i32 {
+// Mins correction — SIMD bsums pairing via addp_i16 (vpaddq_s16).
+// 16 i16 bsums → 8 paired i16 in one instruction, then scalar mins multiply.
+func mins_corr(rw: *restrict i8, sp: i32, bsums: *restrict i16, bs: i32) -> i32 {
     let u1: i32 = read_u32(rw, sp + 4)
     let u2: i32 = read_u32(rw, sp + 8)
     let mn0: i32 = u1 & 0x3f3f3f3f
     let mn1: i32 = ((u2 >> 4) & 0x0f0f0f0f) | (((u1 >> 6) & 0x03030303) << 4)
-    return (mn0 & 255) * (bsums[bs] + bsums[bs+1])
-         + ((mn0 >> 8) & 255) * (bsums[bs+2] + bsums[bs+3])
-         + ((mn0 >> 16) & 255) * (bsums[bs+4] + bsums[bs+5])
-         + ((mn0 >> 24) & 255) * (bsums[bs+6] + bsums[bs+7])
-         + (mn1 & 255) * (bsums[bs+8] + bsums[bs+9])
-         + ((mn1 >> 8) & 255) * (bsums[bs+10] + bsums[bs+11])
-         + ((mn1 >> 16) & 255) * (bsums[bs+12] + bsums[bs+13])
-         + ((mn1 >> 24) & 255) * (bsums[bs+14] + bsums[bs+15])
+
+    // SIMD bsums pairing: load 16 × i16, pairwise add → 8 × i16
+    let bs_lo: i16x8 = load(bsums, bs)
+    let bs_hi: i16x8 = load(bsums, bs + 8)
+    let bp: i16x8 = addp_i16(bs_lo, bs_hi)
+
+    return (mn0 & 255) * to_i32(bp[0])
+         + ((mn0 >> 8) & 255) * to_i32(bp[1])
+         + ((mn0 >> 16) & 255) * to_i32(bp[2])
+         + ((mn0 >> 24) & 255) * to_i32(bp[3])
+         + (mn1 & 255) * to_i32(bp[4])
+         + ((mn1 >> 8) & 255) * to_i32(bp[5])
+         + ((mn1 >> 16) & 255) * to_i32(bp[6])
+         + ((mn1 >> 24) & 255) * to_i32(bp[7])
 }
 
 // SIMD dot for one block: 4 groups × (lo nibbles + hi nibbles)
@@ -81,7 +87,7 @@ func dot_row(
 export func q4k_dot_q8k(
     q4: *restrict i8,
     q8: *restrict i8,
-    bsums: *restrict i32,
+    bsums: *restrict i16,
     n_blocks: i32,
     q8_d: *restrict f32,
     pow2: *restrict f32
@@ -94,9 +100,10 @@ export func q4k_dot_q8k(
     while blk < n_blocks {
         let bp: i32 = blk * 144
         let sumi: i32 = dot_row(q4, bp + 16, bp + 4, q8, blk * 256, mask_lo, shift4)
+        let dd: f32x4 = f16_d_dm(q4, bp)
         let qd: f32 = q8_d[blk]
-        let d: f32 = f16_load(q4, bp, pow2) * qd
-        let dm: f32 = f16_load(q4, bp + 2, pow2) * qd
+        let d: f32 = dd[0] * qd
+        let dm: f32 = dd[1] * qd
         result = result + d * to_f32(sumi) - dm * to_f32(mins_corr(q4, bp + 4, bsums, blk * 16))
         blk = blk + 1
     }
@@ -107,7 +114,7 @@ export func q4k_dot_q8k(
 export func q4k_dot_q8k_4row(
     rw0: *restrict i8, rw1: *restrict i8, rw2: *restrict i8, rw3: *restrict i8,
     q8: *restrict i8,
-    bsums: *restrict i32,
+    bsums: *restrict i16,
     out scores: *mut f32,
     n_blocks: i32,
     q8_d: *restrict f32,
@@ -134,10 +141,14 @@ export func q4k_dot_q8k_4row(
         let s3: i32 = dot_row(rw3, nib, sp, q8, q8o, mask_lo, shift4)
 
         let qd: f32 = q8_d[blk]
-        res0 = res0 + f16_load(rw0, bp) * qd * to_f32(s0) - f16_block_dmin(rw0, bp) * qd * to_f32(mins_corr(rw0, sp, bsums, bs))
-        res1 = res1 + f16_load(rw1, bp) * qd * to_f32(s1) - f16_block_dmin(rw1, bp) * qd * to_f32(mins_corr(rw1, sp, bsums, bs))
-        res2 = res2 + f16_load(rw2, bp) * qd * to_f32(s2) - f16_block_dmin(rw2, bp) * qd * to_f32(mins_corr(rw2, sp, bsums, bs))
-        res3 = res3 + f16_load(rw3, bp) * qd * to_f32(s3) - f16_block_dmin(rw3, bp) * qd * to_f32(mins_corr(rw3, sp, bsums, bs))
+        let dd0: f32x4 = f16_d_dm(rw0, bp)
+        let dd1: f32x4 = f16_d_dm(rw1, bp)
+        let dd2: f32x4 = f16_d_dm(rw2, bp)
+        let dd3: f32x4 = f16_d_dm(rw3, bp)
+        res0 = res0 + dd0[0]*qd*to_f32(s0) - dd0[1]*qd*to_f32(mins_corr(rw0, sp, bsums, bs))
+        res1 = res1 + dd1[0]*qd*to_f32(s1) - dd1[1]*qd*to_f32(mins_corr(rw1, sp, bsums, bs))
+        res2 = res2 + dd2[0]*qd*to_f32(s2) - dd2[1]*qd*to_f32(mins_corr(rw2, sp, bsums, bs))
+        res3 = res3 + dd3[0]*qd*to_f32(s3) - dd3[1]*qd*to_f32(mins_corr(rw3, sp, bsums, bs))
 
         blk = blk + 1
     }
@@ -152,7 +163,7 @@ export func q4k_dot_q8k_4row_dual(
     gw0: *restrict i8, gw1: *restrict i8, gw2: *restrict i8, gw3: *restrict i8,
     uw0: *restrict i8, uw1: *restrict i8, uw2: *restrict i8, uw3: *restrict i8,
     q8: *restrict i8,
-    bsums: *restrict i32,
+    bsums: *restrict i16,
     out gate_scores: *mut f32,
     out up_scores: *mut f32,
     n_blocks: i32,
@@ -188,14 +199,22 @@ export func q4k_dot_q8k_4row_dual(
         let us3: i32 = dot_row(uw3, nib, sp, q8, q8o, mask_lo, shift4)
 
         let qd: f32 = q8_d[blk]
-        gr0 = gr0 + f16_load(gw0, bp)*qd*to_f32(gs0) - f16_block_dmin(gw0, bp)*qd*to_f32(mins_corr(gw0, sp, bsums, bs))
-        gr1 = gr1 + f16_load(gw1, bp)*qd*to_f32(gs1) - f16_block_dmin(gw1, bp)*qd*to_f32(mins_corr(gw1, sp, bsums, bs))
-        gr2 = gr2 + f16_load(gw2, bp)*qd*to_f32(gs2) - f16_block_dmin(gw2, bp)*qd*to_f32(mins_corr(gw2, sp, bsums, bs))
-        gr3 = gr3 + f16_load(gw3, bp)*qd*to_f32(gs3) - f16_block_dmin(gw3, bp)*qd*to_f32(mins_corr(gw3, sp, bsums, bs))
-        ur0 = ur0 + f16_load(uw0, bp)*qd*to_f32(us0) - f16_block_dmin(uw0, bp)*qd*to_f32(mins_corr(uw0, sp, bsums, bs))
-        ur1 = ur1 + f16_load(uw1, bp)*qd*to_f32(us1) - f16_block_dmin(uw1, bp)*qd*to_f32(mins_corr(uw1, sp, bsums, bs))
-        ur2 = ur2 + f16_load(uw2, bp)*qd*to_f32(us2) - f16_block_dmin(uw2, bp)*qd*to_f32(mins_corr(uw2, sp, bsums, bs))
-        ur3 = ur3 + f16_load(uw3, bp)*qd*to_f32(us3) - f16_block_dmin(uw3, bp)*qd*to_f32(mins_corr(uw3, sp, bsums, bs))
+        let gd0: f32x4 = f16_d_dm(gw0, bp)
+        let gd1: f32x4 = f16_d_dm(gw1, bp)
+        let gd2: f32x4 = f16_d_dm(gw2, bp)
+        let gd3: f32x4 = f16_d_dm(gw3, bp)
+        let ud0: f32x4 = f16_d_dm(uw0, bp)
+        let ud1: f32x4 = f16_d_dm(uw1, bp)
+        let ud2: f32x4 = f16_d_dm(uw2, bp)
+        let ud3: f32x4 = f16_d_dm(uw3, bp)
+        gr0 = gr0 + gd0[0]*qd*to_f32(gs0) - gd0[1]*qd*to_f32(mins_corr(gw0, sp, bsums, bs))
+        gr1 = gr1 + gd1[0]*qd*to_f32(gs1) - gd1[1]*qd*to_f32(mins_corr(gw1, sp, bsums, bs))
+        gr2 = gr2 + gd2[0]*qd*to_f32(gs2) - gd2[1]*qd*to_f32(mins_corr(gw2, sp, bsums, bs))
+        gr3 = gr3 + gd3[0]*qd*to_f32(gs3) - gd3[1]*qd*to_f32(mins_corr(gw3, sp, bsums, bs))
+        ur0 = ur0 + ud0[0]*qd*to_f32(us0) - ud0[1]*qd*to_f32(mins_corr(uw0, sp, bsums, bs))
+        ur1 = ur1 + ud1[0]*qd*to_f32(us1) - ud1[1]*qd*to_f32(mins_corr(uw1, sp, bsums, bs))
+        ur2 = ur2 + ud2[0]*qd*to_f32(us2) - ud2[1]*qd*to_f32(mins_corr(uw2, sp, bsums, bs))
+        ur3 = ur3 + ud3[0]*qd*to_f32(us3) - ud3[1]*qd*to_f32(mins_corr(uw3, sp, bsums, bs))
 
         blk = blk + 1
     }

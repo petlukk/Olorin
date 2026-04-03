@@ -30,7 +30,7 @@ unsafe fn q6k_unpack_d(
 /// Dot product of one Q6_K weight row against Q8_K activations.
 pub(crate) unsafe fn q6k_row_dot(
     weight: *const u8, n_blocks: usize,
-    q8_qs: *const i8, q8_d: *const f32, q8_bsums: *const i32,
+    q8_qs: *const i8, q8_d: *const f32, q8_bsums: *const i16,
 ) -> f32 {
     debug_assert!(n_blocks <= MAX_BLOCKS);
     let mut d_arr = [0f32; MAX_BLOCKS];
@@ -45,7 +45,7 @@ pub(crate) unsafe fn q6k_row_dot(
 pub(crate) unsafe fn q6k_4row_dot(
     w0: *const u8, w1: *const u8, w2: *const u8, w3: *const u8,
     n_blocks: usize,
-    q8_qs: *const i8, q8_d: *const f32, q8_bsums: *const i32,
+    q8_qs: *const i8, q8_d: *const f32, q8_bsums: *const i16,
     scores: &mut [f32; 4],
 ) {
     debug_assert!(n_blocks <= MAX_BLOCKS);
@@ -64,7 +64,7 @@ pub(crate) unsafe fn q6k_4row_dot(
 /// Multi-threaded Q6_K x Q8_K matrix multiplication.
 pub(crate) fn q6k_matmul_mt(
     weight: *const u8, row_stride: usize, n_blocks: usize,
-    q8_qs: *const i8, q8_d: *const f32, q8_bsums: *const i32,
+    q8_qs: *const i8, q8_d: *const f32, q8_bsums: *const i16,
     out: &mut [f32], out_dim: usize,
     pool: &crate::inference::threadpool::ThreadPool,
 ) {
@@ -107,7 +107,7 @@ pub(crate) fn q6k_matmul_mt(
 /// Buffers allocated once per thread, reused across row iterations.
 pub(crate) unsafe fn q6k_matmul_work(
     weight: *const u8, row_stride: usize, n_blocks: usize,
-    q8_qs: *const i8, q8_d: *const f32, q8_bsums: *const i32,
+    q8_qs: *const i8, q8_d: *const f32, q8_bsums: *const i16,
     out: *mut f32, out_dim: usize, tid: usize, n_threads: usize,
 ) {
     let chunk = ((out_dim + n_threads - 1) / n_threads + 3) & !3;
@@ -151,7 +151,7 @@ pub(crate) unsafe fn q6k_matmul_work(
 /// Eliminates the separate vecadd pass after projection.
 pub(crate) unsafe fn q6k_matmul_residual_work(
     weight: *const u8, row_stride: usize, n_blocks: usize,
-    q8_qs: *const i8, q8_d: *const f32, q8_bsums: *const i32,
+    q8_qs: *const i8, q8_d: *const f32, q8_bsums: *const i16,
     out: *mut f32, out_dim: usize, tid: usize, n_threads: usize,
 ) {
     let chunk = ((out_dim + n_threads - 1) / n_threads + 3) & !3;

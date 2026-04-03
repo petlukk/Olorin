@@ -2,7 +2,7 @@
 
 use crate::kernels::ffi_inference as ffi;
 use crate::inference::forward::{apply_rope, build_rope_freqs, sample_into};
-use crate::inference::math::{wipe_f32, wipe_i8, wipe_i32};
+use crate::inference::math::{wipe_f32, wipe_i8, wipe_i16};
 use crate::inference::matmul::embed_f16_lookup;
 use crate::inference::matmul_q4k::{Q4K_BLOCK_BYTES, q4k_matmul_mt, q4k_matmul_work, q4k_matmul_residual_work, q4k_fused_gate_up_silu_work};
 use crate::inference::matmul_q6k::{Q6K_BLOCK_BYTES, q6k_matmul_mt, q6k_matmul_work, q6k_matmul_residual_work};
@@ -34,18 +34,18 @@ pub struct LlamaState {
     x_norm: Vec<f32>,
     x_q8_qs: Vec<i8>,
     x_q8_d: Vec<f32>,
-    x_q8_bsums: Vec<i32>,
+    x_q8_bsums: Vec<i16>,
     pub(crate) q: Vec<f32>,
     pub(crate) k: Vec<f32>,
     pub(crate) v: Vec<f32>,
     pub(crate) attn_out: Vec<f32>,
     attn_q8_qs: Vec<i8>,
     attn_q8_d: Vec<f32>,
-    attn_q8_bsums: Vec<i32>,
+    attn_q8_bsums: Vec<i16>,
     pub(crate) hidden: Vec<f32>,
     hidden_q8_qs: Vec<i8>,
     hidden_q8_d: Vec<f32>,
-    hidden_q8_bsums: Vec<i32>,
+    hidden_q8_bsums: Vec<i16>,
     pub(crate) logits: Vec<f32>,
     pub(crate) tmp: Vec<f32>,
     pub(crate) kv_cache: F16KvCache,
@@ -614,18 +614,18 @@ impl Drop for LlamaState {
         wipe_f32(&mut self.x_norm);
         wipe_i8(&mut self.x_q8_qs);
         wipe_f32(&mut self.x_q8_d);
-        wipe_i32(&mut self.x_q8_bsums);
+        wipe_i16(&mut self.x_q8_bsums);
         wipe_f32(&mut self.q);
         wipe_f32(&mut self.k);
         wipe_f32(&mut self.v);
         wipe_f32(&mut self.attn_out);
         wipe_i8(&mut self.attn_q8_qs);
         wipe_f32(&mut self.attn_q8_d);
-        wipe_i32(&mut self.attn_q8_bsums);
+        wipe_i16(&mut self.attn_q8_bsums);
         wipe_f32(&mut self.hidden);
         wipe_i8(&mut self.hidden_q8_qs);
         wipe_f32(&mut self.hidden_q8_d);
-        wipe_i32(&mut self.hidden_q8_bsums);
+        wipe_i16(&mut self.hidden_q8_bsums);
         wipe_f32(&mut self.logits);
         wipe_f32(&mut self.tmp);
         wipe_f32(&mut self.sample_logits_buf);

@@ -1,9 +1,9 @@
 {
-  "library": "/home/peter/projects/olorin1/target/debug/build/olorin-b8f6e5b7101c0541/out/libq4k_quant.so",
+  "library": "/home/peter/projects/olorin1/target/release/build/olorin-83a3a20f43db2862/out/libq4k_quant.so",
   "exports": [
     {
       "name": "quant_f32_q8k",
-      "args": [{"name": "src", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "dst_qs", "type": "*mut i8", "direction": "out", "cap": "n + 12", "count": null}, {"name": "dst_d", "type": "*mut f32", "direction": "out", "cap": "n / 256", "count": null}, {"name": "dst_bsums", "type": "*mut i32", "direction": "out", "cap": "n / 256 * 16", "count": null}, {"name": "n", "type": "i32", "direction": "in", "cap": null, "count": null}],
+      "args": [{"name": "src", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "dst_qs", "type": "*mut i8", "direction": "out", "cap": "n + 12", "count": null}, {"name": "dst_d", "type": "*mut f32", "direction": "out", "cap": "n / 256", "count": null}, {"name": "dst_bsums", "type": "*mut i16", "direction": "out", "cap": "n / 256 * 16", "count": null}, {"name": "n", "type": "i32", "direction": "in", "cap": null, "count": null}],
       "return_type": null
     }
   ],

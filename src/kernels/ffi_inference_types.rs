@@ -14,43 +14,43 @@ pub type I8Dot1RowFn    = unsafe extern "C" fn(*const i8, *const u8, i32) -> i32
 pub type I8Dot4RowFn    = unsafe extern "C" fn(*const i8, *const u8, *const u8, *const u8, *const u8, *mut i32, i32);
 pub type SquaredReluFn  = unsafe extern "C" fn(*const f32, *const f32, *mut f32, i32);
 pub type VecAddFn       = unsafe extern "C" fn(*const f32, *const f32, *mut f32, i32);
-pub type QuantF32Q8kFn  = unsafe extern "C" fn(*const f32, *mut i8, *mut f32, *mut i32, i32);
+pub type QuantF32Q8kFn  = unsafe extern "C" fn(*const f32, *mut i8, *mut f32, *mut i16, i32);
 pub type Q4kDotQ8kFn    = unsafe extern "C" fn(
-    *const u8, *const i8, *const i32,
+    *const u8, *const i8, *const i16,
     i32, *const f32, *const f32) -> f32;
 pub type Q4kDot4RowFn = unsafe extern "C" fn(
     *const u8, *const u8, *const u8, *const u8,
-    *const i8, *const i32,
+    *const i8, *const i16,
     *mut f32, i32, *const f32, *const f32);
 pub type Q4kDot4RowDualFn = unsafe extern "C" fn(
     *const u8, *const u8, *const u8, *const u8,
     *const u8, *const u8, *const u8, *const u8,
-    *const i8, *const i32,
+    *const i8, *const i16,
     *mut f32, *mut f32, i32, *const f32, *const f32);
 pub type Q4kFusedDotFn = unsafe extern "C" fn(
     *const u8, *const f32,
     i32, *const f32, *const f32,
-    *mut f32, *mut i32) -> f32;
+    *mut f32, *mut i16) -> f32;
 pub type Q4kFusedDot4RowFn = unsafe extern "C" fn(
     *const u8, *const u8, *const u8, *const u8,
     *const f32,
     *mut f32, i32,
     *const f32, *const f32, *const f32, *const f32,
     *const f32, *const f32, *const f32, *const f32,
-    *mut f32, *mut i32);
+    *mut f32, *mut i16);
 pub type Q6kDotQ8kFn = unsafe extern "C" fn(
-    *const u8, *const i8, *const i32,
+    *const u8, *const i8, *const i16,
     i32, *const f32) -> f32;
 pub type Q6kDot4RowFn = unsafe extern "C" fn(
     *const u8, *const u8, *const u8, *const u8,
-    *const i8, *const i32, *mut f32, i32,
+    *const i8, *const i16, *mut f32, i32,
     *const f32, *const f32, *const f32, *const f32);
 pub type ApplyRopeFn = unsafe extern "C" fn(*const f32, *const f32, *mut f32, i32, i32);
 #[allow(clippy::type_complexity)]
 pub type Q4kGemm4x4Fn = unsafe extern "C" fn(
     *const u8, *const u8, *const u8, *const u8,
     *const i8, *const i8, *const i8, *const i8,
-    *const i32, *const i32, *const i32, *const i32,
+    *const i16, *const i16, *const i16, *const i16,
     *const u8, *const u8, *const u8, *const u8,
     *const u8, *const u8, *const u8, *const u8,
     *const f32, *const f32, *const f32, *const f32,

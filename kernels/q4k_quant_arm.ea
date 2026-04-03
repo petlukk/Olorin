@@ -9,7 +9,7 @@ export func quant_f32_q8k(
     src: *restrict f32,
     out dst_qs: *mut i8 [cap: n + 12],
     out dst_d: *mut f32 [cap: n / 256],
-    out dst_bsums: *mut i32 [cap: n / 256 * 16],
+    out dst_bsums: *mut i16 [cap: n / 256 * 16],
     n: i32
 ) {
     let blocks: i32 = n / 256
@@ -41,7 +41,7 @@ export func quant_f32_q8k(
             }
             let mut j: i32 = 0
             while j < 16 {
-                dst_bsums[b * 16 + j] = 0
+                dst_bsums[b * 16 + j] = to_i16(0)
                 j = j + 1
             }
         } else {
@@ -74,7 +74,7 @@ export func quant_f32_q8k(
                     sum = sum + to_i32(dst_qs[gbase + k])
                     k = k + 1
                 }
-                dst_bsums[b * 16 + g] = sum
+                dst_bsums[b * 16 + g] = to_i16(sum)
                 g = g + 1
             }
         }
