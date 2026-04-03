@@ -308,6 +308,226 @@ impl LlamaState {
         self.output_proj(model);
     }
 
+    /// Single-token forward pass with per-step profiling.
+    pub fn forward_profiled(&mut self, model: &BitNetModel, token: u32, pos: usize) {
+        use std::time::Instant;
+        let mut t_rmsnorm1 = 0u64;
+        let mut t_quant1 = 0u64;
+        let mut t_qkv = 0u64;
+        let mut t_bias_rope = 0u64;
+        let mut t_kv_store = 0u64;
+        let mut t_attn = 0u64;
+        let mut t_quant_wo = 0u64;
+        let mut t_wo = 0u64;
+        let mut t_rmsnorm2 = 0u64;
+        let mut t_quant2 = 0u64;
+        let mut t_ffn = 0u64;
+        let mut t_quant_down = 0u64;
+        let mut t_down = 0u64;
+
+        embed_token(model, token, &mut self.x);
+        let mut x = std::mem::take(&mut self.x);
+        let h = model.hidden_dim;
+        let hd = model.head_dim;
+        let nh = model.n_heads;
+        let nkv = model.n_kv_heads;
+        let kv = model.kv_dim;
+        let f = model.ffn_dim;
+        let h_nb = q8k_blocks(h);
+        let f_nb = q8k_blocks(f);
+        let h_row_stride = h_nb * Q4K_BLOCK_BYTES;
+        let total = self.pool.thread_count();
+
+        for layer in 0..model.n_layers {
+            let lw = &model.q4k_layers[layer];
+            let wv_bb = lw.wv_block_bytes;
+
+            let t0 = Instant::now();
+            unsafe {
+                ffi::rmsnorm_f32(x.as_ptr(), lw.attn_norm, self.x_norm.as_mut_ptr(), h as i32, model.rms_eps);
+            }
+            t_rmsnorm1 += t0.elapsed().as_micros() as u64;
+
+            let t0 = Instant::now();
+            unsafe {
+                ffi::quant_f32_q8k(self.x_norm.as_ptr(), self.x_q8_qs.as_mut_ptr(),
+                    self.x_q8_d.as_mut_ptr(), self.x_q8_bsums.as_mut_ptr(), h as i32);
+            }
+            t_quant1 += t0.elapsed().as_micros() as u64;
+
+            let t0 = Instant::now();
+            if total >= 3 {
+                let q_t = (total / 2).max(1);
+                let rem = total - q_t;
+                let k_t = rem / 2;
+                let v_t = rem - k_t;
+                let q8p = SendPtr(self.x_q8_qs.as_ptr());
+                let q8d = SendPtr(self.x_q8_d.as_ptr());
+                let q8b = SendPtr(self.x_q8_bsums.as_ptr());
+                let q_out = SendMutPtr(self.q.as_mut_ptr());
+                let k_out = SendMutPtr(self.k.as_mut_ptr());
+                let v_out = SendMutPtr(self.v.as_mut_ptr());
+                let (wq, wk, wv) = (SendPtr(lw.wq), SendPtr(lw.wk), SendPtr(lw.wv));
+                let h_q6k_stride = h_nb * Q6K_BLOCK_BYTES;
+                self.pool.run_split3(
+                    q_t, move |tid, _n| unsafe { q4k_matmul_work(wq.ptr(), h_row_stride, h_nb, q8p.ptr(), q8d.ptr(), q8b.ptr(), q_out.ptr(), h, tid, q_t); },
+                    k_t, move |tid, _n| unsafe { q4k_matmul_work(wk.ptr(), h_row_stride, h_nb, q8p.ptr(), q8d.ptr(), q8b.ptr(), k_out.ptr(), kv, tid, k_t); },
+                    v_t, move |tid, _n| unsafe {
+                        if wv_bb == Q6K_BLOCK_BYTES { q6k_matmul_work(wv.ptr(), h_q6k_stride, h_nb, q8p.ptr(), q8d.ptr(), q8b.ptr(), v_out.ptr(), kv, tid, v_t); }
+                        else { q4k_matmul_work(wv.ptr(), h_row_stride, h_nb, q8p.ptr(), q8d.ptr(), q8b.ptr(), v_out.ptr(), kv, tid, v_t); }
+                    },
+                );
+            } else {
+                q4k_matmul_mt(lw.wq, h_row_stride, h_nb, self.x_q8_qs.as_ptr(), self.x_q8_d.as_ptr(), self.x_q8_bsums.as_ptr(), &mut self.q, h, &self.pool);
+                q4k_matmul_mt(lw.wk, h_row_stride, h_nb, self.x_q8_qs.as_ptr(), self.x_q8_d.as_ptr(), self.x_q8_bsums.as_ptr(), &mut self.k, kv, &self.pool);
+                if wv_bb == Q6K_BLOCK_BYTES {
+                    q6k_matmul_mt(lw.wv, h_nb * Q6K_BLOCK_BYTES, h_nb, self.x_q8_qs.as_ptr(), self.x_q8_d.as_ptr(), self.x_q8_bsums.as_ptr(), &mut self.v, kv, &self.pool);
+                } else {
+                    q4k_matmul_mt(lw.wv, h_row_stride, h_nb, self.x_q8_qs.as_ptr(), self.x_q8_d.as_ptr(), self.x_q8_bsums.as_ptr(), &mut self.v, kv, &self.pool);
+                }
+            }
+            t_qkv += t0.elapsed().as_micros() as u64;
+
+            let t0 = Instant::now();
+            add_bias(&mut self.q, lw.q_bias, h);
+            add_bias(&mut self.k, lw.k_bias, kv);
+            add_bias(&mut self.v, lw.v_bias, kv);
+            build_rope_freqs(&mut self.rope_freqs, hd, pos, model.rope_theta);
+            apply_rope(&mut self.q, &self.rope_freqs, hd, nh);
+            apply_rope(&mut self.k, &self.rope_freqs, hd, nkv);
+            t_bias_rope += t0.elapsed().as_micros() as u64;
+
+            let t0 = Instant::now();
+            self.kv_cache.store(layer, 0, &self.k[..kv], 1).unwrap();
+            self.kv_cache.store(layer, 1, &self.v[..kv], 1).unwrap();
+            if layer == model.n_layers - 1 { self.kv_cache.advance(1).unwrap(); }
+            t_kv_store += t0.elapsed().as_micros() as u64;
+
+            let t0 = Instant::now();
+            let seq_len = pos + 1;
+            let q_per_kv = nh / nkv;
+            let rsqrt_hd = 1.0 / (hd as f32).sqrt();
+            for kv_h in 0..nkv {
+                let k_ptr = self.kv_cache.k_head_ptr(layer, kv_h);
+                let v_ptr = self.kv_cache.v_head_ptr(layer, kv_h);
+                for q_off in 0..q_per_kv {
+                    let q_h = kv_h * q_per_kv + q_off;
+                    let scores = &mut self.attn_scores[q_h * self.max_seq_len..q_h * self.max_seq_len + seq_len];
+                    unsafe {
+                        ffi::attn_dot_f16(self.q[q_h * hd..].as_ptr(), k_ptr, scores.as_mut_ptr(), seq_len as i32, hd as i32);
+                        ffi::softmax_f32(scores.as_mut_ptr(), seq_len as i32, rsqrt_hd);
+                        ffi::attn_vsum_f16(scores.as_ptr(), v_ptr, self.attn_out[q_h * hd..].as_mut_ptr(), seq_len as i32, hd as i32);
+                    }
+                }
+            }
+            t_attn += t0.elapsed().as_micros() as u64;
+
+            let t0 = Instant::now();
+            unsafe {
+                ffi::quant_f32_q8k(self.attn_out.as_ptr(), self.attn_q8_qs.as_mut_ptr(),
+                    self.attn_q8_d.as_mut_ptr(), self.attn_q8_bsums.as_mut_ptr(), h as i32);
+            }
+            t_quant_wo += t0.elapsed().as_micros() as u64;
+
+            let t0 = Instant::now();
+            {
+                let n_thr = self.pool.thread_count().min(h / 4).max(1);
+                let w = SendPtr(lw.wo);
+                let qs = SendPtr(self.attn_q8_qs.as_ptr());
+                let qd = SendPtr(self.attn_q8_d.as_ptr());
+                let qb = SendPtr(self.attn_q8_bsums.as_ptr());
+                let o = SendMutPtr(x.as_mut_ptr());
+                self.pool.run(n_thr, move |tid, _n| unsafe {
+                    q4k_matmul_residual_work(w.ptr(), h_row_stride, h_nb, qs.ptr(), qd.ptr(), qb.ptr(), o.ptr(), h, tid, n_thr);
+                });
+            }
+            t_wo += t0.elapsed().as_micros() as u64;
+
+            let t0 = Instant::now();
+            unsafe {
+                ffi::rmsnorm_f32(x.as_ptr(), lw.ffn_norm, self.x_norm.as_mut_ptr(), h as i32, model.rms_eps);
+            }
+            t_rmsnorm2 += t0.elapsed().as_micros() as u64;
+
+            let t0 = Instant::now();
+            unsafe {
+                ffi::quant_f32_q8k(self.x_norm.as_ptr(), self.x_q8_qs.as_mut_ptr(),
+                    self.x_q8_d.as_mut_ptr(), self.x_q8_bsums.as_mut_ptr(), h as i32);
+            }
+            t_quant2 += t0.elapsed().as_micros() as u64;
+
+            let t0 = Instant::now();
+            {
+                let q8p = SendPtr(self.x_q8_qs.as_ptr());
+                let q8d = SendPtr(self.x_q8_d.as_ptr());
+                let q8b = SendPtr(self.x_q8_bsums.as_ptr());
+                let h_out = SendMutPtr(self.hidden.as_mut_ptr());
+                let (wg, wu) = (SendPtr(lw.w_gate), SendPtr(lw.w_up));
+                self.pool.run(total, move |tid, _n| unsafe {
+                    q4k_fused_gate_up_silu_work(wg.ptr(), wu.ptr(), h_row_stride, h_nb,
+                        q8p.ptr(), q8d.ptr(), q8b.ptr(), h_out.ptr(), f, tid, total);
+                });
+            }
+            t_ffn += t0.elapsed().as_micros() as u64;
+
+            let t0 = Instant::now();
+            unsafe {
+                ffi::quant_f32_q8k(self.hidden.as_ptr(), self.hidden_q8_qs.as_mut_ptr(),
+                    self.hidden_q8_d.as_mut_ptr(), self.hidden_q8_bsums.as_mut_ptr(), f as i32);
+            }
+            t_quant_down += t0.elapsed().as_micros() as u64;
+
+            let t0 = Instant::now();
+            {
+                let n_thr = self.pool.thread_count().min(h / 4).max(1);
+                let w = SendPtr(lw.w_down);
+                let qs = SendPtr(self.hidden_q8_qs.as_ptr());
+                let qd = SendPtr(self.hidden_q8_d.as_ptr());
+                let qb = SendPtr(self.hidden_q8_bsums.as_ptr());
+                let o = SendMutPtr(x.as_mut_ptr());
+                let down_q6k = lw.w_down_block_bytes == Q6K_BLOCK_BYTES;
+                let f_row_stride_q6 = f_nb * Q6K_BLOCK_BYTES;
+                let f_row_stride_q4 = f_nb * Q4K_BLOCK_BYTES;
+                self.pool.run(n_thr, move |tid, _n| unsafe {
+                    if down_q6k {
+                        q6k_matmul_residual_work(w.ptr(), f_row_stride_q6, f_nb, qs.ptr(), qd.ptr(), qb.ptr(), o.ptr(), h, tid, n_thr);
+                    } else {
+                        q4k_matmul_residual_work(w.ptr(), f_row_stride_q4, f_nb, qs.ptr(), qd.ptr(), qb.ptr(), o.ptr(), h, tid, n_thr);
+                    }
+                });
+            }
+            t_down += t0.elapsed().as_micros() as u64;
+        }
+        self.x = x;
+        self.output_proj(model);
+
+        let total_us = t_rmsnorm1 + t_quant1 + t_qkv + t_bias_rope + t_kv_store + t_attn
+            + t_quant_wo + t_wo + t_rmsnorm2 + t_quant2 + t_ffn + t_quant_down + t_down;
+        let ms = |us: u64| us as f64 / 1000.0;
+        let pct = |us: u64| if total_us > 0 { us as f64 / total_us as f64 * 100.0 } else { 0.0 };
+        let nl = model.n_layers;
+        eprintln!("\n--- decode profile (pos={pos}, {nl} layers, {:.1}ms) ---", ms(total_us));
+        eprintln!("┌─────────────────────┬──────────┬───────┐");
+        eprintln!("│ Step                │   ms     │   %   │");
+        eprintln!("├─────────────────────┼──────────┼───────┤");
+        eprintln!("│ rmsnorm (attn)      │ {:7.1} │ {:4.1}% │", ms(t_rmsnorm1), pct(t_rmsnorm1));
+        eprintln!("│ quant_q8k (attn)    │ {:7.1} │ {:4.1}% │", ms(t_quant1), pct(t_quant1));
+        eprintln!("│ QKV matmul          │ {:7.1} │ {:4.1}% │", ms(t_qkv), pct(t_qkv));
+        eprintln!("│ bias+rope           │ {:7.1} │ {:4.1}% │", ms(t_bias_rope), pct(t_bias_rope));
+        eprintln!("│ kv_store (f16)      │ {:7.1} │ {:4.1}% │", ms(t_kv_store), pct(t_kv_store));
+        eprintln!("│ attention (f16)     │ {:7.1} │ {:4.1}% │", ms(t_attn), pct(t_attn));
+        eprintln!("│ quant_q8k (Wo)      │ {:7.1} │ {:4.1}% │", ms(t_quant_wo), pct(t_quant_wo));
+        eprintln!("│ Wo matmul+resid     │ {:7.1} │ {:4.1}% │", ms(t_wo), pct(t_wo));
+        eprintln!("│ rmsnorm (FFN)       │ {:7.1} │ {:4.1}% │", ms(t_rmsnorm2), pct(t_rmsnorm2));
+        eprintln!("│ quant_q8k (FFN)     │ {:7.1} │ {:4.1}% │", ms(t_quant2), pct(t_quant2));
+        eprintln!("│ FFN gate+up+SiLU    │ {:7.1} │ {:4.1}% │", ms(t_ffn), pct(t_ffn));
+        eprintln!("│ quant_q8k (down)    │ {:7.1} │ {:4.1}% │", ms(t_quant_down), pct(t_quant_down));
+        eprintln!("│ down matmul+resid   │ {:7.1} │ {:4.1}% │", ms(t_down), pct(t_down));
+        eprintln!("├─────────────────────┼──────────┼───────┤");
+        eprintln!("│ TOTAL               │ {:7.1} │ 100%  │", ms(total_us));
+        eprintln!("└─────────────────────┴──────────┴───────┘");
+    }
+
     pub fn apply_repetition_penalty(&mut self, generated: &[u32], penalty: f32) {
         if penalty == 1.0 { return; }
         for &tok in generated {
@@ -371,7 +591,8 @@ pub fn generate(
         output.push(next);
         on_token(next);
         if step == 0 { first_tok_ms = first_tok_start.elapsed().as_secs_f64() * 1000.0; }
-        state.forward(model, next, pos);
+        if step == 4 { state.forward_profiled(model, next, pos); }
+        else { state.forward(model, next, pos); }
         pos += 1;
         n_gen += 1;
     }
