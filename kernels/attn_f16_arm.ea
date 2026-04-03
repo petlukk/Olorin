@@ -1,9 +1,8 @@
 // attn_f16_arm.ea — F16 KV-cache attention kernels (ARM NEON)
 //
-// attn_dot_f16: scores[t] = dot(query, f16_to_f32(k_cache[t*hd..]))
-// attn_vsum_f16: out[d] = sum_t(weights[t] * f16_to_f32(v_cache[t*hd+d]))
-//
-// Uses cvt_f16_f32 intrinsic (fcvtl) for SIMD f16→f32 conversion.
+// Uses cvt_f16_f32(i16x4) → f32x4 via fcvtl.
+// Two 4-wide loads + converts per iteration = 8 f16 elements.
+// head_dim is always ≥ 64 and divisible by 8.
 
 #[cfg(aarch64)]
 
@@ -19,21 +18,23 @@ export func attn_dot_f16(
     while t < seq_len {
         let k_off: i32 = t * head_dim
         let mut d: i32 = 0
-        let mut acc: f32x4 = splat(0.0)
+        let mut acc0: f32x4 = splat(0.0)
+        let mut acc1: f32x4 = splat(0.0)
 
-        // 4-wide SIMD loop (ARM NEON = 128-bit)
-        while d + 4 <= head_dim {
-            let kh: i16x4 = load_narrow(kp, k_off + d)
-            let kf: f32x4 = cvt_f16_f32(kh)
-            let q: f32x4 = load(query, d)
-            acc = fma(q, kf, acc)
-            d = d + 4
+        // 8 elements per iteration: 2 × (ldr d + fcvtl + fmla)
+        while d + 8 <= head_dim {
+            let a: i16x4 = load(kp, k_off + d)
+            let b: i16x4 = load(kp, k_off + d + 4)
+            let fa: f32x4 = cvt_f16_f32(a)
+            let fb: f32x4 = cvt_f16_f32(b)
+            let q0: f32x4 = load(query, d)
+            let q1: f32x4 = load(query, d + 4)
+            acc0 = fma(q0, fa, acc0)
+            acc1 = fma(q1, fb, acc1)
+            d = d + 8
         }
 
-        let mut dot: f32 = reduce_add(acc)
-
-        // head_dim is always multiple of 4 for Q4K models, no scalar tail needed
-        scores_out[t] = dot
+        scores_out[t] = reduce_add(acc0) + reduce_add(acc1)
         t = t + 1
     }
 }
@@ -54,28 +55,25 @@ export func attn_vsum_f16(
         store(out, d, zero4)
         d = d + 4
     }
-    while d < head_dim {
-        out[d] = 0.0
-        d = d + 1
-    }
 
-    // Accumulate weighted V rows
+    // Accumulate weighted V rows — 8 elements per iteration
     let mut t: i32 = 0
     while t < seq_len {
         let w: f32x4 = splat(weights[t])
         let v_off: i32 = t * head_dim
         d = 0
 
-        // 4-wide SIMD loop
-        while d + 4 <= head_dim {
-            let vh: i16x4 = load_narrow(vp, v_off + d)
-            let vf: f32x4 = cvt_f16_f32(vh)
-            let cur: f32x4 = load(out, d)
-            store(out, d, fma(w, vf, cur))
-            d = d + 4
+        while d + 8 <= head_dim {
+            let a: i16x4 = load(vp, v_off + d)
+            let b: i16x4 = load(vp, v_off + d + 4)
+            let fa: f32x4 = cvt_f16_f32(a)
+            let fb: f32x4 = cvt_f16_f32(b)
+            let cur0: f32x4 = load(out, d)
+            let cur1: f32x4 = load(out, d + 4)
+            store(out, d, fma(w, fa, cur0))
+            store(out, d + 4, fma(w, fb, cur1))
+            d = d + 8
         }
-
-        // head_dim is always multiple of 4 for Q4K models, no scalar tail needed
 
         t = t + 1
     }

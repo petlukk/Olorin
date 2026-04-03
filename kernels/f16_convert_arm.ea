@@ -1,9 +1,8 @@
 // f16_convert_arm.ea — Bulk f32<->f16 conversion (ARM NEON)
 //
 // Uses cvt_f16_f32/cvt_f32_f16 intrinsics (fcvtl/fcvtn).
-// n must be a multiple of 4 (guaranteed for all inference dimensions).
-// ARM NEON: f16 conversion is 4-wide (64-bit half-register).
-// We load/store i16x4 as the low half of i16x8 via ptr_as_i16 + load.
+// n must be a multiple of 4. load/store are type-directed:
+// let v: i16x4 = load(ptr, i) gives 64-bit ldr d.
 
 #[cfg(aarch64)]
 
@@ -13,11 +12,7 @@ export func f32_to_f16(src: *restrict f32, dst: *mut u16, n: i32) {
     while i + 4 <= n {
         let v: f32x4 = load(src, i)
         let h: i16x4 = cvt_f32_f16(v)
-        // Store 4×i16 (64 bits) — use element stores
-        dp[i] = extract(h, 0)
-        dp[i + 1] = extract(h, 1)
-        dp[i + 2] = extract(h, 2)
-        dp[i + 3] = extract(h, 3)
+        store(dp, i, h)
         i = i + 4
     }
 }
@@ -26,8 +21,7 @@ export func f16_to_f32(src: *restrict u16, dst: *mut f32, n: i32) {
     let sp: *restrict i16 = ptr_as_i16(src)
     let mut i: i32 = 0
     while i + 4 <= n {
-        // Build i16x4 from 4 scalar loads
-        let h: i16x4 = make_i16x4(sp[i], sp[i+1], sp[i+2], sp[i+3])
+        let h: i16x4 = load(sp, i)
         let v: f32x4 = cvt_f16_f32(h)
         store(dst, i, v)
         i = i + 4
