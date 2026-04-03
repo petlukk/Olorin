@@ -124,7 +124,20 @@ export func q4k_gemm_4x4(
             j = j + 1
         }
 
-        // Min correction (identical to x86 — scalar)
+        // Min correction — SIMD bsums pairing via addp_i16
+        let bs0_lo: i16x8 = load(bsums_0, bs_off)
+        let bs0_hi: i16x8 = load(bsums_0, bs_off + 8)
+        let paired0: i16x8 = addp_i16(bs0_lo, bs0_hi)
+        let bs1_lo: i16x8 = load(bsums_1, bs_off)
+        let bs1_hi: i16x8 = load(bsums_1, bs_off + 8)
+        let paired1: i16x8 = addp_i16(bs1_lo, bs1_hi)
+        let bs2_lo: i16x8 = load(bsums_2, bs_off)
+        let bs2_hi: i16x8 = load(bsums_2, bs_off + 8)
+        let paired2: i16x8 = addp_i16(bs2_lo, bs2_hi)
+        let bs3_lo: i16x8 = load(bsums_3, bs_off)
+        let bs3_hi: i16x8 = load(bsums_3, bs_off + 8)
+        let paired3: i16x8 = addp_i16(bs3_lo, bs3_hi)
+
         let mut mb0_t0: i32 = 0
         let mut mb0_t1: i32 = 0
         let mut mb0_t2: i32 = 0
@@ -147,10 +160,10 @@ export func q4k_gemm_4x4(
             let m1: i32 = to_i32(mn1[sc_off + j])
             let m2: i32 = to_i32(mn2[sc_off + j])
             let m3: i32 = to_i32(mn3[sc_off + j])
-            let bp0: i32 = to_i32(bsums_0[bs_off + 2*j]) + to_i32(bsums_0[bs_off + 2*j+1])
-            let bp1: i32 = to_i32(bsums_1[bs_off + 2*j]) + to_i32(bsums_1[bs_off + 2*j+1])
-            let bp2: i32 = to_i32(bsums_2[bs_off + 2*j]) + to_i32(bsums_2[bs_off + 2*j+1])
-            let bp3: i32 = to_i32(bsums_3[bs_off + 2*j]) + to_i32(bsums_3[bs_off + 2*j+1])
+            let bp0: i32 = to_i32(paired0[j])
+            let bp1: i32 = to_i32(paired1[j])
+            let bp2: i32 = to_i32(paired2[j])
+            let bp3: i32 = to_i32(paired3[j])
             mb0_t0 = mb0_t0 + m0 * bp0
             mb0_t1 = mb0_t1 + m0 * bp1
             mb0_t2 = mb0_t2 + m0 * bp2
