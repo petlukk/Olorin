@@ -13,7 +13,9 @@
 
 ## Principle
 
-Every step in the pipeline must match llama.cpp exactly. No extra passes, no security features (TurboQuant, JL-rotation), no Olorin-specific attention kernels. Dead code gets deleted — not commented, not feature-flagged.
+Every step in the pipeline must match llama.cpp exactly. No extra passes, no TurboQuant KV quantization or JL-rotation in the KV cache, no Olorin-specific attention kernels. Dead code gets deleted — not commented, not feature-flagged.
+
+**Note:** Only the KV cache path changes. All other security stays: Vault (encrypted storage), SecureBuffer (mlock + SIMD zeroize), FusedSearcher, safety pipeline, shell guard. Those are outside the inference pipeline and untouched.
 
 Hard rules apply: no file > 500 lines, no fake functions, no silent fallbacks, delete don't comment.
 
