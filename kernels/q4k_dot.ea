@@ -40,6 +40,21 @@ func row_mins(p: *restrict u8, sp: i32, bsums: *restrict i16, bs: i32) -> i32 {
     return reduce_add(madd_i16(mins, bp))
 }
 
+// Mins correction with pre-paired bsums (avoids redundant hadd in 4row/dual).
+func row_mins_bp(p: *restrict u8, sp: i32, bp: i16x8) -> i32 {
+    let mins: i16x8 = [
+        to_i16(ubyte(p, sp + 4) & 63),
+        to_i16(ubyte(p, sp + 5) & 63),
+        to_i16(ubyte(p, sp + 6) & 63),
+        to_i16(ubyte(p, sp + 7) & 63),
+        to_i16((ubyte(p, sp + 8) >> 4) | ((ubyte(p, sp + 4) >> 6) << 4)),
+        to_i16((ubyte(p, sp + 9) >> 4) | ((ubyte(p, sp + 5) >> 6) << 4)),
+        to_i16((ubyte(p, sp + 10) >> 4) | ((ubyte(p, sp + 6) >> 6) << 4)),
+        to_i16((ubyte(p, sp + 11) >> 4) | ((ubyte(p, sp + 7) >> 6) << 4))
+    ]
+    return reduce_add(madd_i16(mins, bp))
+}
+
 // Vector-accumulating dot for one Q4K block (256 elements).
 // Pre-extracts all 8 scales from 2 × u32 reads, then splat + madd_i16.
 func dot_block_vec(
@@ -141,11 +156,16 @@ export func q4k_dot_q8k_4row(
         let s2: i32 = reduce_add(dot_block_vec(rw2, nib, q8, q8o, sp, mask_lo, shift4))
         let s3: i32 = reduce_add(dot_block_vec(rw3, nib, q8, q8o, sp, mask_lo, shift4))
 
+        // Hoist bsums pairing — shared across all 4 rows
+        let blo: i16x8 = load(bsums, bs)
+        let bhi: i16x8 = load(bsums, bs + 8)
+        let paired: i16x8 = hadd_i16(blo, bhi)
+
         let qd: f32 = q8_d[blk]
-        res0 = res0 + f16_load(rw0, bp, pow2) * qd * to_f32(s0) - f16_load(rw0, bp+2, pow2) * qd * to_f32(row_mins(rw0, sp, bsums, bs))
-        res1 = res1 + f16_load(rw1, bp, pow2) * qd * to_f32(s1) - f16_load(rw1, bp+2, pow2) * qd * to_f32(row_mins(rw1, sp, bsums, bs))
-        res2 = res2 + f16_load(rw2, bp, pow2) * qd * to_f32(s2) - f16_load(rw2, bp+2, pow2) * qd * to_f32(row_mins(rw2, sp, bsums, bs))
-        res3 = res3 + f16_load(rw3, bp, pow2) * qd * to_f32(s3) - f16_load(rw3, bp+2, pow2) * qd * to_f32(row_mins(rw3, sp, bsums, bs))
+        res0 = res0 + f16_load(rw0, bp, pow2) * qd * to_f32(s0) - f16_load(rw0, bp+2, pow2) * qd * to_f32(row_mins_bp(rw0, sp, paired))
+        res1 = res1 + f16_load(rw1, bp, pow2) * qd * to_f32(s1) - f16_load(rw1, bp+2, pow2) * qd * to_f32(row_mins_bp(rw1, sp, paired))
+        res2 = res2 + f16_load(rw2, bp, pow2) * qd * to_f32(s2) - f16_load(rw2, bp+2, pow2) * qd * to_f32(row_mins_bp(rw2, sp, paired))
+        res3 = res3 + f16_load(rw3, bp, pow2) * qd * to_f32(s3) - f16_load(rw3, bp+2, pow2) * qd * to_f32(row_mins_bp(rw3, sp, paired))
 
         blk = blk + 1
     }
@@ -191,15 +211,20 @@ export func q4k_dot_q8k_4row_dual(
         let us2: i32 = reduce_add(dot_block_vec(uw2, nib, q8, q8o, sp, mask_lo, shift4))
         let us3: i32 = reduce_add(dot_block_vec(uw3, nib, q8, q8o, sp, mask_lo, shift4))
 
+        // Hoist bsums pairing — shared across all 8 rows
+        let blo: i16x8 = load(bsums, bs)
+        let bhi: i16x8 = load(bsums, bs + 8)
+        let paired: i16x8 = hadd_i16(blo, bhi)
+
         let qd: f32 = q8_d[blk]
-        gr0 = gr0 + f16_load(gw0, bp, pow2)*qd*to_f32(gs0) - f16_load(gw0, bp+2, pow2)*qd*to_f32(row_mins(gw0, sp, bsums, bs))
-        gr1 = gr1 + f16_load(gw1, bp, pow2)*qd*to_f32(gs1) - f16_load(gw1, bp+2, pow2)*qd*to_f32(row_mins(gw1, sp, bsums, bs))
-        gr2 = gr2 + f16_load(gw2, bp, pow2)*qd*to_f32(gs2) - f16_load(gw2, bp+2, pow2)*qd*to_f32(row_mins(gw2, sp, bsums, bs))
-        gr3 = gr3 + f16_load(gw3, bp, pow2)*qd*to_f32(gs3) - f16_load(gw3, bp+2, pow2)*qd*to_f32(row_mins(gw3, sp, bsums, bs))
-        ur0 = ur0 + f16_load(uw0, bp, pow2)*qd*to_f32(us0) - f16_load(uw0, bp+2, pow2)*qd*to_f32(row_mins(uw0, sp, bsums, bs))
-        ur1 = ur1 + f16_load(uw1, bp, pow2)*qd*to_f32(us1) - f16_load(uw1, bp+2, pow2)*qd*to_f32(row_mins(uw1, sp, bsums, bs))
-        ur2 = ur2 + f16_load(uw2, bp, pow2)*qd*to_f32(us2) - f16_load(uw2, bp+2, pow2)*qd*to_f32(row_mins(uw2, sp, bsums, bs))
-        ur3 = ur3 + f16_load(uw3, bp, pow2)*qd*to_f32(us3) - f16_load(uw3, bp+2, pow2)*qd*to_f32(row_mins(uw3, sp, bsums, bs))
+        gr0 = gr0 + f16_load(gw0, bp, pow2)*qd*to_f32(gs0) - f16_load(gw0, bp+2, pow2)*qd*to_f32(row_mins_bp(gw0, sp, paired))
+        gr1 = gr1 + f16_load(gw1, bp, pow2)*qd*to_f32(gs1) - f16_load(gw1, bp+2, pow2)*qd*to_f32(row_mins_bp(gw1, sp, paired))
+        gr2 = gr2 + f16_load(gw2, bp, pow2)*qd*to_f32(gs2) - f16_load(gw2, bp+2, pow2)*qd*to_f32(row_mins_bp(gw2, sp, paired))
+        gr3 = gr3 + f16_load(gw3, bp, pow2)*qd*to_f32(gs3) - f16_load(gw3, bp+2, pow2)*qd*to_f32(row_mins_bp(gw3, sp, paired))
+        ur0 = ur0 + f16_load(uw0, bp, pow2)*qd*to_f32(us0) - f16_load(uw0, bp+2, pow2)*qd*to_f32(row_mins_bp(uw0, sp, paired))
+        ur1 = ur1 + f16_load(uw1, bp, pow2)*qd*to_f32(us1) - f16_load(uw1, bp+2, pow2)*qd*to_f32(row_mins_bp(uw1, sp, paired))
+        ur2 = ur2 + f16_load(uw2, bp, pow2)*qd*to_f32(us2) - f16_load(uw2, bp+2, pow2)*qd*to_f32(row_mins_bp(uw2, sp, paired))
+        ur3 = ur3 + f16_load(uw3, bp, pow2)*qd*to_f32(us3) - f16_load(uw3, bp+2, pow2)*qd*to_f32(row_mins_bp(uw3, sp, paired))
 
         blk = blk + 1
     }
