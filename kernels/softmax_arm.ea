@@ -1,0 +1,97 @@
+// softmax_arm.ea — In-place scaled softmax (ARM NEON)
+//
+// 1. Scale, 2. Find max, 3. Subtract max, 4. Exp, 5. Sum, 6. Normalize
+// Fast exp via degree-6 polynomial approximation.
+
+#[cfg(aarch64)]
+
+func fast_exp_vec(x: f32x4) -> f32x4 {
+    let lo: f32x4 = splat(-88.0)
+    let hi: f32x4 = splat(88.0)
+    let clamped: f32x4 = min(max(x, lo), hi)
+
+    let c1: f32x4 = splat(1.0)
+    let c2: f32x4 = splat(0.5)
+    let c3: f32x4 = splat(0.16666667)
+    let c4: f32x4 = splat(0.041666668)
+    let c5: f32x4 = splat(0.008333334)
+    let c6: f32x4 = splat(0.001388889)
+
+    let mut r: f32x4 = fma(clamped, c6, c5)
+    r = fma(clamped, r, c4)
+    r = fma(clamped, r, c3)
+    r = fma(clamped, r, c2)
+    r = fma(clamped, r, c1)
+    r = fma(clamped, r, c1)
+    return r
+}
+
+func fast_exp_scalar(x: f32) -> f32 {
+    let mut cx: f32 = x
+    if cx < -88.0 { cx = -88.0 }
+    if cx > 88.0 { cx = 88.0 }
+    let mut r: f32 = cx * 0.001388889
+    r = cx * (0.008333334 + r)
+    r = cx * (0.041666668 + r)
+    r = cx * (0.16666667 + r)
+    r = cx * (0.5 + r)
+    r = cx * (1.0 + r)
+    r = 1.0 + r
+    return r
+}
+
+export func softmax_f32(data: *mut f32, n: i32, scale: f32) {
+    // Pass 1: Scale and find max
+    let v_scale: f32x4 = splat(scale)
+    let mut v_max: f32x4 = splat(-1000000.0)
+    let mut i: i32 = 0
+
+    while i + 4 <= n {
+        let v: f32x4 = load(data, i) .* v_scale
+        store(data, i, v)
+        v_max = max(v_max, v)
+        i = i + 4
+    }
+
+    let mut m: f32 = reduce_max(v_max)
+    while i < n {
+        data[i] = data[i] * scale
+        if data[i] > m { m = data[i] }
+        i = i + 1
+    }
+
+    // Pass 2: Subtract max, compute exp, accumulate sum
+    let v_m: f32x4 = splat(m)
+    let mut v_sum: f32x4 = splat(0.0)
+    i = 0
+
+    while i + 4 <= n {
+        let v: f32x4 = load(data, i) .- v_m
+        let e: f32x4 = fast_exp_vec(v)
+        store(data, i, e)
+        v_sum = v_sum .+ e
+        i = i + 4
+    }
+
+    let mut s: f32 = reduce_add(v_sum)
+    while i < n {
+        let e: f32 = fast_exp_scalar(data[i] - m)
+        data[i] = e
+        s = s + e
+        i = i + 1
+    }
+
+    // Pass 3: Normalize
+    let inv_s: f32 = 1.0 / s
+    let v_inv: f32x4 = splat(inv_s)
+    i = 0
+
+    while i + 4 <= n {
+        store(data, i, load(data, i) .* v_inv)
+        i = i + 4
+    }
+    while i < n {
+        data[i] = data[i] * inv_s
+        i = i + 1
+    }
+}

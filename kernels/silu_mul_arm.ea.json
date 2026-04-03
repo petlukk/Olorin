@@ -1,0 +1,12 @@
+{
+  "library": "",
+  "exports": [
+    {
+      "name": "silu_mul_f32",
+      "args": [{"name": "gate", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "up", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "out", "type": "*mut f32", "direction": "in", "cap": null, "count": null}, {"name": "n", "type": "i32", "direction": "in", "cap": null, "count": null}],
+      "return_type": null
+    }
+  ],
+  "structs": [
+  ]
+}

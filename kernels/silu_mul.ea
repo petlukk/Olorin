@@ -1,0 +1,73 @@
+// silu_mul.ea — Fused SiLU(gate) * up (x86 AVX2)
+//
+// out[i] = (gate[i] / (1 + exp(-gate[i]))) * up[i]
+//        = gate[i] * sigmoid(gate[i]) * up[i]
+//
+// Fast exp via degree-6 polynomial for sigmoid.
+
+#[cfg(x86_64)]
+
+func fast_exp_vec(x: f32x8) -> f32x8 {
+    let lo: f32x8 = splat(-88.0)
+    let hi: f32x8 = splat(88.0)
+    let clamped: f32x8 = min(max(x, lo), hi)
+
+    let c1: f32x8 = splat(1.0)
+    let c2: f32x8 = splat(0.5)
+    let c3: f32x8 = splat(0.16666667)
+    let c4: f32x8 = splat(0.041666668)
+    let c5: f32x8 = splat(0.008333334)
+    let c6: f32x8 = splat(0.001388889)
+
+    let mut r: f32x8 = fma(clamped, c6, c5)
+    r = fma(clamped, r, c4)
+    r = fma(clamped, r, c3)
+    r = fma(clamped, r, c2)
+    r = fma(clamped, r, c1)
+    r = fma(clamped, r, c1)
+    return r
+}
+
+func fast_exp_scalar(x: f32) -> f32 {
+    let mut cx: f32 = x
+    if cx < -88.0 { cx = -88.0 }
+    if cx > 88.0 { cx = 88.0 }
+    let mut r: f32 = cx * 0.001388889
+    r = cx * (0.008333334 + r)
+    r = cx * (0.041666668 + r)
+    r = cx * (0.16666667 + r)
+    r = cx * (0.5 + r)
+    r = cx * (1.0 + r)
+    r = 1.0 + r
+    return r
+}
+
+export func silu_mul_f32(gate: *restrict f32, up: *restrict f32, out: *mut f32, n: i32) {
+    let one: f32x8 = splat(1.0)
+    let zero: f32x8 = splat(0.0)
+    let mut i: i32 = 0
+
+    // Main SIMD loop: 8-wide
+    while i + 8 <= n {
+        let g: f32x8 = load(gate, i)
+        let u: f32x8 = load(up, i)
+
+        // sigmoid(g) = 1 / (1 + exp(-g))
+        let neg_g: f32x8 = zero .- g
+        let exp_neg: f32x8 = fast_exp_vec(neg_g)
+        let sig: f32x8 = one ./ (one .+ exp_neg)
+
+        // silu(g) * up = g * sigmoid(g) * up
+        store(out, i, g .* sig .* u)
+        i = i + 8
+    }
+
+    // Scalar tail
+    while i < n {
+        let g: f32 = gate[i]
+        let exp_neg: f32 = fast_exp_scalar(0.0 - g)
+        let sig: f32 = 1.0 / (1.0 + exp_neg)
+        out[i] = g * sig * up[i]
+        i = i + 1
+    }
+}

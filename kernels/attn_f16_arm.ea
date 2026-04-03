@@ -1,0 +1,86 @@
+// attn_f16_arm.ea — F16 KV-cache attention kernels (ARM NEON)
+//
+// attn_dot_f16: scores[t] = dot(query, f16_to_f32(k_cache[t*hd..]))
+// attn_vsum_f16: out[d] = sum_t(weights[t] * f16_to_f32(v_cache[t*hd+d]))
+//
+// F16->f32 via bit manipulation + ptr_as reinterpret.
+
+#[cfg(aarch64)]
+
+func read_u16(p: *restrict u16, off: i32) -> i32 {
+    return to_i32(p[off]) & 65535
+}
+
+func cvt_f16_f32(p: *restrict u16, off: i32, tmp: *mut i32) -> f32 {
+    let raw: i32 = read_u16(p, off)
+    let exp: i32 = (raw >> 10) & 31
+    if exp == 0 { return 0.0 }
+    let sign: i32 = (raw >> 15) & 1
+    let mant: i32 = raw & 1023
+    let f32_bits: i32 = (sign << 31) | ((exp + 112) << 23) | (mant << 13)
+    tmp[0] = f32_bits
+    let fp: *mut f32 = ptr_as_f32(tmp)
+    return fp[0]
+}
+
+export func attn_dot_f16(
+    query: *restrict f32,
+    k_cache: *restrict u16,
+    scores_out: *mut f32,
+    seq_len: i32,
+    head_dim: i32,
+    tmp: *mut i32
+) {
+    let mut t: i32 = 0
+    while t < seq_len {
+        let k_off: i32 = t * head_dim
+        let mut d: i32 = 0
+        let mut dot: f32 = 0.0
+
+        while d < head_dim {
+            let kf: f32 = cvt_f16_f32(k_cache, k_off + d, tmp)
+            dot = dot + query[d] * kf
+            d = d + 1
+        }
+
+        scores_out[t] = dot
+        t = t + 1
+    }
+}
+
+export func attn_vsum_f16(
+    weights: *restrict f32,
+    v_cache: *restrict u16,
+    out: *mut f32,
+    seq_len: i32,
+    head_dim: i32,
+    tmp: *mut i32
+) {
+    // Zero output via SIMD
+    let mut d: i32 = 0
+    let zero: f32x4 = splat(0.0)
+    while d + 4 <= head_dim {
+        store(out, d, zero)
+        d = d + 4
+    }
+    while d < head_dim {
+        out[d] = 0.0
+        d = d + 1
+    }
+
+    // Accumulate weighted V rows
+    let mut t: i32 = 0
+    while t < seq_len {
+        let w: f32 = weights[t]
+        let v_off: i32 = t * head_dim
+        d = 0
+
+        while d < head_dim {
+            let vf: f32 = cvt_f16_f32(v_cache, v_off + d, tmp)
+            out[d] = out[d] + w * vf
+            d = d + 1
+        }
+
+        t = t + 1
+    }
+}
