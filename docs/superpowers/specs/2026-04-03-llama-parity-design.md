@@ -10,6 +10,8 @@ Every step in the pipeline must match llama.cpp exactly. No extra passes, no sec
 
 Hard rules apply: no file > 500 lines, no fake functions, no silent fallbacks, delete don't comment.
 
+**Olorin is Eä's showcase.** Every SIMD operation must be an Eä kernel compiled through eacompute. No Rust scalar fallbacks where SIMD is possible. This includes f32→f16 conversion, attention dot products, V summation, and SiLU. Subagents must not simplify kernel code to scalar Rust.
+
 ## Pipeline (per layer, decode)
 
 Identical to llama.cpp `llama_decode_internal` → `llm_build_llama`:
@@ -29,7 +31,7 @@ for layer in 0..n_layers:
    10. kv_store(K → cache_f16)         — NEW: f32→f16 store
    11. kv_store(V → cache_f16)         — NEW: f32→f16 store
    12. scores = Q · K_cache^T / √hd    — NEW kernel: attn_dot_f16
-   13. softmax(scores)                 — Rust scalar (matches llama.cpp)
+   13. softmax(scores)                 — Eä kernel: softmax_f32
    14. attn_out = scores · V_cache     — NEW kernel: attn_vsum_f16
    15. quant(attn_out) → q8k           — kernel: quant_f32_q8k
    16. x += matmul(wo, q8k)            — kernel: q4k_dot_q8k + residual
@@ -37,7 +39,7 @@ for layer in 0..n_layers:
    18. quant(x_norm) → q8k             — kernel: quant_f32_q8k
    19. gate = matmul(w_gate, q8k)      — kernel: q4k_dot_q8k
    20. up = matmul(w_up, q8k)          — kernel: q4k_dot_q8k
-   21. hidden = silu(gate) * up         — Rust scalar (or fused kernel)
+   21. hidden = silu(gate) * up         — Eä kernel: silu_mul
    22. quant(hidden) → q8k             — kernel: quant_f32_q8k
    23. x += matmul(w_down, q8k)        — kernel: q4k_dot_q8k + residual
 final rmsnorm + output_proj
@@ -73,7 +75,7 @@ pub struct F16KvCache {
 - Total per layer: `2 * n_kv_heads * max_seq_len * head_dim * 2` bytes
 - Llama 3.2 3B (28 layers, 8 KV heads, 128 dim, 2048 seq): 2 * 8 * 2048 * 128 * 2 * 28 = 117MB
 
-**f32→f16 conversion:** Use Eä `f32_to_f16` kernel on ARM (vcvt), Rust scalar on x86 (not perf-critical on store path).
+**f32→f16 conversion:** Eä kernel on both ARM (`fcvtn`) and x86 (`vcvtps2ph`). No Rust scalar — Olorin showcases Eä.
 
 **No:** TurboRotate, quantize_simd, jl_signs, fwht, sign_flip. None of it.
 
@@ -191,7 +193,9 @@ One benchmark per kernel in the pipeline. Each follows the q4k_dot_bench pattern
 | `benchmarks/q4k_dot_bench/` | `q4k_dot_q8k` | ✓ already exists |
 | `benchmarks/rope_bench/` | `rope` | llama.cpp `ggml_rope` |
 | `benchmarks/attn_f16_bench/` | `attn_dot_f16` + `attn_vsum_f16` | llama.cpp attention loop |
-| `benchmarks/silu_bench/` | SiLU (if kernelized) | scalar reference |
+| `benchmarks/silu_bench/` | `silu_mul` | scalar reference |
+| `benchmarks/softmax_bench/` | `softmax_f32` | scalar reference |
+| `benchmarks/f16_convert_bench/` | `f32_to_f16` + `f16_to_f32` | scalar reference |
 
 Each benchmark:
 - `bench.c` — test harness with deterministic RNG, correctness check, timing
