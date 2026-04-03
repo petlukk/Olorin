@@ -4,13 +4,12 @@
 use crate::kernels::ffi_inference as ffi;
 use crate::inference::forward::{apply_rope, build_rope_freqs};
 use crate::inference::forward_llama::{LlamaState, embed_token, add_bias, q8k_blocks};
-use crate::inference::math::softmax_rows;
 use crate::inference::gemm_q4k::{BatchQ8K, q4k_gemm_mt, q4k_fused_silu_gemm_mt};
 use crate::inference::gemm_q6k::q6k_gemm_mt;
 use crate::inference::matmul_q4k::Q4K_BLOCK_BYTES;
 use crate::inference::matmul_q6k::Q6K_BLOCK_BYTES;
 use crate::inference::engine::BitNetModel;
-use crate::inference::cache;
+use crate::kernels::ffi_inference as ffi_inf;
 
 /// Opaque pointer wrapper for vecadd thread dispatch.
 #[derive(Clone, Copy)]
@@ -58,7 +57,7 @@ impl LlamaState {
         let mut t_wo_gemm = 0u64;
         let mut t_resid1 = 0u64;
         let mut t_rmsnorm2 = 0u64;
-        let mut t_quant2 = 0u64;
+        let _t_quant2 = 0u64;
         let mut t_ffn_gemm = 0u64;
         let mut t_quant_down = 0u64;
         let mut t_down_gemm = 0u64;
@@ -126,114 +125,55 @@ impl LlamaState {
             }
 
             t_qkv_gemm += _t0.elapsed().as_micros() as u64;
-            // ── Attention: batch bias+RoPE, bulk KV append, sequential scoring ──
+            // ── Attention: batch bias+RoPE, KV store, f16 attention ──
             let _t0 = std::time::Instant::now();
             for t in 0..n {
                 add_bias(&mut qs_all[t*h..(t+1)*h], lw.q_bias, h);
+                add_bias(&mut ks_all[t*kv..(t+1)*kv], lw.k_bias, kv);
                 add_bias(&mut vs_all[t*kv..(t+1)*kv], lw.v_bias, kv);
             }
             let mut rope_freqs = vec![0.0f32; hd];
-            let pos_base = self.kv_cache.seq_len() as usize;
+            let pos_base = self.kv_cache.seq_len();
             for t in 0..n {
                 build_rope_freqs(&mut rope_freqs, hd, pos_base + t, model.rope_theta);
                 apply_rope(&mut qs_all[t*h..(t+1)*h], &rope_freqs, hd, nh);
                 apply_rope(&mut ks_all[t*kv..(t+1)*kv], &rope_freqs, hd, nkv);
             }
             t_bias_rope += _t0.elapsed().as_micros() as u64;
-            // Bulk KV append: all N tokens at once (head-major within each token)
+            // KV store: token-major, F16KvCache handles scatter
             let _t0 = std::time::Instant::now();
-            // append() uses self.seq_len as write position, n_tokens controls how many.
-            // Data must be head-major: [head][n_tokens * head_dim]
-            // But ks_all is token-major: [token][kv_heads * head_dim]
-            // Transpose to head-major for bulk append:
-            {
-                let mut k_hm = vec![0.0f32; n * kv];  // head-major
-                let mut v_hm = vec![0.0f32; n * kv];
-                for h_idx in 0..nkv {
-                    for t in 0..n {
-                        let src_off = t * kv + h_idx * hd;
-                        let dst_off = h_idx * n * hd + t * hd;
-                        k_hm[dst_off..dst_off+hd].copy_from_slice(&ks_all[src_off..src_off+hd]);
-                        v_hm[dst_off..dst_off+hd].copy_from_slice(&vs_all[src_off..src_off+hd]);
-                    }
-                }
-                self.kv_cache.append(&k_hm, layer as i32, 0, n as i32).unwrap();
-                self.kv_cache.append(&v_hm, layer as i32, 1, n as i32).unwrap();
-                if layer == model.n_layers - 1 { self.kv_cache.advance(n as i32).unwrap(); }
-            }
+            self.kv_cache.store(layer, 0, &ks_all[..n*kv], n).unwrap();
+            self.kv_cache.store(layer, 1, &vs_all[..n*kv], n).unwrap();
+            if layer == model.n_layers - 1 { self.kv_cache.advance(n).unwrap(); }
 
             t_kv_append += _t0.elapsed().as_micros() as u64;
 
             let _t0 = std::time::Instant::now();
-            let has_k_bias = !lw.k_bias.is_null();
-            let seq_len = pos_base + n;
-
-            if !has_k_bias && hd == 128 && ffi::has_fused_causal_attn() {
-                // Flash causal attention: single kernel for all N queries
-                let signs = self.kv_cache.jl_signs();
-                let n_groups = (nh * hd) / 64;
-                for t in 0..n {
-                    for g in 0..n_groups {
-                        let off = t * h + g * 64;
+            // Per-token f16 attention
+            let q_per_kv = nh / nkv;
+            let rsqrt_hd = 1.0 / (hd as f32).sqrt();
+            for t in 0..n {
+                let causal_len = pos_base + t + 1;
+                let qt = &qs_all[t*h..(t+1)*h];
+                for kv_h in 0..nkv {
+                    let k_ptr = self.kv_cache.k_head_ptr(layer, kv_h);
+                    let v_ptr = self.kv_cache.v_head_ptr(layer, kv_h);
+                    for q_off in 0..q_per_kv {
+                        let q_h = kv_h * q_per_kv + q_off;
+                        let mut scores = vec![0.0f32; causal_len];
                         unsafe {
-                            crate::kernels::ffi::turbo_rotate(
-                                qs_all.as_mut_ptr().add(off), signs.as_ptr(), 64,
+                            ffi_inf::attn_dot_f16(
+                                qt[q_h * hd..].as_ptr(), k_ptr,
+                                scores.as_mut_ptr(), causal_len as i32, hd as i32,
+                            );
+                            ffi_inf::softmax_f32(scores.as_mut_ptr(), causal_len as i32, rsqrt_hd);
+                            ffi_inf::attn_vsum_f16(
+                                scores.as_ptr(), v_ptr,
+                                attn_all[t*h + q_h*hd..].as_mut_ptr(),
+                                causal_len as i32, hd as i32,
                             );
                         }
                     }
-                }
-                let (k_w, k_s, k_b) = self.kv_cache.k_ptrs(layer as i32);
-                let (v_w, v_s, v_b) = self.kv_cache.v_ptrs(layer as i32);
-                let gph = self.kv_cache.groups_per_head();
-                let mut state = vec![0.0f32; n * nh * 130];
-                unsafe {
-                    ffi::fused_causal_attn_gqa(
-                        qs_all.as_ptr(), k_w, k_s, k_b, v_w, v_s, v_b,
-                        state.as_mut_ptr(), attn_all.as_mut_ptr(),
-                        seq_len as i32, n as i32, nh as i32, nkv as i32, gph,
-                    );
-                }
-                let n_out_groups = (nh * hd) / 64;
-                for t in 0..n {
-                    for g in 0..n_out_groups {
-                        let off = t * h + g * 64;
-                        unsafe {
-                            let ptr = attn_all.as_mut_ptr().add(off);
-                            crate::kernels::ffi::fwht_inplace(ptr, 64);
-                            crate::kernels::ffi::sign_flip(ptr, signs.as_ptr(), 64);
-                        }
-                    }
-                }
-            } else {
-                // Per-token 3-pass attention (with K-bias correction)
-                let max_scores = nh * seq_len;
-                let mut scores = vec![0.0f32; max_scores];
-                for t in 0..n {
-                    let qt = &qs_all[t*h..(t+1)*h];
-                    cache::attention::attention_scores(&self.kv_cache, qt, layer as i32, nh as i32, nkv as i32, (pos_base + t + 1) as i32, &mut scores[..nh*(pos_base+t+1)]);
-                    if has_k_bias {
-                        let q_per_kv = nh / nkv;
-                        let rsqrt_hd = 1.0 / (hd as f32).sqrt();
-                        let sl = pos_base + t + 1;
-                        let mut rotated_bias = vec![0.0f32; kv];
-                        let mut bias_freqs = vec![0.0f32; hd];
-                        for s in 0..sl {
-                            for i in 0..kv { rotated_bias[i] = unsafe { *lw.k_bias.add(i) }; }
-                            build_rope_freqs(&mut bias_freqs, hd, s, model.rope_theta);
-                            apply_rope(&mut rotated_bias, &bias_freqs, hd, nkv);
-                            for kv_h in 0..nkv {
-                                let kb_off = kv_h * hd;
-                                for q_off in 0..q_per_kv {
-                                    let q_h = kv_h * q_per_kv + q_off;
-                                    let mut dot = 0.0f32;
-                                    for d in 0..hd { dot += qt[q_h*hd+d] * rotated_bias[kb_off+d]; }
-                                    scores[q_h * sl + s] += dot * rsqrt_hd;
-                                }
-                            }
-                        }
-                    }
-                    softmax_rows(&mut scores[..nh*(pos_base+t+1)], nh, pos_base + t + 1);
-                    cache::attention::attention_output(&self.kv_cache, &scores[..nh*(pos_base+t+1)], layer as i32, nh as i32, nkv as i32, (pos_base + t + 1) as i32, &mut attn_all[t*h..(t+1)*h]);
                 }
             }
 
