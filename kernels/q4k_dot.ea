@@ -16,77 +16,78 @@ func f16_load(p: *restrict u8, off: i32, pow2: *restrict f32) -> f32 {
     if exp == 0 { return 0.0 } else { return pow2[exp] * (1.0 + to_f32(raw & 1023) * 0.0009765625) }
 }
 
-func get_scale(p: *restrict u8, sp: i32, j: i32) -> i32 {
-    if j < 2 {
-        return ubyte(p, sp + j*2) & 63
-    }
-    return (ubyte(p, sp + j*2 + 4) & 15) | ((ubyte(p, sp + j*2 - 4) >> 6) << 4)
-}
-
-func get_scale_hi(p: *restrict u8, sp: i32, j: i32) -> i32 {
-    if j < 2 {
-        return ubyte(p, sp + j*2 + 1) & 63
-    }
-    return (ubyte(p, sp + j*2 + 5) & 15) | ((ubyte(p, sp + j*2 - 3) >> 6) << 4)
-}
-
-// Mins correction — SIMD bsums pairing via hadd_i16 (phaddw), scalar mins multiply.
+// Mins correction — fully SIMD: hadd_i16 + vector literal mins + madd_i16.
+// Matches llama.cpp: phaddw + pinsrw(mins) + pmaddwd + reduce.
 func row_mins(p: *restrict u8, sp: i32, bsums: *restrict i16, bs: i32) -> i32 {
     // SIMD bsums pairing: load 16 × i16, hadd → 8 × i16
     let bs_lo: i16x8 = load(bsums, bs)
     let bs_hi: i16x8 = load(bsums, bs + 8)
     let bp: i16x8 = hadd_i16(bs_lo, bs_hi)
 
-    return (ubyte(p, sp + 4) & 63) * to_i32(bp[0])
-         + (ubyte(p, sp + 5) & 63) * to_i32(bp[1])
-         + (ubyte(p, sp + 6) & 63) * to_i32(bp[2])
-         + (ubyte(p, sp + 7) & 63) * to_i32(bp[3])
-         + ((ubyte(p, sp + 8) >> 4) | ((ubyte(p, sp + 4) >> 6) << 4)) * to_i32(bp[4])
-         + ((ubyte(p, sp + 9) >> 4) | ((ubyte(p, sp + 5) >> 6) << 4)) * to_i32(bp[5])
-         + ((ubyte(p, sp + 10) >> 4) | ((ubyte(p, sp + 6) >> 6) << 4)) * to_i32(bp[6])
-         + ((ubyte(p, sp + 11) >> 4) | ((ubyte(p, sp + 7) >> 6) << 4)) * to_i32(bp[7])
+    // Construct mins vector from packed scale bytes (8 × pinsrw)
+    let mins: i16x8 = [
+        to_i16(ubyte(p, sp + 4) & 63),
+        to_i16(ubyte(p, sp + 5) & 63),
+        to_i16(ubyte(p, sp + 6) & 63),
+        to_i16(ubyte(p, sp + 7) & 63),
+        to_i16((ubyte(p, sp + 8) >> 4) | ((ubyte(p, sp + 4) >> 6) << 4)),
+        to_i16((ubyte(p, sp + 9) >> 4) | ((ubyte(p, sp + 5) >> 6) << 4)),
+        to_i16((ubyte(p, sp + 10) >> 4) | ((ubyte(p, sp + 6) >> 6) << 4)),
+        to_i16((ubyte(p, sp + 11) >> 4) | ((ubyte(p, sp + 7) >> 6) << 4))
+    ]
+
+    // madd_i16: mins[0]*bp[0]+mins[1]*bp[1], ... → 4 × i32, then reduce
+    return reduce_add(madd_i16(mins, bp))
 }
 
 // Vector-accumulating dot for one Q4K block (256 elements).
-// maddubs_i16 (pmaddubsw) → madd_i16(scale, ...) (pmaddwd) — scale baked in.
-// Two instructions per dot group, matching llama.cpp AVX2.
+// Pre-extracts all 8 scales from 2 × u32 reads, then splat + madd_i16.
 func dot_block_vec(
     q4: *restrict u8, nib: i32, q8: *restrict i8, q8_off: i32,
     sp: i32, mask_lo: u8x32, shift4: u8x32
 ) -> i32x8 {
+    // Pre-extract all 8 scales: 2 u32 reads + bit manipulation (vs 8 × get_scale)
+    let sp32: *restrict i32 = ptr_as_i32(ptr_as_i8(q4))
+    let u0: i32 = sp32[sp / 4]
+    let u2: i32 = sp32[(sp + 8) / 4]
+    let sc03: i32 = u0 & 0x3f3f3f3f
+    let sc47: i32 = (u2 & 0x0f0f0f0f) | (((u0 >> 6) & 0x03030303) << 4)
+
+    // Splat all 8 scales to i16x16 (vpbroadcastw)
+    let s0: i16x16 = splat(to_i16(sc03 & 255))
+    let s1: i16x16 = splat(to_i16((sc03 >> 8) & 255))
+    let s2: i16x16 = splat(to_i16((sc03 >> 16) & 255))
+    let s3: i16x16 = splat(to_i16((sc03 >> 24) & 255))
+    let s4: i16x16 = splat(to_i16(sc47 & 255))
+    let s5: i16x16 = splat(to_i16((sc47 >> 8) & 255))
+    let s6: i16x16 = splat(to_i16((sc47 >> 16) & 255))
+    let s7: i16x16 = splat(to_i16((sc47 >> 24) & 255))
+
     let mut acc: i32x8 = splat(0)
 
     let p0: u8x32 = load(q4, nib)
     let q8_0a: i8x32 = load(q8, q8_off)
     let q8_0b: i8x32 = load(q8, q8_off + 32)
-    let s0l: i16x16 = splat(to_i16(get_scale(q4, sp, 0)))
-    let s0h: i16x16 = splat(to_i16(get_scale_hi(q4, sp, 0)))
-    acc = acc .+ madd_i16(s0l, maddubs_i16(p0 .& mask_lo, q8_0a))
-              .+ madd_i16(s0h, maddubs_i16(p0 .>> shift4, q8_0b))
+    acc = acc .+ madd_i16(s0, maddubs_i16(p0 .& mask_lo, q8_0a))
+              .+ madd_i16(s1, maddubs_i16(p0 .>> shift4, q8_0b))
 
     let p1: u8x32 = load(q4, nib + 32)
     let q8_1a: i8x32 = load(q8, q8_off + 64)
     let q8_1b: i8x32 = load(q8, q8_off + 96)
-    let s1l: i16x16 = splat(to_i16(get_scale(q4, sp, 1)))
-    let s1h: i16x16 = splat(to_i16(get_scale_hi(q4, sp, 1)))
-    acc = acc .+ madd_i16(s1l, maddubs_i16(p1 .& mask_lo, q8_1a))
-              .+ madd_i16(s1h, maddubs_i16(p1 .>> shift4, q8_1b))
+    acc = acc .+ madd_i16(s2, maddubs_i16(p1 .& mask_lo, q8_1a))
+              .+ madd_i16(s3, maddubs_i16(p1 .>> shift4, q8_1b))
 
     let p2: u8x32 = load(q4, nib + 64)
     let q8_2a: i8x32 = load(q8, q8_off + 128)
     let q8_2b: i8x32 = load(q8, q8_off + 160)
-    let s2l: i16x16 = splat(to_i16(get_scale(q4, sp, 2)))
-    let s2h: i16x16 = splat(to_i16(get_scale_hi(q4, sp, 2)))
-    acc = acc .+ madd_i16(s2l, maddubs_i16(p2 .& mask_lo, q8_2a))
-              .+ madd_i16(s2h, maddubs_i16(p2 .>> shift4, q8_2b))
+    acc = acc .+ madd_i16(s4, maddubs_i16(p2 .& mask_lo, q8_2a))
+              .+ madd_i16(s5, maddubs_i16(p2 .>> shift4, q8_2b))
 
     let p3: u8x32 = load(q4, nib + 96)
     let q8_3a: i8x32 = load(q8, q8_off + 192)
     let q8_3b: i8x32 = load(q8, q8_off + 224)
-    let s3l: i16x16 = splat(to_i16(get_scale(q4, sp, 3)))
-    let s3h: i16x16 = splat(to_i16(get_scale_hi(q4, sp, 3)))
-    acc = acc .+ madd_i16(s3l, maddubs_i16(p3 .& mask_lo, q8_3a))
-              .+ madd_i16(s3h, maddubs_i16(p3 .>> shift4, q8_3b))
+    acc = acc .+ madd_i16(s6, maddubs_i16(p3 .& mask_lo, q8_3a))
+              .+ madd_i16(s7, maddubs_i16(p3 .>> shift4, q8_3b))
 
     return acc
 }
