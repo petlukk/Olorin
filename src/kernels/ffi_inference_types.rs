@@ -59,28 +59,12 @@ pub type Q4kGemm4x4Fn = unsafe extern "C" fn(
     *mut f32, i32,
 );
 
-pub type QuantizeSIMDFn   = unsafe extern "C" fn(*const f32, *mut i32, *mut f32, *mut f32, i32);
-pub type DequantizeSIMDFn = unsafe extern "C" fn(*const u8, *const f32, *const f32, *mut f32, i32);
-pub type KScoreMhaFn = unsafe extern "C" fn(
-    *const f32, *const u8, *const f32, *const f32, *mut f32, i32, i32, i32);
-pub type KScoreGqaFn = unsafe extern "C" fn(
-    *const f32, *const u8, *const f32, *const f32, *mut f32, i32, i32, i32, i32);
-pub type VSumMhaFn = unsafe extern "C" fn(
-    *const f32, *const u8, *const f32, *const f32, *mut f32, i32, i32, i32);
-pub type VSumGqaFn = unsafe extern "C" fn(
-    *const f32, *const u8, *const f32, *const f32, *mut f32, i32, i32, i32, i32);
-pub type FusedAttentionFn = unsafe extern "C" fn(
-    *const f32,
-    *const u8, *const f32, *const f32,
-    *const u8, *const f32, *const f32,
-    *mut f32, i32, i32, i32);
-pub type FusedCausalAttnFn = unsafe extern "C" fn(
-    *const f32, *const u8, *const f32, *const f32,
-    *const u8, *const f32, *const f32,
-    *mut f32, *mut f32, i32, i32, i32, i32, i32);
-pub type FlashDecodeAttnFn = unsafe extern "C" fn(
-    *const f32, *const u8, *const f32, *const f32,
-    *const u8, *const f32, *const f32,
-    *mut f32, *mut f32,
-    i32, i32, i32, i32);
+pub type AttnDotF16Fn = unsafe extern "C" fn(
+    *const f32, *const u16, *mut f32, i32, i32);
+pub type AttnVsumF16Fn = unsafe extern "C" fn(
+    *const f32, *const u16, *mut f32, i32, i32);
+pub type F32ToF16Fn = unsafe extern "C" fn(*const f32, *mut u16, i32);
+pub type F16ToF32Fn = unsafe extern "C" fn(*const u16, *mut f32, i32);
+pub type SoftmaxF32Fn = unsafe extern "C" fn(*mut f32, i32, f32);
+pub type SiluMulFn = unsafe extern "C" fn(*const f32, *const f32, *mut f32, i32);
 pub type ValidateFn = unsafe extern "C" fn(*const f32, *const f32, *const i32, *const i32, i32) -> i32;
