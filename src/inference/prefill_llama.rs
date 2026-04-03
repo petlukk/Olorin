@@ -125,6 +125,11 @@ impl LlamaState {
             }
 
             t_qkv_gemm += _t0.elapsed().as_micros() as u64;
+            if layer == 1 {
+                let ql2: f32 = qs_all[..h].iter().map(|v| v*v).sum::<f32>().sqrt();
+                let kl2: f32 = ks_all[..kv].iter().map(|v| v*v).sum::<f32>().sqrt();
+                eprintln!("[prefill L1] after QKV: q_L2={ql2:.2} k_L2={kl2:.2}");
+            }
             // ── Attention: batch bias+RoPE, KV store, f16 attention ──
             let _t0 = std::time::Instant::now();
             for t in 0..n {
@@ -178,7 +183,10 @@ impl LlamaState {
             }
 
             t_attention += _t0.elapsed().as_micros() as u64;
-
+            if layer == 1 {
+                let al2: f32 = attn_all[..h].iter().map(|v| v*v).sum::<f32>().sqrt();
+                eprintln!("[prefill L1] after attn: attn_out_L2={al2:.2} attn[0..4]={:?}", &attn_all[..4]);
+            }
             // ── Wo matmul: Q4K × Q8K ──
             let _t0 = std::time::Instant::now();
             {
@@ -208,7 +216,12 @@ impl LlamaState {
             let _t0 = std::time::Instant::now();
             q4k_gemm_mt(lw.wo, h_rs, h_nb, &bq_h, &mut tmp_all, h, &self.pool);
             t_wo_gemm += _t0.elapsed().as_micros() as u64;
-
+            if layer == 1 {
+                let tl2: f32 = tmp_all[..h].iter().map(|v| v*v).sum::<f32>().sqrt();
+                eprintln!("[prefill L1] after Wo: tmp_L2={tl2:.2} tmp[0..4]={:?}", &tmp_all[..4]);
+                let xl2: f32 = xs[0].iter().map(|v| v*v).sum::<f32>().sqrt();
+                eprintln!("[prefill L1] before resid: x_L2={xl2:.2} x[0..4]={:?}", &xs[0][..4]);
+            }
             // ── Parallel vecadd residual (attn) ──
             let _t0 = std::time::Instant::now();
             {
@@ -278,6 +291,25 @@ impl LlamaState {
             q4k_fused_silu_gemm_mt(lw.w_gate, lw.w_up, h_rs, h_nb, &bq_h, &mut hidden_all, f, &self.pool);
 
             t_ffn_gemm += _t0.elapsed().as_micros() as u64;
+            if layer == 1 {
+                // Check FFN input (norm_all) and hidden output for token 0
+                let nl2: f32 = norm_all[..h].iter().map(|v| v*v).sum::<f32>().sqrt();
+                let hl2: f32 = hidden_all[..f].iter().map(|v| v*v).sum::<f32>().sqrt();
+                eprintln!("[prefill L1] FFN input norm_L2={nl2:.4} → hidden_L2={hl2:.2} hidden[1419]={:.4}", hidden_all[1419]);
+                // Also check gate and up separately by calling q4k_dot directly
+                let gw = lw.w_gate;
+                let uw = lw.w_up;
+                unsafe {
+                    let g = crate::inference::matmul_q4k::q4k_row_dot(
+                        gw.add(1419 * h_rs), h_nb,
+                        bq_h.qs_ptr(0) as _, bq_h.d_ptr(0) as _, bq_h.bsums_ptr(0) as _);
+                    let u = crate::inference::matmul_q4k::q4k_row_dot(
+                        uw.add(1419 * h_rs), h_nb,
+                        bq_h.qs_ptr(0) as _, bq_h.d_ptr(0) as _, bq_h.bsums_ptr(0) as _);
+                    let silu_g = g / (1.0 + (-g).exp());
+                    eprintln!("[prefill L1] row 1419: gate={g:.4} up={u:.4} silu(g)*u={:.4}", silu_g * u);
+                }
+            }
             // ── Down projection: Q4K or Q6K ──
             let _t0 = std::time::Instant::now();
             {
@@ -312,6 +344,10 @@ impl LlamaState {
             }
 
             t_down_gemm += _t0.elapsed().as_micros() as u64;
+            if layer == 1 {
+                let dl2: f32 = tmp_all[..h].iter().map(|v| v*v).sum::<f32>().sqrt();
+                eprintln!("[prefill L1] after down proj: tmp_L2={dl2:.2} tmp[0..4]={:?}", &tmp_all[..4]);
+            }
             // ── Parallel vecadd residual (FFN) ──
             let _t0 = std::time::Instant::now();
             {
@@ -329,6 +365,11 @@ impl LlamaState {
                 });
             }
             t_resid2 += _t0.elapsed().as_micros() as u64;
+
+            // DEBUG: trace last token's x[2] and L2 per layer
+            let last = &xs[n-1];
+            let l2: f32 = last.iter().map(|v| v*v).sum::<f32>().sqrt();
+            eprintln!("[prefill L{layer}] x[2]={:.2} x_L2={:.2}", last[2], l2);
         }
 
         // Print profiling summary
@@ -383,6 +424,13 @@ impl LlamaState {
         let h = model.hidden_dim;
         let n = tokens.len();
         self.x[..h].copy_from_slice(&xs[n - 1]);
+        let x_l2: f32 = self.x.iter().take(h).map(|v| v*v).sum::<f32>().sqrt();
+        eprintln!("[prefill done] x_L2={x_l2:.2} x[0..8]={:?}", &self.x[..8]);
+        // Check all token hidden states
+        for (t, xh) in xs.iter().enumerate() {
+            let l2: f32 = xh.iter().map(|v| v*v).sum::<f32>().sqrt();
+            if t == 0 || t == n-1 { eprintln!("  xs[{t}] L2={l2:.2} [0..4]={:?}", &xh[..4]); }
+        }
         self.output_proj(model);
     }
 

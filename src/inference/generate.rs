@@ -80,7 +80,11 @@ impl Engine {
         let mut tokens = if skip_bos { Vec::new() } else { vec![tokenizer.bos_id] };
         if is_q4k {
             let chat = build_chat_prompt(&model.architecture, system, prompt);
-            tokens.extend(tokenizer.encode(&chat));
+            eprintln!("[DEBUG] chat template: {:?}", &chat[..chat.len().min(200)]);
+            let encoded = tokenizer.encode(&chat);
+            eprintln!("[DEBUG] encoded {} tokens: {:?}", encoded.len(), &encoded[..encoded.len().min(30)]);
+            tokens.extend(encoded);
+            eprintln!("[DEBUG] total tokens (with bos): {:?}", &tokens[..tokens.len().min(30)]);
         } else {
             tokens.extend(tokenizer.encode(prompt));
         }
