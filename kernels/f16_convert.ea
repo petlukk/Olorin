@@ -1,56 +1,28 @@
-// f16_convert.ea — Bulk f32<->f16 conversion (x86)
+// f16_convert.ea — Bulk f32<->f16 conversion (x86 AVX2/F16C)
 //
-// f16: [sign:1][exp:5][mant:10], bias=15
-// f32: [sign:1][exp:8][mant:23], bias=127
-// Exponent delta: 112
+// Uses cvt_f16_f32/cvt_f32_f16 intrinsics (vcvtph2ps/vcvtps2ph).
+// n must be a multiple of 8 (guaranteed for all inference dimensions).
 
 #[cfg(x86_64)]
 
-func read_u16(p: *restrict u16, off: i32) -> i32 {
-    return to_i32(p[off]) & 65535
-}
-
-export func f32_to_f16(src: *restrict f32, dst: *mut u16, n: i32, tmp: *mut i32) {
-    let ip: *restrict i32 = ptr_as_i32(src)
+export func f32_to_f16(src: *restrict f32, dst: *mut u16, n: i32) {
+    let dp: *mut i16 = ptr_as_i16(dst)
     let mut i: i32 = 0
-    while i < n {
-        let bits: i32 = ip[i]
-        let sign: i32 = (bits >> 16) & 32768
-        let exp: i32 = ((bits >> 23) & 255) - 112
-        let mant: i32 = (bits >> 13) & 1023
-
-        let mut h: i32 = 0
-        if exp <= 0 {
-            h = sign
-        } else {
-            if exp >= 31 {
-                h = sign | 31744
-            } else {
-                h = sign | (exp << 10) | mant
-            }
-        }
-        // Write via tmp: store as i32, read back as u16
-        tmp[0] = h
-        let tp: *mut u16 = ptr_as_u16(tmp)
-        dst[i] = tp[0]
-        i = i + 1
+    while i + 8 <= n {
+        let v: f32x8 = load(src, i)
+        let h: i16x8 = cvt_f32_f16(v)
+        store(dp, i, h)
+        i = i + 8
     }
 }
 
 export func f16_to_f32(src: *restrict u16, dst: *mut f32, n: i32) {
-    let op: *mut i32 = ptr_as_i32(dst)
+    let sp: *restrict i16 = ptr_as_i16(src)
     let mut i: i32 = 0
-    while i < n {
-        let raw: i32 = read_u16(src, i)
-        let exp: i32 = (raw >> 10) & 31
-
-        if exp == 0 {
-            op[i] = 0
-        } else {
-            let sign: i32 = (raw >> 15) & 1
-            let mant: i32 = raw & 1023
-            op[i] = (sign << 31) | ((exp + 112) << 23) | (mant << 13)
-        }
-        i = i + 1
+    while i + 8 <= n {
+        let h: i16x8 = load(sp, i)
+        let v: f32x8 = cvt_f16_f32(h)
+        store(dst, i, v)
+        i = i + 8
     }
 }

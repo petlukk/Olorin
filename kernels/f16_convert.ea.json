@@ -3,7 +3,7 @@
   "exports": [
     {
       "name": "f32_to_f16",
-      "args": [{"name": "src", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "dst", "type": "*mut u16", "direction": "in", "cap": null, "count": null}, {"name": "n", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "tmp", "type": "*mut i32", "direction": "in", "cap": null, "count": null}],
+      "args": [{"name": "src", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "dst", "type": "*mut u16", "direction": "in", "cap": null, "count": null}, {"name": "n", "type": "i32", "direction": "in", "cap": null, "count": null}],
       "return_type": null
     },
     {

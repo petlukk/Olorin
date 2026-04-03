@@ -3,12 +3,12 @@
   "exports": [
     {
       "name": "attn_dot_f16",
-      "args": [{"name": "query", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "k_cache", "type": "*restrict u16", "direction": "in", "cap": null, "count": null}, {"name": "scores_out", "type": "*mut f32", "direction": "in", "cap": null, "count": null}, {"name": "seq_len", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "head_dim", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "tmp", "type": "*mut i32", "direction": "in", "cap": null, "count": null}],
+      "args": [{"name": "query", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "k_cache", "type": "*restrict u16", "direction": "in", "cap": null, "count": null}, {"name": "scores_out", "type": "*mut f32", "direction": "in", "cap": null, "count": null}, {"name": "seq_len", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "head_dim", "type": "i32", "direction": "in", "cap": null, "count": null}],
       "return_type": null
     },
     {
       "name": "attn_vsum_f16",
-      "args": [{"name": "weights", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "v_cache", "type": "*restrict u16", "direction": "in", "cap": null, "count": null}, {"name": "out", "type": "*mut f32", "direction": "in", "cap": null, "count": null}, {"name": "seq_len", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "head_dim", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "tmp", "type": "*mut i32", "direction": "in", "cap": null, "count": null}],
+      "args": [{"name": "weights", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "v_cache", "type": "*restrict u16", "direction": "in", "cap": null, "count": null}, {"name": "out", "type": "*mut f32", "direction": "in", "cap": null, "count": null}, {"name": "seq_len", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "head_dim", "type": "i32", "direction": "in", "cap": null, "count": null}],
       "return_type": null
     }
   ],
