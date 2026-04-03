@@ -4,6 +4,13 @@
 **Branch:** from_the_beginning
 **Goal:** Make Olorin's decode and prefill pipeline identical to llama.cpp so we can benchmark apple-to-apple and find where to optimize.
 
+**llama.cpp reference:** `/mnt/c/Users/Peter.lukka/Desktop/DEV/llama.cpp/` (master, commit 08f2145). Use this as source for extracting reference C code for benchmarks and verifying pipeline behavior. Key paths:
+- Attention: `ggml/src/ggml-cpu/ops.cpp` (`ggml_compute_forward_flash_attn_ext`)
+- Q4K dot: `ggml/src/ggml-cpu/arch/arm/quants.c` (`ggml_vec_dot_q4_K_q8_K`)
+- RMSNorm: `ggml/src/ggml-cpu/ops.cpp` (`ggml_compute_forward_rms_norm`)
+- RoPE: `ggml/src/ggml-cpu/ops.cpp` (`ggml_compute_forward_rope`)
+- Q8K quant: `ggml/src/ggml-cpu/quants.c` (`quantize_row_q8_K`)
+
 ## Principle
 
 Every step in the pipeline must match llama.cpp exactly. No extra passes, no security features (TurboQuant, JL-rotation), no Olorin-specific attention kernels. Dead code gets deleted — not commented, not feature-flagged.
