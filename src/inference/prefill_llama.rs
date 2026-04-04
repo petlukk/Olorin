@@ -82,6 +82,18 @@ impl LlamaState {
         for layer in 0..model.n_layers {
             let lw = &model.q4k_layers[layer];
 
+            // Per-token L2 at layer start (first 5 layers only)
+            if layer <= 4 {
+                let mut toks: Vec<String> = Vec::new();
+                for t in 0..n.min(6) {
+                    let l2: f32 = xs[t].iter().map(|v| v*v).sum::<f32>().sqrt();
+                    toks.push(format!("t{t}={l2:.1}"));
+                }
+                let last_l2: f32 = xs[n-1].iter().map(|v| v*v).sum::<f32>().sqrt();
+                toks.push(format!("t{}={last_l2:.1}", n-1));
+                eprintln!("[L{layer} input] {}", toks.join(" "));
+            }
+
             // ── Parallel rmsnorm → norm_all, then batch quantize to Q8K ──
             let _t0 = std::time::Instant::now();
             {
@@ -131,7 +143,19 @@ impl LlamaState {
 
             t_quant1 += _t0.elapsed().as_micros() as u64;
 
-            // DEBUG: dump RMSNorm + Q8K for first token, layer 0 (compare with C reference)
+            // DEBUG: verify RMSNorm for token 0 at L0
+            if layer == 0 {
+                // Manual RMSNorm for token 0
+                let x0 = &xs[0];
+                let ss: f32 = x0.iter().map(|v| v*v).sum::<f32>();
+                let rms = (ss / h as f32 + model.rms_eps).sqrt();
+                let manual_norm0 = x0[0] * unsafe { *lw.attn_norm.add(0) } / rms;
+                let kernel_norm0 = norm_all[0];
+                eprintln!("[L0 RMSNorm t0] rms={rms:.8} manual[0]={manual_norm0:.8} kernel[0]={kernel_norm0:.8} x0[0]={:.8} w[0]={:.8}",
+                    x0[0], unsafe { *lw.attn_norm.add(0) });
+                let kernel_l2: f32 = norm_all[..h].iter().map(|v| v*v).sum::<f32>().sqrt();
+                eprintln!("[L0 RMSNorm t0] kernel L2={kernel_l2:.4}");
+            }
             if layer == 0 {
                 let norm0 = &norm_all[..h];
                 let nl2: f32 = norm0.iter().map(|v| v*v).sum::<f32>().sqrt();
@@ -302,9 +326,41 @@ impl LlamaState {
                 });
             }
             t_quant_wo += _t0.elapsed().as_micros() as u64;
+            // DEBUG: check Q8K of attn_out for token 0 at L0
+            if layer == 0 {
+                let a0 = &attn_all[..h];
+                let a0_l2: f32 = a0.iter().map(|v| v*v).sum::<f32>().sqrt();
+                let a0_max: f32 = a0.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+                let d0 = bq_h.d[0];
+                let qs0: Vec<i32> = bq_h.qs[..16].iter().map(|&v| v as i32).collect();
+                // Dequant check: d*qs should approximate original
+                let dequant0: f32 = d0 * bq_h.qs[0] as f32;
+                eprintln!("[L0 Wo Q8K t0] attn_L2={a0_l2:.4} max={a0_max:.6} d[0]={d0:.8} qs[0..16]={qs0:?} dequant[0]={dequant0:.6} orig[0]={:.6}", a0[0]);
+                // Also check the GEMM input/output ratio
+                let an = &attn_all[(n-1)*h..n*h];
+                let an_l2: f32 = an.iter().map(|v| v*v).sum::<f32>().sqrt();
+                let an_max: f32 = an.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+                let dn = bq_h.d[(n-1)*h_nb];
+                eprintln!("[L0 Wo Q8K tN] attn_L2={an_l2:.4} max={an_max:.6} d[0]={dn:.8}");
+            }
             let _t0 = std::time::Instant::now();
             q4k_gemm_mt(lw.wo, h_rs, h_nb, &bq_h, &mut tmp_all, h, &self.pool);
             t_wo_gemm += _t0.elapsed().as_micros() as u64;
+            // DEBUG: verify Wo GEMM output for token 0 at L0
+            if layer == 0 {
+                // Manual single-row dot for row 0 vs token 0
+                let ref_dot = unsafe { crate::inference::matmul_q4k::q4k_row_dot(
+                    lw.wo, h_nb, bq_h.qs_ptr(0) as _, bq_h.d_ptr(0) as _, bq_h.bsums_ptr(0) as _) };
+                let gemm_val = tmp_all[0];
+                // Also check row 0 vs last token
+                let ref_last = unsafe { crate::inference::matmul_q4k::q4k_row_dot(
+                    lw.wo, h_nb, bq_h.qs_ptr(n-1) as _, bq_h.d_ptr(n-1) as _, bq_h.bsums_ptr(n-1) as _) };
+                let gemm_last = tmp_all[(n-1)*h];
+                eprintln!("[L0 Wo verify] t0: gemm={gemm_val:.6} ref={ref_dot:.6} | tN: gemm={gemm_last:.6} ref={ref_last:.6}");
+                // Check first few Wo output elements for token 0
+                eprintln!("[L0 Wo t0] out[0..8]={:?}", &tmp_all[..8]);
+                eprintln!("[L0 Wo tN] out[0..8]={:?}", &tmp_all[(n-1)*h..(n-1)*h+8]);
+            }
             if layer == 1 {
                 let tl2: f32 = tmp_all[..h].iter().map(|v| v*v).sum::<f32>().sqrt();
                 eprintln!("[prefill L1] after Wo: tmp_L2={tl2:.2} tmp[0..4]={:?}", &tmp_all[..4]);
@@ -469,10 +525,20 @@ impl LlamaState {
                 for t in 0..n { xs[t][2] = 0.0; }
             }
 
-            // DEBUG: trace last token's x[2] and L2 per layer
-            let last = &xs[n-1];
-            let l2: f32 = last.iter().map(|v| v*v).sum::<f32>().sqrt();
-            eprintln!("[prefill L{layer}] x[2]={:.2} x_L2={:.2}", last[2], l2);
+            // DEBUG: per-step trace for token 0 and last token at every layer
+            {
+                let last = &xs[n-1];
+                let l2: f32 = last.iter().map(|v| v*v).sum::<f32>().sqrt();
+                let al2: f32 = attn_all[(n-1)*h..(n-1)*h+h].iter().map(|v| v*v).sum::<f32>().sqrt();
+                let tl2: f32 = tmp_all[(n-1)*h..(n-1)*h+h].iter().map(|v| v*v).sum::<f32>().sqrt();
+                let hl2: f32 = hidden_all[(n-1)*f..(n-1)*f+f].iter().map(|v| v*v).sum::<f32>().sqrt();
+                // Token 0 stats
+                let x0l2: f32 = xs[0].iter().map(|v| v*v).sum::<f32>().sqrt();
+                let a0l2: f32 = attn_all[..h].iter().map(|v| v*v).sum::<f32>().sqrt();
+                let t0l2: f32 = tmp_all[..h].iter().map(|v| v*v).sum::<f32>().sqrt();
+                let h0l2: f32 = hidden_all[..f].iter().map(|v| v*v).sum::<f32>().sqrt();
+                eprintln!("[prefill L{layer}] t0: attn={a0l2:.1} wo={t0l2:.1} ffn={h0l2:.1} x={x0l2:.1} | tN: attn={al2:.1} wo={tl2:.1} ffn={hl2:.1} x={l2:.1}");
+            }
         }
 
         // Print profiling summary

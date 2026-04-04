@@ -167,6 +167,23 @@ impl LlamaState {
 
 
         // Bias — all applied BEFORE cache (llama.cpp style)
+        if layer == 0 {
+            // Dump bias magnitudes
+            if !lw.k_bias.is_null() {
+                let kb = unsafe { std::slice::from_raw_parts(lw.k_bias, kv) };
+                let k_mean_abs = kb.iter().map(|v| v.abs()).sum::<f32>() / kv as f32;
+                let k_max = kb.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+                let k_out_l2: f32 = self.k[..kv].iter().map(|v| v*v).sum::<f32>().sqrt();
+                let k_mean_out = self.k[..kv].iter().map(|v| v.abs()).sum::<f32>() / kv as f32;
+                eprintln!("[L0 BIAS] K_bias mean_abs={k_mean_abs:.4} max={k_max:.4} | K_matmul_L2={k_out_l2:.4} K_matmul_mean_abs={k_mean_out:.4}");
+            }
+            if !lw.q_bias.is_null() {
+                let qb = unsafe { std::slice::from_raw_parts(lw.q_bias, h) };
+                let q_mean_abs = qb.iter().map(|v| v.abs()).sum::<f32>() / h as f32;
+                let q_out_l2: f32 = self.q[..h].iter().map(|v| v*v).sum::<f32>().sqrt();
+                eprintln!("[L0 BIAS] Q_bias mean_abs={q_mean_abs:.4} | Q_matmul_L2={q_out_l2:.4}");
+            }
+        }
         add_bias(&mut self.q, lw.q_bias, h);
         add_bias(&mut self.k, lw.k_bias, kv);
         add_bias(&mut self.v, lw.v_bias, kv);
@@ -234,8 +251,8 @@ impl LlamaState {
             eprintln!("[pos=0 L0] negative q8_d count: {neg_d_count} / {h_nb}");
         }
 
-        // pos=0 L0: verify Q4K dot against scalar reference
-        if pos == 0 && layer == 0 {
+        // First decode step, L0: verify Q4K dot against scalar reference
+        if false && layer == 0 && std::env::var("OLORIN_VERIFY").is_ok() {
             let wq = lw.wq;
             let q8_qs = self.x_q8_qs.as_ptr();
             let q8_d = self.x_q8_d.as_ptr();
@@ -280,6 +297,87 @@ impl LlamaState {
                 eprintln!("[pos=0 L0] Q4K dot row0: kernel={kernel_val:.4} scalar_ref={ref_val:.4} diff={:.6}",
                     (kernel_val - ref_val).abs());
                 eprintln!("[pos=0 L0] Q[0] (from matmul) = {:.4}", self.q[0]);
+
+                // Verify ALL rows: compare matmul output vs scalar reference
+                let mut max_diff = 0.0f32;
+                let mut max_diff_row = 0usize;
+                for row in 0..h {
+                    let row_w = wq.add(row * h_nb * 144);
+                    let mut ref_r = 0.0f32;
+                    for blk in 0..h_nb {
+                        let w = row_w.add(blk * 144);
+                        let d_raw = *w as u16 | ((*w.add(1) as u16) << 8);
+                        let dm_raw = *w.add(2) as u16 | ((*w.add(3) as u16) << 8);
+                        let d = crate::inference::matmul::f16_to_f32(d_raw);
+                        let dm = crate::inference::matmul::f16_to_f32(dm_raw);
+                        let qd = *q8_d.add(blk);
+                        let scales = std::slice::from_raw_parts(w.add(4), 12);
+                        let mut sc = [0u8; 8];
+                        let mut mn = [0u8; 8];
+                        crate::inference::matmul_q4k::unpack_q4k_scales(scales, &mut sc, &mut mn);
+                        let qs = w.add(16);
+                        let mut sumi = 0i32;
+                        for j in 0..4usize {
+                            let (sl, sh) = (sc[2*j] as i32, sc[2*j+1] as i32);
+                            for k in 0..32usize {
+                                let byte = *qs.add(j * 32 + k);
+                                let lo = (byte & 0xF) as i32;
+                                let hi = (byte >> 4) as i32;
+                                let q8l = *q8_qs.add(blk * 256 + j * 64 + k) as i32;
+                                let q8h = *q8_qs.add(blk * 256 + j * 64 + 32 + k) as i32;
+                                sumi += lo * q8l * sl + hi * q8h * sh;
+                            }
+                        }
+                        let mut mins = 0i32;
+                        for j in 0..8usize {
+                            let bs_idx = blk * 16 + j * 2;
+                            let bp = *q8_bsums.add(bs_idx) as i32 + *q8_bsums.add(bs_idx + 1) as i32;
+                            mins += mn[j] as i32 * bp;
+                        }
+                        ref_r += d * qd * sumi as f32 - dm * qd * mins as f32;
+                    }
+                    let diff = (self.q[row] - ref_r).abs();
+                    if diff > max_diff { max_diff = diff; max_diff_row = row; }
+                }
+                eprintln!("[pos=0 L0] ALL ROWS: max_diff={max_diff:.6} at row={max_diff_row} kernel={:.4} ref={:.4}",
+                    self.q[max_diff_row], {
+                        // recompute ref for that row
+                        let row_w = wq.add(max_diff_row * h_nb * 144);
+                        let mut ref_r = 0.0f32;
+                        for blk in 0..h_nb {
+                            let w = row_w.add(blk * 144);
+                            let d_raw = *w as u16 | ((*w.add(1) as u16) << 8);
+                            let dm_raw = *w.add(2) as u16 | ((*w.add(3) as u16) << 8);
+                            let d = crate::inference::matmul::f16_to_f32(d_raw);
+                            let dm = crate::inference::matmul::f16_to_f32(dm_raw);
+                            let qd = *q8_d.add(blk);
+                            let scales = std::slice::from_raw_parts(w.add(4), 12);
+                            let mut sc = [0u8; 8];
+                            let mut mn = [0u8; 8];
+                            crate::inference::matmul_q4k::unpack_q4k_scales(scales, &mut sc, &mut mn);
+                            let qs = w.add(16);
+                            let mut sumi = 0i32;
+                            for j in 0..4usize {
+                                let (sl, sh) = (sc[2*j] as i32, sc[2*j+1] as i32);
+                                for k in 0..32usize {
+                                    let byte = *qs.add(j * 32 + k);
+                                    let lo = (byte & 0xF) as i32;
+                                    let hi = (byte >> 4) as i32;
+                                    let q8l = *q8_qs.add(blk * 256 + j * 64 + k) as i32;
+                                    let q8h = *q8_qs.add(blk * 256 + j * 64 + 32 + k) as i32;
+                                    sumi += lo * q8l * sl + hi * q8h * sh;
+                                }
+                            }
+                            let mut mins = 0i32;
+                            for j in 0..8usize {
+                                let bs_idx = blk * 16 + j * 2;
+                                let bp = *q8_bsums.add(bs_idx) as i32 + *q8_bsums.add(bs_idx + 1) as i32;
+                                mins += mn[j] as i32 * bp;
+                            }
+                            ref_r += d * qd * sumi as f32 - dm * qd * mins as f32;
+                        }
+                        ref_r
+                    });
             }
         }
 
@@ -320,6 +418,11 @@ impl LlamaState {
             eprintln!("[L2] after Wo+resid: x_L2={x_l2:.2} attn_out_L2={ao_l2:.2} x[0..8]={:?}", &x[..8]);
         } else if pos == 24 {
             eprintln!("[L{layer}] x_L2={:.2}", x.iter().map(|v| v*v).sum::<f32>().sqrt());
+        }
+
+        // DEBUG: zero out dominant dimension to test dimensional drift hypothesis
+        if std::env::var("OLORIN_ZERO_DIM2").is_ok() {
+            x[2] = 0.0;
         }
 
         unsafe {
@@ -405,9 +508,19 @@ impl LlamaState {
     /// Single-token forward pass.
     pub fn forward(&mut self, model: &BitNetModel, token: u32, pos: usize) {
         embed_token(model, token, &mut self.x);
+        if pos == 0 {
+            let l2: f32 = self.x.iter().map(|v| v*v).sum::<f32>().sqrt();
+            eprintln!("[embed] token={token} L2={l2:.6} x[0..8]={:?}", &self.x[..8]);
+        }
         let mut x = std::mem::take(&mut self.x);
         for layer in 0..model.n_layers {
             self.process_layer(model, layer, &mut x, pos);
+            // Trace per-layer x_L2 for first 2 tokens
+            if pos <= 1 {
+                let l2: f32 = x.iter().map(|v| v*v).sum::<f32>().sqrt();
+                eprint!(" L{layer}={l2:.1}");
+                if layer == model.n_layers - 1 { eprintln!(); }
+            }
         }
         self.x = x;
         self.output_proj(model);
@@ -732,6 +845,140 @@ pub fn generate(
             let entropy: f64 = -(1.0 / sum_exp).ln();
             eprintln!("  range: [{:.4}, {:.4}] softmax_entropy={entropy:.2}",
                 state.logits.iter().cloned().fold(f32::INFINITY, f32::min), max_l);
+            eprintln!("  logits[0..8]={:?}", &state.logits[..8]);
+            // Compare: llama.cpp gives logits[0..8]=[2.6111, 11.6444, 5.8988, 8.1306, 5.2622, 4.5004, 7.9542, 6.4317]
+
+            // Verify output projection: scalar Q6K dot for row 0
+            let h_nb = crate::inference::forward_llama::q8k_blocks(model.hidden_dim);
+            let q6k_bb = crate::inference::matmul_q6k::Q6K_BLOCK_BYTES;
+            unsafe {
+                let ow = model.output_weight;
+                let q8_qs = state.x_q8_qs.as_ptr();
+                let q8_d = state.x_q8_d.as_ptr();
+                // Scalar Q6K dot for row 0
+                let mut ref_val = 0.0f64;
+                for blk in 0..h_nb {
+                    let bp = ow.add(blk * q6k_bb);
+                    // Q6K layout: ql[128], qh[64], sc[16], d[2]
+                    let d_raw = *(bp.add(208) as *const u16);
+                    let d = crate::inference::matmul::f16_to_f32(d_raw) as f64;
+                    let qd = *q8_d.add(blk) as f64;
+                    let ql = bp;
+                    let qh = bp.add(128);
+                    let sc = bp.add(192) as *const i8;
+                    let mut sumi = 0i32;
+                    for half in 0..2usize {
+                        for l in 0..32usize {
+                            let is = l / 16;
+                            let ql0 = *ql.add(half * 64 + l);
+                            let ql32 = *ql.add(half * 64 + l + 32);
+                            let qh_byte = *qh.add(half * 32 + l);
+                            let q1 = ((ql0 & 0xF) | (((qh_byte >> 0) & 3) << 4)) as i8 as i32 - 32;
+                            let q2 = ((ql32 & 0xF) | (((qh_byte >> 2) & 3) << 4)) as i8 as i32 - 32;
+                            let q3 = ((ql0 >> 4) | (((qh_byte >> 4) & 3) << 4)) as i8 as i32 - 32;
+                            let q4 = ((ql32 >> 4) | (((qh_byte >> 6) & 3) << 4)) as i8 as i32 - 32;
+                            let s0 = *sc.add(half * 8 + is) as i32;
+                            let s2 = *sc.add(half * 8 + is + 2) as i32;
+                            let s4 = *sc.add(half * 8 + is + 4) as i32;
+                            let s6 = *sc.add(half * 8 + is + 6) as i32;
+                            let base = blk * 256 + half * 128;
+                            sumi += q1 * *q8_qs.add(base + l) as i32 * s0;
+                            sumi += q2 * *q8_qs.add(base + l + 32) as i32 * s2;
+                            sumi += q3 * *q8_qs.add(base + l + 64) as i32 * s4;
+                            sumi += q4 * *q8_qs.add(base + l + 96) as i32 * s6;
+                        }
+                    }
+                    ref_val += d * qd * sumi as f64;
+                }
+                eprintln!("  [OUTPUT VERIFY] kernel logits[0]={:.6} scalar_ref={:.6} diff={:.6}",
+                    state.logits[0], ref_val, (state.logits[0] as f64 - ref_val).abs());
+
+                // Per-block comparison: run kernel for 1 block at a time vs scalar ref
+                eprintln!("  [PER-BLOCK Q6K] (block, kernel_contrib, ref_contrib, diff):");
+                for blk in 0..h_nb.min(4) {
+                    let bp = ow.add(blk * q6k_bb);
+                    let d_raw = *(bp.add(208) as *const u16);
+                    let d = crate::inference::matmul::f16_to_f32(d_raw);
+                    let qd = *q8_d.add(blk);
+                    let d_arr_val = d * qd;
+
+                    // Kernel: 1-block Q6K dot (weight ptr offset to this block)
+                    let kernel_1blk = ffi::q6k_dot_q8k(
+                        ow.add(blk * q6k_bb),
+                        q8_qs.add(blk * 256),
+                        state.x_q8_bsums.as_ptr().add(blk * 16),
+                        1, // n_blocks = 1
+                        &d_arr_val as *const f32,
+                    );
+
+                    // Scalar ref for this block
+                    let ql = bp;
+                    let qh = bp.add(128);
+                    let sc = bp.add(192) as *const i8;
+                    let mut sumi = 0i32;
+                    for half in 0..2usize {
+                        for l in 0..32usize {
+                            let is = l / 16;
+                            let ql0 = *ql.add(half * 64 + l);
+                            let ql32 = *ql.add(half * 64 + l + 32);
+                            let qh_byte = *qh.add(half * 32 + l);
+                            let q1 = ((ql0 & 0xF) | (((qh_byte >> 0) & 3) << 4)) as i8 as i32 - 32;
+                            let q2 = ((ql32 & 0xF) | (((qh_byte >> 2) & 3) << 4)) as i8 as i32 - 32;
+                            let q3 = ((ql0 >> 4) | (((qh_byte >> 4) & 3) << 4)) as i8 as i32 - 32;
+                            let q4 = ((ql32 >> 4) | (((qh_byte >> 6) & 3) << 4)) as i8 as i32 - 32;
+                            let s0 = *sc.add(half * 8 + is) as i32;
+                            let s2 = *sc.add(half * 8 + is + 2) as i32;
+                            let s4 = *sc.add(half * 8 + is + 4) as i32;
+                            let s6 = *sc.add(half * 8 + is + 6) as i32;
+                            let base = blk * 256 + half * 128;
+                            sumi += q1 * *q8_qs.add(base + l) as i32 * s0;
+                            sumi += q2 * *q8_qs.add(base + l + 32) as i32 * s2;
+                            sumi += q3 * *q8_qs.add(base + l + 64) as i32 * s4;
+                            sumi += q4 * *q8_qs.add(base + l + 96) as i32 * s6;
+                        }
+                    }
+                    let ref_1blk = d as f64 * qd as f64 * sumi as f64;
+
+                    // Also compute maddubs-style (unsigned q6 * signed q8) sum and bsums correction
+                    let mut maddubs_sum = 0i32;
+                    let mut bsums_corr = 0i32;
+                    for half in 0..2usize {
+                        for l in 0..32usize {
+                            let is = l / 16;
+                            let ql0 = *ql.add(half * 64 + l);
+                            let ql32 = *ql.add(half * 64 + l + 32);
+                            let qh_byte = *qh.add(half * 32 + l);
+                            // Unsigned q6 values (0..63)
+                            let q1u = ((ql0 & 0xF) | (((qh_byte >> 0) & 3) << 4)) as i32;
+                            let q2u = ((ql32 & 0xF) | (((qh_byte >> 2) & 3) << 4)) as i32;
+                            let q3u = ((ql0 >> 4) | (((qh_byte >> 4) & 3) << 4)) as i32;
+                            let q4u = ((ql32 >> 4) | (((qh_byte >> 6) & 3) << 4)) as i32;
+                            let s0 = *sc.add(half * 8 + is) as i32;
+                            let s2 = *sc.add(half * 8 + is + 2) as i32;
+                            let s4 = *sc.add(half * 8 + is + 4) as i32;
+                            let s6 = *sc.add(half * 8 + is + 6) as i32;
+                            let base = blk * 256 + half * 128;
+                            maddubs_sum += q1u * *q8_qs.add(base + l) as i32 * s0;
+                            maddubs_sum += q2u * *q8_qs.add(base + l + 32) as i32 * s2;
+                            maddubs_sum += q3u * *q8_qs.add(base + l + 64) as i32 * s4;
+                            maddubs_sum += q4u * *q8_qs.add(base + l + 96) as i32 * s6;
+                        }
+                        // bsums correction for this half
+                        for g in 0..8usize {
+                            let bs = *state.x_q8_bsums.as_ptr().add(blk * 16 + half * 8 + g) as i32;
+                            let s_val = *sc.add(half * 8 + g) as i32;
+                            bsums_corr += 32 * s_val * bs;
+                        }
+                    }
+                    if blk < 2 {
+                        eprintln!("    blk={blk}: kernel={kernel_1blk:.6} ref={:.6} diff={:.6} maddubs={maddubs_sum} bsums_corr={bsums_corr} sumi_ref={sumi} check={}",
+                            ref_1blk, (kernel_1blk as f64 - ref_1blk).abs(), maddubs_sum - bsums_corr);
+                    } else {
+                        eprintln!("    blk={blk}: kernel={kernel_1blk:.6} ref={:.6} diff={:.6}",
+                            ref_1blk, (kernel_1blk as f64 - ref_1blk).abs());
+                    }
+                }
+            }
         }
         state.apply_repetition_penalty(&output, repetition_penalty);
         let next = state.sample_logits(temperature, top_k, top_p, min_p);
