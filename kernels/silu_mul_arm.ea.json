@@ -1,5 +1,5 @@
 {
-  "library": "",
+  "library": "/mnt/c/Users/Peter.lukka/Desktop/DEV/Olorin/target/aarch64-unknown-linux-gnu/release/build/olorin-30990ca1ddced56c/out/libsilu_mul.so",
   "exports": [
     {
       "name": "silu_mul_f32",

@@ -1,56 +1,8 @@
 // softmax.ea — In-place scaled softmax (x86 AVX2)
 //
-// 1. Scale:     data[i] *= scale
-// 2. Find max:  m = max(data[i])
-// 3. Subtract:  data[i] -= m
-// 4. Exp:       data[i] = fast_exp(data[i])
-// 5. Sum:       s = sum(data[i])
-// 6. Normalize: data[i] /= s
-//
-// Fast exp via degree-6 polynomial (Schraudolph-style, ~1e-4 relative error).
+// Uses LLVM exp intrinsic (llvm.exp.v8f32) for correct SIMD exp.
 
 #[cfg(x86_64)]
-
-// fast_exp_vec: e^x via polynomial 1 + x*(1 + x/2*(1 + x/3*(1 + x/4*(1 + x/5*(1 + x/6)))))
-// Clamped to [-88, 88] to avoid inf/denorm.
-func fast_exp_vec(x: f32x8) -> f32x8 {
-    let lo: f32x8 = splat(-88.0)
-    let hi: f32x8 = splat(88.0)
-    let clamped: f32x8 = min(max(x, lo), hi)
-
-    let c1: f32x8 = splat(1.0)
-    let c2: f32x8 = splat(0.5)
-    let c3: f32x8 = splat(0.16666667)
-    let c4: f32x8 = splat(0.041666668)
-    let c5: f32x8 = splat(0.008333334)
-    let c6: f32x8 = splat(0.001388889)
-
-    // Horner form: 1 + x*(1 + x*(1/2 + x*(1/6 + x*(1/24 + x*(1/120 + x/720)))))
-    let mut r: f32x8 = fma(clamped, c6, c5)
-    r = fma(clamped, r, c4)
-    r = fma(clamped, r, c3)
-    r = fma(clamped, r, c2)
-    r = fma(clamped, r, c1)
-    r = fma(clamped, r, c1)
-    return r
-}
-
-func fast_exp_scalar(x: f32) -> f32 {
-    let mut cx: f32 = x
-    if cx < -88.0 { cx = -88.0 }
-    if cx > 88.0 { cx = 88.0 }
-    let mut r: f32 = 1.0 + cx * 0.001388889
-    r = 1.0 + cx * r * 0.008333334 / (1.0 + cx * 0.001388889) // simplify
-    // Just use the iterative form
-    r = cx * 0.001388889
-    r = cx * (0.008333334 + r)
-    r = cx * (0.041666668 + r)
-    r = cx * (0.16666667 + r)
-    r = cx * (0.5 + r)
-    r = cx * (1.0 + r)
-    r = 1.0 + r
-    return r
-}
 
 export func softmax_f32(data: *mut f32, n: i32, scale: f32) {
     // Pass 1: Scale and find max
@@ -59,8 +11,7 @@ export func softmax_f32(data: *mut f32, n: i32, scale: f32) {
     let mut i: i32 = 0
 
     while i + 8 <= n {
-        let raw: f32x8 = load(data, i)
-        let v: f32x8 = raw .* v_scale
+        let v: f32x8 = load_f32x8(data, i) .* v_scale
         store(data, i, v)
         v_max = max(v_max, v)
         i = i + 8
@@ -73,26 +24,39 @@ export func softmax_f32(data: *mut f32, n: i32, scale: f32) {
         i = i + 1
     }
 
-    // Pass 2: Subtract max, compute exp, accumulate sum
+    // Pass 2: Subtract max, exp, accumulate sum
     let v_m: f32x8 = splat(m)
     let mut v_sum: f32x8 = splat(0.0)
     i = 0
 
     while i + 8 <= n {
-        let raw2: f32x8 = load(data, i)
-        let v: f32x8 = raw2 .- v_m
-        let e: f32x8 = fast_exp_vec(v)
+        let e: f32x8 = exp(load_f32x8(data, i) .- v_m)
         store(data, i, e)
         v_sum = v_sum .+ e
         i = i + 8
     }
 
     let mut s: f32 = reduce_add(v_sum)
-    while i < n {
-        let e: f32 = fast_exp_scalar(data[i] - m)
-        data[i] = e
-        s = s + e
-        i = i + 1
+
+    // Tail: overlap-load last 8 for SIMD exp
+    if i < n {
+        if n >= 8 {
+            let tail_off: i32 = n - 8
+            let e: f32x8 = exp(load_f32x8(data, tail_off) .- v_m)
+            store(data, tail_off, e)
+            let mut j: i32 = i
+            while j < n {
+                s = s + data[j]
+                j = j + 1
+            }
+        } else {
+            while i < n {
+                let v: f32 = data[i] - m
+                data[i] = exp(v)
+                s = s + data[i]
+                i = i + 1
+            }
+        }
     }
 
     // Pass 3: Normalize
@@ -101,8 +65,7 @@ export func softmax_f32(data: *mut f32, n: i32, scale: f32) {
     i = 0
 
     while i + 8 <= n {
-        let raw3: f32x8 = load(data, i)
-        store(data, i, raw3 .* v_inv)
+        store(data, i, load_f32x8(data, i) .* v_inv)
         i = i + 8
     }
     while i < n {
