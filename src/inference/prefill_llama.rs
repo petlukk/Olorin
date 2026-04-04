@@ -34,6 +34,22 @@ impl LlamaState {
             let mut x = vec![0.0f32; h]; embed_token(model, tok, &mut x); x
         }).collect();
 
+        // Dump first and last token embeddings
+        {
+            let x0 = &xs[0];
+            let l2: f32 = x0.iter().map(|v| v*v).sum::<f32>().sqrt();
+            eprintln!("[embed] token[0]={} L2={l2:.6} x[0..8]={:?}", tokens[0], &x0[..8]);
+            let xn = &xs[n-1];
+            let ln: f32 = xn.iter().map(|v| v*v).sum::<f32>().sqrt();
+            eprintln!("[embed] token[{}]={} L2={ln:.6} x[0..4]={:?}", n-1, tokens[n-1], &xn[..4]);
+            // Raw bytes of first block for this token
+            let embed_data = model.embed_weight_f16;
+            let row_bytes = (h / 256) * 210; // Q6K
+            let row_ptr = unsafe { embed_data.add(tokens[0] as usize * row_bytes) };
+            let first_16 = unsafe { std::slice::from_raw_parts(row_ptr, 16) };
+            eprintln!("[embed] raw bytes[0..16]={:02x?} embed_ptr={:?} row_bytes={}", first_16, embed_data, row_bytes);
+        }
+
         let mut norm_all = vec![0.0f32; n * h];
         let mut bq_h = BatchQ8K::new(n, h);
         let mut bq_f = BatchQ8K::new(n, f);
@@ -114,6 +130,35 @@ impl LlamaState {
             }
 
             t_quant1 += _t0.elapsed().as_micros() as u64;
+
+            // DEBUG: dump RMSNorm + Q8K for first token, layer 0 (compare with C reference)
+            if layer == 0 {
+                let norm0 = &norm_all[..h];
+                let nl2: f32 = norm0.iter().map(|v| v*v).sum::<f32>().sqrt();
+                eprintln!("[PIPE L0] rmsnorm: L2={nl2:.6} x_norm[0..8]={:?}", &norm0[..8]);
+
+                let q8_d0 = bq_h.d[0];
+                let q8_qs0: Vec<i32> = bq_h.qs[..8].iter().map(|&v| v as i32).collect();
+                let q8_bs0 = bq_h.bsums[0];
+                let neg_d = bq_h.d[..h_nb].iter().filter(|&&d| d < 0.0).count();
+                eprintln!("[PIPE L0] q8k: d={q8_d0:.8} qs[0..8]={q8_qs0:?} bsums[0]={q8_bs0} neg_d={neg_d}/{h_nb}");
+            }
+            // Verify Q4K dot row 0 against C reference
+            if layer == 0 {
+                let wq = lw.wq;
+                let pow2 = crate::inference::matmul_q4k::F16_POW2.as_ptr();
+                unsafe {
+                    let dot0 = ffi::q4k_dot_q8k(
+                        wq,
+                        bq_h.qs.as_ptr(),
+                        bq_h.bsums.as_ptr(),
+                        h_nb as i32,
+                        bq_h.d.as_ptr(),
+                        pow2,
+                    );
+                    eprintln!("[PIPE L0] q4k_dot(Wq row0) = {dot0:.8}  (ref: 0.12002471)");
+                }
+            }
             // ── QKV matmul: Q4K × Q8K (pre-quantized) ──
             let _t0 = std::time::Instant::now();
             q4k_gemm_mt(lw.wq, h_rs, h_nb, &bq_h, &mut qs_all, h, &self.pool);
@@ -125,6 +170,17 @@ impl LlamaState {
             }
 
             t_qkv_gemm += _t0.elapsed().as_micros() as u64;
+            if layer == 0 {
+                // Step 1: QKV matmul output (last token, before bias/rope)
+                let last_q = &qs_all[(n-1)*h..(n-1)*h+h];
+                let last_k = &ks_all[(n-1)*kv..(n-1)*kv+kv];
+                let last_v = &vs_all[(n-1)*kv..(n-1)*kv+kv];
+                let ql2: f32 = last_q.iter().map(|v| v*v).sum::<f32>().sqrt();
+                let kl2: f32 = last_k.iter().map(|v| v*v).sum::<f32>().sqrt();
+                let vl2: f32 = last_v.iter().map(|v| v*v).sum::<f32>().sqrt();
+                eprintln!("[CMP L0 step1] after QKV matmul (last tok, pre-bias/rope): Q_L2={ql2:.6} K_L2={kl2:.6} V_L2={vl2:.6}");
+                eprintln!("[CMP L0 step1] Q[0..4]={:?} K[0..4]={:?} V[0..4]={:?}", &last_q[..4], &last_k[..4], &last_v[..4]);
+            }
             if layer == 1 {
                 let ql2: f32 = qs_all[..h].iter().map(|v| v*v).sum::<f32>().sqrt();
                 let kl2: f32 = ks_all[..kv].iter().map(|v| v*v).sum::<f32>().sqrt();
@@ -145,6 +201,17 @@ impl LlamaState {
                 apply_rope(&mut ks_all[t*kv..(t+1)*kv], &rope_freqs, hd, nkv);
             }
             t_bias_rope += _t0.elapsed().as_micros() as u64;
+            if layer == 0 {
+                // Step 2: after bias+RoPE (last token)
+                let last_q = &qs_all[(n-1)*h..(n-1)*h+h];
+                let last_k = &ks_all[(n-1)*kv..(n-1)*kv+kv];
+                let last_v = &vs_all[(n-1)*kv..(n-1)*kv+kv];
+                let ql2: f32 = last_q.iter().map(|v| v*v).sum::<f32>().sqrt();
+                let kl2: f32 = last_k.iter().map(|v| v*v).sum::<f32>().sqrt();
+                let vl2: f32 = last_v.iter().map(|v| v*v).sum::<f32>().sqrt();
+                eprintln!("[CMP L0 step2] after bias+rope (last tok): Q_L2={ql2:.6} K_L2={kl2:.6} V_L2={vl2:.6}");
+                eprintln!("[CMP L0 step2] Q[0..4]={:?} K[0..4]={:?} V[0..4]={:?}", &last_q[..4], &last_k[..4], &last_v[..4]);
+            }
             // KV store: token-major, F16KvCache handles scatter
             let _t0 = std::time::Instant::now();
             self.kv_cache.store(layer, 0, &ks_all[..n*kv], n).unwrap();
@@ -171,18 +238,40 @@ impl LlamaState {
                                 qt[q_h * hd..].as_ptr(), k_ptr,
                                 scores.as_mut_ptr(), causal_len as i32, hd as i32,
                             );
+                            // Step 3: raw scores before softmax (last token, head 0)
+                            if layer == 0 && t == n-1 && q_h == 0 {
+                                let slen = scores.len().min(8);
+                                eprintln!("[CMP L0 step3] raw scores H0 (last tok, first {slen}): {:?}", &scores[..slen]);
+                            }
                             ffi_inf::softmax_f32(scores.as_mut_ptr(), causal_len as i32, rsqrt_hd);
+                            // Step 4: after softmax
+                            if layer == 0 && t == n-1 && q_h == 0 {
+                                let slen = scores.len().min(8);
+                                eprintln!("[CMP L0 step4] softmax H0 (last tok, first {slen}): {:?}", &scores[..slen]);
+                            }
                             ffi_inf::attn_vsum_f16(
                                 scores.as_ptr(), v_ptr,
                                 attn_all[t*h + q_h*hd..].as_mut_ptr(),
                                 causal_len as i32, hd as i32,
                             );
+                            // Step 5: vsum output for head 0
+                            if layer == 0 && t == n-1 && q_h == 0 {
+                                let out = &attn_all[t*h..t*h+4];
+                                eprintln!("[CMP L0 step5] vsum H0 (last tok): out[0..4]={:?}", out);
+                            }
                         }
                     }
                 }
             }
 
             t_attention += _t0.elapsed().as_micros() as u64;
+            // Dump layer 0 attention output for last token (compare with llama.cpp)
+            if layer == 0 {
+                let last = (n-1)*h;
+                let al2: f32 = attn_all[last..last+h].iter().map(|v| v*v).sum::<f32>().sqrt();
+                eprintln!("[CMP L0] attn_out L2={al2:.6} x[0..4]={:?}  (llama.cpp: L2=1.4377 x=[-0.011, -0.001, -0.010, -0.013])",
+                    &attn_all[last..last+4]);
+            }
             if layer == 1 {
                 let al2: f32 = attn_all[..h].iter().map(|v| v*v).sum::<f32>().sqrt();
                 eprintln!("[prefill L1] after attn: attn_out_L2={al2:.2} attn[0..4]={:?}", &attn_all[..4]);
@@ -240,6 +329,15 @@ impl LlamaState {
             }
 
             t_resid1 += _t0.elapsed().as_micros() as u64;
+            // Dump layer 0 after Wo+residual (= ffn_inp in llama.cpp)
+            if layer == 0 {
+                let xn = &xs[n-1];
+                let xl2: f32 = xn.iter().map(|v| v*v).sum::<f32>().sqrt();
+                eprintln!("[CMP L0] ffn_inp L2={xl2:.6} x[0..4]={:?}  (llama.cpp: L2=1.4283 x=[-0.018, -0.002, -0.011, -0.034])",
+                    &xn[..4]);
+                let tl2: f32 = tmp_all[(n-1)*h..(n-1)*h+h].iter().map(|v| v*v).sum::<f32>().sqrt();
+                eprintln!("[CMP L0] Wo_out L2={tl2:.6}  (for last token)");
+            }
             // ── Parallel rmsnorm (FFN) → norm_all, then batch quantize ──
             let _t0 = std::time::Instant::now();
             {
@@ -365,6 +463,11 @@ impl LlamaState {
                 });
             }
             t_resid2 += _t0.elapsed().as_micros() as u64;
+
+            // DEBUG: zero dim2 to test dimensional drift hypothesis
+            if std::env::var("OLORIN_ZERO_DIM2").is_ok() {
+                for t in 0..n { xs[t][2] = 0.0; }
+            }
 
             // DEBUG: trace last token's x[2] and L2 per layer
             let last = &xs[n-1];
