@@ -100,6 +100,19 @@ fn step1_embedding() {
 
     let raw_l2 = l2(&embed);
 
+    // Per-block and per-group L2 for Q6K dequant verification
+    for blk in 0..(hd / 256) {
+        let b = &embed[blk * 256..(blk + 1) * 256];
+        let bl2 = l2(b);
+        // Per-group L2 (8 groups of 32 elements per block)
+        let mut gl2s = String::new();
+        for g in 0..8 {
+            let gslice = &b[g * 32..(g + 1) * 32];
+            gl2s += &format!(" g{}={:.4}", g, l2(gslice));
+        }
+        eprintln!("blk{blk}: L2={bl2:.6}{gl2s}");
+    }
+
     // Gemma scaling: multiply by sqrt(hidden_dim)
     let scale = (hd as f32).sqrt();
     for v in embed.iter_mut() {
@@ -331,4 +344,35 @@ fn step4_ple() {
     assert!(!sig_l2.is_nan(), "PLE signal is NaN");
 
     eprintln!("PASS: step4 PLE Phase A computed");
+}
+
+#[test]
+fn step5_logits() {
+    if !has_model() { eprintln!("SKIP: no model"); return; }
+
+    let gguf = olorin::inference::gguf::GgufFile::open(std::path::Path::new(&model_path())).unwrap();
+    let model = olorin::inference::engine::Gemma4Model::from_gguf(&gguf).unwrap();
+    olorin::kernels::ffi::init().unwrap();
+
+    let mut state = olorin::inference::forward::Gemma4State::new(&model, 512);
+
+    // Forward pass with BOS token (id=2)
+    let logits = state.forward_one(&model, 2);
+
+    let logit_l2 = l2(logits);
+    eprintln!("=== Step 5: Logits (BOS token) ===");
+    eprintln!("logits L2={:.4}  (llama.cpp: 2655.2185)", logit_l2);
+    eprintln!("logits first4={}  (llama.cpp: [-10.5338, 15.5578, 11.2333, -10.5488])", first4(logits));
+
+    // Find top-5
+    let mut scored: Vec<(f32, usize)> = logits.iter().enumerate().map(|(i, &v)| (v, i)).collect();
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+    eprintln!("Top-5 (llama.cpp: 236761=20.07, 236764=19.18, 236771=18.75):");
+    for i in 0..5.min(scored.len()) {
+        eprintln!("  {}: token={} logit={:.4}", i, scored[i].1, scored[i].0);
+    }
+
+    assert!(!logit_l2.is_nan(), "logits contain NaN");
+    assert!(logit_l2 > 1.0, "logits near-zero");
+    eprintln!("PASS: step5 logits computed");
 }

@@ -69,35 +69,37 @@ pub fn q6k_embed_lookup(
                 output[elem_base + 16 + j] = sc0b * ((q6 - 32) as f32);
             }
 
-            // Group 1: ql[0..32] high nibble, qh bits 2-3
+            // Group 1: ql[32..64] low nibble, qh bits 2-3
+            // (llama.cpp: y[l+32] = ql[l+32] & 0xF | qh >> 2)
             let sc1a = d * unsafe { *sc_ptr.add(2) as i8 as f32 };
             let sc1b = d * unsafe { *sc_ptr.add(3) as i8 as f32 };
             for j in 0..16usize {
-                let ql = unsafe { *ql_ptr.add(j) };
-                let qh = unsafe { *qh_ptr.add(j) };
-                let q6 = ((ql >> 4) & 0x0f) as i32 | ((((qh >> 2) & 0x03) as i32) << 4);
-                output[elem_base + 32 + j] = sc1a * ((q6 - 32) as f32);
-            }
-            for j in 0..16usize {
-                let ql = unsafe { *ql_ptr.add(16 + j) };
-                let qh = unsafe { *qh_ptr.add(16 + j) };
-                let q6 = ((ql >> 4) & 0x0f) as i32 | ((((qh >> 2) & 0x03) as i32) << 4);
-                output[elem_base + 32 + 16 + j] = sc1b * ((q6 - 32) as f32);
-            }
-
-            // Group 2: ql[32..64] low nibble, qh bits 4-5
-            let sc2a = d * unsafe { *sc_ptr.add(4) as i8 as f32 };
-            let sc2b = d * unsafe { *sc_ptr.add(5) as i8 as f32 };
-            for j in 0..16usize {
                 let ql = unsafe { *ql_ptr.add(32 + j) };
                 let qh = unsafe { *qh_ptr.add(j) };
-                let q6 = (ql & 0x0f) as i32 | ((((qh >> 4) & 0x03) as i32) << 4);
-                output[elem_base + 64 + j] = sc2a * ((q6 - 32) as f32);
+                let q6 = (ql & 0x0f) as i32 | ((((qh >> 2) & 0x03) as i32) << 4);
+                output[elem_base + 32 + j] = sc1a * ((q6 - 32) as f32);
             }
             for j in 0..16usize {
                 let ql = unsafe { *ql_ptr.add(32 + 16 + j) };
                 let qh = unsafe { *qh_ptr.add(16 + j) };
-                let q6 = (ql & 0x0f) as i32 | ((((qh >> 4) & 0x03) as i32) << 4);
+                let q6 = (ql & 0x0f) as i32 | ((((qh >> 2) & 0x03) as i32) << 4);
+                output[elem_base + 32 + 16 + j] = sc1b * ((q6 - 32) as f32);
+            }
+
+            // Group 2: ql[0..32] high nibble, qh bits 4-5
+            // (llama.cpp: y[l+64] = ql[l] >> 4 | qh >> 4)
+            let sc2a = d * unsafe { *sc_ptr.add(4) as i8 as f32 };
+            let sc2b = d * unsafe { *sc_ptr.add(5) as i8 as f32 };
+            for j in 0..16usize {
+                let ql = unsafe { *ql_ptr.add(j) };
+                let qh = unsafe { *qh_ptr.add(j) };
+                let q6 = ((ql >> 4) & 0x0f) as i32 | ((((qh >> 4) & 0x03) as i32) << 4);
+                output[elem_base + 64 + j] = sc2a * ((q6 - 32) as f32);
+            }
+            for j in 0..16usize {
+                let ql = unsafe { *ql_ptr.add(16 + j) };
+                let qh = unsafe { *qh_ptr.add(16 + j) };
+                let q6 = ((ql >> 4) & 0x0f) as i32 | ((((qh >> 4) & 0x03) as i32) << 4);
                 output[elem_base + 64 + 16 + j] = sc2b * ((q6 - 32) as f32);
             }
 
