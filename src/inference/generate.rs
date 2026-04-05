@@ -1,175 +1,48 @@
 //! Public inference API — the sole entry point for text generation.
 //!
-//! `Engine::load(path)` opens a GGUF model.
-//! `Engine::generate(prompt, on_token)` tokenizes, runs forward pass, returns text.
-//! Knows nothing about channels, vault, or safety.
+//! Stubbed for Gemma 4 transition. Model loading and generation will be
+//! re-implemented once the forward pass is ready (Task 8).
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use crate::error::Result;
-use crate::inference::engine::{BitNetModel, QuantType};
-use crate::inference::gguf::GgufFile;
-use crate::inference::tokenizer::Tokenizer;
 
 pub struct Engine {
-    /// Backing GGUF data — must outlive model (raw pointers into mmap).
-    _gguf: GgufFile,
-    model: BitNetModel,
-    tokenizer: Tokenizer,
-    max_seq_len: usize,
     pub max_tokens: usize,
     pub temperature: f32,
     pub top_k: usize,
     pub top_p: f32,
     pub min_p: f32,
     pub repetition_penalty: f32,
-    /// Draft model for speculative decoding (optional).
-    draft_gguf: Option<GgufFile>,
-    draft_model: Option<BitNetModel>,
     pub draft_k: usize,
 }
 
 impl Engine {
-    /// Load a GGUF model from disk. Parses weights and tokenizer once.
-    pub fn load(path: &Path, max_seq_len: usize) -> Result<Self> {
-        let gguf = GgufFile::open(path)?;
-        let model = BitNetModel::from_gguf(&gguf)?;
-        let tokenizer = Tokenizer::from_gguf(&gguf)?;
-        Ok(Engine {
-            _gguf: gguf,
-            model,
-            tokenizer,
-            max_seq_len,
-            max_tokens: 64,
-            temperature: 0.8,
-            top_k: 40,
-            top_p: 0.95,
-            min_p: 0.05,
-            repetition_penalty: 1.1,
-            draft_gguf: None,
-            draft_model: None,
-            draft_k: 5,
-        })
+    /// Load a GGUF model from disk.
+    pub fn load(_path: &Path, _max_seq_len: usize) -> Result<Self> {
+        Err(crate::error::Error::Inference(
+            "Gemma 4 inference not yet implemented".into(),
+        ))
     }
 
     /// Load a draft model for speculative decoding.
-    pub fn load_draft(&mut self, path: &Path) -> Result<()> {
-        let gguf = GgufFile::open(path)?;
-        let model = BitNetModel::from_gguf(&gguf)?;
-        eprintln!("[Olorin] Draft model loaded: {} layers, {} dim", model.n_layers, model.hidden_dim);
-        self.draft_gguf = Some(gguf);
-        self.draft_model = Some(model);
-        Ok(())
+    pub fn load_draft(&mut self, _path: &Path) -> Result<()> {
+        Err(crate::error::Error::Inference(
+            "Gemma 4 speculative decoding not yet implemented".into(),
+        ))
     }
 
     /// Detect quantization type of the loaded model.
     pub fn quant_type_str(&self) -> &str {
-        self.model.quant_type_str()
+        "gemma4"
     }
 
     /// Generate text from a prompt. Calls `on_token` for each generated token.
     /// Returns the complete generated text.
-    pub fn generate(&self, prompt: &str, system: &str, on_token: &dyn Fn(&str)) -> Result<String> {
-        let model = &self.model;
-        let tokenizer = &self.tokenizer;
-
-        let is_q4k = model.quant_type == QuantType::Q4K;
-
-        // Build prompt tokens — match each model's native format
-        let skip_bos = model.architecture == "qwen2";
-        let mut tokens = if skip_bos { Vec::new() } else { vec![tokenizer.bos_id] };
-        if is_q4k {
-            let chat = build_chat_prompt(&model.architecture, system, prompt);
-            eprintln!("[DEBUG] chat template: {:?}", &chat[..chat.len().min(200)]);
-            let encoded = tokenizer.encode(&chat);
-            eprintln!("[DEBUG] encoded {} tokens: {:?}", encoded.len(), &encoded[..encoded.len().min(30)]);
-            tokens.extend(encoded);
-            eprintln!("[DEBUG] total tokens (with bos): {:?}", &tokens[..tokens.len().min(30)]);
-        } else {
-            tokens.extend(tokenizer.encode(prompt));
-        }
-
-        let output = Arc::new(std::sync::Mutex::new(Vec::<u32>::new()));
-        let output_ref = output.clone();
-
-        let on_tok = |tok_id: u32| {
-            let text = tokenizer.decode(&[tok_id]);
-            on_token(&text);
-            output_ref.lock().unwrap().push(tok_id);
-        };
-
-        let mut generated = if is_q4k {
-            if let Some(ref draft_model) = self.draft_model {
-                use crate::inference::speculative;
-                let (gen, _, _) = speculative::speculative_generate(
-                    model, draft_model, &tokens, self.max_tokens, self.draft_k,
-                    self.temperature, self.top_k, self.top_p, self.min_p,
-                    self.repetition_penalty, &tokenizer.stop_ids, self.max_seq_len, on_tok,
-                );
-                gen
-            } else {
-                use crate::inference::forward_llama;
-                let (gen, _, _) = forward_llama::generate(
-                    model, &tokens, self.max_tokens, self.temperature,
-                    self.top_k, self.top_p, self.min_p, self.repetition_penalty,
-                    &tokenizer.stop_ids, self.max_seq_len, on_tok,
-                );
-                gen
-            }
-        } else {
-            use crate::inference::forward::InferenceState;
-            let (gen, _, _) = InferenceState::generate(
-                &model, &tokens, self.max_tokens, self.temperature,
-                self.top_k, self.top_p, self.min_p, self.repetition_penalty,
-                &tokenizer.stop_ids, self.max_seq_len, on_tok,
-            );
-            gen
-        };
-
-        let mut gen_tokens: Vec<u32> = generated[tokens.len()..].to_vec();
-        let result = tokenizer.decode(&gen_tokens);
-
-        // Wipe token buffers — no plaintext residue
-        unsafe {
-            std::ptr::write_bytes(tokens.as_mut_ptr(), 0, tokens.len());
-            std::ptr::write_bytes(generated.as_mut_ptr(), 0, generated.len());
-            std::ptr::write_bytes(gen_tokens.as_mut_ptr(), 0, gen_tokens.len());
-            let mut out = output.lock().unwrap();
-            std::ptr::write_bytes(out.as_mut_ptr(), 0, out.len());
-        }
-        std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
-
-        Ok(result)
+    pub fn generate(&self, _prompt: &str, _system: &str, _on_token: &dyn Fn(&str)) -> Result<String> {
+        Err(crate::error::Error::Inference(
+            "Gemma 4 inference not yet implemented".into(),
+        ))
     }
-}
-
-/// Build chat prompt in the model's native template format.
-fn build_chat_prompt(architecture: &str, system: &str, prompt: &str) -> String {
-    let mut chat = String::new();
-    match architecture {
-        "qwen2" => {
-            if !system.is_empty() {
-                chat.push_str("<|im_start|>system\n");
-                chat.push_str(system);
-                chat.push_str("<|im_end|>\n");
-            }
-            chat.push_str("<|im_start|>user\n");
-            chat.push_str(prompt);
-            chat.push_str("<|im_end|>\n<|im_start|>assistant\n");
-        }
-        _ => {
-            // Llama 3 format (default)
-            if !system.is_empty() {
-                chat.push_str("<|start_header_id|>system<|end_header_id|>\n\n");
-                chat.push_str(system);
-                chat.push_str("<|eot_id|>");
-            }
-            chat.push_str("<|start_header_id|>user<|end_header_id|>\n\n");
-            chat.push_str(prompt);
-            chat.push_str("<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n");
-        }
-    }
-    chat
 }
 
 /// Find a GGUF model in standard locations.
@@ -216,17 +89,14 @@ pub fn resolve_model(arg: Option<&str>) -> Option<PathBuf> {
     ];
     match arg {
         Some(name) => {
-            // Try alias
             for &(alias, filename) in aliases {
                 if name == alias {
                     let p = olorin_models.join(filename);
                     return p.exists().then_some(p);
                 }
             }
-            // Try stem name (from available_models)
             let stem_path = olorin_models.join(format!("{name}.gguf"));
             if stem_path.exists() { return Some(stem_path); }
-            // Try full path
             let p = PathBuf::from(name);
             p.exists().then_some(p)
         }
