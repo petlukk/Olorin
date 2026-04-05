@@ -1,0 +1,12 @@
+{
+  "library": "/mnt/c/Users/Peter.lukka/Desktop/DEV/Olorin/target/release/build/olorin-74d22db92a50c3ff/out/libgemma4_rope.so",
+  "exports": [
+    {
+      "name": "gemma4_rope",
+      "args": [{"name": "data", "type": "*mut f32", "direction": "in", "cap": null, "count": null}, {"name": "cos_table", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "sin_table", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "head_dim", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "n_heads", "type": "i32", "direction": "in", "cap": null, "count": null}],
+      "return_type": null
+    }
+  ],
+  "structs": [
+  ]
+}

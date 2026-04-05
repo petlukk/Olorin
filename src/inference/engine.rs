@@ -1,4 +1,7 @@
-//! Gemma 4 model structure and weight loading from GGUF.
+//! Gemma 4 E2B model structure and weight loading from GGUF.
+//!
+//! Per-layer varying dimensions: SWA layers have head_dim 256, ffn 6144;
+//! global layers have head_dim 512, ffn 12288. KV sharing across last N layers.
 
 use crate::inference::gguf::{GgufFile, MetaValue};
 
@@ -17,15 +20,38 @@ pub enum AttnType {
 // ---------------------------------------------------------------------------
 
 pub struct LayerWeights {
-    pub attn_norm: *const f32,
-    pub wq: *const u8,
-    pub wk: *const u8,
-    pub wv: *const u8,
-    pub wo: *const u8,
-    pub ffn_norm: *const f32,
-    pub w_gate: *const u8,
-    pub w_up: *const u8,
-    pub w_down: *const u8,
+    // Pre-attention RMSNorm
+    pub attn_norm: *const f32,        // [hidden_dim]
+
+    // Attention projections (Q4K quantized)
+    pub wq: *const u8,                // [hidden_dim, n_heads * head_dim_k]
+    pub wk: *const u8,                // [hidden_dim, n_kv_heads * head_dim_k]
+    pub wv: *const u8,                // [hidden_dim, n_kv_heads * head_dim_v]
+    pub wo: *const u8,                // [n_heads * head_dim_k, hidden_dim]
+
+    // QK norm (per-head, BF16->f32 converted at load)
+    pub q_norm: *const f32,           // [head_dim_k]
+    pub k_norm: *const f32,           // [head_dim_k]
+
+    // Post-attention RMSNorm
+    pub post_attn_norm: *const f32,   // [hidden_dim]
+
+    // Pre-FFN RMSNorm
+    pub ffn_norm: *const f32,         // [hidden_dim]
+
+    // FFN (GeGLU, Q4K quantized)
+    pub w_gate: *const u8,            // [hidden_dim, ffn_dim]
+    pub w_up: *const u8,              // [hidden_dim, ffn_dim]
+    pub w_down: *const u8,            // [ffn_dim, hidden_dim]
+
+    // Post-FFN RMSNorm
+    pub post_ffn_norm: *const f32,    // [hidden_dim]
+
+    // PLE per-layer tensors
+    pub inp_gate: *const u8,          // [hidden_dim, ple_dim]
+    pub proj: *const u8,              // [ple_dim, hidden_dim]
+    pub post_norm: *const f32,        // [hidden_dim]
+    pub layer_output_scale: f32,      // scalar
 }
 
 impl std::fmt::Debug for LayerWeights {
@@ -43,22 +69,41 @@ pub struct Gemma4Model {
     pub hidden_dim: usize,
     pub n_heads: usize,
     pub n_kv_heads: usize,
-    pub head_dim: usize,
-    pub ffn_dim: usize,
     pub vocab_size: usize,
-    pub rope_theta: f32,
     pub rms_eps: f32,
     pub sliding_window: usize,
-    pub attn_types: Vec<AttnType>,
-    pub kv_shared_source: Vec<Option<usize>>,
+    pub logit_softcap: f32,
     pub ple_dim: usize,
 
+    // Per-layer varying dimensions
+    pub head_dim_k: Vec<usize>,       // per-layer: 256 (SWA) or 512 (global)
+    pub head_dim_v: Vec<usize>,       // per-layer: 256 or 512
+    pub ffn_dim: Vec<usize>,          // per-layer: 6144 or 12288
+    pub is_swa: Vec<bool>,            // per-layer: true = sliding window
+    pub kv_shared_source: Vec<Option<usize>>,
+
+    // RoPE (dual frequencies)
+    pub rope_theta_swa: f32,          // 10000.0
+    pub rope_theta_global: f32,       // 1000000.0
+    pub rope_dim_swa: usize,          // 256
+    pub rope_dim_global: usize,       // 512
+    pub rope_freqs: Option<Vec<f32>>, // global RoPE freq factors [rope_dim_global/2]
+
+    // Layers
     pub layers: Vec<LayerWeights>,
+
+    // Global tensors
     pub embed_weight: *const u8,
     pub embed_dtype: u32,
-    pub output_weight: *const u8,
-    pub output_dtype: u32,
     pub norm_weight: *const f32,
+
+    // PLE global tensors
+    pub ple_token_embd: *const u8,    // [ple_dim * n_layers, vocab_size] Q6K
+    pub ple_model_proj: *const u8,    // [hidden_dim, ple_dim * n_layers] BF16
+    pub ple_proj_norm: *const f32,    // [ple_dim]
+
+    // BF16->f32 conversion buffers owned by the model (kept alive)
+    _bf16_bufs: Vec<Vec<f32>>,
 }
 
 unsafe impl Send for Gemma4Model {}
@@ -89,6 +134,29 @@ fn get_meta_f32(gguf: &GgufFile, key: &str) -> Option<f32> {
     }
 }
 
+/// Extract a u32/i32 array from metadata.
+fn get_meta_u32_array(gguf: &GgufFile, key: &str) -> Option<Vec<u32>> {
+    match gguf.metadata.get(key)? {
+        MetaValue::Array(arr) => {
+            let mut out = Vec::with_capacity(arr.len());
+            for v in arr {
+                match v {
+                    MetaValue::U32(x) => out.push(*x),
+                    MetaValue::I32(x) => out.push(*x as u32),
+                    MetaValue::U64(x) => out.push(*x as u32),
+                    MetaValue::I64(x) => out.push(*x as u32),
+                    _ => return None,
+                }
+            }
+            Some(out)
+        }
+        // Scalar fallback — single value, replicate not needed at call site
+        MetaValue::U32(v) => Some(vec![*v]),
+        MetaValue::I32(v) => Some(vec![*v as u32]),
+        _ => None,
+    }
+}
+
 fn tensor_ptr<T>(gguf: &GgufFile, name: &str) -> Result<*const T, String> {
     let data = gguf
         .tensor_data(name)
@@ -96,36 +164,61 @@ fn tensor_ptr<T>(gguf: &GgufFile, name: &str) -> Result<*const T, String> {
     Ok(data.as_ptr() as *const T)
 }
 
-// ---------------------------------------------------------------------------
-// Compute attention type pattern
-// ---------------------------------------------------------------------------
+fn tensor_ptr_opt<T>(gguf: &GgufFile, name: &str) -> *const T {
+    gguf.tensor_data(name)
+        .map(|d| d.as_ptr() as *const T)
+        .unwrap_or(std::ptr::null())
+}
 
-fn compute_attn_types(n_layers: usize, global_every: usize) -> Vec<AttnType> {
-    (0..n_layers)
-        .map(|i| {
-            if i == n_layers - 1 || (global_every > 0 && i % global_every == 0) {
-                AttnType::Global
-            } else {
-                AttnType::SlidingWindow
-            }
-        })
-        .collect()
+/// Convert BF16 tensor data to a new Vec<f32>. Returns the vec.
+fn bf16_to_f32_vec(data: &[u8]) -> Vec<f32> {
+    let n = data.len() / 2;
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let bits = u16::from_le_bytes([data[i * 2], data[i * 2 + 1]]);
+        out.push(f32::from_bits((bits as u32) << 16));
+    }
+    out
+}
+
+/// Read a single f32 scalar from a [1]-shaped tensor (dtype F32).
+fn read_f32_scalar(gguf: &GgufFile, name: &str) -> f32 {
+    match gguf.tensor_data(name) {
+        Some(data) if data.len() >= 4 => {
+            f32::from_le_bytes([data[0], data[1], data[2], data[3]])
+        }
+        _ => 1.0,
+    }
 }
 
 // ---------------------------------------------------------------------------
-// Compute shared KV source mapping
+// Shared KV source mapping
 // ---------------------------------------------------------------------------
 
-fn compute_kv_shared(n_layers: usize, shared_suffix_len: usize) -> Vec<Option<usize>> {
+/// Compute kv_shared_source. Layers that share KV walk back to find the
+/// nearest earlier layer of the same attention type that owns its own KV.
+fn compute_kv_shared(
+    n_layers: usize,
+    shared_suffix_len: usize,
+    is_swa: &[bool],
+) -> Vec<Option<usize>> {
     if shared_suffix_len == 0 {
         return vec![None; n_layers];
     }
     let first_shared = n_layers.saturating_sub(shared_suffix_len);
     (0..n_layers)
         .map(|i| {
-            if i >= first_shared && i > 0 {
-                // Reuse KV from the layer just before the shared range
-                Some(first_shared.saturating_sub(1))
+            if i >= first_shared {
+                // Walk back to find last non-shared layer of same type
+                let want_swa = is_swa[i];
+                let mut src = None;
+                for j in (0..first_shared).rev() {
+                    if is_swa[j] == want_swa {
+                        src = Some(j);
+                        break;
+                    }
+                }
+                src
             } else {
                 None
             }
@@ -140,12 +233,10 @@ fn compute_kv_shared(n_layers: usize, shared_suffix_len: usize) -> Vec<Option<us
 impl Gemma4Model {
     pub fn from_gguf(gguf: &GgufFile) -> Result<Self, String> {
         // 1. Architecture name
-        let arch = gguf
-            .get_str("general.architecture")
-            .unwrap_or("gemma2");
+        let arch = gguf.get_str("general.architecture").unwrap_or("gemma4");
         eprintln!("[gemma4] architecture: {arch}");
 
-        // 2. Read metadata params
+        // 2. Core metadata
         let n_layers = get_meta_u32(gguf, &format!("{arch}.block_count"))
             .ok_or("missing block_count")? as usize;
         let hidden_dim = get_meta_u32(gguf, &format!("{arch}.embedding_length"))
@@ -154,17 +245,107 @@ impl Gemma4Model {
             .ok_or("missing head_count")? as usize;
         let n_kv_heads = get_meta_u32(gguf, &format!("{arch}.attention.head_count_kv"))
             .ok_or("missing head_count_kv")? as usize;
-        let ffn_dim = get_meta_u32(gguf, &format!("{arch}.feed_forward_length"))
-            .ok_or("missing feed_forward_length")? as usize;
-        let head_dim = hidden_dim / n_heads;
 
-        let rope_theta = get_meta_f32(gguf, &format!("{arch}.rope.freq_base"))
-            .unwrap_or(10000.0);
         let rms_eps = get_meta_f32(gguf, &format!("{arch}.attention.layer_norm_rms_epsilon"))
             .unwrap_or(1e-6);
         let sliding_window = get_meta_u32(gguf, &format!("{arch}.attention.sliding_window"))
             .map(|v| v as usize)
             .unwrap_or(512);
+        let logit_softcap = get_meta_f32(gguf, &format!("{arch}.final_logit_softcapping"))
+            .unwrap_or(0.0);
+
+        // Per-layer head dimensions
+        let key_len_global = get_meta_u32(gguf, &format!("{arch}.attention.key_length"))
+            .unwrap_or(512) as usize;
+        let key_len_swa = get_meta_u32(gguf, &format!("{arch}.attention.key_length_swa"))
+            .unwrap_or(256) as usize;
+        let val_len_global = get_meta_u32(gguf, &format!("{arch}.attention.value_length"))
+            .unwrap_or(512) as usize;
+        let val_len_swa = get_meta_u32(gguf, &format!("{arch}.attention.value_length_swa"))
+            .unwrap_or(256) as usize;
+
+        // Shared KV suffix length
+        let shared_suffix = get_meta_u32(gguf, &format!("{arch}.attention.shared_kv_layers"))
+            .map(|v| v as usize)
+            .unwrap_or(0);
+
+        // PLE dimension
+        let ple_dim = get_meta_u32(gguf, &format!("{arch}.embedding_length_per_layer_input"))
+            .map(|v| v as usize)
+            .unwrap_or(0);
+
+        // RoPE dual frequencies
+        let rope_theta_global = get_meta_f32(gguf, &format!("{arch}.rope.freq_base"))
+            .unwrap_or(1000000.0);
+        let rope_theta_swa = get_meta_f32(gguf, &format!("{arch}.rope.freq_base_swa"))
+            .unwrap_or(10000.0);
+        let rope_dim_global = get_meta_u32(gguf, &format!("{arch}.rope.dimension_count"))
+            .unwrap_or(key_len_global as u32) as usize;
+        let rope_dim_swa = get_meta_u32(gguf, &format!("{arch}.rope.dimension_count_swa"))
+            .unwrap_or(key_len_swa as u32) as usize;
+
+        // 3. Sliding window pattern (per-layer array: 1=SWA, 0=global)
+        let is_swa: Vec<bool> = match get_meta_u32_array(
+            gguf,
+            &format!("{arch}.attention.sliding_window_pattern"),
+        ) {
+            Some(pattern) => {
+                if pattern.len() != n_layers {
+                    return Err(format!(
+                        "sliding_window_pattern has {} items, expected {n_layers}",
+                        pattern.len()
+                    ));
+                }
+                pattern.iter().map(|&v| v == 1).collect()
+            }
+            None => {
+                // Fallback: compute from global_layer_interval
+                let interval = get_meta_u32(
+                    gguf,
+                    &format!("{arch}.attention.global_layer_interval"),
+                )
+                .map(|v| v as usize)
+                .unwrap_or(5);
+                (0..n_layers)
+                    .map(|i| {
+                        !(i == n_layers - 1
+                            || (interval > 0 && i % interval == 0))
+                    })
+                    .collect()
+            }
+        };
+
+        // 4. Per-layer FFN dimensions (array or scalar)
+        let ffn_dim: Vec<usize> = match get_meta_u32_array(
+            gguf,
+            &format!("{arch}.feed_forward_length"),
+        ) {
+            Some(arr) if arr.len() == n_layers => {
+                arr.iter().map(|&v| v as usize).collect()
+            }
+            Some(arr) if arr.len() == 1 => {
+                vec![arr[0] as usize; n_layers]
+            }
+            _ => {
+                // Scalar fallback
+                let single = get_meta_u32(gguf, &format!("{arch}.feed_forward_length"))
+                    .unwrap_or(6144) as usize;
+                vec![single; n_layers]
+            }
+        };
+
+        // 5. Per-layer head dims derived from SWA/global type
+        let head_dim_k: Vec<usize> = is_swa
+            .iter()
+            .map(|&swa| if swa { key_len_swa } else { key_len_global })
+            .collect();
+        let head_dim_v: Vec<usize> = is_swa
+            .iter()
+            .map(|&swa| if swa { val_len_swa } else { val_len_global })
+            .collect();
+
+        // 6. KV shared source
+        let kv_shared_source = compute_kv_shared(n_layers, shared_suffix, &is_swa);
 
         // Vocab size from embedding tensor dims
         let vocab_size = gguf
@@ -172,93 +353,147 @@ impl Gemma4Model {
             .get("token_embd.weight")
             .and_then(|&idx| gguf.tensors.get(idx))
             .and_then(|ti| ti.dims.first().copied())
-            .ok_or("cannot determine vocab_size from token_embd.weight")? as usize;
+            .ok_or("cannot determine vocab_size from token_embd.weight")?
+            as usize;
 
-        // Global attention interval (default every 5th layer)
-        let global_every = get_meta_u32(gguf, &format!("{arch}.attention.global_layer_interval"))
-            .map(|v| v as usize)
-            .unwrap_or(5);
+        // 7. RoPE frequency factors (optional global tensor)
+        let rope_freqs = gguf.tensor_data("rope_freqs.weight").map(|data| {
+            // F32 tensor
+            let n = data.len() / 4;
+            let mut v = Vec::with_capacity(n);
+            for i in 0..n {
+                let off = i * 4;
+                let bits = u32::from_le_bytes([
+                    data[off], data[off + 1], data[off + 2], data[off + 3],
+                ]);
+                v.push(f32::from_bits(bits));
+            }
+            v
+        });
 
-        // Shared KV suffix length
-        let shared_suffix = get_meta_u32(gguf, &format!("{arch}.attention.shared_kv_layers"))
-            .map(|v| v as usize)
-            .unwrap_or(0);
-
-        // PLE dimension (0 if not present)
-        let ple_dim = get_meta_u32(gguf, &format!("{arch}.ple.embedding_length"))
-            .map(|v| v as usize)
-            .unwrap_or(0);
-
-        // 3. Attention types
-        let attn_types = compute_attn_types(n_layers, global_every);
-
-        // 4. Shared KV source
-        let kv_shared_source = compute_kv_shared(n_layers, shared_suffix);
-
-        // 5. Per-layer weight pointers
+        // 8. Per-layer weight pointers (BF16 norms converted to owned f32 bufs)
+        let mut bf16_bufs: Vec<Vec<f32>> = Vec::new();
         let mut layers = Vec::with_capacity(n_layers);
         for i in 0..n_layers {
-            let prefix = format!("blk.{i}");
+            let b = format!("blk.{i}");
             let lw = LayerWeights {
-                attn_norm: tensor_ptr::<f32>(gguf, &format!("{prefix}.attn_norm.weight"))?,
-                wq: tensor_ptr::<u8>(gguf, &format!("{prefix}.attn_q.weight"))?,
-                wk: tensor_ptr::<u8>(gguf, &format!("{prefix}.attn_k.weight"))?,
-                wv: tensor_ptr::<u8>(gguf, &format!("{prefix}.attn_v.weight"))?,
-                wo: tensor_ptr::<u8>(gguf, &format!("{prefix}.attn_output.weight"))?,
-                ffn_norm: tensor_ptr::<f32>(gguf, &format!("{prefix}.ffn_norm.weight"))?,
-                w_gate: tensor_ptr::<u8>(gguf, &format!("{prefix}.ffn_gate.weight"))?,
-                w_up: tensor_ptr::<u8>(gguf, &format!("{prefix}.ffn_up.weight"))?,
-                w_down: tensor_ptr::<u8>(gguf, &format!("{prefix}.ffn_down.weight"))?,
+                attn_norm: tensor_ptr::<f32>(gguf, &format!("{b}.attn_norm.weight"))?,
+                wq: tensor_ptr::<u8>(gguf, &format!("{b}.attn_q.weight"))?,
+                wk: tensor_ptr::<u8>(gguf, &format!("{b}.attn_k.weight"))?,
+                wv: tensor_ptr::<u8>(gguf, &format!("{b}.attn_v.weight"))?,
+                wo: tensor_ptr::<u8>(gguf, &format!("{b}.attn_output.weight"))?,
+                q_norm: load_norm_ptr(gguf, &format!("{b}.attn_q_norm.weight"), &mut bf16_bufs),
+                k_norm: load_norm_ptr(gguf, &format!("{b}.attn_k_norm.weight"), &mut bf16_bufs),
+                post_attn_norm: load_norm_ptr(gguf, &format!("{b}.post_attention_norm.weight"), &mut bf16_bufs),
+                ffn_norm: tensor_ptr::<f32>(gguf, &format!("{b}.ffn_norm.weight"))?,
+                w_gate: tensor_ptr::<u8>(gguf, &format!("{b}.ffn_gate.weight"))?,
+                w_up: tensor_ptr::<u8>(gguf, &format!("{b}.ffn_up.weight"))?,
+                w_down: tensor_ptr::<u8>(gguf, &format!("{b}.ffn_down.weight"))?,
+                post_ffn_norm: load_norm_ptr(gguf, &format!("{b}.post_ffw_norm.weight"), &mut bf16_bufs),
+                inp_gate: tensor_ptr_opt::<u8>(gguf, &format!("{b}.inp_gate.weight")),
+                proj: tensor_ptr_opt::<u8>(gguf, &format!("{b}.proj.weight")),
+                post_norm: load_norm_ptr(gguf, &format!("{b}.post_norm.weight"), &mut bf16_bufs),
+                layer_output_scale: read_f32_scalar(gguf, &format!("{b}.layer_output_scale")),
             };
             layers.push(lw);
         }
 
-        // 6. Global tensors
+        // 9. Global tensors
         let embed_weight = tensor_ptr::<u8>(gguf, "token_embd.weight")?;
         let embed_idx = gguf.tensor_map["token_embd.weight"];
         let embed_dtype = gguf.tensors[embed_idx].dtype;
-
-        // Output projection — may be tied to embedding
-        let (output_weight, output_dtype) = if gguf.tensor_map.contains_key("output.weight") {
-            let ptr = tensor_ptr::<u8>(gguf, "output.weight")?;
-            let idx = gguf.tensor_map["output.weight"];
-            (ptr, gguf.tensors[idx].dtype)
-        } else {
-            // Tied to embedding
-            (embed_weight, embed_dtype)
-        };
-
         let norm_weight = tensor_ptr::<f32>(gguf, "output_norm.weight")?;
 
-        // 7. Diagnostic info
-        let n_global = attn_types.iter().filter(|t| **t == AttnType::Global).count();
-        let n_sliding = n_layers - n_global;
-        eprintln!("[gemma4] layers={n_layers} hidden={hidden_dim} heads={n_heads} kv_heads={n_kv_heads} head_dim={head_dim}");
-        eprintln!("[gemma4] ffn={ffn_dim} vocab={vocab_size} rope_theta={rope_theta} rms_eps={rms_eps}");
-        eprintln!("[gemma4] sliding_window={sliding_window} global_every={global_every} ({n_global} global, {n_sliding} sliding)");
-        eprintln!("[gemma4] shared_kv_suffix={shared_suffix} ple_dim={ple_dim}");
-        eprintln!("[gemma4] embed_dtype={embed_dtype} output_dtype={output_dtype} output_tied={}", !gguf.tensor_map.contains_key("output.weight"));
+        // PLE global tensors (optional)
+        let ple_token_embd = tensor_ptr_opt::<u8>(gguf, "per_layer_token_embd.weight");
+        let ple_model_proj = tensor_ptr_opt::<u8>(gguf, "per_layer_model_proj.weight");
+
+        // PLE projection norm — may be BF16 or F32
+        let ple_proj_norm = load_norm_ptr(
+            gguf,
+            "per_layer_proj_norm.weight",
+            &mut bf16_bufs,
+        );
+
+        // 10. Diagnostic summary
+        let n_swa = is_swa.iter().filter(|&&s| s).count();
+        eprintln!("[gemma4] {n_layers}L h={hidden_dim} heads={n_heads}/{n_kv_heads} swa={n_swa} global={}", n_layers - n_swa);
+        eprintln!("[gemma4] head_k={key_len_swa}/{key_len_global} ffn={}/{} sw={sliding_window} ple={ple_dim}",
+            ffn_dim.iter().min().unwrap_or(&0), ffn_dim.iter().max().unwrap_or(&0));
+        eprintln!("[gemma4] rope={rope_theta_swa}/{rope_theta_global} softcap={logit_softcap} shared_kv={shared_suffix} bf16_bufs={}", bf16_bufs.len());
 
         Ok(Gemma4Model {
             n_layers,
             hidden_dim,
             n_heads,
             n_kv_heads,
-            head_dim,
-            ffn_dim,
             vocab_size,
-            rope_theta,
             rms_eps,
             sliding_window,
-            attn_types,
-            kv_shared_source,
+            logit_softcap,
             ple_dim,
+            head_dim_k,
+            head_dim_v,
+            ffn_dim,
+            is_swa,
+            kv_shared_source,
+            rope_theta_swa,
+            rope_theta_global,
+            rope_dim_swa,
+            rope_dim_global,
+            rope_freqs,
             layers,
             embed_weight,
             embed_dtype,
-            output_weight,
-            output_dtype,
             norm_weight,
+            ple_token_embd,
+            ple_model_proj,
+            ple_proj_norm,
+            _bf16_bufs: bf16_bufs,
         })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Norm pointer loading (handles F32 direct or BF16 conversion)
+// ---------------------------------------------------------------------------
+
+/// Load a norm weight pointer. If the tensor is BF16, convert to f32 and
+/// store the buffer in `bufs` (keeping it alive). Returns null if missing.
+fn load_norm_ptr(
+    gguf: &GgufFile,
+    name: &str,
+    bufs: &mut Vec<Vec<f32>>,
+) -> *const f32 {
+    let idx = match gguf.tensor_map.get(name) {
+        Some(&i) => i,
+        None => return std::ptr::null(),
+    };
+    let ti = &gguf.tensors[idx];
+    match ti.dtype {
+        0 => {
+            // F32 — point directly into mmap
+            gguf.tensor_data(name)
+                .map(|d| d.as_ptr() as *const f32)
+                .unwrap_or(std::ptr::null())
+        }
+        30 => {
+            // BF16 — convert to owned Vec<f32>
+            match gguf.tensor_data(name) {
+                Some(data) => {
+                    let converted = bf16_to_f32_vec(data);
+                    let ptr = converted.as_ptr();
+                    bufs.push(converted);
+                    ptr
+                }
+                None => std::ptr::null(),
+            }
+        }
+        _ => {
+            eprintln!("[gemma4] warning: {name} has unexpected dtype {}, treating as f32", ti.dtype);
+            gguf.tensor_data(name)
+                .map(|d| d.as_ptr() as *const f32)
+                .unwrap_or(std::ptr::null())
+        }
     }
 }

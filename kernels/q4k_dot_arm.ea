@@ -31,13 +31,22 @@ func mins_corr(rw: *restrict i8, sp: i32, bsums: *restrict i16, bs: i32) -> i32 
     let bs_hi: i16x8 = load(bsums, bs + 8)
     let paired: i16x8 = addp_i16(bs_lo, bs_hi)
 
-    let m_lo: i16x4 = [to_i16(mn0 & 255), to_i16((mn0 >> 8) & 255),
-                        to_i16((mn0 >> 16) & 255), to_i16((mn0 >> 24) & 255)]
-    let m_hi: i16x4 = [to_i16(mn1 & 255), to_i16((mn1 >> 8) & 255),
-                        to_i16((mn1 >> 16) & 255), to_i16((mn1 >> 24) & 255)]
-    let p_lo: i16x4 = shuffle(paired, [0, 1, 2, 3])
-    let p_hi: i16x4 = shuffle(paired, [4, 5, 6, 7])
-    return reduce_add(wmul_i32(m_lo, p_lo) .+ wmul_i32(m_hi, p_hi))
+    // Scalar mins correction — avoids i16x8→i16x4 shuffle limitation.
+    // 8 multiply-adds is negligible vs the dot product itself.
+    let mut corr: i32 = 0
+    let m0: i32 = mn0 & 255
+    let m1: i32 = (mn0 >> 8) & 255
+    let m2: i32 = (mn0 >> 16) & 255
+    let m3: i32 = (mn0 >> 24) & 255
+    let m4: i32 = mn1 & 255
+    let m5: i32 = (mn1 >> 8) & 255
+    let m6: i32 = (mn1 >> 16) & 255
+    let m7: i32 = (mn1 >> 24) & 255
+    corr = corr + m0 * to_i32(paired[0]) + m1 * to_i32(paired[1])
+    corr = corr + m2 * to_i32(paired[2]) + m3 * to_i32(paired[3])
+    corr = corr + m4 * to_i32(paired[4]) + m5 * to_i32(paired[5])
+    corr = corr + m6 * to_i32(paired[6]) + m7 * to_i32(paired[7])
+    return corr
 }
 
 // Mins correction with pre-paired bsums (avoids redundant addp in 4row/dual).
@@ -47,13 +56,20 @@ func mins_corr_bp(rw: *restrict i8, sp: i32, paired: i16x8) -> i32 {
     let mn0: i32 = u1 & 0x3f3f3f3f
     let mn1: i32 = ((u2 >> 4) & 0x0f0f0f0f) | (((u1 >> 6) & 0x03030303) << 4)
 
-    let m_lo: i16x4 = [to_i16(mn0 & 255), to_i16((mn0 >> 8) & 255),
-                        to_i16((mn0 >> 16) & 255), to_i16((mn0 >> 24) & 255)]
-    let m_hi: i16x4 = [to_i16(mn1 & 255), to_i16((mn1 >> 8) & 255),
-                        to_i16((mn1 >> 16) & 255), to_i16((mn1 >> 24) & 255)]
-    let p_lo: i16x4 = shuffle(paired, [0, 1, 2, 3])
-    let p_hi: i16x4 = shuffle(paired, [4, 5, 6, 7])
-    return reduce_add(wmul_i32(m_lo, p_lo) .+ wmul_i32(m_hi, p_hi))
+    let mut corr: i32 = 0
+    let m0: i32 = mn0 & 255
+    let m1: i32 = (mn0 >> 8) & 255
+    let m2: i32 = (mn0 >> 16) & 255
+    let m3: i32 = (mn0 >> 24) & 255
+    let m4: i32 = mn1 & 255
+    let m5: i32 = (mn1 >> 8) & 255
+    let m6: i32 = (mn1 >> 16) & 255
+    let m7: i32 = (mn1 >> 24) & 255
+    corr = corr + m0 * to_i32(paired[0]) + m1 * to_i32(paired[1])
+    corr = corr + m2 * to_i32(paired[2]) + m3 * to_i32(paired[3])
+    corr = corr + m4 * to_i32(paired[4]) + m5 * to_i32(paired[5])
+    corr = corr + m6 * to_i32(paired[6]) + m7 * to_i32(paired[7])
+    return corr
 }
 
 // SIMD dot for one block: pre-extract scales via 2×u32, 4 groups × (lo + hi nibbles)

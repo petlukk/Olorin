@@ -4,7 +4,7 @@
 //!           -> final rmsnorm -> output matmul -> logits
 
 use crate::inference::cache::KvCache;
-use crate::inference::engine::Gemma4Model;
+use crate::inference::engine::{AttnType, Gemma4Model};
 use crate::inference::matmul;
 use crate::kernels::ffi_inference;
 
@@ -93,20 +93,29 @@ pub struct Gemma4State {
 impl Gemma4State {
     pub fn new(model: &Gemma4Model, max_seq_len: usize) -> Self {
         let hd = model.hidden_dim;
-        let qkv_dim = model.n_heads * model.head_dim;
-        let kv_dim = model.n_kv_heads * model.head_dim;
+        // Use max dimensions across all layers for buffer allocation
+        let max_head_k = *model.head_dim_k.iter().max().unwrap_or(&512);
+        let max_head_v = *model.head_dim_v.iter().max().unwrap_or(&512);
+        let max_head = max_head_k.max(max_head_v);
+        let max_qkv = model.n_heads * max_head_k;
+        let max_kv = model.n_kv_heads * max_head;
         let n_blocks_hd = hd / 256;
-        let ffn = model.ffn_dim;
-        let n_blocks_ffn = ffn / 256;
-        let n_blocks_out = hd / 256; // output matmul input is hidden_dim
+        let max_ffn = *model.ffn_dim.iter().max().unwrap_or(&12288);
+        let n_blocks_ffn = max_ffn / 256;
+        let n_blocks_out = hd / 256;
+
+        // Build AttnType vec from is_swa for KvCache
+        let attn_types: Vec<AttnType> = model.is_swa.iter().map(|&swa| {
+            if swa { AttnType::SlidingWindow } else { AttnType::Global }
+        }).collect();
 
         let cache = KvCache::new(
             model.n_layers,
             model.n_kv_heads,
-            model.head_dim,
+            max_head,
             model.sliding_window,
             max_seq_len,
-            model.attn_types.clone(),
+            attn_types,
             model.kv_shared_source.clone(),
         );
 
@@ -118,27 +127,27 @@ impl Gemma4State {
             q8_d: vec![0.0; n_blocks_hd],
             q8_bsums: vec![0; n_blocks_hd * 16],
 
-            q: vec![0.0; qkv_dim],
-            k: vec![0.0; kv_dim],
-            v: vec![0.0; kv_dim],
+            q: vec![0.0; max_qkv],
+            k: vec![0.0; max_kv],
+            v: vec![0.0; max_kv],
 
-            attn_out: vec![0.0; qkv_dim],
+            attn_out: vec![0.0; max_qkv],
             attn_scores: vec![0.0; max_seq_len],
-            kv_f32_scratch: vec![0.0; model.head_dim],
+            kv_f32_scratch: vec![0.0; max_head],
 
-            gate: vec![0.0; ffn],
-            up: vec![0.0; ffn],
+            gate: vec![0.0; max_ffn],
+            up: vec![0.0; max_ffn],
             down: vec![0.0; hd],
 
-            ffn_q8_qs: vec![0; ffn + 12],
+            ffn_q8_qs: vec![0; max_ffn + 12],
             ffn_q8_d: vec![0.0; n_blocks_ffn],
             ffn_q8_bsums: vec![0; n_blocks_ffn * 16],
 
             logits: vec![0.0; model.vocab_size],
             q6k_d_scratch: vec![0.0; n_blocks_out * 4],
 
-            cos_table: vec![0.0; model.head_dim / 2],
-            sin_table: vec![0.0; model.head_dim / 2],
+            cos_table: vec![0.0; max_head / 2],
+            sin_table: vec![0.0; max_head / 2],
 
             cache,
         }
@@ -147,14 +156,11 @@ impl Gemma4State {
     /// Run one decode step. Returns logits slice.
     pub fn forward_one(&mut self, model: &Gemma4Model, token_id: u32) -> &[f32] {
         let hd = model.hidden_dim;
-        let head_dim = model.head_dim;
         let n_heads = model.n_heads;
         let n_kv_heads = model.n_kv_heads;
         let gqa_ratio = n_heads / n_kv_heads;
-        let kv_dim = n_kv_heads * head_dim;
         let pos = self.cache.seq_len();
         let diag = diag_enabled();
-        let scale = 1.0 / (head_dim as f32).sqrt();
 
         // 1. Embedding lookup (Q6K dequant)
         matmul::q6k_embed_lookup(model.embed_weight, token_id as usize, &mut self.x, hd);
@@ -169,18 +175,28 @@ impl Gemma4State {
             eprintln!("[gemma4] pos={pos} embed L2={:.4}", l2_norm(&self.x));
         }
 
-        // 2. RoPE tables for current position
-        compute_rope_tables(
-            &mut self.cos_table,
-            &mut self.sin_table,
-            pos,
-            head_dim,
-            model.rope_theta,
-        );
-
-        // 3. Per-layer transformer blocks
+        // 2. Per-layer transformer blocks
         for layer in 0..model.n_layers {
             let lw = &model.layers[layer];
+            let head_dim = model.head_dim_k[layer];
+            let head_dim_v = model.head_dim_v[layer];
+            let kv_dim = n_kv_heads * head_dim;
+            let kv_dim_v = n_kv_heads * head_dim_v;
+            let scale = 1.0 / (head_dim as f32).sqrt();
+
+            // RoPE: use layer-appropriate theta and dim
+            let rope_theta = if model.is_swa[layer] {
+                model.rope_theta_swa
+            } else {
+                model.rope_theta_global
+            };
+            compute_rope_tables(
+                &mut self.cos_table,
+                &mut self.sin_table,
+                pos,
+                head_dim,
+                rope_theta,
+            );
 
             // a. Pre-attention RMSNorm
             ffi_inference::gemma4_rmsnorm(
@@ -199,7 +215,7 @@ impl Gemma4State {
                 &mut self.q8_bsums,
             );
 
-            // b-d. QKV projections
+            // b-d. QKV projections (dims vary per layer)
             matmul::q4k_matvec(
                 lw.wq,
                 &self.q8_qs, &self.q8_d, &self.q8_bsums,
@@ -213,7 +229,7 @@ impl Gemma4State {
             matmul::q4k_matvec(
                 lw.wv,
                 &self.q8_qs, &self.q8_d, &self.q8_bsums,
-                &mut self.v, kv_dim, hd,
+                &mut self.v, kv_dim_v, hd,
             );
 
             // e-f. RoPE on Q and K
@@ -233,7 +249,7 @@ impl Gemma4State {
             );
 
             // g. KV cache store
-            self.cache.store(layer, &self.k, &self.v);
+            self.cache.store(layer, &self.k[..kv_dim], &self.v[..kv_dim_v]);
 
             // h. Attention (GQA, single-token decode)
             let attn_len = self.cache.attn_len(layer);
@@ -246,8 +262,9 @@ impl Gemma4State {
             );
 
             // i. Output projection
+            let attn_out_dim = n_heads * head_dim;
             matmul::quant_input(
-                &self.attn_out,
+                &self.attn_out[..attn_out_dim],
                 &mut self.q8_qs,
                 &mut self.q8_d,
                 &mut self.q8_bsums,
@@ -255,7 +272,7 @@ impl Gemma4State {
             matmul::q4k_matvec(
                 lw.wo,
                 &self.q8_qs, &self.q8_d, &self.q8_bsums,
-                &mut self.down, hd, n_heads * head_dim,
+                &mut self.down, hd, attn_out_dim,
             );
 
             // j. Residual add
@@ -279,7 +296,7 @@ impl Gemma4State {
                 model.rms_eps,
             );
 
-            // l. FFN (GeGLU)
+            // l. FFN (GeGLU) — per-layer ffn_dim
             self.ffn(model, layer);
 
             // m. Residual add
@@ -295,7 +312,7 @@ impl Gemma4State {
             }
         }
 
-        // 4. Final RMSNorm
+        // 3. Final RMSNorm
         ffi_inference::gemma4_rmsnorm(
             self.x.as_ptr(),
             model.norm_weight,
@@ -304,7 +321,7 @@ impl Gemma4State {
             model.rms_eps,
         );
 
-        // 5. Output logits
+        // 4. Output logits (tied to embedding, always Q6K for Gemma 4)
         matmul::quant_input(
             &self.x_norm,
             &mut self.q8_qs,
@@ -312,9 +329,9 @@ impl Gemma4State {
             &mut self.q8_bsums,
         );
 
-        if model.output_dtype == matmul::GGML_TYPE_Q6_K {
+        if model.embed_dtype == matmul::GGML_TYPE_Q6_K {
             matmul::q6k_matvec(
-                model.output_weight,
+                model.embed_weight,
                 &self.q8_qs, &self.q8_d, &self.q8_bsums,
                 &mut self.logits,
                 &mut self.q6k_d_scratch,
@@ -322,10 +339,19 @@ impl Gemma4State {
             );
         } else {
             matmul::q4k_matvec(
-                model.output_weight,
+                model.embed_weight,
                 &self.q8_qs, &self.q8_d, &self.q8_bsums,
                 &mut self.logits, model.vocab_size, hd,
             );
+        }
+
+        // Apply logit soft-capping if configured
+        if model.logit_softcap > 0.0 {
+            let cap = model.logit_softcap;
+            let inv_cap = 1.0 / cap;
+            for l in self.logits.iter_mut() {
+                *l = cap * (*l * inv_cap).tanh();
+            }
         }
 
         // Advance cache position
@@ -409,7 +435,7 @@ impl Gemma4State {
     /// FFN: GeGLU — gate/up dual matmul, GELU(gate)*up, down projection.
     fn ffn(&mut self, model: &Gemma4Model, layer: usize) {
         let hd = model.hidden_dim;
-        let ffn_dim = model.ffn_dim;
+        let ffn_dim = model.ffn_dim[layer];
         let lw = &model.layers[layer];
 
         // Quantize x_norm for gate/up matmul
@@ -439,7 +465,7 @@ impl Gemma4State {
 
         // Quantize gate (ffn_dim) for down projection
         matmul::quant_input(
-            &self.gate,
+            &self.gate[..ffn_dim],
             &mut self.ffn_q8_qs,
             &mut self.ffn_q8_d,
             &mut self.ffn_q8_bsums,
