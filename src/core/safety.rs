@@ -263,12 +263,9 @@ const CHATML_PATTERNS: &[&[u8]] = &[
     b"<|end_header_id|>",
     b"<|start_header_id|>",
     b"<|eot_id|>",
-    b"<|",
+    b"<|turn>",
     b"[INST]",
     b"[/INST]",
-    b"user:",
-    b"assistant:",
-    b"system:",
 ];
 
 /// Returns true if the token looks like a ChatML/prompt header hallucination.
