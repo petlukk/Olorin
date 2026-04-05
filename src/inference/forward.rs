@@ -75,7 +75,7 @@ pub(crate) fn bare_rmsnorm(x: &mut [f32], eps: f32) {
 
 pub struct Gemma4State {
     // Activation buffers
-    pub(crate) x: Vec<f32>,       // current layer input (inpL)
+    pub x: Vec<f32>,              // current layer input (inpL)
     pub(crate) x_norm: Vec<f32>,  // scratch for norm output
 
     // Q8K quantized input (for matmul)
@@ -120,7 +120,7 @@ pub struct Gemma4State {
     pub(crate) attn_res: Vec<f32>,
 
     // PLE buffers
-    pub(crate) ple_signal: Vec<f32>,
+    pub ple_signal: Vec<f32>,
     pub(crate) ple_gate: Vec<f32>,
     pub(crate) ple_out: Vec<f32>,
     pub(crate) ple_q8_qs: Vec<i8>,
@@ -206,7 +206,7 @@ impl Gemma4State {
 
     /// Phase A: compute per-layer PLE signal for this token.
     /// Called once per token before the layer loop.
-    pub(crate) fn prepare_ple(
+    pub fn prepare_ple(
         &mut self,
         model: &Gemma4Model,
         token_id: u32,
