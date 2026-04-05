@@ -423,7 +423,7 @@ impl Gemma4Model {
                 inp_gate_dtype: tensor_dtype(gguf, &format!("{b}.inp_gate.weight")),
                 proj_dtype: tensor_dtype(gguf, &format!("{b}.proj.weight")),
                 post_norm: load_norm_ptr(gguf, &format!("{b}.post_norm.weight"), &mut bf16_bufs),
-                layer_output_scale: read_f32_scalar(gguf, &format!("{b}.layer_output_scale")),
+                layer_output_scale: read_f32_scalar(gguf, &format!("{b}.layer_output_scale.weight")),
             };
             layers.push(lw);
         }

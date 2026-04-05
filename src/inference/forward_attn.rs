@@ -336,8 +336,8 @@ impl Gemma4State {
 
         if diag {
             eprintln!(
-                "[gemma4] L{il} post-ffn L2={:.4}",
-                l2_norm(&self.x[..hd])
+                "[gemma4] L{il} out L2={:.4} scale={:.6}",
+                l2_norm(&self.x[..hd]), out_scale
             );
         }
     }
