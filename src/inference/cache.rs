@@ -54,7 +54,7 @@ pub struct KvCache {
     window_size: usize,
     seq_len: usize,
     n_kv_heads: usize,
-    head_dim: usize,
+    head_dim_v: Vec<usize>,  // per-layer value head dim (256 or 512)
 }
 
 impl KvCache {
@@ -66,7 +66,7 @@ impl KvCache {
     pub fn new(
         n_layers: usize,
         n_kv_heads: usize,
-        head_dim: usize,
+        head_dim_v: Vec<usize>,
         window_size: usize,
         max_seq_len: usize,
         attn_types: Vec<AttnType>,
@@ -74,19 +74,20 @@ impl KvCache {
     ) -> Self {
         assert_eq!(attn_types.len(), n_layers);
         assert_eq!(shared_source.len(), n_layers);
+        assert_eq!(head_dim_v.len(), n_layers);
 
         let mut k = Vec::with_capacity(n_layers);
         let mut v = Vec::with_capacity(n_layers);
 
         for l in 0..n_layers {
             if shared_source[l].is_some() {
-                // Shared layer — no own storage
                 k.push(Vec::new());
                 v.push(Vec::new());
             } else {
+                let hd = head_dim_v[l];
                 let cap = match attn_types[l] {
-                    AttnType::SlidingWindow => n_kv_heads * window_size * head_dim,
-                    AttnType::Global => n_kv_heads * max_seq_len * head_dim,
+                    AttnType::SlidingWindow => n_kv_heads * window_size * hd,
+                    AttnType::Global => n_kv_heads * max_seq_len * hd,
                 };
                 k.push(vec![0u16; cap]);
                 v.push(vec![0u16; cap]);
@@ -101,7 +102,7 @@ impl KvCache {
             window_size,
             seq_len: 0,
             n_kv_heads,
-            head_dim,
+            head_dim_v,
         }
     }
 
@@ -116,7 +117,8 @@ impl KvCache {
             return;
         }
 
-        let stride = self.n_kv_heads * self.head_dim;
+        let hd = self.head_dim_v[layer];
+        let stride = self.n_kv_heads * hd;
         debug_assert_eq!(k_f32.len(), stride);
         debug_assert_eq!(v_f32.len(), stride);
 

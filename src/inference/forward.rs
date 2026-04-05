@@ -1,7 +1,8 @@
 //! Gemma 4 forward pass — decode (single token).
 //!
-//! Pipeline: embed -> (rmsnorm -> attn -> residual -> rmsnorm -> ffn -> residual) x N
-//!           -> final rmsnorm -> output matmul -> logits
+//! Pipeline: embed -> (rmsnorm -> qkv -> qk_norm -> rope -> kv -> attn -> wo ->
+//!   post_attn_norm -> residual -> rmsnorm -> ffn -> post_ffn_norm -> residual) x N
+//!   -> final rmsnorm -> output matmul -> logit_softcap -> logits
 
 use crate::inference::cache::KvCache;
 use crate::inference::engine::{AttnType, Gemma4Model};
@@ -47,44 +48,44 @@ fn compute_rope_tables(
 
 pub struct Gemma4State {
     // Activation buffers
-    x: Vec<f32>,
-    x_norm: Vec<f32>,
+    pub(crate) x: Vec<f32>,
+    pub(crate) x_norm: Vec<f32>,
 
     // Q8K quantized input (for matmul)
-    q8_qs: Vec<i8>,
-    q8_d: Vec<f32>,
-    q8_bsums: Vec<i16>,
+    pub(crate) q8_qs: Vec<i8>,
+    pub(crate) q8_d: Vec<f32>,
+    pub(crate) q8_bsums: Vec<i16>,
 
     // QKV buffers
-    q: Vec<f32>,
-    k: Vec<f32>,
-    v: Vec<f32>,
+    pub(crate) q: Vec<f32>,
+    pub(crate) k: Vec<f32>,
+    pub(crate) v: Vec<f32>,
 
     // Attention
-    attn_out: Vec<f32>,
-    attn_scores: Vec<f32>,
+    pub(crate) attn_out: Vec<f32>,
+    pub(crate) attn_scores: Vec<f32>,
     // Scratch for f16->f32 conversion of one KV head row
-    kv_f32_scratch: Vec<f32>,
+    pub(crate) kv_f32_scratch: Vec<f32>,
 
     // FFN
-    gate: Vec<f32>,
-    up: Vec<f32>,
-    down: Vec<f32>,
+    pub(crate) gate: Vec<f32>,
+    pub(crate) up: Vec<f32>,
+    pub(crate) down: Vec<f32>,
 
     // FFN Q8K (for quantizing FFN intermediate)
-    ffn_q8_qs: Vec<i8>,
-    ffn_q8_d: Vec<f32>,
-    ffn_q8_bsums: Vec<i16>,
+    pub(crate) ffn_q8_qs: Vec<i8>,
+    pub(crate) ffn_q8_d: Vec<f32>,
+    pub(crate) ffn_q8_bsums: Vec<i16>,
 
     // Output
-    logits: Vec<f32>,
+    pub(crate) logits: Vec<f32>,
 
     // Q6K d_scratch for output matmul (if output is Q6K)
-    q6k_d_scratch: Vec<f32>,
+    pub(crate) q6k_d_scratch: Vec<f32>,
 
     // RoPE tables
-    cos_table: Vec<f32>,
-    sin_table: Vec<f32>,
+    pub(crate) cos_table: Vec<f32>,
+    pub(crate) sin_table: Vec<f32>,
 
     // KV cache
     pub cache: KvCache,
@@ -112,7 +113,7 @@ impl Gemma4State {
         let cache = KvCache::new(
             model.n_layers,
             model.n_kv_heads,
-            max_head,
+            model.head_dim_v.clone(),
             model.sliding_window,
             max_seq_len,
             attn_types,
@@ -232,7 +233,45 @@ impl Gemma4State {
                 &mut self.v, kv_dim_v, hd,
             );
 
-            // e-f. RoPE on Q and K
+            // e. QK norm — per-head RMSNorm before RoPE
+            if !lw.q_norm.is_null() {
+                for h in 0..n_heads {
+                    let off = h * head_dim;
+                    ffi_inference::gemma4_rmsnorm(
+                        self.q.as_ptr().wrapping_add(off),
+                        lw.q_norm,
+                        self.kv_f32_scratch.as_mut_ptr(),
+                        head_dim as i32,
+                        model.rms_eps,
+                    );
+                    self.q[off..off + head_dim]
+                        .copy_from_slice(&self.kv_f32_scratch[..head_dim]);
+                }
+            }
+            if !lw.k_norm.is_null() {
+                for h in 0..n_kv_heads {
+                    let off = h * head_dim;
+                    ffi_inference::gemma4_rmsnorm(
+                        self.k.as_ptr().wrapping_add(off),
+                        lw.k_norm,
+                        self.kv_f32_scratch.as_mut_ptr(),
+                        head_dim as i32,
+                        model.rms_eps,
+                    );
+                    self.k[off..off + head_dim]
+                        .copy_from_slice(&self.kv_f32_scratch[..head_dim]);
+                }
+            }
+
+            if diag && layer == 0 {
+                eprintln!(
+                    "[gemma4] L0 Qnorm L2={:.4} Knorm L2={:.4}",
+                    l2_norm(&self.q[..n_heads * head_dim]),
+                    l2_norm(&self.k[..kv_dim]),
+                );
+            }
+
+            // f. RoPE on Q and K
             ffi_inference::gemma4_rope(
                 self.q.as_mut_ptr(),
                 self.cos_table.as_ptr(),
@@ -275,9 +314,22 @@ impl Gemma4State {
                 &mut self.down, hd, attn_out_dim,
             );
 
-            // j. Residual add
-            for i in 0..hd {
-                self.x[i] += self.down[i];
+            // j. Post-attention RMSNorm + residual add
+            if !lw.post_attn_norm.is_null() {
+                ffi_inference::gemma4_rmsnorm(
+                    self.down.as_ptr(),
+                    lw.post_attn_norm,
+                    self.x_norm.as_mut_ptr(),
+                    hd as i32,
+                    model.rms_eps,
+                );
+                for i in 0..hd {
+                    self.x[i] += self.x_norm[i];
+                }
+            } else {
+                for i in 0..hd {
+                    self.x[i] += self.down[i];
+                }
             }
 
             if diag {
@@ -299,9 +351,22 @@ impl Gemma4State {
             // l. FFN (GeGLU) — per-layer ffn_dim
             self.ffn(model, layer);
 
-            // m. Residual add
-            for i in 0..hd {
-                self.x[i] += self.down[i];
+            // m. Post-FFN RMSNorm + residual add
+            if !lw.post_ffn_norm.is_null() {
+                ffi_inference::gemma4_rmsnorm(
+                    self.down.as_ptr(),
+                    lw.post_ffn_norm,
+                    self.x_norm.as_mut_ptr(),
+                    hd as i32,
+                    model.rms_eps,
+                );
+                for i in 0..hd {
+                    self.x[i] += self.x_norm[i];
+                }
+            } else {
+                for i in 0..hd {
+                    self.x[i] += self.down[i];
+                }
             }
 
             if diag {
@@ -358,125 +423,6 @@ impl Gemma4State {
         self.cache.advance();
 
         &self.logits
-    }
-
-    /// GQA attention decode: for each Q head, dot with cached K, softmax, weighted V sum.
-    fn attention_decode(
-        &mut self,
-        n_heads: usize,
-        _n_kv_heads: usize,
-        gqa_ratio: usize,
-        head_dim: usize,
-        kv_dim: usize,
-        attn_len: usize,
-        scale: f32,
-        k_ptr: *const u16,
-        v_ptr: *const u16,
-    ) {
-        let stride = kv_dim; // n_kv_heads * head_dim per position
-
-        for h in 0..n_heads {
-            let kv_h = h / gqa_ratio;
-            let q_off = h * head_dim;
-            let q_slice = &self.q[q_off..q_off + head_dim];
-
-            // Compute attention scores: Q dot K for each cached position
-            for p in 0..attn_len {
-                let k_offset = p * stride + kv_h * head_dim;
-                let k_src = unsafe { k_ptr.add(k_offset) };
-                // Convert f16 -> f32
-                unsafe {
-                    ffi_inference::f16_to_f32(
-                        k_src,
-                        self.kv_f32_scratch.as_mut_ptr(),
-                        head_dim as i32,
-                    );
-                }
-                // Dot product
-                let mut dot = 0.0f32;
-                for d in 0..head_dim {
-                    dot += q_slice[d] * self.kv_f32_scratch[d];
-                }
-                self.attn_scores[p] = dot;
-            }
-
-            // Softmax with scale = 1/sqrt(head_dim)
-            unsafe {
-                ffi_inference::softmax_f32(
-                    self.attn_scores.as_mut_ptr(),
-                    attn_len as i32,
-                    scale,
-                );
-            }
-
-            // Weighted V sum
-            let out_off = q_off;
-            for d in 0..head_dim {
-                self.attn_out[out_off + d] = 0.0;
-            }
-            for p in 0..attn_len {
-                let v_offset = p * stride + kv_h * head_dim;
-                let v_src = unsafe { v_ptr.add(v_offset) };
-                unsafe {
-                    ffi_inference::f16_to_f32(
-                        v_src,
-                        self.kv_f32_scratch.as_mut_ptr(),
-                        head_dim as i32,
-                    );
-                }
-                let s = self.attn_scores[p];
-                for d in 0..head_dim {
-                    self.attn_out[out_off + d] += s * self.kv_f32_scratch[d];
-                }
-            }
-        }
-    }
-
-    /// FFN: GeGLU — gate/up dual matmul, GELU(gate)*up, down projection.
-    fn ffn(&mut self, model: &Gemma4Model, layer: usize) {
-        let hd = model.hidden_dim;
-        let ffn_dim = model.ffn_dim[layer];
-        let lw = &model.layers[layer];
-
-        // Quantize x_norm for gate/up matmul
-        matmul::quant_input(
-            &self.x_norm,
-            &mut self.q8_qs,
-            &mut self.q8_d,
-            &mut self.q8_bsums,
-        );
-
-        // Fused gate + up projection
-        matmul::q4k_matvec_dual(
-            lw.w_gate,
-            lw.w_up,
-            &self.q8_qs, &self.q8_d, &self.q8_bsums,
-            &mut self.gate, &mut self.up,
-            ffn_dim, hd,
-        );
-
-        // GELU(gate) * up -> gate buffer
-        ffi_inference::gelu_mul(
-            self.gate.as_ptr(),
-            self.up.as_ptr(),
-            self.gate.as_mut_ptr(),
-            ffn_dim as i32,
-        );
-
-        // Quantize gate (ffn_dim) for down projection
-        matmul::quant_input(
-            &self.gate[..ffn_dim],
-            &mut self.ffn_q8_qs,
-            &mut self.ffn_q8_d,
-            &mut self.ffn_q8_bsums,
-        );
-
-        // Down projection: ffn_dim -> hidden_dim
-        matmul::q4k_matvec(
-            lw.w_down,
-            &self.ffn_q8_qs, &self.ffn_q8_d, &self.ffn_q8_bsums,
-            &mut self.down, hd, ffn_dim,
-        );
     }
 
     /// Reset state for a new sequence.
