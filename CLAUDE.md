@@ -1,12 +1,12 @@
-# Olorin — The Wakeful Mind in Eä
+# Olorin — The Wakeful Mind in Ea
 
-Single-binary AI agent. BitNet SIMD inference, encrypted vault, tool-use, Web UI + WhatsApp.
+Single-binary AI agent. Gemma 4 E2B SIMD inference, encrypted vault, tool-use, Web UI + WhatsApp.
 
 ## Build
 
-Eä compiler required in PATH:
+Ea compiler required in PATH:
 ```bash
-PATH="/home/peter/projects/eacompute/target/release:$PATH" cargo build
+PATH="/mnt/c/Users/Peter.lukka/Desktop/DEV/eacompute/target/release:$PATH" cargo build
 ```
 
 ## Hard Rules
@@ -17,7 +17,17 @@ PATH="/home/peter/projects/eacompute/target/release:$PATH" cargo build
 - **No premature features.** Don't build what isn't needed yet.
 - **Delete, don't comment.** Dead code gets removed.
 
-## The Eä Way
+## Ea SIMD Rules (for Claude and all subagents)
+
+- **SIMD is priority.** Every compute operation must be an Ea kernel. Zero scalar fallbacks.
+- **Triple-check eacompute before concluding an intrinsic doesn't exist.** Check `src/typeck/intrinsics*.rs`, `src/codegen/simd*.rs`, `CHANGELOG.md`, `README.md`, and `tests/`. If you checked all five and it's genuinely not there, stop and report — Peter will build it if needed.
+- **Never replace an Ea kernel with Rust scalar code.** Olorin is the Ea showcase. Every kernel demonstrates what eacompute can do.
+- **Ea has full if/else.** Don't use workarounds. Write natural control flow.
+- **Ea load is type-directed.** `let v: i16x4 = load(ptr, 0)` gives a 64-bit load. No `load_narrow` needed.
+- **When in doubt, it should be a kernel.** f16 conversion, attention, RoPE, GELU, RMSNorm — all Ea kernels.
+- **Match llama.cpp exactly first.** Get correctness before optimizing. No creativity in the forward pass until output matches.
+
+## The Ea Way
 
 - **SIMD-first.** If a problem can be solved with a kernel, solve it that way.
 - **Cache-resident.** Hot path fits in L1d/L2.
@@ -41,13 +51,14 @@ Single crate, single binary. No workspace.
 | `core/dispatch.rs` | Command routing + intent classification |
 | `core/handlers.rs` | LLM turn handling + message building |
 | `core/tool_parse.rs` | Streaming tool_call XML detector |
-| `inference/engine.rs` | BitNet/Llama model loading |
-| `inference/forward.rs` | BitNet forward pass |
-| `inference/forward_llama.rs` | Llama forward pass |
-| `inference/cache.rs` | TurboQuant KV-cache |
-| `inference/matmul.rs` | I2S matmul |
+| `inference/engine.rs` | Gemma 4 model loading (GGUF) |
+| `inference/forward.rs` | Gemma 4 forward pass |
+| `inference/cache.rs` | F16 KV-cache (sliding window + shared layers) |
+| `inference/matmul.rs` | Q4K/Q6K matmul wrappers |
 | `inference/gguf.rs` | GGUF format parser |
 | `inference/tokenizer.rs` | BPE tokenizer |
+| `inference/generate.rs` | Public inference API — prompt in, text out |
+| `inference/threadpool.rs` | Work-stealing thread pool |
 | `storage/vault.rs` | Encrypted conversation storage |
 | `storage/crypto.rs` | ChaCha20 encrypt/decrypt |
 | `storage/search.rs` | FusedSearcher — zero-exposure vault search |
@@ -58,8 +69,7 @@ Single crate, single binary. No workspace.
 | `interface/server.rs` | Web UI + WhatsApp gateway (std::net, no tokio) |
 | `interface/exec.rs` | Process spawning (fork/exec) |
 | `kernels/ffi.rs` | KernelTable + core/safety/storage FFI wrappers |
-| `kernels/ffi_inference.rs` | Inference + KV-cache FFI wrappers |
-| `inference/generate.rs` | Public inference API — prompt in, text out |
+| `kernels/ffi_inference.rs` | Inference FFI wrappers |
 | `recall.rs` | VectorStore (session embeddings, SecureBuffer-backed) |
 | `tools/` | 19 built-in tools |
 
@@ -79,10 +89,20 @@ Embedded via `include_bytes!`, extracted to `~/.olorin/lib/{version}/`.
 
 **FusedSearcher** (vault search): ~23 KB scratch, chacha20_search_v2 kernel, decrypt+search in SIMD registers
 **SecureBuffer** (Ghost-Buster): mlock'd memory, SIMD-zeroed on Drop via zeroize kernel
-**EakvCache** (KV-cache): TurboQuant quantization, fused attention kernels
 **VectorStore** (recall): JL-projected byte-histogram embeddings, ring buffer, SecureBuffer scratch
 
 All follow: `new()` -> own buffers -> `&mut self` methods reuse them.
+
+## Gemma 4 E2B Inference
+
+- **Text-only.** No vision/audio encoders.
+- **Q4K weights.** Q6K for embeddings.
+- **Sliding window (512 tok) + global attention** alternating 4:1.
+- **Shared KV cache** — last N layers reuse KV from earlier layers.
+- **Per-Layer Embeddings (PLE)** — residual signal per decoder layer.
+- **Dual RoPE** — standard for sliding, proportional for global.
+- **GeGLU FFN** — GELU-gated feed-forward.
+- **Verify against llama.cpp** — layer-by-layer L2-norm comparison.
 
 ## Security
 
