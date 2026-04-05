@@ -208,13 +208,13 @@ impl DispatchContext {
         // ── Streaming Inference ──────────────────────────────────────
         self.messages.push(handlers::user_message(input));
 
-        if let Some(engine) = &self.engine {
-            let system = self.system_prompt.clone();
-            let prompt = match &recall_context {
-                Some(ctx) => format!("{ctx}\n\n{}", self.last_user_text()),
-                None => self.last_user_text(),
-            };
+        let system = self.system_prompt.clone();
+        let prompt = match &recall_context {
+            Some(ctx) => format!("{ctx}\n\n{}", self.last_user_text()),
+            None => self.last_user_text(),
+        };
 
+        if let Some(engine) = &mut self.engine {
             let full_text = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
             let full_ref = full_text.clone();
             let tx_ref = tx.clone();
@@ -434,17 +434,17 @@ impl DispatchContext {
     }
 
     fn run_inference(
-        &self,
+        &mut self,
         recall_context: &Option<String>,
     ) -> Result<String, String> {
         let system = self.system_prompt.clone();
 
         // Try local engine first
-        if let Some(engine) = &self.engine {
-            let prompt = match recall_context {
-                Some(ctx) => format!("{ctx}\n\n{}", self.last_user_text()),
-                None => self.last_user_text(),
-            };
+        let prompt = match recall_context {
+            Some(ctx) => format!("{ctx}\n\n{}", self.last_user_text()),
+            None => self.last_user_text(),
+        };
+        if let Some(engine) = &mut self.engine {
             match engine.generate(&prompt, &system, &|_| {}) {
                 Ok(text) => return Ok(text),
                 Err(e) => {
