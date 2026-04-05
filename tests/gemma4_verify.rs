@@ -394,7 +394,11 @@ fn step5_logits() {
     let mut state = olorin::inference::forward::Gemma4State::new(&model, 512);
 
     // Forward pass with BOS token (id=2)
-    let logits = state.forward_one(&model, 2);
+    let logits_vec = state.forward_one(&model, 2).to_vec();
+    let logits = &logits_vec;
+
+    let hd = model.hidden_dim;
+    eprintln!("pre-logit hidden L2={:.4}  (L34 out, llama.cpp: 21.01)", l2(&state.x[..hd]));
 
     let logit_l2 = l2(logits);
     eprintln!("=== Step 5: Logits (BOS token) ===");

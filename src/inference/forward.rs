@@ -300,6 +300,12 @@ impl Gemma4State {
             model.rms_eps,
         );
 
+        if diag {
+            eprintln!("[gemma4] result_norm L2={:.4} first4=[{:.4},{:.4},{:.4},{:.4}]",
+                l2_norm(&self.x_norm[..hd]),
+                self.x_norm[0], self.x_norm[1], self.x_norm[2], self.x_norm[3]);
+        }
+
         matmul::quant_input(
             &self.x_norm,
             &mut self.q8_qs,
