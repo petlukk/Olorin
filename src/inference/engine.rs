@@ -4,6 +4,7 @@
 //! global layers have head_dim 512, ffn 12288. KV sharing across last N layers.
 
 use crate::inference::gguf::{GgufFile, MetaValue};
+use crate::inference::engine_helpers::load_norm_ptr;
 
 // ---------------------------------------------------------------------------
 // Attention type per layer
@@ -28,6 +29,15 @@ pub struct LayerWeights {
     pub wk: *const u8,                // [hidden_dim, n_kv_heads * head_dim_k]
     pub wv: *const u8,                // [hidden_dim, n_kv_heads * head_dim_v]
     pub wo: *const u8,                // [n_heads * head_dim_k, hidden_dim]
+
+    // Per-tensor dtypes (GGML type codes)
+    pub wq_dtype: u32,
+    pub wk_dtype: u32,
+    pub wv_dtype: u32,
+    pub wo_dtype: u32,
+    pub w_gate_dtype: u32,
+    pub w_up_dtype: u32,
+    pub w_down_dtype: u32,
 
     // QK norm (per-head, BF16->f32 converted at load)
     pub q_norm: *const f32,           // [head_dim_k]
@@ -167,21 +177,17 @@ fn tensor_ptr<T>(gguf: &GgufFile, name: &str) -> Result<*const T, String> {
     Ok(data.as_ptr() as *const T)
 }
 
+fn tensor_dtype(gguf: &GgufFile, name: &str) -> u32 {
+    match gguf.tensor_map.get(name) {
+        Some(&idx) => gguf.tensors[idx].dtype,
+        None => 0,
+    }
+}
+
 fn tensor_ptr_opt<T>(gguf: &GgufFile, name: &str) -> *const T {
     gguf.tensor_data(name)
         .map(|d| d.as_ptr() as *const T)
         .unwrap_or(std::ptr::null())
-}
-
-/// Convert BF16 tensor data to a new Vec<f32>. Returns the vec.
-fn bf16_to_f32_vec(data: &[u8]) -> Vec<f32> {
-    let n = data.len() / 2;
-    let mut out = Vec::with_capacity(n);
-    for i in 0..n {
-        let bits = u16::from_le_bytes([data[i * 2], data[i * 2 + 1]]);
-        out.push(f32::from_bits((bits as u32) << 16));
-    }
-    out
 }
 
 /// Read a single f32 scalar from a [1]-shaped tensor (dtype F32).
@@ -395,6 +401,13 @@ impl Gemma4Model {
                 wk: tensor_ptr::<u8>(gguf, &format!("{b}.attn_k.weight"))?,
                 wv: tensor_ptr::<u8>(gguf, &format!("{b}.attn_v.weight"))?,
                 wo: tensor_ptr::<u8>(gguf, &format!("{b}.attn_output.weight"))?,
+                wq_dtype: tensor_dtype(gguf, &format!("{b}.attn_q.weight")),
+                wk_dtype: tensor_dtype(gguf, &format!("{b}.attn_k.weight")),
+                wv_dtype: tensor_dtype(gguf, &format!("{b}.attn_v.weight")),
+                wo_dtype: tensor_dtype(gguf, &format!("{b}.attn_output.weight")),
+                w_gate_dtype: tensor_dtype(gguf, &format!("{b}.ffn_gate.weight")),
+                w_up_dtype: tensor_dtype(gguf, &format!("{b}.ffn_up.weight")),
+                w_down_dtype: tensor_dtype(gguf, &format!("{b}.ffn_down.weight")),
                 q_norm: load_norm_ptr(gguf, &format!("{b}.attn_q_norm.weight"), &mut bf16_bufs),
                 k_norm: load_norm_ptr(gguf, &format!("{b}.attn_k_norm.weight"), &mut bf16_bufs),
                 post_attn_norm: load_norm_ptr(gguf, &format!("{b}.post_attention_norm.weight"), &mut bf16_bufs),
@@ -467,46 +480,3 @@ impl Gemma4Model {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Norm pointer loading (handles F32 direct or BF16 conversion)
-// ---------------------------------------------------------------------------
-
-/// Load a norm weight pointer. If the tensor is BF16, convert to f32 and
-/// store the buffer in `bufs` (keeping it alive). Returns null if missing.
-fn load_norm_ptr(
-    gguf: &GgufFile,
-    name: &str,
-    bufs: &mut Vec<Vec<f32>>,
-) -> *const f32 {
-    let idx = match gguf.tensor_map.get(name) {
-        Some(&i) => i,
-        None => return std::ptr::null(),
-    };
-    let ti = &gguf.tensors[idx];
-    match ti.dtype {
-        0 => {
-            // F32 — point directly into mmap
-            gguf.tensor_data(name)
-                .map(|d| d.as_ptr() as *const f32)
-                .unwrap_or(std::ptr::null())
-        }
-        30 => {
-            // BF16 — convert to owned Vec<f32>
-            match gguf.tensor_data(name) {
-                Some(data) => {
-                    let converted = bf16_to_f32_vec(data);
-                    let ptr = converted.as_ptr();
-                    bufs.push(converted);
-                    ptr
-                }
-                None => std::ptr::null(),
-            }
-        }
-        _ => {
-            eprintln!("[gemma4] warning: {name} has unexpected dtype {}, treating as f32", ti.dtype);
-            gguf.tensor_data(name)
-                .map(|d| d.as_ptr() as *const f32)
-                .unwrap_or(std::ptr::null())
-        }
-    }
-}

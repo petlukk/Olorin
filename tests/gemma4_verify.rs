@@ -72,7 +72,7 @@ fn step1_embedding() {
     let hd = model.hidden_dim;
     let mut embed = vec![0.0f32; hd];
 
-    olorin::inference::matmul::q6k_embed_lookup(
+    olorin::inference::dequant::q6k_embed_lookup(
         model.embed_weight, token_id, &mut embed, hd,
     );
 
@@ -109,7 +109,7 @@ fn step2_rmsnorm() {
 
     let hd = model.hidden_dim;
     let mut embed = vec![0.0f32; hd];
-    olorin::inference::matmul::q6k_embed_lookup(model.embed_weight, 2, &mut embed, hd);
+    olorin::inference::dequant::q6k_embed_lookup(model.embed_weight, 2, &mut embed, hd);
     let scale = (hd as f32).sqrt();
     for v in embed.iter_mut() { *v *= scale; }
 

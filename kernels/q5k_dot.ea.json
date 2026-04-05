@@ -1,0 +1,17 @@
+{
+  "library": "/mnt/c/Users/Peter.lukka/Desktop/DEV/Olorin/target/release/build/olorin-74d22db92a50c3ff/out/libq5k_dot.so",
+  "exports": [
+    {
+      "name": "q5k_dot_q8k",
+      "args": [{"name": "q5", "type": "*restrict u8", "direction": "in", "cap": null, "count": null}, {"name": "q8", "type": "*restrict i8", "direction": "in", "cap": null, "count": null}, {"name": "bsums", "type": "*restrict i16", "direction": "in", "cap": null, "count": null}, {"name": "n_blocks", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "q8_d", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "pow2", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}],
+      "return_type": "f32"
+    },
+    {
+      "name": "q5k_dot_q8k_4row",
+      "args": [{"name": "rw0", "type": "*restrict u8", "direction": "in", "cap": null, "count": null}, {"name": "rw1", "type": "*restrict u8", "direction": "in", "cap": null, "count": null}, {"name": "rw2", "type": "*restrict u8", "direction": "in", "cap": null, "count": null}, {"name": "rw3", "type": "*restrict u8", "direction": "in", "cap": null, "count": null}, {"name": "q8", "type": "*restrict i8", "direction": "in", "cap": null, "count": null}, {"name": "bsums", "type": "*restrict i16", "direction": "in", "cap": null, "count": null}, {"name": "scores", "type": "*mut f32", "direction": "out", "cap": "4", "count": null}, {"name": "n_blocks", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "q8_d", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "pow2", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}],
+      "return_type": null
+    }
+  ],
+  "structs": [
+  ]
+}

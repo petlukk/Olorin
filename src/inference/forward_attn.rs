@@ -74,12 +74,23 @@ impl Gemma4State {
             &mut self.q8_bsums,
         );
 
+        if diag && il == 0 {
+            eprintln!("[gemma4] L0 attn_norm L2={:.4} (llama.cpp: 452.89)", l2_norm(&self.x_norm[..hd]));
+            eprintln!("[gemma4] L0 attn_norm first4=[{:.4},{:.4},{:.4},{:.4}] (llama.cpp: [-10.64,-8.44,1.21,-12.26])",
+                self.x_norm[0], self.x_norm[1], self.x_norm[2], self.x_norm[3]);
+        }
+
         // ── 2. Q projection ─────────────────────────────────────────
-        matmul::q4k_matvec(
-            lw.wq,
+        matmul::matvec(
+            lw.wq_dtype, lw.wq,
             &self.q8_qs, &self.q8_d, &self.q8_bsums,
-            &mut self.q, n_heads * head_dim, hd,
+            &mut self.q, &mut self.q6k_d_scratch,
+            n_heads * head_dim, hd,
         );
+
+        if diag && il == 0 {
+            eprintln!("[gemma4] L0 Q_proj L2={:.4} head_dim={} n_heads={}", l2_norm(&self.q[..n_heads * head_dim]), head_dim, n_heads);
+        }
 
         // ── 3. Q norm (per-head, weight+1) + RoPE ───────────────────
         if !lw.q_norm.is_null() {
@@ -111,15 +122,17 @@ impl Gemma4State {
             let kv_dim = n_kv_heads * head_dim;
             let kv_dim_v = n_kv_heads * head_dim_v;
 
-            matmul::q4k_matvec(
-                lw.wk,
+            matmul::matvec(
+                lw.wk_dtype, lw.wk,
                 &self.q8_qs, &self.q8_d, &self.q8_bsums,
-                &mut self.k, kv_dim, hd,
+                &mut self.k, &mut self.q6k_d_scratch,
+                kv_dim, hd,
             );
-            matmul::q4k_matvec(
-                lw.wv,
+            matmul::matvec(
+                lw.wv_dtype, lw.wv,
                 &self.q8_qs, &self.q8_d, &self.q8_bsums,
-                &mut self.v, kv_dim_v, hd,
+                &mut self.v, &mut self.q6k_d_scratch,
+                kv_dim_v, hd,
             );
 
             // K norm (per-head, weight+1)
@@ -163,10 +176,14 @@ impl Gemma4State {
         }
 
         if diag && il == 0 {
-            eprintln!(
-                "[gemma4] L0 Qnorm L2={:.4}",
-                l2_norm(&self.q[..n_heads * head_dim]),
-            );
+            eprintln!("[gemma4] L0 attn_norm L2={:.4} (llama.cpp: 452.89)", l2_norm(&self.x_norm[..hd]));
+            eprintln!("[gemma4] L0 Q pre-norm L2={:.4}", l2_norm(&self.q[..n_heads * head_dim]));
+            // After QK norm:
+            eprintln!("[gemma4] L0 Qnorm L2={:.4} (llama.cpp: 44.55)", l2_norm(&self.q[..n_heads * head_dim]));
+            if has_kv {
+                eprintln!("[gemma4] L0 Knorm L2={:.4} (llama.cpp: 2.03)", l2_norm(&self.k[..n_kv_heads * head_dim]));
+                eprintln!("[gemma4] L0 Vnorm L2={:.4} (llama.cpp: 16.00)", l2_norm(&self.v[..n_kv_heads * head_dim_v]));
+            }
         }
 
         // ── 5. Attention (GQA, scale=1.0) ────────────────────────────
@@ -190,10 +207,11 @@ impl Gemma4State {
             &mut self.q8_d,
             &mut self.q8_bsums,
         );
-        matmul::q4k_matvec(
-            lw.wo,
+        matmul::matvec(
+            lw.wo_dtype, lw.wo,
             &self.q8_qs, &self.q8_d, &self.q8_bsums,
-            &mut self.wo_out, hd, attn_out_dim,
+            &mut self.wo_out, &mut self.q6k_d_scratch,
+            hd, attn_out_dim,
         );
 
         // post_attn_norm(wo_out) + inpL -> attn_res
@@ -354,14 +372,29 @@ impl Gemma4State {
             &mut self.q8_bsums,
         );
 
-        // Fused gate + up projection
-        matmul::q4k_matvec_dual(
-            lw.w_gate,
-            lw.w_up,
-            &self.q8_qs, &self.q8_d, &self.q8_bsums,
-            &mut self.gate, &mut self.up,
-            ffn_dim, hd,
-        );
+        // Gate + up projection (fused when both Q4K, separate otherwise)
+        if lw.w_gate_dtype == matmul::GGML_TYPE_Q4_K && lw.w_up_dtype == matmul::GGML_TYPE_Q4_K {
+            matmul::q4k_matvec_dual(
+                lw.w_gate,
+                lw.w_up,
+                &self.q8_qs, &self.q8_d, &self.q8_bsums,
+                &mut self.gate, &mut self.up,
+                ffn_dim, hd,
+            );
+        } else {
+            matmul::matvec(
+                lw.w_gate_dtype, lw.w_gate,
+                &self.q8_qs, &self.q8_d, &self.q8_bsums,
+                &mut self.gate, &mut self.q6k_d_scratch,
+                ffn_dim, hd,
+            );
+            matmul::matvec(
+                lw.w_up_dtype, lw.w_up,
+                &self.q8_qs, &self.q8_d, &self.q8_bsums,
+                &mut self.up, &mut self.q6k_d_scratch,
+                ffn_dim, hd,
+            );
+        }
 
         // GELU(gate) * up
         ffi_inference::gelu_mul(
@@ -380,10 +413,11 @@ impl Gemma4State {
         );
 
         // Down projection: ffn_dim -> hidden_dim
-        matmul::q4k_matvec(
-            lw.w_down,
+        matmul::matvec(
+            lw.w_down_dtype, lw.w_down,
             &self.ffn_q8_qs, &self.ffn_q8_d, &self.ffn_q8_bsums,
-            &mut self.down, hd, ffn_dim,
+            &mut self.down, &mut self.q6k_d_scratch,
+            hd, ffn_dim,
         );
     }
 }

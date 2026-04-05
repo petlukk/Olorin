@@ -1,0 +1,205 @@
+// q5k_dot.ea — Q5_K × Q8_K dot product kernel (SSSE3/AVX2)
+//
+// Q5_K block (176 bytes per 256 elements):
+//   d(f16)@0  dmin(f16)@2  scales[12]@4  qh[32]@16  qs[128]@48
+//
+// Same scale/mins format as Q4K. Extra high bit per element stored in qh.
+// Inline f16→f32 via pow2 table (same as Q4K).
+
+#[cfg(x86_64)]
+
+func ubyte(p: *restrict u8, off: i32) -> i32 {
+    return to_i32(p[off]) & 255
+}
+
+func f16_load(p: *restrict u8, off: i32, pow2: *restrict f32) -> f32 {
+    let raw: i32 = ubyte(p, off) | (ubyte(p, off + 1) << 8)
+    let exp: i32 = (raw >> 10) & 31
+    if exp == 0 { return 0.0 } else { return pow2[exp] * (1.0 + to_f32(raw & 1023) * 0.0009765625) }
+}
+
+// Mins correction — identical to Q4K (same 12-byte packed scale format).
+func row_mins(p: *restrict u8, sp: i32, bsums: *restrict i16, bs: i32) -> i32 {
+    let bs_lo: i16x8 = load(bsums, bs)
+    let bs_hi: i16x8 = load(bsums, bs + 8)
+    let bp: i16x8 = hadd_i16(bs_lo, bs_hi)
+
+    let mins: i16x8 = [
+        to_i16(ubyte(p, sp + 4) & 63),
+        to_i16(ubyte(p, sp + 5) & 63),
+        to_i16(ubyte(p, sp + 6) & 63),
+        to_i16(ubyte(p, sp + 7) & 63),
+        to_i16((ubyte(p, sp + 8) >> 4) | ((ubyte(p, sp + 4) >> 6) << 4)),
+        to_i16((ubyte(p, sp + 9) >> 4) | ((ubyte(p, sp + 5) >> 6) << 4)),
+        to_i16((ubyte(p, sp + 10) >> 4) | ((ubyte(p, sp + 6) >> 6) << 4)),
+        to_i16((ubyte(p, sp + 11) >> 4) | ((ubyte(p, sp + 7) >> 6) << 4))
+    ]
+
+    return reduce_add(madd_i16(mins, bp))
+}
+
+func row_mins_bp(p: *restrict u8, sp: i32, bp: i16x8) -> i32 {
+    let mins: i16x8 = [
+        to_i16(ubyte(p, sp + 4) & 63),
+        to_i16(ubyte(p, sp + 5) & 63),
+        to_i16(ubyte(p, sp + 6) & 63),
+        to_i16(ubyte(p, sp + 7) & 63),
+        to_i16((ubyte(p, sp + 8) >> 4) | ((ubyte(p, sp + 4) >> 6) << 4)),
+        to_i16((ubyte(p, sp + 9) >> 4) | ((ubyte(p, sp + 5) >> 6) << 4)),
+        to_i16((ubyte(p, sp + 10) >> 4) | ((ubyte(p, sp + 6) >> 6) << 4)),
+        to_i16((ubyte(p, sp + 11) >> 4) | ((ubyte(p, sp + 7) >> 6) << 4))
+    ]
+    return reduce_add(madd_i16(mins, bp))
+}
+
+// Q5K dot for one block (256 elements).
+// Like Q4K dot_block_vec, but adds high bit from qh to each nibble.
+// hbits (32 bytes) stores 1 bit per element. For each group of 64 elements
+// (processed as 2 sub-groups of 32), we extract consecutive bit pairs.
+func dot_block_vec(
+    q5: *restrict u8, qs_off: i32, qh_off: i32,
+    q8: *restrict i8, q8_off: i32,
+    sp: i32, mask_lo: u8x32
+) -> i32x8 {
+    // Pre-extract all 8 scales (same as Q4K)
+    let sp32: *restrict i32 = ptr_as_i32(ptr_as_i8(q5))
+    let u0: i32 = sp32[sp / 4]
+    let u2: i32 = sp32[(sp + 8) / 4]
+    let sc03: i32 = u0 & 0x3f3f3f3f
+    let sc47: i32 = (u2 & 0x0f0f0f0f) | (((u0 >> 6) & 0x03030303) << 4)
+
+    let s0: i16x16 = splat(to_i16(sc03 & 255))
+    let s1: i16x16 = splat(to_i16((sc03 >> 8) & 255))
+    let s2: i16x16 = splat(to_i16((sc03 >> 16) & 255))
+    let s3: i16x16 = splat(to_i16((sc03 >> 24) & 255))
+    let s4: i16x16 = splat(to_i16(sc47 & 255))
+    let s5: i16x16 = splat(to_i16((sc47 >> 8) & 255))
+    let s6: i16x16 = splat(to_i16((sc47 >> 16) & 255))
+    let s7: i16x16 = splat(to_i16((sc47 >> 24) & 255))
+
+    let hbits: u8x32 = load(q5, qh_off)
+    let shift4: u8x32 = splat(4)
+    let mask1: u8x32 = splat(1)
+
+    // Pre-compute all 8 high-bit vectors: ((hbits >> bit) & 1) << 4
+    // Each yields u8x32 with values 0 or 16.
+    let hb0: u8x32 = (hbits .& mask1) .<< shift4
+    let hb1: u8x32 = ((hbits .>> mask1) .& mask1) .<< shift4
+    let sh2: u8x32 = splat(2)
+    let hb2: u8x32 = ((hbits .>> sh2) .& mask1) .<< shift4
+    let sh3: u8x32 = splat(3)
+    let hb3: u8x32 = ((hbits .>> sh3) .& mask1) .<< shift4
+    let hb4: u8x32 = ((hbits .>> shift4) .& mask1) .<< shift4
+    let sh5: u8x32 = splat(5)
+    let hb5: u8x32 = ((hbits .>> sh5) .& mask1) .<< shift4
+    let sh6: u8x32 = splat(6)
+    let hb6: u8x32 = ((hbits .>> sh6) .& mask1) .<< shift4
+    let sh7: u8x32 = splat(7)
+    let hb7: u8x32 = ((hbits .>> sh7) .& mask1) .<< shift4
+
+    let mut acc: i32x8 = splat(0)
+
+    // Group 0: qs[0..32], high bits 0 and 1
+    let p0: u8x32 = load(q5, qs_off)
+    let q5_0: u8x32 = (p0 .& mask_lo) .+ hb0
+    let q5_1: u8x32 = (p0 .>> shift4) .+ hb1
+    let q8_0a: i8x32 = load(q8, q8_off)
+    let q8_0b: i8x32 = load(q8, q8_off + 32)
+    acc = acc .+ madd_i16(s0, maddubs_i16(q5_0, q8_0a))
+              .+ madd_i16(s1, maddubs_i16(q5_1, q8_0b))
+
+    // Group 1: qs[32..64], high bits 2 and 3
+    let p1: u8x32 = load(q5, qs_off + 32)
+    let q5_2: u8x32 = (p1 .& mask_lo) .+ hb2
+    let q5_3: u8x32 = (p1 .>> shift4) .+ hb3
+    let q8_1a: i8x32 = load(q8, q8_off + 64)
+    let q8_1b: i8x32 = load(q8, q8_off + 96)
+    acc = acc .+ madd_i16(s2, maddubs_i16(q5_2, q8_1a))
+              .+ madd_i16(s3, maddubs_i16(q5_3, q8_1b))
+
+    // Group 2: qs[64..96], high bits 4 and 5
+    let p2: u8x32 = load(q5, qs_off + 64)
+    let q5_4: u8x32 = (p2 .& mask_lo) .+ hb4
+    let q5_5: u8x32 = (p2 .>> shift4) .+ hb5
+    let q8_2a: i8x32 = load(q8, q8_off + 128)
+    let q8_2b: i8x32 = load(q8, q8_off + 160)
+    acc = acc .+ madd_i16(s4, maddubs_i16(q5_4, q8_2a))
+              .+ madd_i16(s5, maddubs_i16(q5_5, q8_2b))
+
+    // Group 3: qs[96..128], high bits 6 and 7
+    let p3: u8x32 = load(q5, qs_off + 96)
+    let q5_6: u8x32 = (p3 .& mask_lo) .+ hb6
+    let q5_7: u8x32 = (p3 .>> shift4) .+ hb7
+    let q8_3a: i8x32 = load(q8, q8_off + 192)
+    let q8_3b: i8x32 = load(q8, q8_off + 224)
+    acc = acc .+ madd_i16(s6, maddubs_i16(q5_6, q8_3a))
+              .+ madd_i16(s7, maddubs_i16(q5_7, q8_3b))
+
+    return acc
+}
+
+// Single-row dot product.
+export func q5k_dot_q8k(
+    q5: *restrict u8, q8: *restrict i8, bsums: *restrict i16,
+    n_blocks: i32, q8_d: *restrict f32, pow2: *restrict f32
+) -> f32 {
+    let mask_lo: u8x32 = splat(15)
+    let mut result: f32 = 0.0
+
+    let mut blk: i32 = 0
+    while blk < n_blocks {
+        let bp: i32 = blk * 176
+        let sumi: i32 = reduce_add(dot_block_vec(q5, bp + 48, bp + 16, q8, blk * 256, bp + 4, mask_lo))
+        let qd: f32 = q8_d[blk]
+        let d: f32 = f16_load(q5, bp, pow2) * qd
+        let dm: f32 = f16_load(q5, bp + 2, pow2) * qd
+        result = result + d * to_f32(sumi) - dm * to_f32(row_mins(q5, bp + 4, bsums, blk * 16))
+        blk = blk + 1
+    }
+    return result
+}
+
+// 4-row dot product.
+export func q5k_dot_q8k_4row(
+    rw0: *restrict u8, rw1: *restrict u8, rw2: *restrict u8, rw3: *restrict u8,
+    q8: *restrict i8, bsums: *restrict i16,
+    out scores: *mut f32 [cap: 4],
+    n_blocks: i32, q8_d: *restrict f32, pow2: *restrict f32
+) {
+    let mask_lo: u8x32 = splat(15)
+    let mut res0: f32 = 0.0
+    let mut res1: f32 = 0.0
+    let mut res2: f32 = 0.0
+    let mut res3: f32 = 0.0
+
+    let mut blk: i32 = 0
+    while blk < n_blocks {
+        let bp: i32 = blk * 176
+        let sp: i32 = bp + 4
+        let qh: i32 = bp + 16
+        let qs: i32 = bp + 48
+        let q8o: i32 = blk * 256
+        let bs: i32 = blk * 16
+
+        let s0: i32 = reduce_add(dot_block_vec(rw0, qs, qh, q8, q8o, sp, mask_lo))
+        let s1: i32 = reduce_add(dot_block_vec(rw1, qs, qh, q8, q8o, sp, mask_lo))
+        let s2: i32 = reduce_add(dot_block_vec(rw2, qs, qh, q8, q8o, sp, mask_lo))
+        let s3: i32 = reduce_add(dot_block_vec(rw3, qs, qh, q8, q8o, sp, mask_lo))
+
+        let blo: i16x8 = load(bsums, bs)
+        let bhi: i16x8 = load(bsums, bs + 8)
+        let paired: i16x8 = hadd_i16(blo, bhi)
+
+        let qd: f32 = q8_d[blk]
+        res0 = res0 + f16_load(rw0, bp, pow2) * qd * to_f32(s0) - f16_load(rw0, bp+2, pow2) * qd * to_f32(row_mins_bp(rw0, sp, paired))
+        res1 = res1 + f16_load(rw1, bp, pow2) * qd * to_f32(s1) - f16_load(rw1, bp+2, pow2) * qd * to_f32(row_mins_bp(rw1, sp, paired))
+        res2 = res2 + f16_load(rw2, bp, pow2) * qd * to_f32(s2) - f16_load(rw2, bp+2, pow2) * qd * to_f32(row_mins_bp(rw2, sp, paired))
+        res3 = res3 + f16_load(rw3, bp, pow2) * qd * to_f32(s3) - f16_load(rw3, bp+2, pow2) * qd * to_f32(row_mins_bp(rw3, sp, paired))
+
+        blk = blk + 1
+    }
+    scores[0] = res0
+    scores[1] = res1
+    scores[2] = res2
+    scores[3] = res3
+}

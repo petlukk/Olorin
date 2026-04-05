@@ -12,11 +12,14 @@ use crate::kernels::ffi_inference;
 
 pub const Q4K_BLOCK_SIZE: usize = 256; // elements per Q4K superblock
 pub const Q4K_BLOCK_BYTES: usize = 144; // bytes per Q4K superblock
+pub const Q5K_BLOCK_SIZE: usize = 256; // elements per Q5K superblock
+pub const Q5K_BLOCK_BYTES: usize = 176; // bytes per Q5K superblock
 pub const Q6K_BLOCK_SIZE: usize = 256; // elements per Q6K superblock
 pub const Q6K_BLOCK_BYTES: usize = 210; // bytes per Q6K superblock
 
 // GGUF dtype codes
 pub const GGML_TYPE_Q4_K: u32 = 12;
+pub const GGML_TYPE_Q5_K: u32 = 13;
 pub const GGML_TYPE_Q6_K: u32 = 14;
 
 // ---------------------------------------------------------------------------
@@ -48,7 +51,7 @@ fn pow2_table() -> &'static [f32; 32] {
 // ---------------------------------------------------------------------------
 
 #[inline]
-fn f16_to_f32_scalar(h: u16) -> f32 {
+pub(crate) fn f16_to_f32_scalar(h: u16) -> f32 {
     let sign = ((h >> 15) & 1) as u32;
     let exp = ((h >> 10) & 0x1f) as u32;
     let mant = (h & 0x3ff) as u32;
@@ -247,6 +250,65 @@ pub fn q4k_matvec_dual(
 }
 
 // ---------------------------------------------------------------------------
+// Q5K matrix-vector multiply
+// ---------------------------------------------------------------------------
+
+/// Q5K matrix-vector: weight (n_rows × n_cols, Q5K) × input (Q8K) → output (f32).
+///
+/// Same interface as q4k_matvec. Q5K has same scale/mins format as Q4K,
+/// just 5 bits per weight instead of 4 (extra bit in qh field).
+pub fn q5k_matvec(
+    weight: *const u8,
+    input_qs: &[i8],
+    input_d: &[f32],
+    input_bsums: &[i16],
+    output: &mut [f32],
+    n_rows: usize,
+    n_cols: usize,
+) {
+    debug_assert!(n_cols % Q5K_BLOCK_SIZE == 0);
+    let n_blocks = n_cols / Q5K_BLOCK_SIZE;
+    let row_bytes = n_blocks * Q5K_BLOCK_BYTES;
+    let pow2 = pow2_table();
+
+    let q8 = input_qs.as_ptr();
+    let bsums = input_bsums.as_ptr();
+    let q8_d = input_d.as_ptr();
+    let pow2_ptr = pow2.as_ptr();
+
+    let full_quads = n_rows / 4;
+    let remainder = n_rows % 4;
+
+    unsafe {
+        for quad in 0..full_quads {
+            let base_row = quad * 4;
+            let rw0 = weight.add(base_row * row_bytes);
+            let rw1 = weight.add((base_row + 1) * row_bytes);
+            let rw2 = weight.add((base_row + 2) * row_bytes);
+            let rw3 = weight.add((base_row + 3) * row_bytes);
+
+            ffi_inference::q5k_dot_q8k_4row(
+                rw0, rw1, rw2, rw3,
+                q8, bsums,
+                output.as_mut_ptr().add(base_row),
+                n_blocks as i32,
+                q8_d, pow2_ptr,
+            );
+        }
+
+        for i in 0..remainder {
+            let row = full_quads * 4 + i;
+            let rw = weight.add(row * row_bytes);
+            output[row] = ffi_inference::q5k_dot_q8k(
+                rw, q8, bsums,
+                n_blocks as i32,
+                q8_d, pow2_ptr,
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Q6K matrix-vector multiply
 // ---------------------------------------------------------------------------
 
@@ -334,119 +396,40 @@ pub fn q6k_matvec(
 }
 
 // ---------------------------------------------------------------------------
-// Q6K embedding dequantization
+// Generic dtype-dispatching matvec
 // ---------------------------------------------------------------------------
 
-/// Dequantize a single row from a Q6K embedding table to f32.
+/// Dispatch matvec based on GGML dtype code.
 ///
-/// Q6K block layout (210 bytes per 256 elements):
-///   ql[128]@0  qh[64]@128  scales[16]@192  d(f16)@208
-///
-/// Each element is 6-bit: low 4 bits from ql, high 2 bits from qh.
-/// Value = d * scale[group] * (q6 - 32).
-pub fn q6k_embed_lookup(
+/// `d_scratch` is only used for Q6K (needs per-block d pre-multiplication).
+/// Pass a slice of length >= n_blocks * 4 for Q6K, or empty for Q4K/Q5K.
+pub fn matvec(
+    dtype: u32,
     weight: *const u8,
-    token_id: usize,
+    input_qs: &[i8],
+    input_d: &[f32],
+    input_bsums: &[i16],
     output: &mut [f32],
-    hidden_dim: usize,
+    d_scratch: &mut [f32],
+    n_rows: usize,
+    n_cols: usize,
 ) {
-    debug_assert!(hidden_dim % Q6K_BLOCK_SIZE == 0);
-    let n_blocks = hidden_dim / Q6K_BLOCK_SIZE;
-    let row_bytes = n_blocks * Q6K_BLOCK_BYTES;
-    let row_base = unsafe { weight.add(token_id * row_bytes) };
+    match dtype {
+        GGML_TYPE_Q4_K => q4k_matvec(weight, input_qs, input_d, input_bsums, output, n_rows, n_cols),
+        GGML_TYPE_Q5_K => q5k_matvec(weight, input_qs, input_d, input_bsums, output, n_rows, n_cols),
+        GGML_TYPE_Q6_K => q6k_matvec(weight, input_qs, input_d, input_bsums, output, d_scratch, n_rows, n_cols),
+        _ => panic!("unsupported weight dtype {dtype}"),
+    }
+}
 
-    for blk in 0..n_blocks {
-        let block = unsafe { row_base.add(blk * Q6K_BLOCK_BYTES) };
-        let out_base = blk * Q6K_BLOCK_SIZE;
-
-        // Extract d (f16 at offset 208)
-        let d_raw = unsafe { u16::from_le_bytes([*block.add(208), *block.add(209)]) };
-        let d = f16_to_f32_scalar(d_raw);
-
-        // Q6K layout per block (256 elements):
-        //   ql[128]@0  qh[64]@128  scales[16]@192  d(f16)@208
-        //
-        // Processed in 2 halves of 128 elements each.
-        // Each half has 4 groups of 32 elements:
-        //   Group 0: ql[0..32] low nibble  + qh bits [0..1]
-        //   Group 1: ql[0..32] high nibble + qh bits [2..3]
-        //   Group 2: ql[32..64] low nibble + qh bits [4..5]
-        //   Group 3: ql[32..64] high nibble + qh bits [6..7]
-        //
-        // Each group's 32 elements split into 2 subgroups of 16
-        // with separate scale entries.
-        // Q8K input is consumed sequentially: 32 elements per group.
-
-        for half in 0..2usize {
-            let ql_ptr = unsafe { block.add(half * 64) };
-            let qh_ptr = unsafe { block.add(128 + half * 32) };
-            let sc_ptr = unsafe { block.add(192 + half * 8) };
-            let elem_base = out_base + half * 128;
-
-            // Group 0: ql[0..32] low nibble, qh bits 0-1
-            let sc0a = d * unsafe { *sc_ptr.add(0) as i8 as f32 };
-            let sc0b = d * unsafe { *sc_ptr.add(1) as i8 as f32 };
-            for j in 0..16usize {
-                let ql = unsafe { *ql_ptr.add(j) };
-                let qh = unsafe { *qh_ptr.add(j) };
-                let q6 = (ql & 0x0f) as i32 | (((qh & 0x03) as i32) << 4);
-                output[elem_base + j] = sc0a * ((q6 - 32) as f32);
-            }
-            for j in 0..16usize {
-                let ql = unsafe { *ql_ptr.add(16 + j) };
-                let qh = unsafe { *qh_ptr.add(16 + j) };
-                let q6 = (ql & 0x0f) as i32 | (((qh & 0x03) as i32) << 4);
-                output[elem_base + 16 + j] = sc0b * ((q6 - 32) as f32);
-            }
-
-            // Group 1: ql[0..32] high nibble, qh bits 2-3
-            let sc1a = d * unsafe { *sc_ptr.add(2) as i8 as f32 };
-            let sc1b = d * unsafe { *sc_ptr.add(3) as i8 as f32 };
-            for j in 0..16usize {
-                let ql = unsafe { *ql_ptr.add(j) };
-                let qh = unsafe { *qh_ptr.add(j) };
-                let q6 = ((ql >> 4) & 0x0f) as i32 | ((((qh >> 2) & 0x03) as i32) << 4);
-                output[elem_base + 32 + j] = sc1a * ((q6 - 32) as f32);
-            }
-            for j in 0..16usize {
-                let ql = unsafe { *ql_ptr.add(16 + j) };
-                let qh = unsafe { *qh_ptr.add(16 + j) };
-                let q6 = ((ql >> 4) & 0x0f) as i32 | ((((qh >> 2) & 0x03) as i32) << 4);
-                output[elem_base + 32 + 16 + j] = sc1b * ((q6 - 32) as f32);
-            }
-
-            // Group 2: ql[32..64] low nibble, qh bits 4-5
-            let sc2a = d * unsafe { *sc_ptr.add(4) as i8 as f32 };
-            let sc2b = d * unsafe { *sc_ptr.add(5) as i8 as f32 };
-            for j in 0..16usize {
-                let ql = unsafe { *ql_ptr.add(32 + j) };
-                let qh = unsafe { *qh_ptr.add(j) };
-                let q6 = (ql & 0x0f) as i32 | ((((qh >> 4) & 0x03) as i32) << 4);
-                output[elem_base + 64 + j] = sc2a * ((q6 - 32) as f32);
-            }
-            for j in 0..16usize {
-                let ql = unsafe { *ql_ptr.add(32 + 16 + j) };
-                let qh = unsafe { *qh_ptr.add(16 + j) };
-                let q6 = (ql & 0x0f) as i32 | ((((qh >> 4) & 0x03) as i32) << 4);
-                output[elem_base + 64 + 16 + j] = sc2b * ((q6 - 32) as f32);
-            }
-
-            // Group 3: ql[32..64] high nibble, qh bits 6-7
-            let sc3a = d * unsafe { *sc_ptr.add(6) as i8 as f32 };
-            let sc3b = d * unsafe { *sc_ptr.add(7) as i8 as f32 };
-            for j in 0..16usize {
-                let ql = unsafe { *ql_ptr.add(32 + j) };
-                let qh = unsafe { *qh_ptr.add(j) };
-                let q6 = ((ql >> 4) & 0x0f) as i32 | ((((qh >> 6) & 0x03) as i32) << 4);
-                output[elem_base + 96 + j] = sc3a * ((q6 - 32) as f32);
-            }
-            for j in 0..16usize {
-                let ql = unsafe { *ql_ptr.add(32 + 16 + j) };
-                let qh = unsafe { *qh_ptr.add(16 + j) };
-                let q6 = ((ql >> 4) & 0x0f) as i32 | ((((qh >> 6) & 0x03) as i32) << 4);
-                output[elem_base + 96 + 16 + j] = sc3b * ((q6 - 32) as f32);
-            }
-        }
+/// Row bytes for a given dtype and column count.
+#[inline]
+pub fn row_bytes_for_dtype(dtype: u32, n_cols: usize) -> usize {
+    match dtype {
+        GGML_TYPE_Q4_K => q4k_row_bytes(n_cols),
+        GGML_TYPE_Q5_K => q5k_row_bytes(n_cols),
+        GGML_TYPE_Q6_K => q6k_row_bytes(n_cols),
+        _ => panic!("unsupported weight dtype {dtype}"),
     }
 }
 
@@ -458,6 +441,12 @@ pub fn q6k_embed_lookup(
 #[inline]
 pub fn q4k_row_bytes(n_cols: usize) -> usize {
     (n_cols / Q4K_BLOCK_SIZE) * Q4K_BLOCK_BYTES
+}
+
+/// Bytes per row for Q5K weight matrix with given column count.
+#[inline]
+pub fn q5k_row_bytes(n_cols: usize) -> usize {
+    (n_cols / Q5K_BLOCK_SIZE) * Q5K_BLOCK_BYTES
 }
 
 /// Bytes per row for Q6K weight matrix with given column count.

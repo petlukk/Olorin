@@ -11,6 +11,8 @@ pub struct KernelTableInference {
     pub q4k_dot_q8k:           Q4kDotQ8kFn,
     pub q4k_dot_q8k_4row:      Q4kDot4RowFn,
     pub q4k_dot_q8k_4row_dual: Q4kDot4RowDualFn,
+    pub q5k_dot_q8k:           Q5kDotQ8kFn,
+    pub q5k_dot_q8k_4row:      Q5kDot4RowFn,
     pub q6k_dot_q8k:           Q6kDotQ8kFn,
     pub q6k_dot_q8k_4row:      Q6kDot4RowFn,
     pub f32_to_f16:            F32ToF16Fn,
@@ -73,6 +75,7 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
 
     let q4kq = load("q4k_quant")?;
     let q4kd = load_best("q4k_dot")?;
+    let q5kd = load("q5k_dot")?;
     let q6kd = load("q6k_dot")?;
     let f16_conv_lib = load("f16_convert")?;
     let softmax_lib  = load("softmax")?;
@@ -94,6 +97,8 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
             q4k_dot_q8k:           std::mem::transmute(sym(&q4kd, b"q4k_dot_q8k\0")?),
             q4k_dot_q8k_4row:      std::mem::transmute(sym(&q4kd, b"q4k_dot_q8k_4row\0")?),
             q4k_dot_q8k_4row_dual: std::mem::transmute(sym(&q4kd, b"q4k_dot_q8k_4row_dual\0")?),
+            q5k_dot_q8k:           std::mem::transmute(sym(&q5kd, b"q5k_dot_q8k\0")?),
+            q5k_dot_q8k_4row:      std::mem::transmute(sym(&q5kd, b"q5k_dot_q8k_4row\0")?),
             q6k_dot_q8k:           std::mem::transmute(sym(&q6kd, b"q6k_dot_q8k\0")?),
             q6k_dot_q8k_4row:      std::mem::transmute(sym(&q6kd, b"q6k_dot_q8k_4row\0")?),
             f32_to_f16:     std::mem::transmute(sym(&f16_conv_lib, b"f32_to_f16\0")?),
@@ -102,7 +107,7 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
             gemma4_rmsnorm: std::mem::transmute(sym(&gemma4_rmsnorm_lib, b"gemma4_rmsnorm\0")?),
             gelu_mul:       std::mem::transmute(sym(&gemma4_gelu_lib, b"gelu_mul\0")?),
             gemma4_rope:    std::mem::transmute(sym(&gemma4_rope_lib, b"gemma4_rope\0")?),
-            libs: vec![q4kq, q4kd, q6kd, f16_conv_lib, softmax_lib, gemma4_rmsnorm_lib, gemma4_gelu_lib, gemma4_rope_lib],
+            libs: vec![q4kq, q4kd, q5kd, q6kd, f16_conv_lib, softmax_lib, gemma4_rmsnorm_lib, gemma4_gelu_lib, gemma4_rope_lib],
         };
         Ok(t)
     }
@@ -143,6 +148,22 @@ pub unsafe fn q4k_dot_q8k_4row_dual(
     (k().q4k_dot_q8k_4row_dual)(
         gw0, gw1, gw2, gw3, uw0, uw1, uw2, uw3,
         q8, bsums, gate_scores, up_scores, n_blocks, q8_d, pow2)
+}
+
+pub unsafe fn q5k_dot_q8k(
+    q5: *const u8, q8: *const i8, bsums: *const i16,
+    n_blocks: i32, q8_d: *const f32, pow2: *const f32,
+) -> f32 {
+    (k().q5k_dot_q8k)(q5, q8, bsums, n_blocks, q8_d, pow2)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn q5k_dot_q8k_4row(
+    rw0: *const u8, rw1: *const u8, rw2: *const u8, rw3: *const u8,
+    q8: *const i8, bsums: *const i16,
+    scores: *mut f32, n_blocks: i32, q8_d: *const f32, pow2: *const f32,
+) {
+    (k().q5k_dot_q8k_4row)(rw0, rw1, rw2, rw3, q8, bsums, scores, n_blocks, q8_d, pow2)
 }
 
 pub unsafe fn q6k_dot_q8k(

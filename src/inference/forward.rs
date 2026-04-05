@@ -9,6 +9,7 @@
 use crate::inference::cache::KvCache;
 use crate::inference::engine::{AttnType, Gemma4Model};
 use crate::inference::matmul;
+use crate::inference::dequant;
 use crate::kernels::ffi_inference;
 
 // ---------------------------------------------------------------------------
@@ -174,7 +175,7 @@ impl Gemma4State {
             ffn_q8_bsums: vec![0; n_blocks_ffn * 16],
 
             logits: vec![0.0; model.vocab_size],
-            q6k_d_scratch: vec![0.0; n_blocks_out * 4],
+            q6k_d_scratch: vec![0.0; std::cmp::max(n_blocks_out, n_blocks_ffn) * 4],
 
             cos_table: vec![0.0; max_head / 2],
             sin_table: vec![0.0; max_head / 2],
@@ -192,7 +193,7 @@ impl Gemma4State {
         let diag = diag_enabled();
 
         // ── Pre-loop: embed + scale ──────────────────────────────────
-        matmul::q6k_embed_lookup(model.embed_weight, token_id as usize, &mut self.x, hd);
+        dequant::q6k_embed_lookup(model.embed_weight, token_id as usize, &mut self.x, hd);
         let embed_scale = (hd as f32).sqrt();
         for v in self.x.iter_mut() {
             *v *= embed_scale;
@@ -223,21 +224,12 @@ impl Gemma4State {
             &mut self.q8_bsums,
         );
 
-        if model.embed_dtype == matmul::GGML_TYPE_Q6_K {
-            matmul::q6k_matvec(
-                model.embed_weight,
-                &self.q8_qs, &self.q8_d, &self.q8_bsums,
-                &mut self.logits,
-                &mut self.q6k_d_scratch,
-                model.vocab_size, hd,
-            );
-        } else {
-            matmul::q4k_matvec(
-                model.embed_weight,
-                &self.q8_qs, &self.q8_d, &self.q8_bsums,
-                &mut self.logits, model.vocab_size, hd,
-            );
-        }
+        matmul::matvec(
+            model.embed_dtype, model.embed_weight,
+            &self.q8_qs, &self.q8_d, &self.q8_bsums,
+            &mut self.logits, &mut self.q6k_d_scratch,
+            model.vocab_size, hd,
+        );
 
         if model.logit_softcap > 0.0 {
             let cap = model.logit_softcap;

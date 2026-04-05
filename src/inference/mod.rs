@@ -1,8 +1,10 @@
 pub mod engine;
+mod engine_helpers;
 pub mod gguf;
 pub mod tokenizer;
 pub mod cache;
 pub mod matmul;
+pub mod dequant;
 pub mod generate;
 pub mod threadpool;
 pub mod forward;
