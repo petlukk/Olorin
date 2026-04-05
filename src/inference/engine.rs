@@ -145,6 +145,9 @@ fn get_meta_u32_array(gguf: &GgufFile, key: &str) -> Option<Vec<u32>> {
                     MetaValue::I32(x) => out.push(*x as u32),
                     MetaValue::U64(x) => out.push(*x as u32),
                     MetaValue::I64(x) => out.push(*x as u32),
+                    MetaValue::Bool(b) => out.push(if *b { 1 } else { 0 }),
+                    MetaValue::U8(x) => out.push(*x as u32),
+                    MetaValue::I8(x) => out.push(*x as u32),
                     _ => return None,
                 }
             }
@@ -285,10 +288,18 @@ impl Gemma4Model {
             .unwrap_or(key_len_swa as u32) as usize;
 
         // 3. Sliding window pattern (per-layer array: 1=SWA, 0=global)
-        let is_swa: Vec<bool> = match get_meta_u32_array(
-            gguf,
-            &format!("{arch}.attention.sliding_window_pattern"),
-        ) {
+        let swp_key = format!("{arch}.attention.sliding_window_pattern");
+        // Debug: check what metadata type the key has
+        if let Some(mv) = gguf.metadata.get(&swp_key) {
+            eprintln!("[gemma4] swp metadata type: {:?}", std::mem::discriminant(mv));
+            if let MetaValue::Array(arr) = mv {
+                eprintln!("[gemma4] swp array len={}, first elem type: {:?}",
+                    arr.len(), arr.first().map(|v| std::mem::discriminant(v)));
+            }
+        } else {
+            eprintln!("[gemma4] swp key not found in metadata!");
+        }
+        let is_swa: Vec<bool> = match get_meta_u32_array(gguf, &swp_key) {
             Some(pattern) => {
                 if pattern.len() != n_layers {
                     return Err(format!(
@@ -296,9 +307,11 @@ impl Gemma4Model {
                         pattern.len()
                     ));
                 }
+                eprintln!("[gemma4] sliding_window_pattern loaded: first 5 = {:?}", &pattern[..5.min(pattern.len())]);
                 pattern.iter().map(|&v| v == 1).collect()
             }
             None => {
+                eprintln!("[gemma4] WARNING: sliding_window_pattern not found, using fallback");
                 // Fallback: compute from global_layer_interval
                 let interval = get_meta_u32(
                     gguf,
@@ -347,12 +360,12 @@ impl Gemma4Model {
         // 6. KV shared source
         let kv_shared_source = compute_kv_shared(n_layers, shared_suffix, &is_swa);
 
-        // Vocab size from embedding tensor dims
+        // Vocab size from embedding tensor dims: [hidden_dim, vocab_size]
         let vocab_size = gguf
             .tensor_map
             .get("token_embd.weight")
             .and_then(|&idx| gguf.tensors.get(idx))
-            .and_then(|ti| ti.dims.first().copied())
+            .and_then(|ti| ti.dims.get(1).copied())
             .ok_or("cannot determine vocab_size from token_embd.weight")?
             as usize;
 

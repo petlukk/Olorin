@@ -7,16 +7,16 @@ const ALIGNMENT: u64 = 32;
 #[derive(Debug, Clone)]
 pub enum MetaValue {
     U8(u8),
-    I8,
+    I8(i8),
     U16(u16),
-    I16,
+    I16(i16),
     U32(u32),
     I32(i32),
     F32(f32),
     U64(u64),
     I64(i64),
     F64(f64),
-    Bool,
+    Bool(bool),
     Str(String),
     Array(Vec<MetaValue>),
 }
@@ -126,15 +126,15 @@ fn read_string(buf: &[u8], pos: usize) -> Result<(String, usize)> {
 fn read_meta_value(buf: &[u8], pos: usize, vtype: u32) -> Result<(MetaValue, usize)> {
     match vtype {
         0 => { let (v, p) = read_u8(buf, pos)?; Ok((MetaValue::U8(v), p)) }
-        1 => { let (_v, p) = read_i8(buf, pos)?; Ok((MetaValue::I8, p)) }
+        1 => { let (v, p) = read_i8(buf, pos)?; Ok((MetaValue::I8(v), p)) }
         2 => { let (v, p) = read_u16(buf, pos)?; Ok((MetaValue::U16(v), p)) }
-        3 => { let (_v, p) = read_i16(buf, pos)?; Ok((MetaValue::I16, p)) }
+        3 => { let (v, p) = read_i16(buf, pos)?; Ok((MetaValue::I16(v), p)) }
         4 => { let (v, p) = read_u32(buf, pos)?; Ok((MetaValue::U32(v), p)) }
         5 => { let (v, p) = read_i32(buf, pos)?; Ok((MetaValue::I32(v), p)) }
         6 => { let (v, p) = read_f32(buf, pos)?; Ok((MetaValue::F32(v), p)) }
         7 => {
-            let (_v, p) = read_u8(buf, pos)?;
-            Ok((MetaValue::Bool, p))
+            let (v, p) = read_u8(buf, pos)?;
+            Ok((MetaValue::Bool(v != 0), p))
         }
         8 => {
             let (s, p) = read_string(buf, pos)?;
