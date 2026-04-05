@@ -228,7 +228,72 @@ fn step3_qkv_projection() {
     );
     eprintln!("K_proj     L2={:.4}  first4={}  dtype={}", l2(&k), first4(&k), lw.wk_dtype);
 
-    // Debug: scalar Q5K reference dot for row 1 vs SIMD kernel
+    // Debug: per-block scalar vs SIMD Q5K for row 1 to find which block diverges
+    if lw.wk_dtype == 13 {
+        let n_blk = hd / 256;
+        let row_bytes = n_blk * 176;
+        let pow2 = olorin::inference::matmul::pow2_table_pub();
+        let wk1 = unsafe { lw.wk.add(1 * row_bytes) };
+        for blk in 0..n_blk {
+            let bp = unsafe { wk1.add(blk * 176) };
+            // SIMD single-block
+            let q8_blk = unsafe { q8_qs.as_ptr().add(blk * 256) };
+            let bs_blk = unsafe { q8_bsums.as_ptr().add(blk * 16) };
+            let d_blk = unsafe { q8_d.as_ptr().add(blk) };
+            let simd_val = unsafe {
+                olorin::kernels::ffi_inference::q5k_dot_q8k(
+                    bp as *const u8, q8_blk, bs_blk, 1, d_blk, pow2.as_ptr(),
+                )
+            };
+            // Scalar single-block (same as llama.cpp)
+            let d_raw = unsafe { u16::from_le_bytes([*bp, *bp.add(1)]) };
+            let dm_raw = unsafe { u16::from_le_bytes([*bp.add(2), *bp.add(3)]) };
+            let d = olorin::inference::matmul::f16_scalar(d_raw);
+            let dm = olorin::inference::matmul::f16_scalar(dm_raw);
+            let qs_ptr = unsafe { bp.add(48) };
+            let qh_ptr = unsafe { bp.add(16) };
+            let sc_ptr = unsafe { bp.add(4) };
+            let q8_base = blk * 256;
+            let mut q5v = [0u8; 256];
+            let mut m: u8 = 1;
+            for j in 0..4usize {
+                for l in 0..32usize {
+                    let ql = unsafe { *qs_ptr.add(j*32+l) };
+                    let qh = unsafe { *qh_ptr.add(l) };
+                    q5v[j*64+l] = (ql & 0xF) + if qh & m != 0 { 16 } else { 0 };
+                }
+                m <<= 1;
+                for l in 0..32usize {
+                    let ql = unsafe { *qs_ptr.add(j*32+l) };
+                    let qh = unsafe { *qh_ptr.add(l) };
+                    q5v[j*64+32+l] = (ql >> 4) + if qh & m != 0 { 16 } else { 0 };
+                }
+                m <<= 1;
+            }
+            let mut utmp = [0u32; 4];
+            unsafe { std::ptr::copy_nonoverlapping(sc_ptr, utmp.as_mut_ptr() as *mut u8, 12); }
+            utmp[3] = ((utmp[2] >> 4) & 0x0f0f0f0f) | (((utmp[1] >> 6) & 0x03030303) << 4);
+            let uaux = utmp[1] & 0x3f3f3f3f;
+            utmp[1] = (utmp[2] & 0x0f0f0f0f) | (((utmp[0] >> 6) & 0x03030303) << 4);
+            utmp[2] = uaux;
+            utmp[0] &= 0x3f3f3f3f;
+            let scs = unsafe { &*(utmp.as_ptr() as *const [u8; 8]) };
+            let mins = unsafe { &*((utmp.as_ptr() as *const u8).add(8) as *const [u8; 8]) };
+            let mut sumi_mins = 0i32;
+            for j in 0..16 { sumi_mins += q8_bsums[blk*16+j] as i32 * mins[j/2] as i32; }
+            let mut sumi = 0i32;
+            for g in 0..8 {
+                let sc = scs[g] as i32;
+                for l in 0..32 { sumi += sc * q5v[g*32+l] as i32 * q8_qs[q8_base+g*32+l] as i32; }
+            }
+            let scalar_val = d * q8_d[blk] * sumi as f32 - dm * q8_d[blk] * sumi_mins as f32;
+            if (simd_val - scalar_val).abs() > 0.01 {
+                eprintln!("  K row1 blk{blk}: SIMD={simd_val:.4} scalar={scalar_val:.4} d={d:.6} dm={dm:.6} q8d={:.6} sumi={sumi} mins_sum={sumi_mins}",
+                    q8_d[blk]);
+            }
+        }
+    }
+    // Scalar Q5K reference
     if lw.wk_dtype == 13 {
         let n_blocks_k = hd / 256;
         let row_bytes = n_blocks_k * 176;
