@@ -1,8 +1,8 @@
-// gemma4_rope.ea — Rotary Position Embeddings (RoPE) in-place
+// gemma4_rope.ea — Rotary Position Embeddings (RoPE) in-place, NEOX layout
 //
-// Applies precomputed cos/sin rotation to Q or K vectors.
+// Gemma 4 uses ROPE_TYPE_NEOX: pairs are (d, d+half_dim), not (2d, 2d+1).
 // data layout: [head0_dim0..head0_dimN, head1_dim0..head1_dimN, ...]
-// Rotation pairs: (dim0,dim1), (dim2,dim3), ... using cos_table/sin_table.
+// Rotation pairs: (dim_d, dim_{d+half}) for d in 0..half_dim.
 //
 // new_re = re * cos[d] - im * sin[d]
 // new_im = re * sin[d] + im * cos[d]
@@ -14,13 +14,12 @@ export func gemma4_rope(data: *mut f32, cos_table: *restrict f32, sin_table: *re
         let base: i32 = h * head_dim
         let mut d: i32 = 0
         while d < half_dim {
-            let idx: i32 = base + d * 2
-            let re: f32 = data[idx]
-            let im: f32 = data[idx + 1]
+            let re: f32 = data[base + d]
+            let im: f32 = data[base + d + half_dim]
             let c: f32 = cos_table[d]
             let s: f32 = sin_table[d]
-            data[idx] = re * c - im * s
-            data[idx + 1] = re * s + im * c
+            data[base + d] = re * c - im * s
+            data[base + d + half_dim] = re * s + im * c
             d = d + 1
         }
         h = h + 1

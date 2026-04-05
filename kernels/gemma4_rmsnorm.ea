@@ -1,6 +1,7 @@
-// gemma4_rmsnorm.ea — RMSNorm with Gemma weight+1 convention
+// gemma4_rmsnorm.ea — RMSNorm for Gemma 4 (no weight+1)
 //
-// out[i] = x[i] * (1 + weight[i]) * rsqrt(mean(x^2) + eps)
+// out[i] = x[i] * weight[i] * rsqrt(mean(x^2) + eps)
+// Gemma4 stores norm weights as-is in GGUF (norm_shift=0).
 // Two-pass: sum-of-squares then scale+apply.
 
 export func gemma4_rmsnorm(x: *restrict f32, weight: *restrict f32, out: *mut f32, n: i32, eps: f32) {
@@ -35,23 +36,21 @@ export func gemma4_rmsnorm(x: *restrict f32, weight: *restrict f32, out: *mut f3
     let mean: f32 = ss / to_f32(n)
     let scale: f32 = rsqrt(mean + eps)
 
-    // Pass 2: Apply (1 + weight) * x * scale
+    // Pass 2: Apply weight * x * scale
     let v_scale: f32x4 = splat(scale)
-    let v_one: f32x4 = splat(1.0)
     i = 0
 
     while i + 4 <= n {
         let vx: f32x4 = load(x, i)
         let vw: f32x4 = load(weight, i)
-        let w1: f32x4 = vw .+ v_one
         let normed: f32x4 = vx .* v_scale
-        store(out, i, normed .* w1)
+        store(out, i, normed .* vw)
         i = i + 4
     }
 
     // Scalar tail
     while i < n {
-        out[i] = x[i] * scale * (1.0 + weight[i])
+        out[i] = x[i] * scale * weight[i]
         i = i + 1
     }
 }
