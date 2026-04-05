@@ -396,6 +396,53 @@ pub fn q6k_matvec(
 }
 
 // ---------------------------------------------------------------------------
+// BF16 matrix-vector multiply
+// ---------------------------------------------------------------------------
+
+/// BF16 matrix-vector: weight (n_rows x n_cols, BF16) x input (f32) -> output (f32).
+///
+/// BF16 weight data is 2 bytes per element. Row stride = n_cols * 2 bytes.
+pub fn bf16_matvec(
+    weight: *const u8,
+    input: &[f32],
+    output: &mut [f32],
+    n_rows: usize,
+    n_cols: usize,
+) {
+    let row_bytes = n_cols * 2;
+    let mut scratch = [0i32; 8]; // scratch for BF16->f32 reinterpretation
+
+    let full_quads = n_rows / 4;
+    let remainder = n_rows % 4;
+
+    unsafe {
+        for quad in 0..full_quads {
+            let base_row = quad * 4;
+            let w0 = weight.add(base_row * row_bytes) as *const u16;
+            let w1 = weight.add((base_row + 1) * row_bytes) as *const u16;
+            let w2 = weight.add((base_row + 2) * row_bytes) as *const u16;
+            let w3 = weight.add((base_row + 3) * row_bytes) as *const u16;
+
+            ffi_inference::bf16_dot_f32_4row(
+                w0, w1, w2, w3,
+                input.as_ptr(),
+                output.as_mut_ptr().add(base_row),
+                scratch.as_mut_ptr(),
+                n_cols as i32,
+            );
+        }
+
+        for i in 0..remainder {
+            let row = full_quads * 4 + i;
+            let w = weight.add(row * row_bytes) as *const u16;
+            output[row] = ffi_inference::bf16_dot_f32(
+                w, input.as_ptr(), scratch.as_mut_ptr(), n_cols as i32,
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Generic dtype-dispatching matvec
 // ---------------------------------------------------------------------------
 
