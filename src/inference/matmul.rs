@@ -40,6 +40,8 @@ fn build_pow2_table() -> [f32; 32] {
     t
 }
 
+pub fn pow2_table_pub() -> &'static [f32; 32] { pow2_table() }
+
 fn pow2_table() -> &'static [f32; 32] {
     use std::sync::OnceLock;
     static TABLE: OnceLock<[f32; 32]> = OnceLock::new();
@@ -51,6 +53,7 @@ fn pow2_table() -> &'static [f32; 32] {
 // ---------------------------------------------------------------------------
 
 #[inline]
+pub fn f16_scalar(h: u16) -> f32 { f16_to_f32_scalar(h) }
 pub(crate) fn f16_to_f32_scalar(h: u16) -> f32 {
     let sign = ((h >> 15) & 1) as u32;
     let exp = ((h >> 10) & 0x1f) as u32;

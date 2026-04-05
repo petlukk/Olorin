@@ -228,6 +228,86 @@ fn step3_qkv_projection() {
     );
     eprintln!("K_proj     L2={:.4}  first4={}  dtype={}", l2(&k), first4(&k), lw.wk_dtype);
 
+    // Debug: scalar Q5K reference dot for row 1 vs SIMD kernel
+    if lw.wk_dtype == 13 {
+        let n_blocks_k = hd / 256;
+        let row_bytes = n_blocks_k * 176;
+        // Scalar reference Q5K dot matching llama.cpp exactly
+        for r in 0..4.min(kv_dim) {
+            let wk_r = unsafe { lw.wk.add(r * row_bytes) };
+            let mut result_scalar = 0.0f32;
+            for blk in 0..n_blocks_k {
+                let bp = unsafe { wk_r.add(blk * 176) };
+                let d_raw = unsafe { u16::from_le_bytes([*bp, *bp.add(1)]) };
+                let dm_raw = unsafe { u16::from_le_bytes([*bp.add(2), *bp.add(3)]) };
+                let d = olorin::inference::matmul::f16_scalar(d_raw);
+                let dm = olorin::inference::matmul::f16_scalar(dm_raw);
+                let qs_ptr = unsafe { bp.add(48) };
+                let qh_ptr = unsafe { bp.add(16) };
+                let sc_ptr = unsafe { bp.add(4) };
+                let q8_base = blk * 256;
+
+                // Dequant Q5K values (matching llama.cpp order)
+                let mut q5_vals = [0i8; 256];
+                let mut m: u8 = 1;
+                for j in 0..4usize {
+                    for l in 0..32usize {
+                        let ql = unsafe { *qs_ptr.add(j * 32 + l) };
+                        let qh = unsafe { *qh_ptr.add(l) };
+                        q5_vals[j * 64 + l] = (ql & 0xF) as i8 + if qh & m != 0 { 16 } else { 0 };
+                    }
+                    m <<= 1;
+                    for l in 0..32usize {
+                        let ql = unsafe { *qs_ptr.add(j * 32 + l) };
+                        let qh = unsafe { *qh_ptr.add(l) };
+                        q5_vals[j * 64 + 32 + l] = (ql >> 4) as i8 + if qh & m != 0 { 16 } else { 0 };
+                    }
+                    m <<= 1;
+                }
+
+                // Extract scales and mins (matching llama.cpp)
+                let mut utmp = [0u32; 4];
+                unsafe {
+                    std::ptr::copy_nonoverlapping(sc_ptr, utmp.as_mut_ptr() as *mut u8, 12);
+                }
+                utmp[3] = ((utmp[2] >> 4) & 0x0f0f0f0f) | (((utmp[1] >> 6) & 0x03030303) << 4);
+                let uaux = utmp[1] & 0x3f3f3f3f;
+                utmp[1] = (utmp[2] & 0x0f0f0f0f) | (((utmp[0] >> 6) & 0x03030303) << 4);
+                utmp[2] = uaux;
+                utmp[0] &= 0x3f3f3f3f;
+                let scales = unsafe { &*(utmp.as_ptr() as *const [u8; 16]) };
+                let mins = &scales[8..];
+                let scs = &scales[0..8];
+
+                // Mins correction
+                let mut sumi_mins = 0i32;
+                for j in 0..16 {
+                    sumi_mins += q8_bsums[blk * 16 + j] as i32 * mins[j / 2] as i32;
+                }
+
+                // Dot product with scales
+                let mut sumi = 0i32;
+                for g in 0..8 {
+                    let sc = scs[g] as i32;
+                    for l in 0..32 {
+                        sumi += sc * q5_vals[g * 32 + l] as i32 * q8_qs[q8_base + g * 32 + l] as i32;
+                    }
+                }
+
+                result_scalar += d * q8_d[blk] * sumi as f32 - dm * q8_d[blk] * sumi_mins as f32;
+            }
+            let pow2 = olorin::inference::matmul::pow2_table_pub();
+            let wk_row = unsafe { lw.wk.add(r * row_bytes) };
+            let simd_val = unsafe {
+                olorin::kernels::ffi_inference::q5k_dot_q8k(
+                    wk_row, q8_qs.as_ptr(), q8_bsums.as_ptr(),
+                    n_blocks_k as i32, q8_d.as_ptr(), pow2.as_ptr(),
+                )
+            };
+            eprintln!("K row {r}: scalar={result_scalar:.4} simd={simd_val:.4} llama=[3.81, 3.14, 0.66, 1.16]");
+        }
+    }
+
     // ── V projection ────────────────────────────────────────────
     let kv_dim_v = n_kv * head_dim_v;
     let mut v = vec![0.0f32; kv_dim_v];
