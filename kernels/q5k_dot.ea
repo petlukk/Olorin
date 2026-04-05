@@ -15,7 +15,12 @@ func ubyte(p: *restrict u8, off: i32) -> i32 {
 func f16_load(p: *restrict u8, off: i32, pow2: *restrict f32) -> f32 {
     let raw: i32 = ubyte(p, off) | (ubyte(p, off + 1) << 8)
     let exp: i32 = (raw >> 10) & 31
-    if exp == 0 { return 0.0 } else { return pow2[exp] * (1.0 + to_f32(raw & 1023) * 0.0009765625) }
+    if exp == 0 {
+        // Subnormal: value = 2^(-14) * (mantissa / 1024)
+        return pow2[1] * to_f32(raw & 1023) * 0.0009765625
+    } else {
+        return pow2[exp] * (1.0 + to_f32(raw & 1023) * 0.0009765625)
+    }
 }
 
 // Mins correction — identical to Q4K (same 12-byte packed scale format).
