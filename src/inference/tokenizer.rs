@@ -128,9 +128,9 @@ impl Tokenizer {
 
         // Collect all stop token IDs: eos + chat-specific end-of-turn markers
         let mut stop_ids = vec![eos_id];
-        for special in ["<|eot_id|>", "<|im_end|>"] {
+        for special in ["<|eot_id|>", "<|im_end|>", "<turn|>", "<end_of_turn>"] {
             if let Some(id) = token_to_id.get(special.as_bytes()) {
-                if *id != eos_id {
+                if *id != eos_id && !stop_ids.contains(id) {
                     stop_ids.push(*id);
                 }
             }
@@ -149,31 +149,33 @@ impl Tokenizer {
             return Vec::new();
         }
 
-        // Split on special tokens (e.g. <|start_header_id|>) and encode segments
+        // Special tokens to match: any <...> or <|...|> pattern in vocab.
+        // Scan for '<' and try known special tokens at that position.
         let mut tokens: Vec<u32> = Vec::with_capacity(text.len());
         let mut remaining = text;
         while !remaining.is_empty() {
-            // Find next special token
-            if let Some(pos) = remaining.find("<|") {
-                // Encode text before the special token
+            if let Some(pos) = remaining.find('<') {
+                // Encode text before '<'
                 if pos > 0 {
                     tokens.extend(self.encode_segment(remaining[..pos].as_bytes()));
                 }
-                // Try to match a known special token
                 let after = &remaining[pos..];
-                if let Some(end) = after.find("|>") {
-                    let candidate = &after[..end + 2];
+                // Try to find a closing '>' and match as special token
+                let mut matched = false;
+                if let Some(end) = after.find('>') {
+                    let candidate = &after[..end + 1];
                     if let Some(&id) = self.token_to_id.get(candidate.as_bytes()) {
                         tokens.push(id);
                         remaining = &after[candidate.len()..];
-                        continue;
+                        matched = true;
                     }
                 }
-                // Not a real special token — encode "<|" as text and continue
-                tokens.extend(self.encode_segment(remaining[..pos + 2].as_bytes()));
-                remaining = &remaining[pos + 2..];
+                if !matched {
+                    // Not a special token — encode '<' as text
+                    tokens.extend(self.encode_segment(remaining[pos..pos + 1].as_bytes()));
+                    remaining = &remaining[pos + 1..];
+                }
             } else {
-                // No more special tokens — encode the rest
                 tokens.extend(self.encode_segment(remaining.as_bytes()));
                 break;
             }
@@ -268,7 +270,18 @@ impl Tokenizer {
         let mut bytes = Vec::new();
         for &id in ids {
             if (id as usize) < self.vocab.len() {
-                bytes.extend_from_slice(&self.vocab[id as usize]);
+                let tok = &self.vocab[id as usize];
+                // Replace sentencepiece space marker U+2581 (▁ = 0xE2 0x96 0x81) with space
+                let mut i = 0;
+                while i < tok.len() {
+                    if i + 2 < tok.len() && tok[i] == 0xE2 && tok[i + 1] == 0x96 && tok[i + 2] == 0x81 {
+                        bytes.push(b' ');
+                        i += 3;
+                    } else {
+                        bytes.push(tok[i]);
+                        i += 1;
+                    }
+                }
             }
         }
         String::from_utf8_lossy(&bytes).into_owned()

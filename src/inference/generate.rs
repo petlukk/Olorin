@@ -77,9 +77,10 @@ impl Engine {
         // 1. Format as Gemma chat template
         let formatted = format_chat(prompt, system);
 
-        // 2. Tokenize
-        let tokens = self.tokenizer.encode(&formatted);
-        if tokens.is_empty() {
+        // 2. Tokenize (prepend BOS)
+        let mut tokens = vec![self.tokenizer.bos_id];
+        tokens.extend(self.tokenizer.encode(&formatted));
+        if tokens.len() <= 1 {
             return Err(Error::Inference("empty prompt after tokenization".into()));
         }
 
@@ -140,19 +141,20 @@ impl Engine {
 // ---------------------------------------------------------------------------
 
 fn format_chat(user: &str, system: &str) -> String {
+    // Gemma 4 chat format: <bos><|turn>role\ncontent<turn|>\n<|turn>model\n
     let mut out = String::with_capacity(system.len() + user.len() + 80);
     if !system.is_empty() {
-        out.push_str("<start_of_turn>user\n");
+        out.push_str("<|turn>user\n");
         out.push_str(system);
         out.push_str("\n\n");
         out.push_str(user);
-        out.push_str("<end_of_turn>\n");
+        out.push_str("<turn|>\n");
     } else {
-        out.push_str("<start_of_turn>user\n");
+        out.push_str("<|turn>user\n");
         out.push_str(user);
-        out.push_str("<end_of_turn>\n");
+        out.push_str("<turn|>\n");
     }
-    out.push_str("<start_of_turn>model\n");
+    out.push_str("<|turn>model\n");
     out
 }
 
