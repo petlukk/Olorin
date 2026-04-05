@@ -270,7 +270,61 @@ impl Gemma4State {
             }
         }
 
-        // ── 9. PLE — skipped (Task 13) ──────────────────────────────
+        // ── 9. PLE ──────────────────────────────────────────────────
+        if model.ple_dim > 0 && !lw.inp_gate.is_null() && !lw.proj.is_null() {
+            let ple_dim = model.ple_dim;
+            let ple_off = il * ple_dim;
+
+            // Down-project: inp_gate @ x → ple_gate[ple_dim]
+            matmul::quant_input(
+                &self.x[..hd],
+                &mut self.q8_qs,
+                &mut self.q8_d,
+                &mut self.q8_bsums,
+            );
+            matmul::matvec(
+                lw.inp_gate_dtype, lw.inp_gate,
+                &self.q8_qs, &self.q8_d, &self.q8_bsums,
+                &mut self.ple_gate, &mut self.q6k_d_scratch,
+                ple_dim, hd,
+            );
+
+            // GELU(gate) * ple_signal_slice
+            ffi_inference::gelu_mul(
+                self.ple_gate.as_ptr(),
+                self.ple_signal[ple_off..].as_ptr(),
+                self.ple_gate.as_mut_ptr(),
+                ple_dim as i32,
+            );
+
+            // Up-project: proj @ gated → ple_out[hidden_dim]
+            matmul::quant_input(
+                &self.ple_gate[..ple_dim],
+                &mut self.ple_q8_qs,
+                &mut self.ple_q8_d,
+                &mut self.ple_q8_bsums,
+            );
+            matmul::matvec(
+                lw.proj_dtype, lw.proj,
+                &self.ple_q8_qs, &self.ple_q8_d, &self.ple_q8_bsums,
+                &mut self.ple_out, &mut self.q6k_d_scratch,
+                hd, ple_dim,
+            );
+
+            // RMSNorm + residual add
+            if !lw.post_norm.is_null() {
+                ffi_inference::gemma4_rmsnorm(
+                    self.ple_out.as_ptr(),
+                    lw.post_norm,
+                    self.ple_out.as_mut_ptr(),
+                    hd as i32,
+                    model.rms_eps,
+                );
+            }
+            for i in 0..hd {
+                self.x[i] += self.ple_out[i];
+            }
+        }
 
         // ── 10. Layer output scale ───────────────────────────────────
         let out_scale = lw.layer_output_scale;
