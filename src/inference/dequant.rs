@@ -119,3 +119,17 @@ pub fn q6k_embed_lookup(
         }
     }
 }
+
+/// Dequantize a single row from a Q6K table with configurable row width.
+///
+/// Same algorithm as q6k_embed_lookup but named for clarity when used with
+/// PLE token embeddings where row_dim = ple_dim * n_layers (not hidden_dim).
+#[inline]
+pub fn q6k_dequant_row(
+    weight: *const u8,
+    row_id: usize,
+    output: &mut [f32],
+    row_dim: usize,
+) {
+    q6k_embed_lookup(weight, row_id, output, row_dim)
+}

@@ -60,6 +60,8 @@ pub struct LayerWeights {
     // PLE per-layer tensors
     pub inp_gate: *const u8,          // [hidden_dim, ple_dim]
     pub proj: *const u8,              // [ple_dim, hidden_dim]
+    pub inp_gate_dtype: u32,
+    pub proj_dtype: u32,
     pub post_norm: *const f32,        // [hidden_dim]
     pub layer_output_scale: f32,      // scalar
 }
@@ -418,6 +420,8 @@ impl Gemma4Model {
                 post_ffn_norm: load_norm_ptr(gguf, &format!("{b}.post_ffw_norm.weight"), &mut bf16_bufs),
                 inp_gate: tensor_ptr_opt::<u8>(gguf, &format!("{b}.inp_gate.weight")),
                 proj: tensor_ptr_opt::<u8>(gguf, &format!("{b}.proj.weight")),
+                inp_gate_dtype: tensor_dtype(gguf, &format!("{b}.inp_gate.weight")),
+                proj_dtype: tensor_dtype(gguf, &format!("{b}.proj.weight")),
                 post_norm: load_norm_ptr(gguf, &format!("{b}.post_norm.weight"), &mut bf16_bufs),
                 layer_output_scale: read_f32_scalar(gguf, &format!("{b}.layer_output_scale")),
             };
@@ -446,7 +450,7 @@ impl Gemma4Model {
         eprintln!("[gemma4] {n_layers}L h={hidden_dim} heads={n_heads}/{n_kv_heads} swa={n_swa} global={}", n_layers - n_swa);
         eprintln!("[gemma4] head_k={key_len_swa}/{key_len_global} ffn={}/{} sw={sliding_window} ple={ple_dim}",
             ffn_dim.iter().min().unwrap_or(&0), ffn_dim.iter().max().unwrap_or(&0));
-        eprintln!("[gemma4] rope={rope_theta_swa}/{rope_theta_global} softcap={logit_softcap} shared_kv={shared_suffix} bf16_bufs={}", bf16_bufs.len());
+        eprintln!("[gemma4] rope={rope_theta_swa}/{rope_theta_global} dim={rope_dim_swa}/{rope_dim_global} softcap={logit_softcap} shared_kv={shared_suffix} bf16_bufs={}", bf16_bufs.len());
 
         Ok(Gemma4Model {
             n_layers,
