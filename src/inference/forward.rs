@@ -89,7 +89,7 @@ pub struct Gemma4State {
     pub(crate) v: Vec<f32>,
 
     // Attention
-    pub(crate) attn_out: Vec<f32>,
+    pub attn_out: Vec<f32>,
     pub(crate) attn_scores: Vec<f32>,
     pub(crate) kv_f32_scratch: Vec<f32>,
 

@@ -306,6 +306,43 @@ fn step3_qkv_projection() {
 }
 
 #[test]
+fn step3b_single_layer() {
+    if !has_model() { eprintln!("SKIP: no model"); return; }
+
+    let gguf = olorin::inference::gguf::GgufFile::open(std::path::Path::new(&model_path())).unwrap();
+    let model = olorin::inference::engine::Gemma4Model::from_gguf(&gguf).unwrap();
+    olorin::kernels::ffi::init().unwrap();
+
+    // Run full layer 0 with BOS token via Gemma4State
+    let mut state = olorin::inference::forward::Gemma4State::new(&model, 512);
+
+    // Embed BOS + scale (no PLE for this test)
+    let hd = model.hidden_dim;
+    olorin::inference::dequant::q6k_embed_lookup(model.embed_weight, 2, &mut state.x, hd);
+    let scale = (hd as f32).sqrt();
+    for v in state.x[..hd].iter_mut() { *v *= scale; }
+
+    // Run layer 0
+    state.layer_forward(&model, 0, 0, false);
+
+    eprintln!("=== Step 3b: Single layer forward (L0, BOS, pos=0, no PLE) ===");
+    eprintln!("l_out L2={:.4}  first4=[{:.4},{:.4},{:.4},{:.4}]",
+        l2(&state.x[..hd]), state.x[0], state.x[1], state.x[2], state.x[3]);
+    eprintln!("  (llama.cpp: L2=40.3056 first4=[-0.2106, -0.0050, 0.0073, -0.3651])");
+
+    // Also check attention output — at pos=0 it should equal V_normed
+    // kqv_out is in attn_out buffer
+    let n_heads = model.n_heads;
+    let head_dim = model.head_dim_k[0];
+    eprintln!("attn_out L2={:.4}  first4=[{:.4},{:.4},{:.4},{:.4}]",
+        l2(&state.attn_out[..n_heads * head_dim]),
+        state.attn_out[0], state.attn_out[1], state.attn_out[2], state.attn_out[3]);
+    eprintln!("  (llama.cpp kqv_out: L2=45.2570 first4=[0.0263, 0.1174, 0.0296, -0.1724])");
+
+    eprintln!("PASS: step3b single layer forward");
+}
+
+#[test]
 fn step4_ple() {
     if !has_model() { eprintln!("SKIP: no model"); return; }
 

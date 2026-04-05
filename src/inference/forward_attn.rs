@@ -14,7 +14,7 @@ use super::forward::{bare_rmsnorm, compute_rope_tables, l2_norm, Gemma4State};
 
 impl Gemma4State {
     /// Full layer forward pass matching llama.cpp gemma4-iswa.cpp.
-    pub(crate) fn layer_forward(
+    pub fn layer_forward(
         &mut self,
         model: &Gemma4Model,
         il: usize,
@@ -199,6 +199,12 @@ impl Gemma4State {
             kv_dim, attn_len, attn_scale, k_ptr, v_ptr,
         );
 
+        if diag && il == 0 {
+            eprintln!("[gemma4] L0 kqv_out L2={:.4} first4=[{:.4},{:.4},{:.4},{:.4}]",
+                l2_norm(&self.attn_out[..n_heads * head_dim]),
+                self.attn_out[0], self.attn_out[1], self.attn_out[2], self.attn_out[3]);
+        }
+
         // ── 6. Wo + post-attention norm + residual ───────────────────
         let attn_out_dim = n_heads * head_dim;
         matmul::quant_input(
@@ -232,11 +238,10 @@ impl Gemma4State {
             }
         }
 
-        if diag {
-            eprintln!(
-                "[gemma4] L{il} post-attn L2={:.4}",
-                l2_norm(&self.attn_res[..hd])
-            );
+        if diag && il == 0 {
+            eprintln!("[gemma4] L0 post-attn L2={:.4} first4=[{:.4},{:.4},{:.4},{:.4}]",
+                l2_norm(&self.attn_res[..hd]),
+                self.attn_res[0], self.attn_res[1], self.attn_res[2], self.attn_res[3]);
         }
 
         // ── 7. FFN ───────────────────────────────────────────────────
@@ -250,6 +255,12 @@ impl Gemma4State {
         );
 
         self.ffn(model, il);
+
+        if diag && il == 0 {
+            eprintln!("[gemma4] L0 ffn_out L2={:.4} first4=[{:.4},{:.4},{:.4},{:.4}]",
+                l2_norm(&self.down[..hd]),
+                self.down[0], self.down[1], self.down[2], self.down[3]);
+        }
 
         // ── 8. Post-FFN norm + residual ──────────────────────────────
         // Residual is with attn_res (NOT inpL!)
