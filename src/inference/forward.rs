@@ -40,6 +40,8 @@ pub(crate) fn compute_rope_tables(
     freq_factors: Option<&[f32]>,
 ) {
     let half = n_rot / 2;
+    debug_assert!(half <= cos.len(), "rope: half={half} > cos={}", cos.len());
+    debug_assert!(half <= sin.len(), "rope: half={half} > sin={}", sin.len());
     for d in 0..half {
         let base_freq = 1.0 / theta.powf(2.0 * d as f32 / n_rot as f32);
         let freq = match freq_factors {
@@ -117,6 +119,14 @@ pub struct Gemma4State {
     // Post-attention residual (attn_out_res in the pipeline)
     pub(crate) attn_res: Vec<f32>,
 
+    // PLE buffers
+    pub(crate) ple_signal: Vec<f32>,
+    pub(crate) ple_gate: Vec<f32>,
+    pub(crate) ple_out: Vec<f32>,
+    pub(crate) ple_q8_qs: Vec<i8>,
+    pub(crate) ple_q8_d: Vec<f32>,
+    pub(crate) ple_q8_bsums: Vec<i16>,
+
     // KV cache
     pub cache: KvCache,
 }
@@ -152,9 +162,10 @@ impl Gemma4State {
             x: vec![0.0; hd],
             x_norm: vec![0.0; hd],
 
-            q8_qs: vec![0; hd + 12],
-            q8_d: vec![0.0; n_blocks_hd],
-            q8_bsums: vec![0; n_blocks_hd * 16],
+            // Sized for max(hd, max_qkv) since Wo quantizes attn_out (n_heads*head_dim)
+            q8_qs: vec![0; max_qkv + 12],
+            q8_d: vec![0.0; max_qkv / 256],
+            q8_bsums: vec![0; (max_qkv / 256) * 16],
 
             q: vec![0.0; max_qkv],
             k: vec![0.0; max_kv],
@@ -182,7 +193,76 @@ impl Gemma4State {
 
             attn_res: vec![0.0; hd],
 
+            ple_signal: vec![0.0; model.ple_dim * model.n_layers],
+            ple_gate: vec![0.0; model.ple_dim.max(1)],
+            ple_out: vec![0.0; hd],
+            ple_q8_qs: vec![0; model.ple_dim + 12],
+            ple_q8_d: vec![0.0; (model.ple_dim / 256).max(1)],
+            ple_q8_bsums: vec![0; ((model.ple_dim / 256).max(1)) * 16],
+
             cache,
+        }
+    }
+
+    /// Phase A: compute per-layer PLE signal for this token.
+    /// Called once per token before the layer loop.
+    pub(crate) fn prepare_ple(
+        &mut self,
+        model: &Gemma4Model,
+        token_id: u32,
+    ) {
+        let ple_dim = model.ple_dim;
+        if ple_dim == 0 || model.ple_token_embd.is_null() {
+            return;
+        }
+        let n_layers = model.n_layers;
+        let hd = model.hidden_dim;
+        let total = ple_dim * n_layers;
+
+        // 1. Q6K dequant: ple_token_embd[token_id] → raw signal, scale × √ple_dim
+        dequant::q6k_dequant_row(
+            model.ple_token_embd,
+            token_id as usize,
+            &mut self.ple_signal,
+            total,
+        );
+        let embd_scale = (ple_dim as f32).sqrt();
+        for v in self.ple_signal[..total].iter_mut() {
+            *v *= embd_scale;
+        }
+
+        // 2. BF16 matvec: ple_model_proj @ embedding → proj, scale × 1/√hidden_dim
+        let mut proj_ple = vec![0.0f32; total];
+        matmul::bf16_matvec(
+            model.ple_model_proj,
+            &self.x[..hd],
+            &mut proj_ple,
+            total,
+            hd,
+        );
+        let proj_scale = 1.0 / (hd as f32).sqrt();
+        for v in proj_ple.iter_mut() {
+            *v *= proj_scale;
+        }
+
+        // 3. RMSNorm each [ple_dim] slice with ple_proj_norm
+        if !model.ple_proj_norm.is_null() {
+            for il in 0..n_layers {
+                let off = il * ple_dim;
+                ffi_inference::gemma4_rmsnorm(
+                    proj_ple[off..].as_ptr(),
+                    model.ple_proj_norm,
+                    proj_ple[off..].as_mut_ptr(),
+                    ple_dim as i32,
+                    model.rms_eps,
+                );
+            }
+        }
+
+        // 4. Add + scale: (raw + proj) / √2
+        let inv_sqrt2 = 1.0 / 2.0f32.sqrt();
+        for i in 0..total {
+            self.ple_signal[i] = (self.ple_signal[i] + proj_ple[i]) * inv_sqrt2;
         }
     }
 
@@ -202,6 +282,9 @@ impl Gemma4State {
         if diag {
             eprintln!("[gemma4] pos={pos} embed L2={:.4}", l2_norm(&self.x));
         }
+
+        // PLE Phase A: compute per-layer signal
+        self.prepare_ple(model, token_id);
 
         // ── Per-layer transformer blocks ─────────────────────────────
         for il in 0..model.n_layers {
