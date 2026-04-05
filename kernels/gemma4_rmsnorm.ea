@@ -1,0 +1,57 @@
+// gemma4_rmsnorm.ea — RMSNorm with Gemma weight+1 convention
+//
+// out[i] = x[i] * (1 + weight[i]) * rsqrt(mean(x^2) + eps)
+// Two-pass: sum-of-squares then scale+apply.
+
+export func gemma4_rmsnorm(x: *restrict f32, weight: *restrict f32, out: *mut f32, n: i32, eps: f32) {
+    // Pass 1: Sum of squares with dual accumulators for ILP
+    let mut acc0: f32x4 = splat(0.0)
+    let mut acc1: f32x4 = splat(0.0)
+    let mut i: i32 = 0
+
+    while i + 8 <= n {
+        let v0: f32x4 = load(x, i)
+        let v1: f32x4 = load(x, i + 4)
+        acc0 = fma(v0, v0, acc0)
+        acc1 = fma(v1, v1, acc1)
+        i = i + 8
+    }
+
+    while i + 4 <= n {
+        let v: f32x4 = load(x, i)
+        acc0 = fma(v, v, acc0)
+        i = i + 4
+    }
+
+    let mut ss: f32 = reduce_add(acc0) + reduce_add(acc1)
+
+    // Scalar tail for remainder
+    while i < n {
+        ss = ss + x[i] * x[i]
+        i = i + 1
+    }
+
+    // Compute scale = rsqrt(mean(x^2) + eps)
+    let mean: f32 = ss / to_f32(n)
+    let scale: f32 = rsqrt(mean + eps)
+
+    // Pass 2: Apply (1 + weight) * x * scale
+    let v_scale: f32x4 = splat(scale)
+    let v_one: f32x4 = splat(1.0)
+    i = 0
+
+    while i + 4 <= n {
+        let vx: f32x4 = load(x, i)
+        let vw: f32x4 = load(weight, i)
+        let w1: f32x4 = vw .+ v_one
+        let normed: f32x4 = vx .* v_scale
+        store(out, i, normed .* w1)
+        i = i + 4
+    }
+
+    // Scalar tail
+    while i < n {
+        out[i] = x[i] * scale * (1.0 + weight[i])
+        i = i + 1
+    }
+}
