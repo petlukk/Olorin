@@ -1,0 +1,46 @@
+// gemma4_gelu.ea — Fused GELU-gated linear unit
+//
+// out[i] = GELU(gate[i]) * up[i]
+// GELU(x) = x * 0.5 * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+// tanh(x) = 1 - 2 / (exp(2x) + 1)
+
+export func gelu_mul(gate: *restrict f32, up: *restrict f32, out: *mut f32, n: i32) {
+    let v_half: f32x4 = splat(0.5)
+    let v_coeff: f32x4 = splat(0.7978845608)   // sqrt(2/pi)
+    let v_cubic: f32x4 = splat(0.044715)
+    let v_two: f32x4 = splat(2.0)
+    let v_one: f32x4 = splat(1.0)
+
+    let mut i: i32 = 0
+
+    while i + 4 <= n {
+        let g: f32x4 = load(gate, i)
+        let u: f32x4 = load(up, i)
+
+        // inner = sqrt(2/pi) * (x + 0.044715 * x^3)
+        let g3: f32x4 = g .* g .* g
+        let inner: f32x4 = v_coeff .* (g .+ v_cubic .* g3)
+
+        // tanh(inner) = 1 - 2 / (exp(2*inner) + 1)
+        let e: f32x4 = exp(v_two .* inner)
+        let th: f32x4 = v_one .- v_two ./ (e .+ v_one)
+
+        // GELU(x) = x * 0.5 * (1 + tanh(...))
+        let gelu: f32x4 = g .* v_half .* (v_one .+ th)
+
+        store(out, i, gelu .* u)
+        i = i + 4
+    }
+
+    // Scalar tail
+    while i < n {
+        let x: f32 = gate[i]
+        let x3: f32 = x * x * x
+        let inner: f32 = 0.7978845608 * (x + 0.044715 * x3)
+        let e: f32 = exp(2.0 * inner)
+        let th: f32 = 1.0 - 2.0 / (e + 1.0)
+        let gelu: f32 = x * 0.5 * (1.0 + th)
+        out[i] = gelu * up[i]
+        i = i + 1
+    }
+}

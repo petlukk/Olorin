@@ -17,6 +17,7 @@ pub struct KernelTableInference {
     pub f16_to_f32:            F16ToF32Fn,
     pub softmax_f32:           SoftmaxF32Fn,
     pub gemma4_rmsnorm:        Gemma4RmsnormFn,
+    pub gelu_mul:              GeluMulFn,
 }
 
 // SAFETY: KernelTableInference holds function pointers and library handles.
@@ -75,6 +76,7 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
     let f16_conv_lib = load("f16_convert")?;
     let softmax_lib  = load("softmax")?;
     let gemma4_rmsnorm_lib = load("gemma4_rmsnorm")?;
+    let gemma4_gelu_lib    = load("gemma4_gelu")?;
 
     unsafe {
         let sym = |lib: &Library, name: &[u8]| -> Result<usize, String> {
@@ -96,7 +98,8 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
             f16_to_f32:     std::mem::transmute(sym(&f16_conv_lib, b"f16_to_f32\0")?),
             softmax_f32:    std::mem::transmute(sym(&softmax_lib, b"softmax_f32\0")?),
             gemma4_rmsnorm: std::mem::transmute(sym(&gemma4_rmsnorm_lib, b"gemma4_rmsnorm\0")?),
-            libs: vec![q4kq, q4kd, q6kd, f16_conv_lib, softmax_lib, gemma4_rmsnorm_lib],
+            gelu_mul:       std::mem::transmute(sym(&gemma4_gelu_lib, b"gelu_mul\0")?),
+            libs: vec![q4kq, q4kd, q6kd, f16_conv_lib, softmax_lib, gemma4_rmsnorm_lib, gemma4_gelu_lib],
         };
         Ok(t)
     }
@@ -169,4 +172,8 @@ pub unsafe fn softmax_f32(data: *mut f32, n: i32, scale: f32) {
 
 pub fn gemma4_rmsnorm(x: *const f32, weight: *const f32, out: *mut f32, n: i32, eps: f32) {
     unsafe { (k().gemma4_rmsnorm)(x, weight, out, n, eps) }
+}
+
+pub fn gelu_mul(gate: *const f32, up: *const f32, out: *mut f32, n: i32) {
+    unsafe { (k().gelu_mul)(gate, up, out, n) }
 }
