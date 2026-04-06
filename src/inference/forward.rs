@@ -61,12 +61,7 @@ pub(crate) fn compute_rope_tables(
 /// RMSNorm without weight: x = x * rsqrt(mean(x^2) + eps).
 /// Used for V normalization in Gemma4 (matches ggml_rms_norm).
 pub(crate) fn bare_rmsnorm(x: &mut [f32], eps: f32) {
-    let n = x.len();
-    let ss: f32 = x.iter().map(|v| v * v).sum::<f32>();
-    let scale = 1.0 / ((ss / n as f32) + eps).sqrt();
-    for v in x.iter_mut() {
-        *v *= scale;
-    }
+    ffi_inference::bare_rmsnorm_f32(x.as_mut_ptr(), x.len() as i32, eps);
 }
 
 // ---------------------------------------------------------------------------

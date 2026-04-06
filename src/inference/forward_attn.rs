@@ -229,13 +229,13 @@ impl Gemma4State {
                 hd as i32,
                 model.rms_eps,
             );
-            for i in 0..hd {
-                self.attn_res[i] = self.x_norm[i] + self.x[i];
-            }
+            ffi_inference::vec_add_f32(
+                self.x_norm.as_ptr(), self.x.as_ptr(), self.attn_res.as_mut_ptr(), hd as i32,
+            );
         } else {
-            for i in 0..hd {
-                self.attn_res[i] = self.wo_out[i] + self.x[i];
-            }
+            ffi_inference::vec_add_f32(
+                self.wo_out.as_ptr(), self.x.as_ptr(), self.attn_res.as_mut_ptr(), hd as i32,
+            );
         }
 
         if diag && il == 0 {
@@ -272,13 +272,13 @@ impl Gemma4State {
                 hd as i32,
                 model.rms_eps,
             );
-            for i in 0..hd {
-                self.x[i] = self.x_norm[i] + self.attn_res[i];
-            }
+            ffi_inference::vec_add_f32(
+                self.x_norm.as_ptr(), self.attn_res.as_ptr(), self.x.as_mut_ptr(), hd as i32,
+            );
         } else {
-            for i in 0..hd {
-                self.x[i] = self.down[i] + self.attn_res[i];
-            }
+            ffi_inference::vec_add_f32(
+                self.down.as_ptr(), self.attn_res.as_ptr(), self.x.as_mut_ptr(), hd as i32,
+            );
         }
 
         // ── 9. PLE ──────────────────────────────────────────────────
@@ -332,17 +332,17 @@ impl Gemma4State {
                     model.rms_eps,
                 );
             }
-            for i in 0..hd {
-                self.x[i] += self.ple_out[i];
-            }
+            ffi_inference::vec_add_f32(
+                self.x.as_ptr(), self.ple_out.as_ptr(), self.x.as_mut_ptr(), hd as i32,
+            );
         }
 
         // ── 10. Layer output scale ───────────────────────────────────
         let out_scale = lw.layer_output_scale;
         if out_scale != 1.0 {
-            for v in self.x[..hd].iter_mut() {
-                *v *= out_scale;
-            }
+            ffi_inference::vec_scale_f32(
+                self.x.as_ptr(), self.x.as_mut_ptr(), out_scale, hd as i32,
+            );
         }
 
         if diag {
@@ -384,11 +384,11 @@ impl Gemma4State {
                         head_dim as i32,
                     );
                 }
-                let mut dot = 0.0f32;
-                for d in 0..head_dim {
-                    dot += q_slice[d] * self.kv_f32_scratch[d];
-                }
-                self.attn_scores[p] = dot;
+                self.attn_scores[p] = ffi_inference::f32_dot(
+                    q_slice.as_ptr(),
+                    self.kv_f32_scratch.as_ptr(),
+                    head_dim as i32,
+                );
             }
 
             // Softmax with scale (1.0 for Gemma4)
@@ -402,9 +402,7 @@ impl Gemma4State {
 
             // Weighted V sum
             let out_off = q_off;
-            for d in 0..head_dim {
-                self.attn_out[out_off + d] = 0.0;
-            }
+            self.attn_out[out_off..out_off + head_dim].fill(0.0);
             for p in 0..attn_len {
                 let v_offset = p * stride + kv_h * head_dim;
                 let v_src = unsafe { v_ptr.add(v_offset) };
@@ -416,9 +414,12 @@ impl Gemma4State {
                     );
                 }
                 let s = self.attn_scores[p];
-                for d in 0..head_dim {
-                    self.attn_out[out_off + d] += s * self.kv_f32_scratch[d];
-                }
+                ffi_inference::f32_dot_acc(
+                    self.attn_out[out_off..].as_mut_ptr(),
+                    self.kv_f32_scratch.as_ptr(),
+                    s,
+                    head_dim as i32,
+                );
             }
         }
     }
