@@ -222,9 +222,9 @@ impl Gemma4State {
             total,
         );
         let embd_scale = (ple_dim as f32).sqrt();
-        for v in self.ple_signal[..total].iter_mut() {
-            *v *= embd_scale;
-        }
+        ffi_inference::vec_scale_f32(
+            self.ple_signal.as_ptr(), self.ple_signal.as_mut_ptr(), embd_scale, total as i32,
+        );
 
         // 2. BF16 matvec: ple_model_proj @ embedding → proj, scale × 1/√hidden_dim
         let mut proj_ple = vec![0.0f32; total];
@@ -236,9 +236,9 @@ impl Gemma4State {
             hd,
         );
         let proj_scale = 1.0 / (hd as f32).sqrt();
-        for v in proj_ple.iter_mut() {
-            *v *= proj_scale;
-        }
+        ffi_inference::vec_scale_f32(
+            proj_ple.as_ptr(), proj_ple.as_mut_ptr(), proj_scale, total as i32,
+        );
 
         // 3. RMSNorm each [ple_dim] slice with ple_proj_norm
         if !model.ple_proj_norm.is_null() {
@@ -256,9 +256,10 @@ impl Gemma4State {
 
         // 4. Add + scale: (raw + proj) / √2
         let inv_sqrt2 = 1.0 / 2.0f32.sqrt();
-        for i in 0..total {
-            self.ple_signal[i] = (self.ple_signal[i] + proj_ple[i]) * inv_sqrt2;
-        }
+        ffi_inference::vec_fma_f32(
+            self.ple_signal.as_ptr(), proj_ple.as_ptr(),
+            self.ple_signal.as_mut_ptr(), inv_sqrt2, total as i32,
+        );
     }
 
     /// Run one decode step. Returns logits slice.
@@ -270,9 +271,9 @@ impl Gemma4State {
         // ── Pre-loop: embed + scale ──────────────────────────────────
         dequant::q6k_embed_lookup(model.embed_weight, token_id as usize, &mut self.x, hd);
         let embed_scale = (hd as f32).sqrt();
-        for v in self.x.iter_mut() {
-            *v *= embed_scale;
-        }
+        ffi_inference::vec_scale_f32(
+            self.x.as_ptr(), self.x.as_mut_ptr(), embed_scale, hd as i32,
+        );
 
         if diag {
             eprintln!("[gemma4] pos={pos} embed L2={:.4}", l2_norm(&self.x));
@@ -316,11 +317,9 @@ impl Gemma4State {
         );
 
         if model.logit_softcap > 0.0 {
-            let cap = model.logit_softcap;
-            let inv_cap = 1.0 / cap;
-            for l in self.logits.iter_mut() {
-                *l = cap * (*l * inv_cap).tanh();
-            }
+            ffi_inference::softcap_f32(
+                self.logits.as_mut_ptr(), model.vocab_size as i32, model.logit_softcap,
+            );
         }
 
         self.cache.advance();
