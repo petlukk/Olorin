@@ -41,3 +41,5 @@ pub type VecAddF32Fn   = unsafe extern "C" fn(*const f32, *const f32, *mut f32, 
 pub type VecScaleF32Fn = unsafe extern "C" fn(*const f32, *mut f32, f32, i32);
 pub type VecFmaF32Fn   = unsafe extern "C" fn(*const f32, *const f32, *mut f32, f32, i32);
 pub type VecAccF32Fn   = unsafe extern "C" fn(*mut f32, *const f32, f32, i32);
+pub type F32DotFn      = unsafe extern "C" fn(*const f32, *const f32, i32) -> f32;
+pub type F32DotAccFn   = unsafe extern "C" fn(*mut f32, *const f32, f32, i32);

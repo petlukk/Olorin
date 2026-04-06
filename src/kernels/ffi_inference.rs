@@ -27,6 +27,8 @@ pub struct KernelTableInference {
     pub vec_scale_f32:         VecScaleF32Fn,
     pub vec_fma_f32:           VecFmaF32Fn,
     pub vec_acc_f32:           VecAccF32Fn,
+    pub f32_dot:               F32DotFn,
+    pub f32_dot_acc:           F32DotAccFn,
 }
 
 // SAFETY: KernelTableInference holds function pointers and library handles.
@@ -90,6 +92,7 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
     let gemma4_rope_lib    = load("gemma4_rope")?;
     let bf16_matvec_lib    = load("bf16_matvec")?;
     let vec_ops_lib        = load("vec_ops")?;
+    let attn_ops_lib       = load("attn_ops")?;
 
     unsafe {
         let sym = |lib: &Library, name: &[u8]| -> Result<usize, String> {
@@ -121,7 +124,9 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
             vec_scale_f32:     std::mem::transmute(sym(&vec_ops_lib, b"vec_scale_f32\0")?),
             vec_fma_f32:       std::mem::transmute(sym(&vec_ops_lib, b"vec_fma_f32\0")?),
             vec_acc_f32:       std::mem::transmute(sym(&vec_ops_lib, b"vec_acc_f32\0")?),
-            libs: vec![q4kq, q4kd, q5kd, q6kd, f16_conv_lib, softmax_lib, gemma4_rmsnorm_lib, gemma4_gelu_lib, gemma4_rope_lib, bf16_matvec_lib, vec_ops_lib],
+            f32_dot:           std::mem::transmute(sym(&attn_ops_lib, b"f32_dot\0")?),
+            f32_dot_acc:       std::mem::transmute(sym(&attn_ops_lib, b"f32_dot_acc\0")?),
+            libs: vec![q4kq, q4kd, q5kd, q6kd, f16_conv_lib, softmax_lib, gemma4_rmsnorm_lib, gemma4_gelu_lib, gemma4_rope_lib, bf16_matvec_lib, vec_ops_lib, attn_ops_lib],
         };
         Ok(t)
     }
@@ -248,4 +253,12 @@ pub fn vec_fma_f32(a: *const f32, b: *const f32, out: *mut f32, s: f32, n: i32) 
 
 pub fn vec_acc_f32(out: *mut f32, a: *const f32, s: f32, n: i32) {
     unsafe { (k().vec_acc_f32)(out, a, s, n) }
+}
+
+pub fn f32_dot(a: *const f32, b: *const f32, n: i32) -> f32 {
+    unsafe { (k().f32_dot)(a, b, n) }
+}
+
+pub fn f32_dot_acc(out: *mut f32, a: *const f32, s: f32, n: i32) {
+    unsafe { (k().f32_dot_acc)(out, a, s, n) }
 }
