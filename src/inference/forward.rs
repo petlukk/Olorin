@@ -124,9 +124,6 @@ pub struct Gemma4State {
 
     // KV cache
     pub cache: KvCache,
-
-    // Thread pool for parallel matmul
-    pub(crate) pool: crate::inference::threadpool::ThreadPool,
 }
 
 impl Gemma4State {
@@ -199,7 +196,6 @@ impl Gemma4State {
             ple_q8_bsums: vec![0; ((model.ple_dim / 256).max(1)) * 16],
 
             cache,
-            pool: crate::inference::threadpool::ThreadPool::new(),
         }
     }
 
@@ -267,7 +263,7 @@ impl Gemma4State {
     }
 
     /// Run one decode step. Returns logits slice.
-    pub fn forward_one(&mut self, model: &Gemma4Model, token_id: u32) -> &[f32] {
+    pub fn forward_one(&mut self, model: &Gemma4Model, token_id: u32, pool: &crate::inference::threadpool::ThreadPool) -> &[f32] {
         let hd = model.hidden_dim;
         let pos = self.cache.seq_len();
         let diag = diag_enabled();
@@ -288,7 +284,7 @@ impl Gemma4State {
 
         // ── Per-layer transformer blocks ─────────────────────────────
         for il in 0..model.n_layers {
-            self.layer_forward(model, il, pos, diag);
+            self.layer_forward(model, il, pos, diag, pool);
         }
 
         // ── Post-loop: final norm + output matmul + softcap ─────────
@@ -313,8 +309,8 @@ impl Gemma4State {
             &mut self.q8_bsums,
         );
 
-        matmul::matvec(
-            model.embed_dtype, model.embed_weight,
+        matmul::par_matvec(
+            pool, model.embed_dtype, model.embed_weight,
             &self.q8_qs, &self.q8_d, &self.q8_bsums,
             &mut self.logits, &mut self.q6k_d_scratch,
             model.vocab_size, hd,

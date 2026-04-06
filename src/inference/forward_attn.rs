@@ -20,6 +20,7 @@ impl Gemma4State {
         il: usize,
         pos: usize,
         diag: bool,
+        pool: &crate::inference::threadpool::ThreadPool,
     ) {
         let hd = model.hidden_dim;
         let n_heads = model.n_heads;
@@ -81,7 +82,7 @@ impl Gemma4State {
         }
 
         // ── 2. Q projection ─────────────────────────────────────────
-        matmul::matvec(
+        matmul::par_matvec(pool,
             lw.wq_dtype, lw.wq,
             &self.q8_qs, &self.q8_d, &self.q8_bsums,
             &mut self.q, &mut self.q6k_d_scratch,
@@ -122,13 +123,13 @@ impl Gemma4State {
             let kv_dim = n_kv_heads * head_dim;
             let kv_dim_v = n_kv_heads * head_dim_v;
 
-            matmul::matvec(
+            matmul::par_matvec(pool,
                 lw.wk_dtype, lw.wk,
                 &self.q8_qs, &self.q8_d, &self.q8_bsums,
                 &mut self.k, &mut self.q6k_d_scratch,
                 kv_dim, hd,
             );
-            matmul::matvec(
+            matmul::par_matvec(pool,
                 lw.wv_dtype, lw.wv,
                 &self.q8_qs, &self.q8_d, &self.q8_bsums,
                 &mut self.v, &mut self.q6k_d_scratch,
@@ -218,7 +219,7 @@ impl Gemma4State {
             &mut self.q8_d,
             &mut self.q8_bsums,
         );
-        matmul::matvec(
+        matmul::par_matvec(pool,
             lw.wo_dtype, lw.wo,
             &self.q8_qs, &self.q8_d, &self.q8_bsums,
             &mut self.wo_out, &mut self.q6k_d_scratch,
@@ -259,7 +260,7 @@ impl Gemma4State {
             model.rms_eps,
         );
 
-        self.ffn(model, il);
+        self.ffn(model, il, pool);
 
         if diag && il == 0 {
             eprintln!("[gemma4] L0 ffn_out L2={:.4} first4=[{:.4},{:.4},{:.4},{:.4}]",
@@ -298,7 +299,7 @@ impl Gemma4State {
                 &mut self.q8_d,
                 &mut self.q8_bsums,
             );
-            matmul::matvec(
+            matmul::par_matvec(pool,
                 lw.inp_gate_dtype, lw.inp_gate,
                 &self.q8_qs, &self.q8_d, &self.q8_bsums,
                 &mut self.ple_gate, &mut self.q6k_d_scratch,
@@ -320,7 +321,7 @@ impl Gemma4State {
                 &mut self.ple_q8_d,
                 &mut self.ple_q8_bsums,
             );
-            matmul::matvec(
+            matmul::par_matvec(pool,
                 lw.proj_dtype, lw.proj,
                 &self.ple_q8_qs, &self.ple_q8_d, &self.ple_q8_bsums,
                 &mut self.ple_out, &mut self.q6k_d_scratch,
@@ -430,7 +431,7 @@ impl Gemma4State {
     }
 
     /// FFN: GeGLU — gate/up dual matmul, GELU(gate)*up, down projection.
-    pub(crate) fn ffn(&mut self, model: &Gemma4Model, layer: usize) {
+    pub(crate) fn ffn(&mut self, model: &Gemma4Model, layer: usize, pool: &crate::inference::threadpool::ThreadPool) {
         let hd = model.hidden_dim;
         let ffn_dim = model.ffn_dim[layer];
         let lw = &model.layers[layer];
@@ -449,7 +450,7 @@ impl Gemma4State {
                 lw.w_gate_dtype, lw.w_up_dtype, lw.w_down_dtype, ffn_dim);
         }
         if lw.w_gate_dtype == matmul::GGML_TYPE_Q4_K && lw.w_up_dtype == matmul::GGML_TYPE_Q4_K {
-            matmul::q4k_matvec_dual(
+            matmul::par_q4k_matvec_dual(pool,
                 lw.w_gate,
                 lw.w_up,
                 &self.q8_qs, &self.q8_d, &self.q8_bsums,
@@ -457,13 +458,13 @@ impl Gemma4State {
                 ffn_dim, hd,
             );
         } else {
-            matmul::matvec(
+            matmul::par_matvec(pool,
                 lw.w_gate_dtype, lw.w_gate,
                 &self.q8_qs, &self.q8_d, &self.q8_bsums,
                 &mut self.gate, &mut self.q6k_d_scratch,
                 ffn_dim, hd,
             );
-            matmul::matvec(
+            matmul::par_matvec(pool,
                 lw.w_up_dtype, lw.w_up,
                 &self.q8_qs, &self.q8_d, &self.q8_bsums,
                 &mut self.up, &mut self.q6k_d_scratch,
@@ -513,7 +514,7 @@ impl Gemma4State {
         );
 
         // Down projection: ffn_dim -> hidden_dim
-        matmul::matvec(
+        matmul::par_matvec(pool,
             lw.w_down_dtype, lw.w_down,
             &self.ffn_q8_qs, &self.ffn_q8_d, &self.ffn_q8_bsums,
             &mut self.down, &mut self.q6k_d_scratch,

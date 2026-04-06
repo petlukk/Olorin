@@ -19,6 +19,7 @@ pub struct Engine {
     model: Gemma4Model,
     tokenizer: Tokenizer,
     state: Gemma4State,
+    pool: crate::inference::threadpool::ThreadPool,
     pub max_tokens: usize,
     pub temperature: f32,
     pub top_k: usize,
@@ -38,12 +39,15 @@ impl Engine {
         crate::kernels::ffi::init()
             .map_err(|e| Error::Inference(e))?;
         let state = Gemma4State::new(&model, max_seq_len);
+        let pool = crate::inference::threadpool::ThreadPool::new();
+        eprintln!("[Olorin] Thread pool: {} threads", pool.thread_count());
 
         Ok(Self {
             _gguf: gguf,
             model,
             tokenizer,
             state,
+            pool,
             max_tokens: 2048,
             temperature: 0.8,
             top_k: 40,
@@ -90,12 +94,12 @@ impl Engine {
         // 4. Prefill: forward each prompt token (discard logits except last)
         let n_prompt = tokens.len();
         for &tok in &tokens[..n_prompt - 1] {
-            self.state.forward_one(&self.model, tok);
+            self.state.forward_one(&self.model, tok, &self.pool);
         }
 
         // Last prompt token gives us the first set of logits
         let mut logits_snapshot = {
-            let logits = self.state.forward_one(&self.model, tokens[n_prompt - 1]);
+            let logits = self.state.forward_one(&self.model, tokens[n_prompt - 1], &self.pool);
             logits.to_vec()
         };
 
@@ -127,7 +131,7 @@ impl Engine {
             output.push_str(&text);
 
             // Forward to get next logits
-            let logits = self.state.forward_one(&self.model, token_id);
+            let logits = self.state.forward_one(&self.model, token_id, &self.pool);
             logits_snapshot.clear();
             logits_snapshot.extend_from_slice(logits);
         }
