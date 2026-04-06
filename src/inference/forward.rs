@@ -124,6 +124,9 @@ pub struct Gemma4State {
 
     // KV cache
     pub cache: KvCache,
+
+    // Thread pool for parallel matmul
+    pub(crate) pool: crate::inference::threadpool::ThreadPool,
 }
 
 impl Gemma4State {
@@ -196,6 +199,7 @@ impl Gemma4State {
             ple_q8_bsums: vec![0; ((model.ple_dim / 256).max(1)) * 16],
 
             cache,
+            pool: crate::inference::threadpool::ThreadPool::new(),
         }
     }
 
