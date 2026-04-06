@@ -1,0 +1,12 @@
+{
+  "library": "/mnt/c/Users/Peter.lukka/Desktop/DEV/Olorin/target/release/build/olorin-74d22db92a50c3ff/out/libsoftcap.so",
+  "exports": [
+    {
+      "name": "softcap_f32",
+      "args": [{"name": "data", "type": "*mut f32", "direction": "in", "cap": null, "count": null}, {"name": "n", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "cap", "type": "f32", "direction": "in", "cap": null, "count": null}],
+      "return_type": null
+    }
+  ],
+  "structs": [
+  ]
+}
