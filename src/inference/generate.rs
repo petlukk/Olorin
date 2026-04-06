@@ -44,10 +44,10 @@ impl Engine {
             model,
             tokenizer,
             state,
-            max_tokens: 256,
-            temperature: 0.7,
+            max_tokens: 2048,
+            temperature: 0.8,
             top_k: 40,
-            top_p: 0.9,
+            top_p: 0.95,
             min_p: 0.05,
             repetition_penalty: 1.0,
             draft_k: 0,
@@ -288,9 +288,13 @@ fn xorshift64(state: &mut u64) -> u64 {
 // Model discovery (unchanged)
 // ---------------------------------------------------------------------------
 
-/// Find a GGUF model in standard locations.
+/// Find a GGUF model in standard locations. Prefers gemma4 if present.
 pub fn find_model() -> Option<PathBuf> {
     let dir = models_dir()?;
+    let gemma4 = dir.join("gemma-4-e2b-it-Q4_K_M.gguf");
+    if gemma4.exists() {
+        return Some(gemma4);
+    }
     std::fs::read_dir(&dir).ok()?
         .filter_map(|e| e.ok())
         .map(|e| e.path())
@@ -329,6 +333,7 @@ pub fn resolve_model(arg: Option<&str>) -> Option<PathBuf> {
         ("llama",   "Llama-3.2-3B-Instruct-Q4_K_M.gguf"),
         ("llama8b", "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"),
         ("qwen",    "Qwen2.5-1.5B-Instruct-Q4_K_M.gguf"),
+        ("gemma4",  "gemma-4-e2b-it-Q4_K_M.gguf"),
     ];
     match arg {
         Some(name) => {

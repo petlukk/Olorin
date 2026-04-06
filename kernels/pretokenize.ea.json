@@ -1,5 +1,5 @@
 {
-  "library": "/home/peter/projects/olorin1/target/release/build/olorin-83a3a20f43db2862/out/libpretokenize.so",
+  "library": "/mnt/c/Users/Peter.lukka/Desktop/DEV/Olorin/target/release/build/olorin-74d22db92a50c3ff/out/libpretokenize.so",
   "exports": [
     {
       "name": "pretokenize",
