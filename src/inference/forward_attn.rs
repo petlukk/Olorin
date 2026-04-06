@@ -10,7 +10,7 @@ use crate::inference::engine::Gemma4Model;
 use crate::inference::matmul;
 use crate::kernels::ffi_inference;
 
-use super::forward::{bare_rmsnorm, compute_rope_tables, l2_norm, Gemma4State};
+use super::forward::{bare_rmsnorm, compute_rope_tables, diag_enabled, l2_norm, Gemma4State};
 
 impl Gemma4State {
     /// Full layer forward pass matching llama.cpp gemma4-iswa.cpp.
@@ -134,6 +134,11 @@ impl Gemma4State {
                 &mut self.v, &mut self.q6k_d_scratch,
                 kv_dim_v, hd,
             );
+
+            if diag && il == 0 {
+                eprintln!("[gemma4] L0 K_proj L2={:.4} wk_dtype={}", l2_norm(&self.k[..kv_dim]), lw.wk_dtype);
+                eprintln!("[gemma4] L0 V_proj L2={:.4} wv_dtype={}", l2_norm(&self.v[..kv_dim_v]), lw.wv_dtype);
+            }
 
             // K norm (per-head, weight+1)
             if !lw.k_norm.is_null() {
@@ -439,6 +444,10 @@ impl Gemma4State {
         );
 
         // Gate + up projection (fused when both Q4K, separate otherwise)
+        if diag_enabled() && layer == 0 {
+            eprintln!("[gemma4] L0 ffn gate_dtype={} up_dtype={} down_dtype={} ffn_dim={}",
+                lw.w_gate_dtype, lw.w_up_dtype, lw.w_down_dtype, ffn_dim);
+        }
         if lw.w_gate_dtype == matmul::GGML_TYPE_Q4_K && lw.w_up_dtype == matmul::GGML_TYPE_Q4_K {
             matmul::q4k_matvec_dual(
                 lw.w_gate,
@@ -462,6 +471,25 @@ impl Gemma4State {
             );
         }
 
+        if diag_enabled() && layer == 0 {
+            eprintln!("[gemma4] L0 ffn_norm L2={:.4} first4=[{:.4},{:.4},{:.4},{:.4}]",
+                l2_norm(&self.x_norm[..hd]),
+                self.x_norm[0], self.x_norm[1], self.x_norm[2], self.x_norm[3]);
+            // Check Q8K quantization output
+            let q8_d0 = self.q8_d[0];
+            let q8_qs0 = self.q8_qs[0];
+            let q8_bs0 = self.q8_bsums[0];
+            let n_blocks = hd / 256;
+            eprintln!("[gemma4] L0 q8k: d[0]={:.6} qs[0]={} bsums[0]={} n_blocks={}",
+                q8_d0, q8_qs0, q8_bs0, n_blocks);
+            eprintln!("[gemma4] L0 gate L2={:.4} first4=[{:.4},{:.4},{:.4},{:.4}]",
+                l2_norm(&self.gate[..ffn_dim]),
+                self.gate[0], self.gate[1], self.gate[2], self.gate[3]);
+            eprintln!("[gemma4] L0 up L2={:.4} first4=[{:.4},{:.4},{:.4},{:.4}]",
+                l2_norm(&self.up[..ffn_dim]),
+                self.up[0], self.up[1], self.up[2], self.up[3]);
+        }
+
         // GELU(gate) * up
         ffi_inference::gelu_mul(
             self.gate.as_ptr(),
@@ -469,6 +497,12 @@ impl Gemma4State {
             self.gate.as_mut_ptr(),
             ffn_dim as i32,
         );
+
+        if diag_enabled() && layer == 0 {
+            eprintln!("[gemma4] L0 gelu_out L2={:.4} first4=[{:.4},{:.4},{:.4},{:.4}]",
+                l2_norm(&self.gate[..ffn_dim]),
+                self.gate[0], self.gate[1], self.gate[2], self.gate[3]);
+        }
 
         // Quantize gate (ffn_dim) for down projection
         matmul::quant_input(

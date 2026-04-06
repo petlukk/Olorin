@@ -53,13 +53,17 @@ export func quant_f32_q8k(
             let v_inv: f32x4 = splat(inv_scale)
             let v_min: f32x4 = splat(-127.0)
             let v_max: f32x4 = splat(127.0)
+            let v_half: f32x4 = splat(0.5)
+            let v_nhalf: f32x4 = splat(-0.5)
+            let v_zero: f32x4 = splat(0.0)
 
             i = 0
             while i < 256 {
                 let v: f32x4 = load(src, base + i)
                 let scaled: f32x4 = v .* v_inv
                 let clamped: f32x4 = select(scaled .< v_min, v_min, select(scaled .> v_max, v_max, scaled))
-                let narrow: i8x4 = narrow_f32x4_i8(clamped)
+                let rounded: f32x4 = clamped .+ select(clamped .> v_zero, v_half, v_nhalf)
+                let narrow: i8x4 = narrow_f32x4_i8(rounded)
                 store(dst_qs, base + i, narrow)
                 i = i + 4
             }

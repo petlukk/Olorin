@@ -84,45 +84,65 @@ func dot_row(
     let sc03: i32 = u0 & 0x3f3f3f3f
     let sc47: i32 = (u2 & 0x0f0f0f0f) | (((u0 >> 6) & 0x03030303) << 4)
 
-    let mut sumi1: i32 = 0
-    let mut sumi2: i32 = 0
+    // Pre-extract all 8 scales (matching x86 pattern exactly)
+    let s0: i32 = sc03 & 255
+    let s1: i32 = (sc03 >> 8) & 255
+    let s2: i32 = (sc03 >> 16) & 255
+    let s3: i32 = (sc03 >> 24) & 255
+    let s4: i32 = sc47 & 255
+    let s5: i32 = (sc47 >> 8) & 255
+    let s6: i32 = (sc47 >> 16) & 255
+    let s7: i32 = (sc47 >> 24) & 255
+
+    let mut sumi: i32 = 0
+
+    // 4 groups of 32 bytes each = 128 bytes of nibbles
+    // Each group: lo nibble (32 elem) + hi nibble (32 elem) = 64 elements
+    // 4 groups × 64 = 256 elements per block
     let mut wi: i32 = nib
     let mut qi: i32 = q8_off
-    let mut si: i32 = 0
-    while si < 4 {
-        let pa: i8x16 = load(rw, wi)
-        let pb: i8x16 = load(rw, wi + 16)
-        let qa: i8x16 = load(q8, qi)
-        let qb: i8x16 = load(q8, qi + 16)
-        let p1: i32x4 = vdot_i32(pa .& mask_lo, qa) .+ vdot_i32(pb .& mask_lo, qb)
-        sumi1 = sumi1 + reduce_add(p1) * ((sc03 >> (si * 16)) & 255)
-        let qc: i8x16 = load(q8, qi + 32)
-        let qd: i8x16 = load(q8, qi + 48)
-        let p2: i32x4 = vdot_i32((pa .>> shift4) .& mask_lo, qc) .+ vdot_i32((pb .>> shift4) .& mask_lo, qd)
-        sumi2 = sumi2 + reduce_add(p2) * ((sc03 >> (si * 16 + 8)) & 255)
-        wi = wi + 32
-        qi = qi + 64
-        si = si + 1
-    }
 
-    // Scales 4-7 (second half)
-    si = 0
-    while si < 4 {
-        let pa: i8x16 = load(rw, wi)
-        let pb: i8x16 = load(rw, wi + 16)
-        let qa: i8x16 = load(q8, qi)
-        let qb: i8x16 = load(q8, qi + 16)
-        let p1: i32x4 = vdot_i32(pa .& mask_lo, qa) .+ vdot_i32(pb .& mask_lo, qb)
-        sumi1 = sumi1 + reduce_add(p1) * ((sc47 >> (si * 16)) & 255)
-        let qc: i8x16 = load(q8, qi + 32)
-        let qd: i8x16 = load(q8, qi + 48)
-        let p2: i32x4 = vdot_i32((pa .>> shift4) .& mask_lo, qc) .+ vdot_i32((pb .>> shift4) .& mask_lo, qd)
-        sumi2 = sumi2 + reduce_add(p2) * ((sc47 >> (si * 16 + 8)) & 255)
-        wi = wi + 32
-        qi = qi + 64
-        si = si + 1
-    }
-    return sumi1 + sumi2
+    // Group 0: scale s0 (lo), s1 (hi)
+    let pa0: i8x16 = load(rw, wi)
+    let pb0: i8x16 = load(rw, wi + 16)
+    let q0a: i8x16 = load(q8, qi)
+    let q0b: i8x16 = load(q8, qi + 16)
+    let q0c: i8x16 = load(q8, qi + 32)
+    let q0d: i8x16 = load(q8, qi + 48)
+    sumi = sumi + reduce_add(vdot_i32(pa0 .& mask_lo, q0a) .+ vdot_i32(pb0 .& mask_lo, q0b)) * s0
+    sumi = sumi + reduce_add(vdot_i32((pa0 .>> shift4) .& mask_lo, q0c) .+ vdot_i32((pb0 .>> shift4) .& mask_lo, q0d)) * s1
+
+    // Group 1: scale s2 (lo), s3 (hi)
+    let pa1: i8x16 = load(rw, wi + 32)
+    let pb1: i8x16 = load(rw, wi + 48)
+    let q1a: i8x16 = load(q8, qi + 64)
+    let q1b: i8x16 = load(q8, qi + 80)
+    let q1c: i8x16 = load(q8, qi + 96)
+    let q1d: i8x16 = load(q8, qi + 112)
+    sumi = sumi + reduce_add(vdot_i32(pa1 .& mask_lo, q1a) .+ vdot_i32(pb1 .& mask_lo, q1b)) * s2
+    sumi = sumi + reduce_add(vdot_i32((pa1 .>> shift4) .& mask_lo, q1c) .+ vdot_i32((pb1 .>> shift4) .& mask_lo, q1d)) * s3
+
+    // Group 2: scale s4 (lo), s5 (hi)
+    let pa2: i8x16 = load(rw, wi + 64)
+    let pb2: i8x16 = load(rw, wi + 80)
+    let q2a: i8x16 = load(q8, qi + 128)
+    let q2b: i8x16 = load(q8, qi + 144)
+    let q2c: i8x16 = load(q8, qi + 160)
+    let q2d: i8x16 = load(q8, qi + 176)
+    sumi = sumi + reduce_add(vdot_i32(pa2 .& mask_lo, q2a) .+ vdot_i32(pb2 .& mask_lo, q2b)) * s4
+    sumi = sumi + reduce_add(vdot_i32((pa2 .>> shift4) .& mask_lo, q2c) .+ vdot_i32((pb2 .>> shift4) .& mask_lo, q2d)) * s5
+
+    // Group 3: scale s6 (lo), s7 (hi)
+    let pa3: i8x16 = load(rw, wi + 96)
+    let pb3: i8x16 = load(rw, wi + 112)
+    let q3a: i8x16 = load(q8, qi + 192)
+    let q3b: i8x16 = load(q8, qi + 208)
+    let q3c: i8x16 = load(q8, qi + 224)
+    let q3d: i8x16 = load(q8, qi + 240)
+    sumi = sumi + reduce_add(vdot_i32(pa3 .& mask_lo, q3a) .+ vdot_i32(pb3 .& mask_lo, q3b)) * s6
+    sumi = sumi + reduce_add(vdot_i32((pa3 .>> shift4) .& mask_lo, q3c) .+ vdot_i32((pb3 .>> shift4) .& mask_lo, q3d)) * s7
+
+    return sumi
 }
 
 // Single-row — inline f16 scales via fcvtl
