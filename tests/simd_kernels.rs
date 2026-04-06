@@ -237,3 +237,17 @@ fn test_bare_rmsnorm() {
         assert!((e - g).abs() < 1e-5, "bare_rmsnorm mismatch at {i}: {e} vs {g}");
     }
 }
+
+// ---- softcap_f32 ----
+
+#[test]
+fn test_softcap() {
+    init();
+    let cap = 30.0f32;
+    let mut data: Vec<f32> = (-500..500).map(|i| i as f32 * 0.1).collect();
+    let expected: Vec<f32> = data.iter().map(|&x| cap * (x / cap).tanh()).collect();
+    ffi_inference::softcap_f32(data.as_mut_ptr(), data.len() as i32, cap);
+    for (i, (e, g)) in expected.iter().zip(&data).enumerate() {
+        assert!((e - g).abs() < 1e-4, "softcap mismatch at {i}: expected {e} got {g}");
+    }
+}

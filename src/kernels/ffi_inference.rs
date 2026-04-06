@@ -30,6 +30,7 @@ pub struct KernelTableInference {
     pub f32_dot:               F32DotFn,
     pub f32_dot_acc:           F32DotAccFn,
     pub bare_rmsnorm_f32:      BareRmsnormF32Fn,
+    pub softcap_f32:           SoftcapF32Fn,
 }
 
 // SAFETY: KernelTableInference holds function pointers and library handles.
@@ -95,6 +96,7 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
     let vec_ops_lib        = load("vec_ops")?;
     let attn_ops_lib       = load("attn_ops")?;
     let bare_rmsnorm_lib   = load("bare_rmsnorm")?;
+    let softcap_lib        = load("softcap")?;
 
     unsafe {
         let sym = |lib: &Library, name: &[u8]| -> Result<usize, String> {
@@ -129,7 +131,8 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
             f32_dot:           std::mem::transmute(sym(&attn_ops_lib, b"f32_dot\0")?),
             f32_dot_acc:       std::mem::transmute(sym(&attn_ops_lib, b"f32_dot_acc\0")?),
             bare_rmsnorm_f32:  std::mem::transmute(sym(&bare_rmsnorm_lib, b"bare_rmsnorm_f32\0")?),
-            libs: vec![q4kq, q4kd, q5kd, q6kd, f16_conv_lib, softmax_lib, gemma4_rmsnorm_lib, gemma4_gelu_lib, gemma4_rope_lib, bf16_matvec_lib, vec_ops_lib, attn_ops_lib, bare_rmsnorm_lib],
+            softcap_f32:       std::mem::transmute(sym(&softcap_lib, b"softcap_f32\0")?),
+            libs: vec![q4kq, q4kd, q5kd, q6kd, f16_conv_lib, softmax_lib, gemma4_rmsnorm_lib, gemma4_gelu_lib, gemma4_rope_lib, bf16_matvec_lib, vec_ops_lib, attn_ops_lib, bare_rmsnorm_lib, softcap_lib],
         };
         Ok(t)
     }
@@ -268,4 +271,8 @@ pub fn f32_dot_acc(out: *mut f32, a: *const f32, s: f32, n: i32) {
 
 pub fn bare_rmsnorm_f32(x: *mut f32, n: i32, eps: f32) {
     unsafe { (k().bare_rmsnorm_f32)(x, n, eps) }
+}
+
+pub fn softcap_f32(data: *mut f32, n: i32, cap: f32) {
+    unsafe { (k().softcap_f32)(data, n, cap) }
 }
