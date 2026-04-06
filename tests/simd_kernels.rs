@@ -220,3 +220,20 @@ fn test_f32_dot_acc() {
         assert!((e - g).abs() < 1e-5, "f32_dot_acc mismatch at {i}");
     }
 }
+
+// ---- bare_rmsnorm_f32 ----
+
+#[test]
+fn test_bare_rmsnorm() {
+    init();
+    let input: Vec<f32> = (0..512).map(|i| (i as f32 - 256.0) * 0.01).collect();
+    let eps = 1e-6f32;
+    let ss: f32 = input.iter().map(|v| v * v).sum();
+    let scale = 1.0 / ((ss / 512.0) + eps).sqrt();
+    let expected: Vec<f32> = input.iter().map(|v| v * scale).collect();
+    let mut got = input.clone();
+    ffi_inference::bare_rmsnorm_f32(got.as_mut_ptr(), 512, eps);
+    for (i, (e, g)) in expected.iter().zip(&got).enumerate() {
+        assert!((e - g).abs() < 1e-5, "bare_rmsnorm mismatch at {i}: {e} vs {g}");
+    }
+}
