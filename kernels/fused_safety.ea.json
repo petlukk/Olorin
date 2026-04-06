@@ -1,5 +1,5 @@
 {
-  "library": "/mnt/c/Users/Peter.lukka/Desktop/DEV/Olorin/target/release/build/olorin-74d22db92a50c3ff/out/libfused_safety.so",
+  "library": "/mnt/c/Users/Peter.lukka/Desktop/DEV/Olorin/target/debug/build/olorin-b95294034db2bd61/out/libfused_safety.so",
   "exports": [
     {
       "name": "scan_safety_fused",

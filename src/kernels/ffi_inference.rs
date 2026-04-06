@@ -23,6 +23,10 @@ pub struct KernelTableInference {
     pub gemma4_rope:           Gemma4RopeFn,
     pub bf16_dot_f32:          Bf16DotF32Fn,
     pub bf16_dot_f32_4row:     Bf16Dot4RowFn,
+    pub vec_add_f32:           VecAddF32Fn,
+    pub vec_scale_f32:         VecScaleF32Fn,
+    pub vec_fma_f32:           VecFmaF32Fn,
+    pub vec_acc_f32:           VecAccF32Fn,
 }
 
 // SAFETY: KernelTableInference holds function pointers and library handles.
@@ -85,6 +89,7 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
     let gemma4_gelu_lib    = load("gemma4_gelu")?;
     let gemma4_rope_lib    = load("gemma4_rope")?;
     let bf16_matvec_lib    = load("bf16_matvec")?;
+    let vec_ops_lib        = load("vec_ops")?;
 
     unsafe {
         let sym = |lib: &Library, name: &[u8]| -> Result<usize, String> {
@@ -112,7 +117,11 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
             gemma4_rope:    std::mem::transmute(sym(&gemma4_rope_lib, b"gemma4_rope\0")?),
             bf16_dot_f32:      std::mem::transmute(sym(&bf16_matvec_lib, b"bf16_dot_f32\0")?),
             bf16_dot_f32_4row: std::mem::transmute(sym(&bf16_matvec_lib, b"bf16_dot_f32_4row\0")?),
-            libs: vec![q4kq, q4kd, q5kd, q6kd, f16_conv_lib, softmax_lib, gemma4_rmsnorm_lib, gemma4_gelu_lib, gemma4_rope_lib, bf16_matvec_lib],
+            vec_add_f32:       std::mem::transmute(sym(&vec_ops_lib, b"vec_add_f32\0")?),
+            vec_scale_f32:     std::mem::transmute(sym(&vec_ops_lib, b"vec_scale_f32\0")?),
+            vec_fma_f32:       std::mem::transmute(sym(&vec_ops_lib, b"vec_fma_f32\0")?),
+            vec_acc_f32:       std::mem::transmute(sym(&vec_ops_lib, b"vec_acc_f32\0")?),
+            libs: vec![q4kq, q4kd, q5kd, q6kd, f16_conv_lib, softmax_lib, gemma4_rmsnorm_lib, gemma4_gelu_lib, gemma4_rope_lib, bf16_matvec_lib, vec_ops_lib],
         };
         Ok(t)
     }
@@ -223,4 +232,20 @@ pub unsafe fn bf16_dot_f32_4row(
     input: *const f32, scores: *mut f32, scratch: *mut i32, n_cols: i32,
 ) {
     (k().bf16_dot_f32_4row)(w0, w1, w2, w3, input, scores, scratch, n_cols)
+}
+
+pub fn vec_add_f32(a: *const f32, b: *const f32, out: *mut f32, n: i32) {
+    unsafe { (k().vec_add_f32)(a, b, out, n) }
+}
+
+pub fn vec_scale_f32(a: *const f32, out: *mut f32, s: f32, n: i32) {
+    unsafe { (k().vec_scale_f32)(a, out, s, n) }
+}
+
+pub fn vec_fma_f32(a: *const f32, b: *const f32, out: *mut f32, s: f32, n: i32) {
+    unsafe { (k().vec_fma_f32)(a, b, out, s, n) }
+}
+
+pub fn vec_acc_f32(out: *mut f32, a: *const f32, s: f32, n: i32) {
+    unsafe { (k().vec_acc_f32)(out, a, s, n) }
 }

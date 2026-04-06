@@ -1,5 +1,5 @@
 {
-  "library": "/mnt/c/Users/Peter.lukka/Desktop/DEV/Olorin/target/release/build/olorin-74d22db92a50c3ff/out/libintent_router.so",
+  "library": "/mnt/c/Users/Peter.lukka/Desktop/DEV/Olorin/target/debug/build/olorin-b95294034db2bd61/out/libintent_router.so",
   "exports": [
     {
       "name": "classify_intent",
