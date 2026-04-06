@@ -66,7 +66,11 @@ fn main() {
             let stem = fname.strip_suffix(".ea").unwrap().to_string();
             let i8mm = stem.ends_with("_arm_i8mm");
             let arm_only = !i8mm && stem.ends_with("_arm");
-            let x86_only = stem.contains("_avx2") || stem.contains("_avx512");
+            let content = fs::read_to_string(e.path()).unwrap_or_default();
+            let has_cfg_x86 = content.contains("#[cfg(x86_64)]");
+            let has_cfg_arm = content.contains("#[cfg(aarch64)]");
+            let x86_only = stem.contains("_avx2") || stem.contains("_avx512")
+                || (has_cfg_x86 && !has_cfg_arm);
             KernelSrc { stem, arm_only, x86_only, i8mm, path: e.path() }
         })
         .collect();

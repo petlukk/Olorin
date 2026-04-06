@@ -1,0 +1,58 @@
+// bf16_matvec_arm.ea — BF16 weight × f32 input dot product (ARM NEON)
+//
+// BF16→f32: (u16 as u32) << 16 reinterpreted as f32.
+// Uses i32 scratch + ptr_as_f32 for bit-level reinterpret.
+
+#[cfg(aarch64)]
+
+export func bf16_dot_f32(
+    weight: *restrict u16, input: *restrict f32,
+    scratch: *mut i32, n_cols: i32
+) -> f32 {
+    let fp: *mut f32 = ptr_as_f32(scratch)
+    let mut acc0: f32x4 = splat(0.0)
+    let mut acc1: f32x4 = splat(0.0)
+    let mut i: i32 = 0
+
+    while i + 8 <= n_cols {
+        scratch[0] = to_i32(weight[i]) << 16
+        scratch[1] = to_i32(weight[i+1]) << 16
+        scratch[2] = to_i32(weight[i+2]) << 16
+        scratch[3] = to_i32(weight[i+3]) << 16
+        scratch[4] = to_i32(weight[i+4]) << 16
+        scratch[5] = to_i32(weight[i+5]) << 16
+        scratch[6] = to_i32(weight[i+6]) << 16
+        scratch[7] = to_i32(weight[i+7]) << 16
+
+        let w0: f32x4 = load(fp, 0)
+        let w1: f32x4 = load(fp, 4)
+        let in0: f32x4 = load(input, i)
+        let in1: f32x4 = load(input, i + 4)
+
+        acc0 = fma(w0, in0, acc0)
+        acc1 = fma(w1, in1, acc1)
+        i = i + 8
+    }
+
+    let mut result: f32 = reduce_add(acc0) + reduce_add(acc1)
+
+    while i < n_cols {
+        scratch[0] = to_i32(weight[i]) << 16
+        result = result + fp[0] * input[i]
+        i = i + 1
+    }
+
+    return result
+}
+
+export func bf16_dot_f32_4row(
+    w0: *restrict u16, w1: *restrict u16, w2: *restrict u16, w3: *restrict u16,
+    input: *restrict f32,
+    out scores: *mut f32 [cap: 4],
+    scratch: *mut i32, n_cols: i32
+) {
+    scores[0] = bf16_dot_f32(w0, input, scratch, n_cols)
+    scores[1] = bf16_dot_f32(w1, input, scratch, n_cols)
+    scores[2] = bf16_dot_f32(w2, input, scratch, n_cols)
+    scores[3] = bf16_dot_f32(w3, input, scratch, n_cols)
+}
