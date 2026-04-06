@@ -1,7 +1,9 @@
-// bare_rmsnorm.ea — RMSNorm without weight (for V normalization)
+// bare_rmsnorm.ea — RMSNorm without weight (for V normalization, x86 AVX2)
 //
 // x[i] = x[i] * rsqrt(mean(x^2) + eps)
 // Same as gemma4_rmsnorm but no weight array.
+
+#[cfg(x86_64)]
 
 export func bare_rmsnorm_f32(x: *mut f32, n: i32, eps: f32) {
     // Pass 1: Sum of squares

@@ -1,0 +1,34 @@
+// softcap_arm.ea — Logit softcapping (ARM NEON)
+//
+// tanh(x) = 1 - 2 / (exp(2x) + 1)
+
+#[cfg(aarch64)]
+
+export func softcap_f32(data: *mut f32, n: i32, cap: f32) {
+    let inv_cap: f32 = 1.0 / cap
+    let v_inv_cap: f32x4 = splat(inv_cap)
+    let v_cap: f32x4 = splat(cap)
+    let v_two: f32x4 = splat(2.0)
+    let v_one: f32x4 = splat(1.0)
+    let mut i: i32 = 0
+
+    while i + 4 <= n {
+        let raw: f32x4 = load(data, i)
+        let x: f32x4 = raw .* v_inv_cap
+        let two_x: f32x4 = x .* v_two
+        let exp2x: f32x4 = exp(two_x)
+        let denom: f32x4 = exp2x .+ v_one
+        let th: f32x4 = v_one .- v_two ./ denom
+        let result: f32x4 = th .* v_cap
+        store(data, i, result)
+        i = i + 4
+    }
+
+    while i < n {
+        let x: f32 = data[i] * inv_cap
+        let exp2x: f32 = exp(x * 2.0)
+        let th: f32 = 1.0 - 2.0 / (exp2x + 1.0)
+        data[i] = th * cap
+        i = i + 1
+    }
+}

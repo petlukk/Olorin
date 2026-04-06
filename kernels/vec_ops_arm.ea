@@ -1,0 +1,153 @@
+// vec_ops_arm.ea — Element-wise f32 vector operations (ARM NEON)
+//
+// Matches x86 pipeline: 16-wide main loop (4×f32x4), 8-wide cleanup, 4-wide cleanup, scalar tail.
+
+#[cfg(aarch64)]
+
+export func vec_add_f32(a: *restrict f32, b: *restrict f32, out: *mut f32, n: i32) {
+    let mut i: i32 = 0
+    while i + 16 <= n {
+        let va0: f32x4 = load(a, i)
+        let vb0: f32x4 = load(b, i)
+        let va1: f32x4 = load(a, i + 4)
+        let vb1: f32x4 = load(b, i + 4)
+        let va2: f32x4 = load(a, i + 8)
+        let vb2: f32x4 = load(b, i + 8)
+        let va3: f32x4 = load(a, i + 12)
+        let vb3: f32x4 = load(b, i + 12)
+        store(out, i, va0 .+ vb0)
+        store(out, i + 4, va1 .+ vb1)
+        store(out, i + 8, va2 .+ vb2)
+        store(out, i + 12, va3 .+ vb3)
+        i = i + 16
+    }
+    while i + 8 <= n {
+        let va0: f32x4 = load(a, i)
+        let vb0: f32x4 = load(b, i)
+        let va1: f32x4 = load(a, i + 4)
+        let vb1: f32x4 = load(b, i + 4)
+        store(out, i, va0 .+ vb0)
+        store(out, i + 4, va1 .+ vb1)
+        i = i + 8
+    }
+    while i + 4 <= n {
+        let va: f32x4 = load(a, i)
+        let vb: f32x4 = load(b, i)
+        store(out, i, va .+ vb)
+        i = i + 4
+    }
+    while i < n {
+        out[i] = a[i] + b[i]
+        i = i + 1
+    }
+}
+
+export func vec_scale_f32(a: *restrict f32, out: *mut f32, s: f32, n: i32) {
+    let vs: f32x4 = splat(s)
+    let mut i: i32 = 0
+    while i + 16 <= n {
+        let va0: f32x4 = load(a, i)
+        let va1: f32x4 = load(a, i + 4)
+        let va2: f32x4 = load(a, i + 8)
+        let va3: f32x4 = load(a, i + 12)
+        store(out, i, va0 .* vs)
+        store(out, i + 4, va1 .* vs)
+        store(out, i + 8, va2 .* vs)
+        store(out, i + 12, va3 .* vs)
+        i = i + 16
+    }
+    while i + 8 <= n {
+        let va0: f32x4 = load(a, i)
+        let va1: f32x4 = load(a, i + 4)
+        store(out, i, va0 .* vs)
+        store(out, i + 4, va1 .* vs)
+        i = i + 8
+    }
+    while i + 4 <= n {
+        let va: f32x4 = load(a, i)
+        store(out, i, va .* vs)
+        i = i + 4
+    }
+    while i < n {
+        out[i] = a[i] * s
+        i = i + 1
+    }
+}
+
+export func vec_fma_f32(a: *restrict f32, b: *restrict f32, out: *mut f32, s: f32, n: i32) {
+    let vs: f32x4 = splat(s)
+    let mut i: i32 = 0
+    while i + 16 <= n {
+        let va0: f32x4 = load(a, i)
+        let vb0: f32x4 = load(b, i)
+        let va1: f32x4 = load(a, i + 4)
+        let vb1: f32x4 = load(b, i + 4)
+        let va2: f32x4 = load(a, i + 8)
+        let vb2: f32x4 = load(b, i + 8)
+        let va3: f32x4 = load(a, i + 12)
+        let vb3: f32x4 = load(b, i + 12)
+        store(out, i, (va0 .+ vb0) .* vs)
+        store(out, i + 4, (va1 .+ vb1) .* vs)
+        store(out, i + 8, (va2 .+ vb2) .* vs)
+        store(out, i + 12, (va3 .+ vb3) .* vs)
+        i = i + 16
+    }
+    while i + 8 <= n {
+        let va0: f32x4 = load(a, i)
+        let vb0: f32x4 = load(b, i)
+        let va1: f32x4 = load(a, i + 4)
+        let vb1: f32x4 = load(b, i + 4)
+        store(out, i, (va0 .+ vb0) .* vs)
+        store(out, i + 4, (va1 .+ vb1) .* vs)
+        i = i + 8
+    }
+    while i + 4 <= n {
+        let va: f32x4 = load(a, i)
+        let vb: f32x4 = load(b, i)
+        store(out, i, (va .+ vb) .* vs)
+        i = i + 4
+    }
+    while i < n {
+        out[i] = (a[i] + b[i]) * s
+        i = i + 1
+    }
+}
+
+export func vec_acc_f32(out: *mut f32, a: *restrict f32, s: f32, n: i32) {
+    let vs: f32x4 = splat(s)
+    let mut i: i32 = 0
+    while i + 16 <= n {
+        let vo0: f32x4 = load(out, i)
+        let va0: f32x4 = load(a, i)
+        let vo1: f32x4 = load(out, i + 4)
+        let va1: f32x4 = load(a, i + 4)
+        let vo2: f32x4 = load(out, i + 8)
+        let va2: f32x4 = load(a, i + 8)
+        let vo3: f32x4 = load(out, i + 12)
+        let va3: f32x4 = load(a, i + 12)
+        store(out, i, fma(va0, vs, vo0))
+        store(out, i + 4, fma(va1, vs, vo1))
+        store(out, i + 8, fma(va2, vs, vo2))
+        store(out, i + 12, fma(va3, vs, vo3))
+        i = i + 16
+    }
+    while i + 8 <= n {
+        let vo0: f32x4 = load(out, i)
+        let va0: f32x4 = load(a, i)
+        let vo1: f32x4 = load(out, i + 4)
+        let va1: f32x4 = load(a, i + 4)
+        store(out, i, fma(va0, vs, vo0))
+        store(out, i + 4, fma(va1, vs, vo1))
+        i = i + 8
+    }
+    while i + 4 <= n {
+        let vo: f32x4 = load(out, i)
+        let va: f32x4 = load(a, i)
+        store(out, i, fma(va, vs, vo))
+        i = i + 4
+    }
+    while i < n {
+        out[i] = out[i] + a[i] * s
+        i = i + 1
+    }
+}

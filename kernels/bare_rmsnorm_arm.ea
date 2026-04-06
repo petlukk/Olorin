@@ -1,0 +1,79 @@
+// bare_rmsnorm_arm.ea — RMSNorm without weight (ARM NEON)
+//
+// Matches x86 pipeline: 16-wide main loop (4×f32x4), 8-wide cleanup, 4-wide cleanup, scalar tail.
+
+#[cfg(aarch64)]
+
+export func bare_rmsnorm_f32(x: *mut f32, n: i32, eps: f32) {
+    // Pass 1: Sum of squares
+    let mut acc0: f32x4 = splat(0.0)
+    let mut acc1: f32x4 = splat(0.0)
+    let mut acc2: f32x4 = splat(0.0)
+    let mut acc3: f32x4 = splat(0.0)
+    let mut i: i32 = 0
+
+    while i + 16 <= n {
+        let v0: f32x4 = load(x, i)
+        let v1: f32x4 = load(x, i + 4)
+        let v2: f32x4 = load(x, i + 8)
+        let v3: f32x4 = load(x, i + 12)
+        acc0 = fma(v0, v0, acc0)
+        acc1 = fma(v1, v1, acc1)
+        acc2 = fma(v2, v2, acc2)
+        acc3 = fma(v3, v3, acc3)
+        i = i + 16
+    }
+
+    while i + 8 <= n {
+        let v0: f32x4 = load(x, i)
+        let v1: f32x4 = load(x, i + 4)
+        acc0 = fma(v0, v0, acc0)
+        acc1 = fma(v1, v1, acc1)
+        i = i + 8
+    }
+
+    while i + 4 <= n {
+        let v: f32x4 = load(x, i)
+        acc0 = fma(v, v, acc0)
+        i = i + 4
+    }
+
+    let mut ss: f32 = reduce_add(acc0) + reduce_add(acc1) + reduce_add(acc2) + reduce_add(acc3)
+    while i < n {
+        ss = ss + x[i] * x[i]
+        i = i + 1
+    }
+
+    let scale: f32 = rsqrt(ss / to_f32(n) + eps)
+
+    // Pass 2: Scale in-place
+    let vs: f32x4 = splat(scale)
+    i = 0
+    while i + 16 <= n {
+        let v0: f32x4 = load(x, i)
+        let v1: f32x4 = load(x, i + 4)
+        let v2: f32x4 = load(x, i + 8)
+        let v3: f32x4 = load(x, i + 12)
+        store(x, i, v0 .* vs)
+        store(x, i + 4, v1 .* vs)
+        store(x, i + 8, v2 .* vs)
+        store(x, i + 12, v3 .* vs)
+        i = i + 16
+    }
+    while i + 8 <= n {
+        let v0: f32x4 = load(x, i)
+        let v1: f32x4 = load(x, i + 4)
+        store(x, i, v0 .* vs)
+        store(x, i + 4, v1 .* vs)
+        i = i + 8
+    }
+    while i + 4 <= n {
+        let v: f32x4 = load(x, i)
+        store(x, i, v .* vs)
+        i = i + 4
+    }
+    while i < n {
+        x[i] = x[i] * scale
+        i = i + 1
+    }
+}
