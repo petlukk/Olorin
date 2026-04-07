@@ -90,17 +90,3 @@ fn test_tokenizer_from_gguf() {
     assert_eq!(decoded, text, "roundtrip failed: {decoded:?} != {text:?}");
 }
 
-#[test]
-fn test_model_load() {
-    olorin::kernels::ffi::init().unwrap();
-    let Some(path) = model_path() else {
-        eprintln!("SKIP: no model file found");
-        return;
-    };
-    let model = olorin::inference::engine::BitNetModel::load(&path).unwrap();
-    eprintln!("Model loaded: {} layers, {} hidden, quant={}",
-        model.n_layers, model.hidden_dim, model.quant_type_str());
-    assert!(model.n_layers > 0);
-    assert!(model.hidden_dim > 0);
-    assert!(model.vocab_size > 0);
-}

@@ -372,11 +372,7 @@ pub fn resolve_model(arg: Option<&str>) -> Option<PathBuf> {
     let home = std::env::var("HOME").unwrap_or_default();
     let olorin_models = Path::new(&home).join(".olorin/models");
     let aliases: &[(&str, &str)] = &[
-        ("bitnet",  "ggml-model-i2_s.gguf"),
-        ("llama",   "Llama-3.2-3B-Instruct-Q4_K_M.gguf"),
-        ("llama8b", "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"),
-        ("qwen",    "Qwen2.5-1.5B-Instruct-Q4_K_M.gguf"),
-        ("gemma4",  "gemma-4-e2b-it-Q4_K_M.gguf"),
+        ("gemma4", "gemma-4-e2b-it-Q4_K_M.gguf"),
     ];
     match arg {
         Some(name) => {

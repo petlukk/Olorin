@@ -207,10 +207,6 @@ pub unsafe fn q6k_dot_q8k_4row(
         w0, w1, w2, w3, q8, bsums, scores, n_blocks, d0, d1, d2, d3)
 }
 
-pub unsafe fn f32_to_f16(src: *const f32, dst: *mut u16, n: i32) {
-    (k().f32_to_f16)(src, dst, n)
-}
-
 pub unsafe fn f16_to_f32(src: *const u16, dst: *mut f32, n: i32) {
     (k().f16_to_f32)(src, dst, n)
 }
@@ -255,10 +251,6 @@ pub fn vec_scale_f32(a: *const f32, out: *mut f32, s: f32, n: i32) {
 
 pub fn vec_fma_f32(a: *const f32, b: *const f32, out: *mut f32, s: f32, n: i32) {
     unsafe { (k().vec_fma_f32)(a, b, out, s, n) }
-}
-
-pub fn vec_acc_f32(out: *mut f32, a: *const f32, s: f32, n: i32) {
-    unsafe { (k().vec_acc_f32)(out, a, s, n) }
 }
 
 pub fn f32_dot(a: *const f32, b: *const f32, n: i32) -> f32 {

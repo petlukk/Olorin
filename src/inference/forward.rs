@@ -134,7 +134,6 @@ impl Gemma4State {
         let max_head = max_head_k.max(max_head_v);
         let max_qkv = model.n_heads * max_head_k;
         let max_kv = model.n_kv_heads * max_head;
-        let n_blocks_hd = hd / 256;
         let max_ffn = *model.ffn_dim.iter().max().unwrap_or(&12288);
         let n_blocks_ffn = max_ffn / 256;
         let n_blocks_out = hd / 256;

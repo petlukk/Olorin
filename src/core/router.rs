@@ -66,7 +66,7 @@ pub struct DispatchContext {
 impl DispatchContext {
     /// Create a new dispatch context.
     /// `api_key`: optional Anthropic API key for cloud inference.
-    /// `model_arg`: optional model selector ("bitnet", "llama", or path).
+    /// `model_arg`: optional model selector ("gemma4" alias or path).
     pub fn new(api_key: Option<String>, model_arg: Option<&str>, draft_arg: Option<&str>, draft_k: Option<usize>) -> Self {
         let anthropic = api_key.map(AnthropicClient::new);
         let vault = Self::open_vault();

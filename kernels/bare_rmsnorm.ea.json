@@ -1,5 +1,5 @@
 {
-  "library": "/mnt/c/Users/Peter.lukka/Desktop/DEV/Olorin/target/release/build/olorin-74d22db92a50c3ff/out/libbare_rmsnorm.so",
+  "library": "/root/dev/olorin/target/release/build/olorin-fa2b56993063a241/out/libbare_rmsnorm.so",
   "exports": [
     {
       "name": "bare_rmsnorm_f32",

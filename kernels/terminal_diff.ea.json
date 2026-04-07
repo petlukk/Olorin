@@ -1,5 +1,5 @@
 {
-  "library": "/mnt/c/Users/Peter.lukka/Desktop/DEV/Olorin/target/release/build/olorin-74d22db92a50c3ff/out/libterminal_diff.so",
+  "library": "/root/dev/olorin/target/release/build/olorin-fa2b56993063a241/out/libterminal_diff.so",
   "exports": [
     {
       "name": "terminal_diff",

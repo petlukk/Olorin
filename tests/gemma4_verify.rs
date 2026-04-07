@@ -460,6 +460,7 @@ fn step3b_single_layer() {
 
     // Run full layer 0 with BOS token via Gemma4State
     let mut state = olorin::inference::forward::Gemma4State::new(&model, 512);
+    let pool = olorin::inference::threadpool::ThreadPool::new();
 
     // Embed BOS + scale (no PLE for this test)
     let hd = model.hidden_dim;
@@ -468,7 +469,7 @@ fn step3b_single_layer() {
     for v in state.x[..hd].iter_mut() { *v *= scale; }
 
     // Run layer 0
-    state.layer_forward(&model, 0, 0, false);
+    state.layer_forward(&model, 0, 0, false, &pool);
 
     eprintln!("=== Step 3b: Single layer forward (L0, BOS, pos=0, no PLE) ===");
     eprintln!("l_out L2={:.4}  first4=[{:.4},{:.4},{:.4},{:.4}]",
@@ -537,9 +538,10 @@ fn step5_logits() {
     olorin::kernels::ffi::init().unwrap();
 
     let mut state = olorin::inference::forward::Gemma4State::new(&model, 512);
+    let pool = olorin::inference::threadpool::ThreadPool::new();
 
     // Forward pass with BOS token (id=2)
-    let logits_vec = state.forward_one(&model, 2).to_vec();
+    let logits_vec = state.forward_one(&model, 2, &pool).to_vec();
     let logits = &logits_vec;
 
     let hd = model.hidden_dim;

@@ -1,5 +1,5 @@
 {
-  "library": "/mnt/c/Users/Peter.lukka/Desktop/DEV/Olorin/target/aarch64-unknown-linux-gnu/release/build/olorin-624560d25b05c03d/out/libpretokenize.so",
+  "library": "/root/dev/olorin/target/release/build/olorin-fa2b56993063a241/out/libpretokenize.so",
   "exports": [
     {
       "name": "pretokenize",
