@@ -81,7 +81,9 @@ impl Engine {
         // 1. Format as Gemma chat template
         let formatted = format_chat(prompt, system);
 
-        // 2. Tokenize (prepend BOS)
+        // 2. Tokenize. The Gemma 4 jinja chat_template emits {{ bos_token }}
+        //    at the start, so we prepend BOS as a token id (matches what the
+        //    template would produce when rendered + tokenized).
         let mut tokens = vec![self.tokenizer.bos_id];
         tokens.extend(self.tokenizer.encode(&formatted));
         if tokens.len() <= 1 {
