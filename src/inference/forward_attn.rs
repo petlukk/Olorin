@@ -182,6 +182,7 @@ impl Gemma4State {
             self,
             n_heads, n_kv_heads, gqa_ratio, head_dim,
             kv_dim, attn_len, attn_scale, k_ptr, v_ptr,
+            pool,
         );
 
         if diag && il == 0 {

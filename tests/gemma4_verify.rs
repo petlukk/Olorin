@@ -459,8 +459,8 @@ fn step3b_single_layer() {
     olorin::kernels::ffi::init().unwrap();
 
     // Run full layer 0 with BOS token via Gemma4State
-    let mut state = olorin::inference::forward::Gemma4State::new(&model, 512);
     let pool = olorin::inference::threadpool::ThreadPool::new();
+    let mut state = olorin::inference::forward::Gemma4State::new(&model, 512, &pool);
 
     // Embed BOS + scale (no PLE for this test)
     let hd = model.hidden_dim;
@@ -507,7 +507,8 @@ fn step4_ple() {
         return;
     }
 
-    let mut state = olorin::inference::forward::Gemma4State::new(&model, 512);
+    let pool = olorin::inference::threadpool::ThreadPool::new();
+    let mut state = olorin::inference::forward::Gemma4State::new(&model, 512, &pool);
 
     // Embed BOS token + scale
     olorin::inference::dequant::q6k_embed_lookup(model.embed_weight, 2, &mut state.x, hd);
@@ -537,8 +538,8 @@ fn step5_logits() {
     let model = olorin::inference::engine::Gemma4Model::from_gguf(&gguf).unwrap();
     olorin::kernels::ffi::init().unwrap();
 
-    let mut state = olorin::inference::forward::Gemma4State::new(&model, 512);
     let pool = olorin::inference::threadpool::ThreadPool::new();
+    let mut state = olorin::inference::forward::Gemma4State::new(&model, 512, &pool);
 
     // Forward pass with BOS token (id=2)
     let logits_vec = state.forward_one(&model, 2, &pool).to_vec();

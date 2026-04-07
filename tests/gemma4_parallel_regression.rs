@@ -33,8 +33,8 @@ fn forward_one_bos_logits_bit_exact() {
     let model = olorin::inference::engine::Gemma4Model::from_gguf(&gguf).unwrap();
     olorin::kernels::ffi::init().unwrap();
 
-    let mut state = olorin::inference::forward::Gemma4State::new(&model, 512);
     let pool = olorin::inference::threadpool::ThreadPool::new();
+    let mut state = olorin::inference::forward::Gemma4State::new(&model, 512, &pool);
 
     // BOS token id = 2 (matches gemma4_verify::step5_logits)
     let logits = state.forward_one(&model, 2, &pool).to_vec();

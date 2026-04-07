@@ -87,6 +87,8 @@ pub struct Gemma4State {
     pub attn_out: Vec<f32>,
     pub(crate) attn_scores: Vec<f32>,
     pub(crate) kv_f32_scratch: Vec<f32>,
+    pub(crate) attn_scores_stride: usize,
+    pub(crate) kv_scratch_stride: usize,
 
     // Post-attention projection scratch (wo @ attn_out)
     pub(crate) wo_out: Vec<f32>,
@@ -127,11 +129,16 @@ pub struct Gemma4State {
 }
 
 impl Gemma4State {
-    pub fn new(model: &Gemma4Model, max_seq_len: usize) -> Self {
+    pub fn new(
+        model: &Gemma4Model,
+        max_seq_len: usize,
+        pool: &crate::inference::threadpool::ThreadPool,
+    ) -> Self {
         let hd = model.hidden_dim;
         let max_head_k = *model.head_dim_k.iter().max().unwrap_or(&512);
         let max_head_v = *model.head_dim_v.iter().max().unwrap_or(&512);
         let max_head = max_head_k.max(max_head_v);
+        let n_thread_slots = pool.thread_count();
         let max_qkv = model.n_heads * max_head_k;
         let max_kv = model.n_kv_heads * max_head;
         let max_ffn = *model.ffn_dim.iter().max().unwrap_or(&12288);
@@ -166,8 +173,10 @@ impl Gemma4State {
             v: vec![0.0; max_kv],
 
             attn_out: vec![0.0; max_qkv],
-            attn_scores: vec![0.0; max_seq_len],
-            kv_f32_scratch: vec![0.0; max_head],
+            attn_scores: vec![0.0; max_seq_len * n_thread_slots],
+            kv_f32_scratch: vec![0.0; max_head * n_thread_slots],
+            attn_scores_stride: max_seq_len,
+            kv_scratch_stride: max_head,
 
             wo_out: vec![0.0; hd],
 
