@@ -232,7 +232,7 @@ fn step3_qkv_projection() {
     if lw.wk_dtype == 13 {
         let n_blk = hd / 256;
         let row_bytes = n_blk * 176;
-        let pow2 = olorin::inference::matmul::pow2_table_pub();
+        let pow2 = olorin::inference::matmul::pow2_table();
         let wk1 = unsafe { lw.wk.add(1 * row_bytes) };
         for blk in 0..n_blk {
             let bp = unsafe { wk1.add(blk * 176) };
@@ -248,8 +248,8 @@ fn step3_qkv_projection() {
             // Scalar single-block (same as llama.cpp)
             let d_raw = unsafe { u16::from_le_bytes([*bp, *bp.add(1)]) };
             let dm_raw = unsafe { u16::from_le_bytes([*bp.add(2), *bp.add(3)]) };
-            let d = olorin::inference::matmul::f16_scalar(d_raw);
-            let dm = olorin::inference::matmul::f16_scalar(dm_raw);
+            let d = olorin::inference::matmul::f16_to_f32_scalar(d_raw);
+            let dm = olorin::inference::matmul::f16_to_f32_scalar(dm_raw);
             let qs_ptr = unsafe { bp.add(48) };
             let qh_ptr = unsafe { bp.add(16) };
             let sc_ptr = unsafe { bp.add(4) };
@@ -305,8 +305,8 @@ fn step3_qkv_projection() {
                 let bp = unsafe { wk_r.add(blk * 176) };
                 let d_raw = unsafe { u16::from_le_bytes([*bp, *bp.add(1)]) };
                 let dm_raw = unsafe { u16::from_le_bytes([*bp.add(2), *bp.add(3)]) };
-                let d = olorin::inference::matmul::f16_scalar(d_raw);
-                let dm = olorin::inference::matmul::f16_scalar(dm_raw);
+                let d = olorin::inference::matmul::f16_to_f32_scalar(d_raw);
+                let dm = olorin::inference::matmul::f16_to_f32_scalar(dm_raw);
                 let qs_ptr = unsafe { bp.add(48) };
                 let qh_ptr = unsafe { bp.add(16) };
                 let sc_ptr = unsafe { bp.add(4) };
@@ -361,7 +361,7 @@ fn step3_qkv_projection() {
 
                 result_scalar += d * q8_d[blk] * sumi as f32 - dm * q8_d[blk] * sumi_mins as f32;
             }
-            let pow2 = olorin::inference::matmul::pow2_table_pub();
+            let pow2 = olorin::inference::matmul::pow2_table();
             let wk_row = unsafe { lw.wk.add(r * row_bytes) };
             let simd_val = unsafe {
                 olorin::kernels::ffi_inference::q5k_dot_q8k(

@@ -40,7 +40,7 @@ fn build_pow2_table() -> [f32; 32] {
     t
 }
 
-fn pow2_table() -> &'static [f32; 32] {
+pub fn pow2_table() -> &'static [f32; 32] {
     use std::sync::OnceLock;
     static TABLE: OnceLock<[f32; 32]> = OnceLock::new();
     TABLE.get_or_init(build_pow2_table)
@@ -50,7 +50,7 @@ fn pow2_table() -> &'static [f32; 32] {
 // f16 scalar helper (for extracting d from Q6K blocks)
 // ---------------------------------------------------------------------------
 
-pub(crate) fn f16_to_f32_scalar(h: u16) -> f32 {
+pub fn f16_to_f32_scalar(h: u16) -> f32 {
     let sign = ((h >> 15) & 1) as u32;
     let exp = ((h >> 10) & 0x1f) as u32;
     let mant = (h & 0x3ff) as u32;
