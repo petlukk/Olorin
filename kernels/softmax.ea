@@ -38,25 +38,13 @@ export func softmax_f32(data: *mut f32, n: i32, scale: f32) {
 
     let mut s: f32 = reduce_add(v_sum)
 
-    // Tail: overlap-load last 8 for SIMD exp
-    if i < n {
-        if n >= 8 {
-            let tail_off: i32 = n - 8
-            let e: f32x8 = exp(load_f32x8(data, tail_off) .- v_m)
-            store(data, tail_off, e)
-            let mut j: i32 = i
-            while j < n {
-                s = s + data[j]
-                j = j + 1
-            }
-        } else {
-            while i < n {
-                let v: f32 = data[i] - m
-                data[i] = exp(v)
-                s = s + data[i]
-                i = i + 1
-            }
-        }
+    // Scalar tail — do NOT overlap-load: positions before i were already
+    // exp'd by the SIMD pass and would get double-exp'd.
+    while i < n {
+        let v: f32 = data[i] - m
+        data[i] = exp(v)
+        s = s + data[i]
+        i = i + 1
     }
 
     // Pass 3: Normalize
