@@ -12,9 +12,21 @@ pub struct Tokenizer {
     vocab: Vec<Vec<u8>>,
     token_to_id: HashMap<Vec<u8>, u32>,
     scores: Vec<f32>,
+    /// Per-token type from tokenizer.ggml.token_type. Values:
+    ///   1 = NORMAL, 2 = UNKNOWN, 3 = CONTROL, 4 = USER_DEFINED,
+    ///   5 = UNUSED, 6 = BYTE.
+    /// CONTROL and USER_DEFINED tokens are hidden from user-facing decoded
+    /// output (matching llama.cpp behavior).
+    token_types: Vec<i32>,
     pub bos_id: u32,
     pub eos_id: u32,
     pub stop_ids: Vec<u32>,
+    /// SentencePiece (Unigram) tokenizers do not pre-tokenize on word
+    /// boundaries — encoding runs Viterbi over the whole input segment.
+    is_sentencepiece: bool,
+    /// Byte-fallback table: byte value -> token id, for sentencepiece
+    /// fallback when a character isn't in the vocab.
+    byte_fallback: [u32; 256],
 }
 
 /// Parse a byte-fallback token like "<0x41>" into the byte value 0x41.
@@ -90,6 +102,15 @@ impl Tokenizer {
             _ => return Err(Error::Inference("tokenizer.ggml.tokens is not an array".into())),
         };
 
+        // Per-token type array (NORMAL/UNKNOWN/CONTROL/USER_DEFINED/...).
+        let token_types: Vec<i32> = match gguf.metadata.get("tokenizer.ggml.token_type") {
+            Some(MetaValue::Array(arr)) => arr.iter().map(|v| match v {
+                MetaValue::I32(i) => *i,
+                _ => 1,
+            }).collect(),
+            _ => Vec::new(),
+        };
+
         let scores = match scores_arr {
             Some(MetaValue::Array(arr)) => {
                 let mut out = Vec::with_capacity(arr.len());
@@ -151,7 +172,33 @@ impl Tokenizer {
             }
         }
 
-        Ok(Tokenizer { vocab, token_to_id, scores, bos_id, eos_id, stop_ids })
+        // Build byte-fallback table for sentencepiece. Token strings of the
+        // form "<0xNN>" are CONTROL tokens used when a byte isn't covered by
+        // any vocab entry. For sentencepiece, lookup by the literal "<0xNN>"
+        // string in the vocab map (we stored them that way above).
+        let mut byte_fallback = [u32::MAX; 256];
+        if is_sentencepiece {
+            for b in 0u8..=255 {
+                let key = format!("<0x{:02X}>", b);
+                if let Some(&id) = token_to_id.get(key.as_bytes()) {
+                    byte_fallback[b as usize] = id;
+                }
+            }
+        }
+
+        // Pad token_types to match vocab length if missing/short.
+        let mut token_types = token_types;
+        token_types.resize(vocab.len(), 1);
+
+        Ok(Tokenizer { vocab, token_to_id, scores, token_types, bos_id, eos_id, stop_ids, is_sentencepiece, byte_fallback })
+    }
+
+    /// Returns true if a token is CONTROL (3) or USER_DEFINED (4) — these
+    /// should not be rendered to user-facing output. Matches llama.cpp's
+    /// `special` flag behavior in detokenization.
+    pub fn is_control_or_user_defined(&self, id: u32) -> bool {
+        let t = self.token_types.get(id as usize).copied().unwrap_or(1);
+        t == 3 || t == 4
     }
 
     /// Look up a token string in the vocabulary. Returns None if not found.
@@ -199,17 +246,100 @@ impl Tokenizer {
         tokens
     }
 
-    /// Encode a text segment (no special tokens) using SIMD pre-tokenizer.
-    /// Uses pretokenize kernel for span detection, then direct vocab lookup
-    /// per span (matching llama.cpp ignore_merges behavior for tiktoken).
-    /// Falls back to BPE merge for spans not in vocab.
+    /// Encode a text segment (no special tokens). Routes to either the
+    /// SentencePiece Unigram Viterbi encoder (gemma4, llama) or the SIMD
+    /// pretokenize + BPE-merge path (Llama 3 / tiktoken).
     fn encode_segment(&self, bytes: &[u8]) -> Vec<u32> {
-        use crate::kernels::ffi;
-
-        let len = bytes.len();
-        if len == 0 {
+        if bytes.is_empty() {
             return Vec::new();
         }
+        if self.is_sentencepiece {
+            return self.encode_sentencepiece(bytes);
+        }
+        self.encode_bpe_pretokenized(bytes)
+    }
+
+    /// SentencePiece Unigram Viterbi encoder.
+    /// Replaces ASCII space with U+2581 (▁) then runs DP segmentation that
+    /// maximizes total log-score. Falls back to <0xNN> byte tokens for any
+    /// position where no vocab entry starts.
+    fn encode_sentencepiece(&self, raw: &[u8]) -> Vec<u32> {
+        // 1. Replace ' ' with ▁ (\xe2\x96\x81). add_space_prefix=false for
+        //    gemma4, so no leading ▁ is prepended — llama.cpp matches this.
+        let mut bytes: Vec<u8> = Vec::with_capacity(raw.len() + raw.len() / 4);
+        for &b in raw {
+            if b == b' ' {
+                bytes.extend_from_slice(&[0xE2, 0x96, 0x81]);
+            } else {
+                bytes.push(b);
+            }
+        }
+
+        let n = bytes.len();
+        // best_score[i] = best total log-score for bytes[0..i]
+        // best_id[i]    = token id consumed to reach position i
+        // best_prev[i]  = previous position (start of that token)
+        let neg_inf = f32::NEG_INFINITY;
+        let mut best_score = vec![neg_inf; n + 1];
+        let mut best_id = vec![u32::MAX; n + 1];
+        let mut best_prev = vec![0usize; n + 1];
+        best_score[0] = 0.0;
+
+        // Cap maximum token byte length to bound the inner loop. Gemma vocab
+        // has tokens up to ~32 bytes; 64 is safe.
+        const MAX_TOK_LEN: usize = 64;
+
+        for i in 0..n {
+            if best_score[i] == neg_inf {
+                continue;
+            }
+            let limit = (i + MAX_TOK_LEN).min(n);
+            // Try each substring bytes[i..j]
+            for j in (i + 1)..=limit {
+                if let Some(&id) = self.token_to_id.get(&bytes[i..j]) {
+                    let s = best_score[i] + self.scores[id as usize];
+                    if s > best_score[j] {
+                        best_score[j] = s;
+                        best_id[j] = id;
+                        best_prev[j] = i;
+                    }
+                }
+            }
+            // Single-byte fallback (always available so DP always reaches n)
+            let j = i + 1;
+            let b = bytes[i];
+            let fb = self.byte_fallback[b as usize];
+            if fb != u32::MAX {
+                // Byte-fallback tokens have score -1000 in gemma; this makes
+                // them strictly worse than any normal merge.
+                let s = best_score[i] + self.scores[fb as usize];
+                if s > best_score[j] {
+                    best_score[j] = s;
+                    best_id[j] = fb;
+                    best_prev[j] = i;
+                }
+            }
+        }
+
+        // 2. Backtrack from n to 0
+        let mut out: Vec<u32> = Vec::new();
+        let mut p = n;
+        while p > 0 {
+            let id = best_id[p];
+            if id == u32::MAX {
+                // Should never happen — byte fallback guarantees coverage.
+                break;
+            }
+            out.push(id);
+            p = best_prev[p];
+        }
+        out.reverse();
+        out
+    }
+
+    fn encode_bpe_pretokenized(&self, bytes: &[u8]) -> Vec<u32> {
+        use crate::kernels::ffi;
+        let len = bytes.len();
 
         let mut flags = vec![0u8; len];
         let mut boundaries = vec![0u8; len];

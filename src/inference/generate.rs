@@ -132,10 +132,14 @@ impl Engine {
                 break;
             }
 
-            // Decode to text
-            let text = self.tokenizer.decode(&[token_id]);
-            on_token(&text);
-            output.push_str(&text);
+            // Hide CONTROL / USER_DEFINED tokens (e.g. <|think|>, <|channel>,
+            // <channel|>) from user-facing output. They still advance the
+            // model state via forward_one below.
+            if !self.tokenizer.is_control_or_user_defined(token_id) {
+                let text = self.tokenizer.decode(&[token_id]);
+                on_token(&text);
+                output.push_str(&text);
+            }
 
             // Forward to get next logits
             let logits = self.state.forward_one(&self.model, token_id, &self.pool);
