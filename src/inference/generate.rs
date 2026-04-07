@@ -145,19 +145,19 @@ impl Engine {
 // ---------------------------------------------------------------------------
 
 fn format_chat(user: &str, system: &str) -> String {
-    // Gemma 4 chat format: <bos><|turn>role\ncontent<turn|>\n<|turn>model\n
-    let mut out = String::with_capacity(system.len() + user.len() + 80);
-    if !system.is_empty() {
-        out.push_str("<|turn>user\n");
-        out.push_str(system);
-        out.push_str("\n\n");
-        out.push_str(user);
-        out.push_str("<turn|>\n");
-    } else {
-        out.push_str("<|turn>user\n");
-        out.push_str(user);
+    // Gemma 4 chat format (verbatim from GGUF jinja chat_template):
+    //   <bos><|turn>system\n{system_trimmed}<turn|>\n<|turn>user\n{user_trimmed}<turn|>\n<|turn>model\n
+    // BOS is added by the caller via tokenizer.bos_id (matches {{ bos_token }}).
+    let mut out = String::with_capacity(system.len() + user.len() + 96);
+    let sys_trim = system.trim();
+    if !sys_trim.is_empty() {
+        out.push_str("<|turn>system\n");
+        out.push_str(sys_trim);
         out.push_str("<turn|>\n");
     }
+    out.push_str("<|turn>user\n");
+    out.push_str(user.trim());
+    out.push_str("<turn|>\n");
     out.push_str("<|turn>model\n");
     out
 }
