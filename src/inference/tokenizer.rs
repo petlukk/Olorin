@@ -71,6 +71,11 @@ impl Tokenizer {
             .ok_or_else(|| Error::Inference("missing tokenizer.ggml.tokens".into()))?;
         let scores_arr = gguf.metadata.get("tokenizer.ggml.scores");
 
+        // Detect tokenizer model: gemma4 uses SentencePiece (raw vocab bytes,
+        // ▁ for space prefix). Llama 3 / tiktoken use GPT-2 byte-level encoding.
+        let tok_model = gguf.get_str("tokenizer.ggml.model").unwrap_or("").to_string();
+        let is_sentencepiece = tok_model == "gemma4" || tok_model == "llama";
+
         let token_strs = match tokens_arr {
             MetaValue::Array(arr) => {
                 let mut out = Vec::with_capacity(arr.len());
@@ -114,8 +119,18 @@ impl Tokenizer {
         let mut token_to_id = HashMap::with_capacity(token_strs.len());
 
         for (i, tok_str) in token_strs.iter().enumerate() {
-            let bytes = if let Some(b) = parse_byte_token(tok_str) {
-                vec![b]
+            // For sentencepiece, byte-fallback tokens (<0xNN>) are stored with
+            // their literal string as the key — they're only used when input
+            // contains bytes that aren't in vocab. The raw byte tokens (e.g.
+            // token 107 = '\n') must own the [0x0A] hashmap key, not be
+            // overwritten by token 248 = '<0x0A>'.
+            let bytes = if !is_sentencepiece && parse_byte_token(tok_str).is_some() {
+                vec![parse_byte_token(tok_str).unwrap()]
+            } else if is_sentencepiece {
+                // SentencePiece: vocab strings are raw UTF-8. ▁ (U+2581) marks
+                // space prefix, but we keep it as-is in the vocab map and let
+                // the encoder translate spaces to ▁ before lookup.
+                tok_str.as_bytes().to_vec()
             } else {
                 gpt2_decode_str(tok_str)
             };

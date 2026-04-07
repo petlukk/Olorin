@@ -48,9 +48,14 @@ impl Engine {
             tokenizer,
             state,
             pool,
+            // Defaults match llama.cpp + GGUF metadata for this model:
+            //   general.sampling.top_k = 64
+            //   general.sampling.top_p = 0.95
+            //   general.sampling.temp  = 1.0
+            // min_p / repetition_penalty come from llama.cpp CLI defaults.
             max_tokens: 2048,
-            temperature: 0.8,
-            top_k: 40,
+            temperature: 1.0,
+            top_k: 64,
             top_p: 0.95,
             min_p: 0.05,
             repetition_penalty: 1.0,
@@ -147,16 +152,28 @@ impl Engine {
 // ---------------------------------------------------------------------------
 
 fn format_chat(user: &str, system: &str) -> String {
-    // Gemma 4 chat format (verbatim from GGUF jinja chat_template):
-    //   <bos><|turn>system\n{system_trimmed}<turn|>\n<|turn>user\n{user_trimmed}<turn|>\n<|turn>model\n
-    // BOS is added by the caller via tokenizer.bos_id (matches {{ bos_token }}).
+    // Gemma 4 chat format — exact match for llama.cpp default behavior with
+    // enable_thinking=1 (the default for this instruction-tuned model).
+    //
+    // Jinja chat_template emits:
+    //   {{ bos_token }}                           <- caller adds bos_id
+    //   if enable_thinking or system or tools:
+    //     <|turn>system\n
+    //     if enable_thinking: <|think|>
+    //     if system: {system_trimmed}
+    //     <turn|>\n
+    //   for each msg:
+    //     <|turn>{role}\n{content}<turn|>\n
+    //   <|turn>model\n
     let mut out = String::with_capacity(system.len() + user.len() + 96);
     let sys_trim = system.trim();
+    // Always emit a system turn — llama.cpp defaults enable_thinking=1.
+    out.push_str("<|turn>system\n");
+    out.push_str("<|think|>");
     if !sys_trim.is_empty() {
-        out.push_str("<|turn>system\n");
         out.push_str(sys_trim);
-        out.push_str("<turn|>\n");
     }
+    out.push_str("<turn|>\n");
     out.push_str("<|turn>user\n");
     out.push_str(user.trim());
     out.push_str("<turn|>\n");
@@ -183,34 +200,25 @@ fn sample(
         return argmax(logits);
     }
 
-    // Apply temperature
-    for l in logits.iter_mut() {
-        *l /= temperature;
-    }
+    // Sampler order matches llama.cpp default chain:
+    //   top-k -> top-p -> min-p -> temperature -> softmax -> sample
+    // (Olorin previously divided logits by temperature first, which changes
+    // the *ordering* of probabilities at the top-p / min-p cutoffs only when
+    // combined with re-softmax — but it also changes which tokens survive
+    // top-k truncation when ties exist. Match llama.cpp exactly.)
 
-    // Find max for numerical stability + min_p threshold
-    let max_logit = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    let min_p_thresh = max_logit + min_p.max(1e-10).ln();
+    // 1. Build raw (index, logit) candidates
+    let mut candidates: Vec<(u32, f32)> = (0..n as u32)
+        .map(|i| (i, logits[i as usize]))
+        .collect();
 
-    // Build (index, logit) pairs, filter by min_p
-    let mut candidates: Vec<(u32, f32)> = Vec::with_capacity(top_k.min(n));
-    for (i, &l) in logits.iter().enumerate() {
-        if l >= min_p_thresh {
-            candidates.push((i as u32, l));
-        }
-    }
-
-    if candidates.is_empty() {
-        return argmax(logits);
-    }
-
-    // Top-k: sort descending, truncate
+    // 2. Top-k: partial sort, truncate
     candidates.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
     if candidates.len() > top_k {
         candidates.truncate(top_k);
     }
 
-    // Softmax over candidates
+    // 3. Softmax (for top-p / min-p we need probabilities)
     let cmax = candidates[0].1;
     let mut sum = 0.0f32;
     for c in candidates.iter_mut() {
@@ -222,7 +230,7 @@ fn sample(
         c.1 *= inv_sum;
     }
 
-    // Top-p: accumulate, cut
+    // 4. Top-p: accumulate, cut
     let mut cumulative = 0.0f32;
     let mut cutoff = candidates.len();
     for (i, c) in candidates.iter().enumerate() {
@@ -234,11 +242,36 @@ fn sample(
     }
     candidates.truncate(cutoff);
 
-    // Re-normalize after top-p
-    let sum2: f32 = candidates.iter().map(|c| c.1).sum();
-    let inv2 = 1.0 / sum2;
-    for c in candidates.iter_mut() {
-        c.1 *= inv2;
+    // 5. Min-p: keep tokens with prob >= min_p * max_prob
+    let pmax = candidates[0].1;
+    let min_thresh = min_p * pmax;
+    candidates.retain(|c| c.1 >= min_thresh);
+    if candidates.is_empty() {
+        return argmax(logits);
+    }
+
+    // 6. Temperature — applied as scaling on log-probs, then re-softmax
+    if (temperature - 1.0).abs() > 1e-6 {
+        for c in candidates.iter_mut() {
+            c.1 = c.1.ln() / temperature;
+        }
+        let cmax2 = candidates.iter().map(|c| c.1).fold(f32::NEG_INFINITY, f32::max);
+        let mut s2 = 0.0f32;
+        for c in candidates.iter_mut() {
+            c.1 = (c.1 - cmax2).exp();
+            s2 += c.1;
+        }
+        let inv2 = 1.0 / s2;
+        for c in candidates.iter_mut() {
+            c.1 *= inv2;
+        }
+    } else {
+        // Re-normalize after min-p truncation
+        let s2: f32 = candidates.iter().map(|c| c.1).sum();
+        let inv2 = 1.0 / s2;
+        for c in candidates.iter_mut() {
+            c.1 *= inv2;
+        }
     }
 
     // Sample with xorshift64
