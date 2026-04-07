@@ -10,7 +10,7 @@ use crate::inference::engine::Gemma4Model;
 use crate::inference::matmul;
 use crate::kernels::ffi_inference;
 
-use super::forward::{bare_rmsnorm, compute_rope_tables, diag_enabled, l2_norm, Gemma4State};
+use super::forward::{compute_rope_tables, diag_enabled, l2_norm, Gemma4State};
 
 impl Gemma4State {
     /// Full layer forward pass matching llama.cpp gemma4-iswa.cpp.
@@ -95,18 +95,9 @@ impl Gemma4State {
 
         // ── 3. Q norm (per-head, weight+1) + RoPE ───────────────────
         if !lw.q_norm.is_null() {
-            for h in 0..n_heads {
-                let off = h * head_dim;
-                ffi_inference::gemma4_rmsnorm(
-                    self.q.as_ptr().wrapping_add(off),
-                    lw.q_norm,
-                    self.kv_f32_scratch.as_mut_ptr(),
-                    head_dim as i32,
-                    model.rms_eps,
-                );
-                self.q[off..off + head_dim]
-                    .copy_from_slice(&self.kv_f32_scratch[..head_dim]);
-            }
+            super::forward_attn_heads::q_norm_per_head(
+                self, lw.q_norm, n_heads, head_dim, model.rms_eps,
+            );
         }
 
         // RoPE on Q (uses n_rot, not full head_dim)
@@ -143,28 +134,15 @@ impl Gemma4State {
 
             // K norm (per-head, weight+1)
             if !lw.k_norm.is_null() {
-                for h in 0..n_kv_heads {
-                    let off = h * head_dim;
-                    ffi_inference::gemma4_rmsnorm(
-                        self.k.as_ptr().wrapping_add(off),
-                        lw.k_norm,
-                        self.kv_f32_scratch.as_mut_ptr(),
-                        head_dim as i32,
-                        model.rms_eps,
-                    );
-                    self.k[off..off + head_dim]
-                        .copy_from_slice(&self.kv_f32_scratch[..head_dim]);
-                }
+                super::forward_attn_heads::k_norm_per_head(
+                    self, lw.k_norm, n_kv_heads, head_dim, model.rms_eps,
+                );
             }
 
             // V norm: BARE RMSNorm (no weight! just normalize)
-            for h in 0..n_kv_heads {
-                let off = h * head_dim_v;
-                bare_rmsnorm(
-                    &mut self.v[off..off + head_dim_v],
-                    model.rms_eps,
-                );
-            }
+            super::forward_attn_heads::v_bare_norm_per_head(
+                self, n_kv_heads, head_dim_v, model.rms_eps,
+            );
 
             // RoPE on K
             ffi_inference::gemma4_rope(
@@ -200,7 +178,8 @@ impl Gemma4State {
         let v_ptr = self.cache.v_ptr(il);
         let kv_dim = n_kv_heads * head_dim;
 
-        self.attention_decode(
+        super::forward_attn_heads::attention_decode(
+            self,
             n_heads, n_kv_heads, gqa_ratio, head_dim,
             kv_dim, attn_len, attn_scale, k_ptr, v_ptr,
         );
@@ -356,77 +335,6 @@ impl Gemma4State {
                 "[gemma4] L{il} out L2={:.4} scale={:.6}",
                 l2_norm(&self.x[..hd]), out_scale
             );
-        }
-    }
-
-    /// GQA attention decode: Q dot K -> softmax(scale) -> weighted V sum.
-    pub(crate) fn attention_decode(
-        &mut self,
-        n_heads: usize,
-        _n_kv_heads: usize,
-        gqa_ratio: usize,
-        head_dim: usize,
-        kv_dim: usize,
-        attn_len: usize,
-        scale: f32,
-        k_ptr: *const u16,
-        v_ptr: *const u16,
-    ) {
-        let stride = kv_dim;
-
-        for h in 0..n_heads {
-            let kv_h = h / gqa_ratio;
-            let q_off = h * head_dim;
-            let q_slice = &self.q[q_off..q_off + head_dim];
-
-            // Q dot K for each cached position
-            for p in 0..attn_len {
-                let k_offset = p * stride + kv_h * head_dim;
-                let k_src = unsafe { k_ptr.add(k_offset) };
-                unsafe {
-                    ffi_inference::f16_to_f32(
-                        k_src,
-                        self.kv_f32_scratch.as_mut_ptr(),
-                        head_dim as i32,
-                    );
-                }
-                self.attn_scores[p] = ffi_inference::f32_dot(
-                    q_slice.as_ptr(),
-                    self.kv_f32_scratch.as_ptr(),
-                    head_dim as i32,
-                );
-            }
-
-            // Softmax with scale (1.0 for Gemma4)
-            unsafe {
-                ffi_inference::softmax_f32(
-                    self.attn_scores.as_mut_ptr(),
-                    attn_len as i32,
-                    scale,
-                );
-            }
-
-            // Weighted V sum
-            let out_off = q_off;
-            self.attn_out[out_off..out_off + head_dim].fill(0.0);
-            for p in 0..attn_len {
-                let v_offset = p * stride + kv_h * head_dim;
-                let v_src = unsafe { v_ptr.add(v_offset) };
-                unsafe {
-                    ffi_inference::f16_to_f32(
-                        v_src,
-                        self.kv_f32_scratch.as_mut_ptr(),
-                        head_dim as i32,
-                    );
-                }
-                let s = self.attn_scores[p];
-                ffi_inference::f32_dot_acc(
-                    self.attn_out[out_off..].as_mut_ptr(),
-                    self.kv_f32_scratch.as_ptr(),
-                    s,
-                    head_dim as i32,
-                );
-            }
         }
     }
 
