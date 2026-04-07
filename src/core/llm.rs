@@ -193,4 +193,4 @@ pub fn format_chatml(messages: &[Message], tools: &[ToolDef], system: &str) -> S
 
 // ── System prompt ────────────────────────────────────────────────────────────
 
-pub const SYSTEM_PROMPT: &str = "Answer in one sentence. Be direct.";
+pub const SYSTEM_PROMPT: &str = "";
