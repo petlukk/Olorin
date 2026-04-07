@@ -1045,6 +1045,145 @@ loop or matmul reduction tails.
 
 ---
 
+## Real-World Measurement and llama.cpp Comparison
+
+Added 2026-04-07 after the parallelization plan landed. Three independent
+measurements all agree on **~12–15% end-to-end speedup**, and a deeper
+benchmark identified the next bottleneck.
+
+### Speedup signals (all on the same machine, same gguf)
+
+| source | pre-parallel | post-parallel | gain |
+|---|---|---|---|
+| **Web UI, real prompt** *(canonical user-facing number)* | **6.1 tok/s** | **7.0 tok/s** | **+15%** |
+| Stochastic CLI end-to-end (94s vs 84s on a 200-word story prompt) | ~94 s median | ~84 s median | +12% |
+| Synthetic greedy decode (`tests/bench_decode_speed.rs`) | ~7.5 tok/s | ~8.6 tok/s | +15% |
+
+The Web UI number is the one to quote — it includes the full Olorin Pipe
+(safety, intent router, recall, vault), tokenizer, sampling, HTTP streaming,
+and a real user prompt. The synthetic bench is faster because it skips all
+of that and just hammers `forward_one(token) → argmax(logits)` in a loop.
+
+### Apples-to-apples vs llama.cpp master
+
+llama.cpp at github.com/ggml-org/llama.cpp master commit `4eb1951` (post
+PR #21309 which added gemma4 architecture support — Arch package `b7376` is
+too old, you need to build from source). Same gguf, same 16 threads, same
+prompt, both use greedy / temp 0.
+
+| metric | olorin (gemma4-cleanup, post-parallel) | llama.cpp master | winner |
+|---|---|---|---|
+| load time | 2383 ms | 2440 ms | tie |
+| **prompt eval (prefill)** | 8.47 tok/s, 118 ms/tok | **13.96 tok/s, 72 ms/tok** | llama.cpp **1.65×** |
+| **decode (eval)** | **8.64 tok/s, 116 ms/tok** | 4.64 tok/s, 215 ms/tok | olorin **1.86×** |
+| time to first token | 113 ms | ~75 ms | llama.cpp |
+| **peak RSS** | **3414 MB** | 4188 MB | olorin (−775 MB) |
+| KV cache (computed) | 9 MB *(20/35 layers shared, 1 KV head, f16)* | n/a | — |
+| **avg cores busy (decode)** | **8.2 / 16** | n/a | — |
+| **parallel efficiency (decode)** | **51 %** | n/a | half the CPU is idle |
+
+**Headlines:**
+1. **Decode is ~2× faster than mainline llama.cpp.** The Ea SIMD kernels plus
+   the parallelization plan we just landed beat llama.cpp's freshly-merged
+   gemma4 path on autoregressive token generation.
+2. **Prefill is ~1.7× *slower* than llama.cpp.** Olorin has no batched prefill
+   — `forward_one()` processes one token at a time, so prefilling 9 tokens is
+   9 sequential decode calls. llama.cpp does true parallel attention over all
+   prompt tokens at once. **This is the next bottleneck to address** if olorin
+   wants to beat llama.cpp on long-prompt workloads.
+3. **775 MB lighter peak RSS.** Probably because olorin doesn't allocate
+   llama.cpp's compute graph scratch + scheduler buffers, and Q4K weights
+   stay quantized in olorin's loader.
+4. **Parallel efficiency 51 %.** Average 8.2 of 16 cores busy during decode.
+   The biggest remaining headroom — likely sources, in order of suspicion:
+   matmul barrier load imbalance (workers waiting for the slowest tid before
+   `pool.run` returns), the n_heads=8 ceiling on the attention loop and norms
+   we just parallelized, and single-threaded glue between parallel sections
+   (RoPE, GELU, residuals, KV-cache store, argmax sampling).
+
+### How to reproduce — copy/paste commands
+
+**Build olorin** (Ea compiler must be in PATH):
+
+```bash
+PATH="$HOME/projects/eacompute/target/release:$PATH" cargo build --release
+```
+
+**Olorin synthetic decode bench** (deterministic, greedy, 64 tokens):
+
+```bash
+PATH="$HOME/projects/eacompute/target/release:$PATH" \
+    cargo test --release --test bench_decode_speed -- --nocapture
+```
+
+Reports load time, prefill, decode (incl. TTFT and sustained), per-step
+latency curve, peak RSS, KV cache, and parallel efficiency. ~10 seconds.
+
+**Olorin Web UI / interactive** (the canonical 6.1 → 7.0 tok/s path):
+
+```bash
+./target/release/olorin --serve              # Web UI on :8080
+./target/release/olorin                      # REPL
+echo -e "your prompt\n/quit" | ./target/release/olorin   # one-shot via REPL
+```
+
+**llama.cpp build** (mainline, post PR #21309 needed for gemma4):
+
+```bash
+cd ~/projects/llama.cpp
+git pull origin master
+cmake --build build -j --target llama-batched llama-cli
+# binary lands at: build/bin/llama-batched
+```
+
+**llama.cpp decode benchmark** — *exact* invocation matching olorin's bench
+(9-token prompt, 64 generated tokens, 16 threads, greedy, ignore-eos so it
+runs the full 64 instead of stopping at EOS):
+
+```bash
+~/projects/llama.cpp/build/bin/llama-batched \
+    -m ~/.olorin/models/gemma-4-e2b-it-Q4_K_M.gguf \
+    -p "Write a long story about a robot:" \
+    -n 64 --temp 0 -t 16 --ignore-eos
+```
+
+Look for the `eval time` line in stderr — that's the decode tok/s number to
+quote. The `prompt eval time` line is prefill. Don't use `llama-cli` for
+benchmarking on this machine; it forces conversation mode and crashes on
+`--no-conversation` post-master. `llama-batched` is the right tool.
+
+**Peak RSS for llama.cpp** (no GNU `time` on Arch by default — sample
+`/proc/<pid>/status` directly):
+
+```bash
+~/projects/llama.cpp/build/bin/llama-batched <args> 2>/tmp/lc.log >/dev/null & PID=$!
+while kill -0 $PID 2>/dev/null; do
+    HWM=$(grep VmHWM /proc/$PID/status 2>/dev/null | awk '{print $2}')
+    [ -n "$HWM" ] && PEAK=$HWM
+    sleep 0.2
+done
+echo "Peak RSS: $((PEAK / 1024)) MB"
+grep -E "load time|prompt eval|eval time|total time" /tmp/lc.log
+```
+
+### Next bottleneck (not started — would be a new plan)
+
+**Batched prefill.** Process N prompt tokens in one forward pass with parallel
+attention over all positions, instead of N sequential `forward_one()` calls.
+Closes the prefill gap to llama.cpp and probably improves parallel efficiency
+along the way (more rows of work per matmul call → better load balance).
+
+The architecture change: a new `forward_batch(&[token])` method on `Gemma4State`
+that takes a slice of tokens, runs Q/K/V projection as a matmul not a matvec
+(rows = batch_size × n_heads × head_dim), and computes attention with K/V
+spanning all batch positions at once. The kv_cache store would move from
+per-token append to per-batch append. Sampling stays sequential (still one
+token chosen per position).
+
+Not in scope for this plan — separate plan when prefill becomes a priority.
+
+---
+
 ## Self-Review Notes
 
 **Spec coverage:**
