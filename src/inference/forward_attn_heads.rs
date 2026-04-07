@@ -20,19 +20,46 @@ pub(crate) fn q_norm_per_head(
     n_heads: usize,
     head_dim: usize,
     rms_eps: f32,
+    pool: &crate::inference::threadpool::ThreadPool,
 ) {
-    for h in 0..n_heads {
-        let off = h * head_dim;
-        ffi_inference::gemma4_rmsnorm(
-            state.q.as_ptr().wrapping_add(off),
-            q_norm,
-            state.kv_f32_scratch.as_mut_ptr(),
-            head_dim as i32,
-            rms_eps,
-        );
-        state.q[off..off + head_dim]
-            .copy_from_slice(&state.kv_f32_scratch[..head_dim]);
-    }
+    let kv_scratch_stride = state.kv_scratch_stride;
+    let q_addr = state.q.as_mut_ptr() as usize;
+    let scratch_addr = state.kv_f32_scratch.as_mut_ptr() as usize;
+    let q_norm_addr = q_norm as usize;
+
+    let n_workers = n_heads.min(pool.thread_count()).max(1);
+
+    pool.run(n_workers, |tid, nt| {
+        let per = (n_heads + nt - 1) / nt;
+        let h_start = tid * per;
+        let h_end = ((tid + 1) * per).min(n_heads);
+        if h_start >= h_end { return; }
+
+        let q_ptr = q_addr as *mut f32;
+        let q_norm_ptr = q_norm_addr as *const f32;
+        let scratch_base = unsafe {
+            (scratch_addr as *mut f32).add(tid * kv_scratch_stride)
+        };
+
+        for h in h_start..h_end {
+            let off = h * head_dim;
+            let q_head_in = unsafe { q_ptr.add(off) as *const f32 };
+            ffi_inference::gemma4_rmsnorm(
+                q_head_in,
+                q_norm_ptr,
+                scratch_base,
+                head_dim as i32,
+                rms_eps,
+            );
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    scratch_base as *const f32,
+                    q_ptr.add(off),
+                    head_dim,
+                );
+            }
+        }
+    });
 }
 
 pub(crate) fn k_norm_per_head(
@@ -41,19 +68,46 @@ pub(crate) fn k_norm_per_head(
     n_kv_heads: usize,
     head_dim: usize,
     rms_eps: f32,
+    pool: &crate::inference::threadpool::ThreadPool,
 ) {
-    for h in 0..n_kv_heads {
-        let off = h * head_dim;
-        ffi_inference::gemma4_rmsnorm(
-            state.k.as_ptr().wrapping_add(off),
-            k_norm,
-            state.kv_f32_scratch.as_mut_ptr(),
-            head_dim as i32,
-            rms_eps,
-        );
-        state.k[off..off + head_dim]
-            .copy_from_slice(&state.kv_f32_scratch[..head_dim]);
-    }
+    let kv_scratch_stride = state.kv_scratch_stride;
+    let k_addr = state.k.as_mut_ptr() as usize;
+    let scratch_addr = state.kv_f32_scratch.as_mut_ptr() as usize;
+    let k_norm_addr = k_norm as usize;
+
+    let n_workers = n_kv_heads.min(pool.thread_count()).max(1);
+
+    pool.run(n_workers, |tid, nt| {
+        let per = (n_kv_heads + nt - 1) / nt;
+        let h_start = tid * per;
+        let h_end = ((tid + 1) * per).min(n_kv_heads);
+        if h_start >= h_end { return; }
+
+        let k_ptr = k_addr as *mut f32;
+        let k_norm_ptr = k_norm_addr as *const f32;
+        let scratch_base = unsafe {
+            (scratch_addr as *mut f32).add(tid * kv_scratch_stride)
+        };
+
+        for h in h_start..h_end {
+            let off = h * head_dim;
+            let k_head_in = unsafe { k_ptr.add(off) as *const f32 };
+            ffi_inference::gemma4_rmsnorm(
+                k_head_in,
+                k_norm_ptr,
+                scratch_base,
+                head_dim as i32,
+                rms_eps,
+            );
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    scratch_base as *const f32,
+                    k_ptr.add(off),
+                    head_dim,
+                );
+            }
+        }
+    });
 }
 
 pub(crate) fn v_bare_norm_per_head(
@@ -61,11 +115,26 @@ pub(crate) fn v_bare_norm_per_head(
     n_kv_heads: usize,
     head_dim_v: usize,
     rms_eps: f32,
+    pool: &crate::inference::threadpool::ThreadPool,
 ) {
-    for h in 0..n_kv_heads {
-        let off = h * head_dim_v;
-        bare_rmsnorm(&mut state.v[off..off + head_dim_v], rms_eps);
-    }
+    let v_addr = state.v.as_mut_ptr() as usize;
+    let n_workers = n_kv_heads.min(pool.thread_count()).max(1);
+
+    pool.run(n_workers, |tid, nt| {
+        let per = (n_kv_heads + nt - 1) / nt;
+        let h_start = tid * per;
+        let h_end = ((tid + 1) * per).min(n_kv_heads);
+        if h_start >= h_end { return; }
+
+        let v_ptr = v_addr as *mut f32;
+        for h in h_start..h_end {
+            let off = h * head_dim_v;
+            let slice = unsafe {
+                std::slice::from_raw_parts_mut(v_ptr.add(off), head_dim_v)
+            };
+            bare_rmsnorm(slice, rms_eps);
+        }
+    });
 }
 
 pub(crate) fn attention_decode(

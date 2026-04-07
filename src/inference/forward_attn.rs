@@ -96,7 +96,7 @@ impl Gemma4State {
         // ── 3. Q norm (per-head, weight+1) + RoPE ───────────────────
         if !lw.q_norm.is_null() {
             super::forward_attn_heads::q_norm_per_head(
-                self, lw.q_norm, n_heads, head_dim, model.rms_eps,
+                self, lw.q_norm, n_heads, head_dim, model.rms_eps, pool,
             );
         }
 
@@ -135,13 +135,13 @@ impl Gemma4State {
             // K norm (per-head, weight+1)
             if !lw.k_norm.is_null() {
                 super::forward_attn_heads::k_norm_per_head(
-                    self, lw.k_norm, n_kv_heads, head_dim, model.rms_eps,
+                    self, lw.k_norm, n_kv_heads, head_dim, model.rms_eps, pool,
                 );
             }
 
             // V norm: BARE RMSNorm (no weight! just normalize)
             super::forward_attn_heads::v_bare_norm_per_head(
-                self, n_kv_heads, head_dim_v, model.rms_eps,
+                self, n_kv_heads, head_dim_v, model.rms_eps, pool,
             );
 
             // RoPE on K
