@@ -8,7 +8,7 @@ The Eä kernel must produce output that is **byte-for-byte identical** to what
 
 ## 1. Canonical `block_q4_K` (source, per-row)
 
-From `ggml/src/ggml-common.h:317-328`:
+From `ggml/src/ggml-common.h`, struct `block_q4_K` (at the time of writing, lines 317-328):
 
 ```c
 #define QK_K          256
@@ -44,7 +44,7 @@ Byte layout of one `block_q4_K` (offset → field):
 
 ## 2. `block_q4_Kx8` (destination, 8 rows interleaved)
 
-From `ggml/src/ggml-cpu/repack.h:43-50`:
+From `ggml/src/ggml-cpu/repack.h`, struct `block_q4_Kx8` (at the time of writing, lines 43-50):
 
 ```c
 struct block_q4_Kx8 {
@@ -76,7 +76,7 @@ rearrangement of 8 source blocks.
 
 ## 3. Outer repack loop
 
-From `repack.cpp:3231-3260` (`repack_q4_K_to_q4_K_8_bl`):
+From `ggml/src/ggml-cpu/repack.cpp`, function `repack_q4_K_to_q4_K_8_bl` (at the time of writing, lines 3231-3260):
 
 ```c
 constexpr int nrows_interleaved = 8;
@@ -106,7 +106,9 @@ Key facts:
 - Destination is written sequentially as `*dst++`.
 - `interleave_block` is always 8 for the `_8_bl` variant.
 
-## 4. `make_block_q4_Kx8` (inner repack) — from `repack.cpp:2836-2911`
+## 4. `make_block_q4_Kx8` (inner repack)
+
+From `ggml/src/ggml-cpu/repack.cpp`, function `make_block_q4_Kx8` (at the time of writing, lines 2836-2911).
 
 ### 4a. `d` and `dmin`
 
@@ -157,7 +159,36 @@ dst[1016..1023] = row7.qs[120..127]
 This is the pattern the Eä kernel must reproduce. No bit-twiddling on qs — it's
 pure 8-byte gather/scatter.
 
+All `memcpy`/`u64` copies in `make_block_q4_Kx8` are byte-identity moves; the Eä kernel must do an 8-byte byte copy, not a semantic u64 load/store. (Olorin only targets little-endian; this is documentation hygiene.)
+
 ### 4c. `scales` repacking (out.scales[96])
+
+**Q4K scales convention (canonical source layout).** Before reading the repack,
+it helps to know what `in[j].scales[i]` actually means in the source
+`block_q4_K`. A Q4K block contains 8 sub-blocks of 32 weights each, so there
+are 8 per-sub-block *scale* values and 8 per-sub-block *min* values, each 6
+bits wide, packed into the 12-byte `scales[12]` field as follows:
+
+- `scales[0..3]` hold the low 6 bits of the per-sub-block *scale* for
+  sub-blocks 0..3 (one value per byte, bits 0..5).
+- `scales[4..7]` hold the low 6 bits of the per-sub-block *min* for sub-blocks
+  0..3 (bits 0..5).
+- `scales[8..11]` hold the combined info for sub-blocks 4..7: the **low 4
+  bits** of the scale for sub-block `4+k` in the low nibble of byte `8+k`, and
+  the low 4 bits of the min for sub-block `4+k` in the high nibble of byte
+  `8+k`.
+- The **high 2 bits** of scale/min for sub-blocks 4..7 are stolen from bits
+  6..7 of `scales[0..3]` (scales) and `scales[4..7]` (mins) respectively.
+
+So reconstructing the 6-bit scale for sub-block `i` (`i` in 0..3) on row `j`
+is `in[j].scales[i] & 63`, while for sub-block `i+4` it is
+`((in[j].scales[i] & 0xC0) >> 2) | (in[j].scales[i+8] & 0x0F)`. The repack
+below uses exactly this decomposition. (Verified against `ggml-common.h` near
+`block_q4_K`; if that source ever changes, re-check before trusting this
+summary.)
+
+The repack rearranges these so that sub-block-`i` from row-`r` ends up at a
+known offset inside the interleaved `scales[96]` block of `block_q4_Kx8`.
 
 Source `scales[12]` is the standard Q4K 6-bit packed layout encoding 8 sub-block
 scales and 8 sub-block mins. The repack unpacks into locals `s[0..7]` and
@@ -212,9 +243,22 @@ same twelve-line pattern as above (just offset by 48):
 ```
 out.scales[i*12 + 48] = (s[0] & 63) | ((s[4] & 48) << 2);
 out.scales[i*12 + 49] = (s[1] & 63) | ((s[5] & 48) << 2);
-...
+out.scales[i*12 + 50] = (s[2] & 63) | ((s[6] & 48) << 2);
+out.scales[i*12 + 51] = (s[3] & 63) | ((s[7] & 48) << 2);
+out.scales[i*12 + 52] = (m[0] & 63) | ((m[4] & 48) << 2);
+out.scales[i*12 + 53] = (m[1] & 63) | ((m[5] & 48) << 2);
+out.scales[i*12 + 54] = (m[2] & 63) | ((m[6] & 48) << 2);
+out.scales[i*12 + 55] = (m[3] & 63) | ((m[7] & 48) << 2);
+out.scales[i*12 + 56] = (s[4] & 15) | ((m[4] & 15) << 4);
+out.scales[i*12 + 57] = (s[5] & 15) | ((m[5] & 15) << 4);
+out.scales[i*12 + 58] = (s[6] & 15) | ((m[6] & 15) << 4);
 out.scales[i*12 + 59] = (s[7] & 15) | ((m[7] & 15) << 4);
 ```
+
+Note: in this second half, `s[0..7]` and `m[0..7]` are the *upper*
+sub-block values (sub-blocks 4..7 of the source, i.e. `s4..s7`/`m4..m7`
+in the preamble's terminology), reconstructed from the high-2-bits +
+low-nibble encoding described above.
 
 Fills bytes 48..95 of `out.scales`.
 
@@ -251,10 +295,9 @@ n_repacked_blocks = (nrow / 8) * (ncol / 256)
 total_bytes       = n_repacked_blocks * 1152
 ```
 
-which equals `nrow * ncol / 2 + nrow * (2 + 2 + 12) / 1` = `nrow * ncol / 2 +
-nrow * 16`, i.e. exactly the same total as `nrow * nblocks *
-sizeof(block_q4_K)` — the repack does not add or remove bytes, it only permutes
-them.
+This equals `nrow * nblocks * sizeof(block_q4_K)` — the `8 * 144 = 1152`
+identity in section 2 already proves the repack does not add or remove bytes,
+it only permutes them.
 
 ## 6. Loop order summary for the Eä kernel
 
