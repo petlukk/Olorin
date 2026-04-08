@@ -1,5 +1,5 @@
 {
-  "library": "/root/dev/olorin/target/release/build/olorin-fa2b56993063a241/out/libq4k_quant.so",
+  "library": "/root/dev/olorin/target/release/build/olorin-30f5016df977a983/out/libq4k_quant.so",
   "exports": [
     {
       "name": "quant_f32_q8k",

@@ -52,23 +52,24 @@ export func quant_f32_q8k(
             let d: f32 = amax / 127.0
             dst_d[b] = d
 
-            // Pass 2: quantize f32 -> i8 with round-to-nearest (matching llama.cpp)
-            // fptosi truncates toward zero; we need nearest-int rounding.
-            // Round: add copysign(0.5, x) before fptosi.
+            // Pass 2: quantize f32 -> i8 with round-to-nearest-even (banker's),
+            // matching llama.cpp's nearest_int (ggml-quants.c quantize_row_q8_K_ref).
+            // Magic-number trick: (x + 1.5*2^23) - 1.5*2^23 forces IEEE 754
+            // round-half-to-even because adding the magic shifts the rounding
+            // boundary onto the integer position. Result is an integer-valued
+            // f32, which narrow_f32x4_i8 (fptosi) then truncates exactly.
             let inv_scale: f32 = 127.0 / amax
             let v_inv: f32x4 = splat(inv_scale)
             let v_min: f32x4 = splat(-127.0)
             let v_max: f32x4 = splat(127.0)
-            let v_half: f32x4 = splat(0.5)
-            let v_nhalf: f32x4 = splat(-0.5)
-            let v_zero: f32x4 = splat(0.0)
+            let v_magic: f32x4 = splat(12582912.0)
 
             i = 0
             while i < 256 {
                 let v: f32x4 = load(src, base + i)
                 let scaled: f32x4 = v .* v_inv
                 let clamped: f32x4 = select(scaled .< v_min, v_min, select(scaled .> v_max, v_max, scaled))
-                let rounded: f32x4 = clamped .+ select(clamped .> v_zero, v_half, v_nhalf)
+                let rounded: f32x4 = (clamped .+ v_magic) .- v_magic
                 let narrow: i8x4 = narrow_f32x4_i8(rounded)
                 store(dst_qs, base + i, narrow)
                 i = i + 4

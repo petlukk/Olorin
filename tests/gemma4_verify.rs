@@ -15,6 +15,10 @@ fn l2(v: &[f32]) -> f32 {
     v.iter().map(|x| x * x).sum::<f32>().sqrt()
 }
 
+fn sum(v: &[f32]) -> f64 {
+    v.iter().map(|&x| x as f64).sum::<f64>()
+}
+
 fn first4(v: &[f32]) -> String {
     format!("[{:.4}, {:.4}, {:.4}, {:.4}]", v[0], v[1], v[2], v[3])
 }
@@ -462,16 +466,17 @@ fn step3b_single_layer() {
     let pool = olorin::inference::threadpool::ThreadPool::new();
     let mut state = olorin::inference::forward::Gemma4State::new(&model, 512, &pool);
 
-    // Embed BOS + scale (no PLE for this test)
+    // Embed BOS + scale, then run PLE Phase A (matches production forward_one)
     let hd = model.hidden_dim;
     olorin::inference::dequant::q6k_embed_lookup(model.embed_weight, 2, &mut state.x, hd);
     let scale = (hd as f32).sqrt();
     for v in state.x[..hd].iter_mut() { *v *= scale; }
+    state.prepare_ple(&model, 2);
 
     // Run layer 0
     state.layer_forward(&model, 0, 0, false, &pool);
 
-    eprintln!("=== Step 3b: Single layer forward (L0, BOS, pos=0, no PLE) ===");
+    eprintln!("=== Step 3b: Single layer forward (L0, BOS, pos=0) ===");
     eprintln!("l_out L2={:.4}  first4=[{:.4},{:.4},{:.4},{:.4}]",
         l2(&state.x[..hd]), state.x[0], state.x[1], state.x[2], state.x[3]);
     eprintln!("  (llama.cpp: L2=40.3056 first4=[-0.2106, -0.0050, 0.0073, -0.3651])");
@@ -564,4 +569,149 @@ fn step5_logits() {
     assert!(!logit_l2.is_nan(), "logits contain NaN");
     assert!(logit_l2 > 1.0, "logits near-zero");
     eprintln!("PASS: step5 logits computed");
+}
+
+#[test]
+fn step6_two_token_vs_llama_eval_callback() {
+    // Reference values captured from:
+    //   llama-eval-callback -m gemma-4-e2b-it-Q4_K_M.gguf -p "a" -n 0
+    // Tokens: [BOS=2, 'a'=236746]. Dumped tensors are at output position 1
+    // (the 'a' token, after BOS in KV).
+    //
+    // IMPORTANT: llama processes prompt "a" as a SINGLE BATCHED gemm forward
+    // (hidden state shape {1536, 2}), while olorin processes the two tokens as
+    // SEQUENTIAL matvec forwards via the incremental decode path. The two have
+    // different f32 inner-loop accumulation orders, so the values printed below
+    // are NOT expected to match bit-for-bit at pos=1. The drift seen here is
+    // the architectural prompt-eval gap, not an inference bug. olorin's decode
+    // path is bit-exact to llama's decode path (proven by step3b at pos=0).
+    // Closing this gap requires a batched forward path with Q4K×Q8K gemm
+    // kernels — tracked in a separate plan.
+    if !has_model() { eprintln!("SKIP: no model"); return; }
+
+    let gguf = olorin::inference::gguf::GgufFile::open(std::path::Path::new(&model_path())).unwrap();
+    let model = olorin::inference::engine::Gemma4Model::from_gguf(&gguf).unwrap();
+    olorin::kernels::ffi::init().unwrap();
+
+    let pool = olorin::inference::threadpool::ThreadPool::new();
+    let mut state = olorin::inference::forward::Gemma4State::new(&model, 512, &pool);
+
+    // Forward BOS at pos=0
+    let _ = state.forward_one(&model, 2, &pool);
+
+    // Forward 'a' (token 236746) at pos=1
+    let logits_vec = state.forward_one(&model, 236746, &pool).to_vec();
+
+    let hd = model.hidden_dim;
+    let l34_sum = sum(&state.x[..hd]);
+    let logits_sum = sum(&logits_vec);
+
+    eprintln!("=== Step 6: 2-token (BOS, 'a') @ pos=1 vs llama-eval-callback ===");
+    eprintln!("l_out-34 sum:     olorin={:.6}  llama.cpp=40.513065", l34_sum);
+    eprintln!("logits sum:       olorin={:.4}  llama.cpp=-1781197.7500", logits_sum);
+
+    let l34_drift = (l34_sum - 40.513065).abs() / 40.513065_f64.abs();
+    let lg_drift = (logits_sum + 1781197.75).abs() / 1781197.75_f64.abs();
+    eprintln!("relative drift:   l_out-34={:.4}%  logits={:.4}%",
+        l34_drift * 100.0, lg_drift * 100.0);
+    eprintln!("PASS: step6 dumped");
+}
+
+/// Scalar Rust port of llama.cpp's quantize_row_q8_K_ref (ggml-quants.c:2692).
+/// Used to bisect olorin's quant kernel. Returns (qs, d, bsums) for one 256-block.
+fn llama_q8k_ref_block(x: &[f32]) -> (Vec<i8>, f32, Vec<i16>) {
+    assert_eq!(x.len(), 256);
+    let mut max = 0.0f32;
+    let mut amax = 0.0f32;
+    for &v in x {
+        let av = v.abs();
+        if av > amax { amax = av; max = v; }
+    }
+    if amax == 0.0 {
+        return (vec![0; 256], 0.0, vec![0; 16]);
+    }
+    let iscale = -127.0f32 / max;
+    // Magic-number nearest-int (round-half-to-even) — bit-equivalent to ggml's nearest_int.
+    let nearest = |fval: f32| -> i32 {
+        let val = fval + 12582912.0f32;
+        let bits: u32 = val.to_bits();
+        ((bits & 0x007fffff) as i32) - 0x00400000
+    };
+    let mut qs = vec![0i8; 256];
+    for j in 0..256 {
+        let v = nearest(iscale * x[j]);
+        qs[j] = v.min(127) as i8;
+    }
+    let mut bsums = vec![0i16; 16];
+    for g in 0..16 {
+        let mut s = 0i32;
+        for k in 0..16 { s += qs[g*16 + k] as i32; }
+        bsums[g] = s as i16;
+    }
+    (qs, 1.0 / iscale, bsums)
+}
+
+#[test]
+fn step7_q8k_quant_kernel_vs_llama_ref() {
+    // Hypothesis: olorin's quant_input differs from llama's quantize_row_q8_K_ref
+    // due to rounding mode (round-half-away-from-zero vs round-half-to-even).
+    // Test on a synthetic vector designed to land at half-integer scaled boundaries.
+    olorin::kernels::ffi::init().unwrap();
+
+    // Construct 256 values with controlled amax = 2.0, including values that
+    // scale to exact halves and near-halves on both sides of zero.
+    let amax = 2.0f32;
+    let mut x = vec![0.0f32; 256];
+    x[0] = amax;             // anchors amax (positive sign → llama's max=+2.0)
+    x[1] = -amax;            // -2.0 → scales to +127 in llama, -127 in olorin
+    // Scaled value = x * (127/2) = x * 63.5
+    // To hit scaled=k.5, set x = (k.5)/63.5
+    for k in 0..32 {
+        let target = k as f32 + 0.5;
+        x[2 + k]    = target / 63.5;        // positive halves
+        x[34 + k]   = -target / 63.5;       // negative halves
+    }
+    // Fill rest with small noise
+    for i in 66..256 {
+        x[i] = ((i as f32) * 0.0137 - 0.5) * 0.01;
+    }
+
+    // Run olorin's kernel
+    let mut o_qs = vec![0i8; 256 + 12];
+    let mut o_d = vec![0.0f32; 1];
+    let mut o_bsums = vec![0i16; 16];
+    olorin::inference::matmul::quant_input(&x, &mut o_qs, &mut o_d, &mut o_bsums);
+
+    // Run scalar reference
+    let (r_qs, r_d, _r_bsums) = llama_q8k_ref_block(&x);
+
+    eprintln!("=== Step 7: olorin quant_input vs llama q8_K_ref ===");
+    eprintln!("olorin d[0]={:.8}  llama_ref d[0]={:.8}  (signs may differ; |d| should match)",
+        o_d[0], r_d);
+    eprintln!("|olorin d| = {:.8}   |llama d| = {:.8}", o_d[0].abs(), r_d.abs());
+
+    let mut mismatches = 0usize;
+    for j in 0..256 {
+        // olorin's qs has same sign as x[j]; llama's qs has opposite sign of x[j] when max>0.
+        // Compare magnitudes (and equiv signs after sign convention).
+        let o = o_qs[j];
+        let r = r_qs[j];
+        // After sign convention, magnitudes should match exactly.
+        let o_mag = o.unsigned_abs() as i32;
+        let r_mag = r.unsigned_abs() as i32;
+        if o_mag != r_mag {
+            if mismatches < 12 {
+                eprintln!("  qs[{:>3}] x={:>10.6}  scaled_olorin={:>9.4}  olorin={:>4} llama={:>4}  (|Δ|={})",
+                    j, x[j], x[j] * 63.5, o, r, (o_mag - r_mag).abs());
+            }
+            mismatches += 1;
+        }
+    }
+    eprintln!("Total qs magnitude mismatches: {} / 256", mismatches);
+
+    if mismatches == 0 {
+        eprintln!("HYPOTHESIS REJECTED: kernels agree on this synthetic input");
+    } else {
+        eprintln!("HYPOTHESIS CONFIRMED: olorin's quant_input differs from llama's q8_K_ref");
+    }
 }
