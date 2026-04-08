@@ -249,12 +249,16 @@ fn batch2_q4k_8x8_q8k_matvec_bitexact_vs_existing_matvec() {
         );
     }
     let mut new_out = vec![0.0f32; n_rows];
+    let mut scratch = vec![0u8; 144];
+    let pow2 = olorin::inference::matmul::pow2_table();
     unsafe {
         olorin::kernels::ffi_inference::q4k_8x8_q8k_matvec(
             packed.as_ptr(),
             q8_qs.as_ptr(),
             q8_d.as_ptr(),
             q8_bsums.as_ptr(),
+            pow2.as_ptr(),
+            scratch.as_mut_ptr(),
             new_out.as_mut_ptr(),
             n_rows as i32, n_cols as i32,
         );

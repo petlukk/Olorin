@@ -164,11 +164,14 @@ pub unsafe fn q4k_8x8_q8k_matvec(
     q8_qs: *const i8,
     q8_d: *const f32,
     q8_bsums: *const i16,
+    pow2: *const f32,
+    scratch: *mut u8,
     output: *mut f32,
     n_rows: i32,
     n_cols: i32,
 ) {
-    (k().q4k_8x8_q8k_matvec)(weight_packed, q8_qs, q8_d, q8_bsums, output, n_rows, n_cols)
+    (k().q4k_8x8_q8k_matvec)(
+        weight_packed, q8_qs, q8_d, q8_bsums, pow2, scratch, output, n_rows, n_cols)
 }
 
 pub unsafe fn q4k_dot_q8k(
