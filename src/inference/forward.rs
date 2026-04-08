@@ -270,6 +270,23 @@ impl Gemma4State {
         );
     }
 
+    /// Run a prompt-eval forward pass over `tokens`. Returns the final-token logits.
+    /// During Phase A this is a thin loop over `forward_one`; later phases replace
+    /// the body with batched gemm.
+    pub fn forward_batch(
+        &mut self,
+        model: &Gemma4Model,
+        tokens: &[u32],
+        pool: &crate::inference::threadpool::ThreadPool,
+    ) -> &[f32] {
+        assert!(!tokens.is_empty(), "forward_batch requires at least one token");
+        let last = *tokens.last().unwrap();
+        for &t in &tokens[..tokens.len() - 1] {
+            let _ = self.forward_one(model, t, pool);
+        }
+        self.forward_one(model, last, pool)
+    }
+
     /// Run one decode step. Returns logits slice.
     pub fn forward_one(&mut self, model: &Gemma4Model, token_id: u32, pool: &crate::inference::threadpool::ThreadPool) -> &[f32] {
         let hd = model.hidden_dim;
