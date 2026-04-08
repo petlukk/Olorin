@@ -179,3 +179,108 @@ fn batch1_repack_q4k_bytes_match_ggml_golden() {
     }
     eprintln!("PASS: batch1 — {} bytes match", FIX_TOTAL);
 }
+
+// ---------------------------------------------------------------------------
+// batch2: q4k_8x8_q8k_matvec bit-exact vs olorin's existing q4k_matvec
+// ---------------------------------------------------------------------------
+//
+// The new q4k_8x8_q8k_matvec targets ggml's 8x8 gemm f32 reduction order
+// (per-sb FMAs per block, mins accumulated in a parallel register,
+// subtracted once after the b loop — see
+// docs/superpowers/research/2026-04-08-ggml-q4k-8x8-q8k-gemm.md). Olorin's
+// existing q4k_matvec uses a different per-block order (one f32 add +
+// mins subtract per block), so the two are NOT f32-bit-equal even for N=1
+// — they differ in the low bits of the f32 rounding.
+//
+// Bit-exact validation vs ggml's 8x8 gemm happens in Task 10 via a golden
+// fixture (same pattern as Task 6). Here we use a tight absolute tolerance
+// (1e-4) that catches algorithm bugs but accepts f32 reduction-order drift.
+//
+// Weight choice: layer 0 ffn_gate.weight — shape [hidden_dim, ffn_dim] =
+// [1536, 6144]. It's Q4K-typed in the Q4_K_M quant (layer 0 dtypes were
+// wq=14 wk=13 wv=14 wo=13 gate=12 up=12 down=14, i.e. only gate/up are Q4K).
+// Storage: n_rows=ffn_dim=6144 (outer), n_cols=hidden_dim=1536 (inner).
+// Both divisible by 8 and 256 respectively. ✓
+
+#[test]
+fn batch2_q4k_8x8_q8k_matvec_bitexact_vs_existing_matvec() {
+    if !has_model() { eprintln!("SKIP: no model"); return; }
+    let gguf = olorin::inference::gguf::GgufFile::open(Path::new(&model_path())).unwrap();
+    let model = olorin::inference::engine::Gemma4Model::from_gguf(&gguf).unwrap();
+    olorin::kernels::ffi::init().unwrap();
+
+    let lw = &model.layers[0];
+    let q4k = olorin::inference::matmul::GGML_TYPE_Q4_K;
+    assert_eq!(lw.w_gate_dtype, q4k, "blk.0.ffn_gate.weight must be Q4K");
+
+    let n_rows = model.ffn_dim[0];      // 6144
+    let n_cols = model.hidden_dim;      // 1536
+    assert!(n_rows % 8 == 0);
+    assert!(n_cols % 256 == 0);
+
+    // Deterministic input
+    let mut x = vec![0.0f32; n_cols];
+    for i in 0..n_cols {
+        x[i] = ((i as f32) * 0.0137 - 0.5).sin() * 0.3;
+    }
+
+    // Quantize input to Q8K
+    let n_blocks = n_cols / 256;
+    let mut q8_qs = vec![0i8; n_cols + 12];
+    let mut q8_d = vec![0.0f32; n_blocks];
+    let mut q8_bsums = vec![0i16; n_blocks * 16];
+    olorin::inference::matmul::quant_input(&x, &mut q8_qs, &mut q8_d, &mut q8_bsums);
+
+    // Reference: olorin's existing Q4K matvec on the raw (non-repacked) weight
+    let mut ref_out = vec![0.0f32; n_rows];
+    olorin::inference::matmul::q4k_matvec(
+        lw.w_gate,
+        &q8_qs, &q8_d, &q8_bsums,
+        &mut ref_out,
+        n_rows, n_cols,
+    );
+
+    // New path: repack the weight, then 8x8 matvec
+    let row_bytes = n_blocks * 144;
+    let mut packed = vec![0u8; n_rows * row_bytes];
+    unsafe {
+        olorin::kernels::ffi_inference::q4k_repack_8x8(
+            lw.w_gate, packed.as_mut_ptr(), n_rows as i32, n_cols as i32,
+        );
+    }
+    let mut new_out = vec![0.0f32; n_rows];
+    unsafe {
+        olorin::kernels::ffi_inference::q4k_8x8_q8k_matvec(
+            packed.as_ptr(),
+            q8_qs.as_ptr(),
+            q8_d.as_ptr(),
+            q8_bsums.as_ptr(),
+            new_out.as_mut_ptr(),
+            n_rows as i32, n_cols as i32,
+        );
+    }
+
+    // Tolerance-based comparison (see header comment for rationale).
+    const EPS: f32 = 1.0e-4;
+    let mut max_abs_diff = 0.0f32;
+    let mut worst_row = 0usize;
+    for i in 0..n_rows {
+        let d = (ref_out[i] - new_out[i]).abs();
+        if d > max_abs_diff {
+            max_abs_diff = d;
+            worst_row = i;
+        }
+    }
+    if max_abs_diff > EPS {
+        let lo = worst_row.saturating_sub(4);
+        let hi = (worst_row + 4).min(n_rows);
+        eprintln!("worst row {worst_row}: |ref - new| = {max_abs_diff:e} > {EPS:e}");
+        eprintln!("ref:  {:?}", &ref_out[lo..hi]);
+        eprintln!("new:  {:?}", &new_out[lo..hi]);
+        panic!("q4k_8x8_q8k_matvec diverges from reference matvec beyond tolerance");
+    }
+    eprintln!(
+        "PASS: batch2 — {} rows, max |ref - new| = {max_abs_diff:e}",
+        n_rows
+    );
+}

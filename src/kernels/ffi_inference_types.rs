@@ -2,6 +2,8 @@
 
 pub type QuantF32Q8kFn  = unsafe extern "C" fn(*const f32, *mut i8, *mut f32, *mut i16, i32);
 pub type Q4kRepack8x8Fn = unsafe extern "C" fn(*const u8, *mut u8, i32, i32);
+pub type Q4k8x8Q8kMatvecFn = unsafe extern "C" fn(
+    *const u8, *const i8, *const f32, *const i16, *mut f32, i32, i32);
 pub type Q4kDotQ8kFn    = unsafe extern "C" fn(
     *const u8, *const i8, *const i16,
     i32, *const f32, *const f32) -> f32;

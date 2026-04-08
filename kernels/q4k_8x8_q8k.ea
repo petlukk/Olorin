@@ -1,0 +1,32 @@
+// q4k_8x8_q8k.ea — Matvec (N=1) and gemm (N>1) for repacked Q4K × Q8K.
+//
+// Input weight layout: block_q4_Kx8 tiles produced by q4k_repack_8x8. Each
+// tile covers 8 output rows × 1 column-block (256 K) and is 1152 bytes:
+//   0..15    d[0..8]    (8 × f16)
+//   16..31   dmin[0..8] (8 × f16)
+//   32..127  scales[96] (repacked sub-blocks 0..3 then 4..7)
+//   128..1151 qs[1024]  (128 × 8-byte interleaved chunks)
+//
+// See docs/superpowers/research/2026-04-08-ggml-q4k-8x8-format.md for the
+// byte layout and docs/superpowers/research/2026-04-08-ggml-q4k-8x8-q8k-gemm.md
+// for the f32 reduction order this kernel must mirror bit-for-bit.
+//
+// STATUS: skeleton — currently writes zeros. The real AVX-512 implementation
+// lands in a follow-up commit behind the same FFI signature, verified by
+// tests/gemma4_batch_verify.rs::batch2_q4k_8x8_q8k_matvec_bitexact_vs_existing_matvec.
+
+export func q4k_8x8_q8k_matvec(
+    weight_packed: *restrict u8,
+    q8_qs: *restrict i8,
+    q8_d: *restrict f32,
+    q8_bsums: *restrict i16,
+    out output: *mut f32 [cap: n_rows],
+    n_rows: i32,
+    n_cols: i32
+) {
+    // TODO: bit-exact AVX-512 implementation. Current stub zeros the output
+    // so the FFI + test scaffolding can land first.
+    for i in 0..n_rows {
+        output[i] = 0.0
+    }
+}

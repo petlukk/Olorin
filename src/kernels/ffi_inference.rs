@@ -9,6 +9,7 @@ pub struct KernelTableInference {
     pub libs: Vec<Library>,
     pub quant_f32_q8k:         QuantF32Q8kFn,
     pub q4k_repack_8x8:        Q4kRepack8x8Fn,
+    pub q4k_8x8_q8k_matvec:    Q4k8x8Q8kMatvecFn,
     pub q4k_dot_q8k:           Q4kDotQ8kFn,
     pub q4k_dot_q8k_4row:      Q4kDot4RowFn,
     pub q4k_dot_q8k_4row_dual: Q4kDot4RowDualFn,
@@ -86,6 +87,7 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
 
     let q4kq = load("q4k_quant")?;
     let q4kr = load("q4k_repack")?;
+    let q4k8 = load("q4k_8x8_q8k")?;
     let q4kd = load_best("q4k_dot")?;
     let q5kd = load("q5k_dot")?;
     let q6kd = load("q6k_dot")?;
@@ -112,6 +114,7 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
         let t = KernelTableInference {
             quant_f32_q8k:         std::mem::transmute(sym(&q4kq, b"quant_f32_q8k\0")?),
             q4k_repack_8x8:        std::mem::transmute(sym(&q4kr, b"q4k_repack_8x8\0")?),
+            q4k_8x8_q8k_matvec:    std::mem::transmute(sym(&q4k8, b"q4k_8x8_q8k_matvec\0")?),
             q4k_dot_q8k:           std::mem::transmute(sym(&q4kd, b"q4k_dot_q8k\0")?),
             q4k_dot_q8k_4row:      std::mem::transmute(sym(&q4kd, b"q4k_dot_q8k_4row\0")?),
             q4k_dot_q8k_4row_dual: std::mem::transmute(sym(&q4kd, b"q4k_dot_q8k_4row_dual\0")?),
@@ -135,7 +138,7 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
             f32_dot_acc:       std::mem::transmute(sym(&attn_ops_lib, b"f32_dot_acc\0")?),
             bare_rmsnorm_f32:  std::mem::transmute(sym(&bare_rmsnorm_lib, b"bare_rmsnorm_f32\0")?),
             softcap_f32:       std::mem::transmute(sym(&softcap_lib, b"softcap_f32\0")?),
-            libs: vec![q4kq, q4kr, q4kd, q5kd, q6kd, f16_conv_lib, softmax_lib, gemma4_rmsnorm_lib, gemma4_gelu_lib, gemma4_rope_lib, bf16_matvec_lib, vec_ops_lib, attn_ops_lib, bare_rmsnorm_lib, softcap_lib],
+            libs: vec![q4kq, q4kr, q4k8, q4kd, q5kd, q6kd, f16_conv_lib, softmax_lib, gemma4_rmsnorm_lib, gemma4_gelu_lib, gemma4_rope_lib, bf16_matvec_lib, vec_ops_lib, attn_ops_lib, bare_rmsnorm_lib, softcap_lib],
         };
         Ok(t)
     }
@@ -153,6 +156,19 @@ pub unsafe fn q4k_repack_8x8(
     src: *const u8, dst: *mut u8, nrows: i32, n_cols: i32,
 ) {
     (k().q4k_repack_8x8)(src, dst, nrows, n_cols)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn q4k_8x8_q8k_matvec(
+    weight_packed: *const u8,
+    q8_qs: *const i8,
+    q8_d: *const f32,
+    q8_bsums: *const i16,
+    output: *mut f32,
+    n_rows: i32,
+    n_cols: i32,
+) {
+    (k().q4k_8x8_q8k_matvec)(weight_packed, q8_qs, q8_d, q8_bsums, output, n_rows, n_cols)
 }
 
 pub unsafe fn q4k_dot_q8k(
