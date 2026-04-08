@@ -7,20 +7,29 @@ purpose is to pin down the exact f32 reduction order so the Eä kernel
 
 ## Sources read (no edits)
 
-- `/root/dev/llama.cpp/ggml/src/ggml-cpu/arch/x86/repack.cpp`
-  - free function `ggml_gemm_q4_K_8x8_q8_K` at **line 2042**
-    (not a template specialization — the `tensor_traits<block_q4_K,8,8,Q8_K>`
-    trait dispatches to this named function via its `.gemm` member)
-  - AVX-512 path: lines 2077–2454 (`__AVX512BW__ && __AVX512DQ__`)
-  - AVX2-only fallback path: lines ~2455–3485 (same math, narrower lanes)
-  - final generic fallback at line 3492: `ggml_gemm_q4_K_8x8_q8_K_generic`
-- `/root/dev/llama.cpp/ggml/src/ggml-cpu/repack.cpp`
-  - trait registration `q4_K_8x8_q8_K` at **line 4536**
+All line numbers below are parenthetical references to llama.cpp build
+8685 — the symbols are the load-bearing anchors.
 
-Olorin runs on AVX-512 → the spec below describes the AVX-512 path.
-The AVX2 fallback performs the exact same math with 256-bit accumulators
-and is bit-exact with the AVX-512 path (same reduction order over the
-same operands, modulo the 512 = 2×256 tile packing).
+- `/root/dev/llama.cpp/ggml/src/ggml-cpu/arch/x86/repack.cpp`
+  - free function **`ggml_gemm_q4_K_8x8_q8_K`** (at the time of writing,
+    line 2042) — not a template specialization; the
+    `tensor_traits<block_q4_K,8,8,Q8_K>` trait dispatches to this named
+    function via its `.gemm` member.
+  - Inside that function, the **`#if defined(__AVX512BW__) && defined(__AVX512DQ__)`**
+    guard block is the AVX-512 path (at the time of writing, lines
+    2077–2815).
+  - The **`#else` AVX2 fallback** in the same function (at the time of
+    writing, lines ~2816–3487) runs the same per-output recipe at
+    256-bit lane width.
+  - The generic scalar fallback **`ggml_gemm_q4_K_8x8_q8_K_generic`** (at
+    the time of writing, line 3492) is reference-only.
+- `/root/dev/llama.cpp/ggml/src/ggml-cpu/repack.cpp`
+  - trait registration **`q4_K_8x8_q8_K`** (at the time of writing,
+    line 4536).
+
+Olorin runs on AVX-512 → the spec below describes the AVX-512 path. See
+"Footnote: AVX2 and generic fallbacks" for why the AVX2 path is
+per-output bit-exact with AVX-512.
 
 ## Signature and tiling
 
@@ -209,8 +218,9 @@ output column):**
 
 2. **Within one Q4K 64-element sub-block pair (one `sb` iteration):**
    still integer. The two 32-element sub-blocks are combined via
-   `_mm512_add_epi32(iacc_row_k_0, iacc_row_k_1)`, and the result is
-   converted to f32 *once per (`sb`, row)*.
+   `_mm512_add_epi32(iacc_row_k_0, iacc_row_k_1)` — this is the inner
+   accumulation loop in `ggml_gemm_q4_K_8x8_q8_K`'s AVX-512 branch — and
+   the result is converted to f32 *once per (`sb`, row)*.
 
 3. **Within one Q4K super-block (`b` fixed, all 4 `sb` iterations):**
    this is where f32 addition **starts**. For each row `i`:
@@ -276,8 +286,10 @@ Notes:
 - `i32_0 + i32_1` is plain `add_epi32` (modular wrap in i32) before the
   single `cvtepi32_ps` — **do not** convert each sub-block to f32
   separately. Doing so would change the rounding boundary.
-- `row_d` is already stored as f32 in `block_q8_Kx4.d[4]` (see line 2421
-  `_mm_load_ps(a_ptrs[rp][b].d)`). No f16→f32 on the Q8K side.
+- `row_d` is already stored as f32 in `block_q8_Kx4.d[4]` — the AVX-512
+  branch of `ggml_gemm_q4_K_8x8_q8_K` loads it via
+  `_mm_load_ps(a_ptrs[rp][b].d)` inside the `rp` loop. No f16→f32 on the
+  Q8K side.
 - `col_d` and `col_dmin` are f16 in the `block_q4_Kx8` header and
   converted via `GGML_F32Cx8x2_LOAD` (two halves into one `__m512`).
   The Eä kernel must use the same f16→f32 conversion semantics
@@ -285,7 +297,8 @@ Notes:
 
 ## Trait registration (where the dispatch lives)
 
-`/root/dev/llama.cpp/ggml/src/ggml-cpu/repack.cpp:4535-4536`:
+In `/root/dev/llama.cpp/ggml/src/ggml-cpu/repack.cpp`, the
+`q4_K_8x8_q8_K` trait instance (at the time of writing, line 4536):
 
 ```cpp
 static const ggml::cpu::repack::tensor_traits<block_q4_K, 4, 8, GGML_TYPE_Q8_K> q4_K_8x4_q8_K;
@@ -314,10 +327,40 @@ The `8x8` variant is selected for AVX2/AVX-512 capable CPUs when
 
 ## Footnote: AVX2 and generic fallbacks
 
-- The AVX2 fallback (line ~2455 onward) performs the same per-`b`,
-  per-`sb`, ascending f32 accumulation in 256-bit lanes. Because it
-  processes the same 16×16 tile in two 8-wide halves with the same
-  operand order, it is bit-exact with the AVX-512 path for f32 outputs.
-- The scalar generic fallback `ggml_gemm_q4_K_8x8_q8_K_generic`
-  (line 3492) is reference-only and is **not** used on x86 when AVX2 or
-  AVX-512 is available. Olorin does not need to match the generic path.
+- The AVX2 fallback — the `#else` branch of `ggml_gemm_q4_K_8x8_q8_K`
+  (at the time of writing, lines ~2816–3487) — performs the same
+  per-`b`, per-`sb`, ascending f32 accumulation in 256-bit lanes. Its
+  outer tile differs from the AVX-512 path: instead of stepping
+  `x += 2` to build a 16×16 tile across two `block_q4_Kx8` columns, it
+  steps `x++` and keeps a 16×8 tile (one `block_q4_Kx8` at a time). The
+  per-output bit-exactness claim nevertheless holds, and here is why:
+
+  > AVX-512 has 16 i32 / f32 lanes, AVX2 has 8. Each output element of
+  > the gemm — `s[(y*4 + rp)*bs + (x*8 + col)]` for some fixed
+  > `(rp, col)` — owns **exactly one accumulator lane** in either
+  > implementation (one lane of `acc_rows[rp*4 + k]` in the AVX-512
+  > `__m512` path, and one lane of the AVX2 `__m256` counterpart). The
+  > f32 reduction tree for that single output is therefore independent
+  > of how many *other* lanes happen to share the SIMD register. The
+  > AVX2 branch applies exactly the same per-output sequence per
+  > `(b, sb, rp, k)`: integer dot via `maddubs_epi16` → i16
+  > add-reductions in the same fixed order → `madd_epi16` with the
+  > 6-bit sub-block scale → `add_epi32` of the two 32-elt sub-blocks →
+  > `cvtepi32_ps` → `mul_ps(col_scale, broadcast(row_d_k))` →
+  > `fmadd_ps` into `acc_rows[rp*4 + k]`. The `mul_ps`-then-`fmadd_ps`
+  > decomposition (separate round on `col * row`, then single-rounded
+  > FMA) is preserved verbatim. End-of-block `sub_ps(acc_rows,
+  > acc_min_rows)` runs once after the `b` loop in both paths. Because
+  > lanes never cross, narrowing from 16 to 8 lanes does not perturb
+  > any per-output reduction — every per-output bit pattern is
+  > identical to the AVX-512 path.
+
+  Olorin's critical path is AVX-512 only, so the AVX2 path is not a
+  verification target. Task 10 verifies bit-exactness against whichever
+  ggml path the test host selects; on an AVX-512 machine that is the
+  AVX-512 branch, and the AVX2 argument above is documented here only so
+  future maintainers do not have to re-derive it.
+- The scalar generic fallback `ggml_gemm_q4_K_8x8_q8_K_generic` (at the
+  time of writing, line 3492) is reference-only and is **not** used on
+  x86 when AVX2 or AVX-512 is available. Olorin does not need to match
+  the generic path.
