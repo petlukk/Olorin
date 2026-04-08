@@ -2,6 +2,12 @@
 
 Single-binary AI agent. Gemma 4 E2B SIMD inference, encrypted vault, tool-use, Web UI + WhatsApp.
 
+## eabrain (use first, grep second)
+
+Run `eabrain status` at the start of every session/task. Before grepping for an Eä symbol or assuming a kernel/intrinsic doesn't exist, run `eabrain search <name>` and `eabrain ref <name>`. After editing `.ea` files, run `eabrain index` to refresh the index. Save cross-session findings via `eabrain remember`.
+
+**Limitation:** eabrain indexes `.ea` kernel source files but **not** eacompute's Rust intrinsic definitions. If `eabrain ref` returns nothing for an intrinsic name, grep `/root/dev/eacompute/src/typeck/intrinsics*.rs` and `/root/dev/eacompute/src/codegen/simd*.rs` directly before concluding the intrinsic doesn't exist.
+
 ## Build
 
 Ea compiler required in PATH:
