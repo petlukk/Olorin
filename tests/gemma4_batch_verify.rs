@@ -403,3 +403,190 @@ fn batch3_q4k_8x8_q8k_gemm_bitexact_per_column() {
         eprintln!("PASS: batch3 N={n} — {} outputs bit-exact", n_rows * n);
     }
 }
+
+// ---------------------------------------------------------------------------
+// batch4: q4k_8x8_q8k_gemm bit-exact vs ggml_gemm_q4_K_8x8_q8_K (AVX-512)
+// ---------------------------------------------------------------------------
+//
+// Load libggml-cpu.so at runtime, call ggml_gemm_q4_K_8x8_q8_K directly on
+// the same repacked weight + same f32 inputs as olorin's gemm, compare the
+// f32 output matrix byte-for-byte. This is THE validation that olorin's
+// per-output f32 reduction order matches llama.cpp's batched gemm — what
+// batch2 and batch3 can't prove transitively because olorin's existing
+// matvec targets ggml's NON-batched path, not the batched one.
+//
+// Skipped gracefully if libggml-cpu.so isn't present.
+//
+// ggml's gemm contract (from ggml/src/ggml-cpu/arch/x86/repack.cpp:2042):
+//   void ggml_gemm_q4_K_8x8_q8_K(
+//     int n, float* s, size_t bs, const void* vx, const void* vy, int nr, int nc)
+// where
+//   n  = K (inner dim, multiple of 256)
+//   s  = output f32, row-major, bs floats per row
+//   vx = B = block_q4_Kx8* (repacked weight)
+//   vy = A = block_q8_Kx4* (4-row interleaved Q8K)
+//   nr = input row count (multiple of 4)
+//   nc = output column count (multiple of 8)
+//
+// Output element at (input_row, output_feature) = s[input_row * bs + output_feature].
+// Setting bs = nc = n_rows makes this a row-major [N × n_rows] matrix — exactly
+// the same layout as olorin's col-major [n_rows × N] gemm output when you map
+// olorin's "col" = ggml's "row" and olorin's "row" = ggml's "col". So a straight
+// Vec<f32> byte-for-byte comparison works once both are produced.
+
+const LIBGGML_BASE: &str = "/root/dev/llama.cpp/build/bin/libggml-base.so";
+const LIBGGML_CPU:  &str = "/root/dev/llama.cpp/build/bin/libggml-cpu.so";
+
+fn has_libggml() -> bool {
+    std::path::Path::new(LIBGGML_BASE).exists()
+        && std::path::Path::new(LIBGGML_CPU).exists()
+}
+
+#[test]
+fn batch4_q4k_8x8_q8k_gemm_bitexact_vs_ggml_avx512() {
+    if !has_model() { eprintln!("SKIP: no model"); return; }
+    if !has_libggml() { eprintln!("SKIP: libggml-cpu.so not present at {LIBGGML_CPU}"); return; }
+
+    use libloading::{Library, Symbol};
+
+    let gguf = olorin::inference::gguf::GgufFile::open(Path::new(&model_path())).unwrap();
+    let model = olorin::inference::engine::Gemma4Model::from_gguf(&gguf).unwrap();
+    olorin::kernels::ffi::init().unwrap();
+
+    // Same Q4K weight pick as batch2/batch3.
+    let lw = &model.layers[0];
+    assert_eq!(lw.w_gate_dtype, olorin::inference::matmul::GGML_TYPE_Q4_K);
+    let n_rows = model.ffn_dim[0];    // 6144
+    let n_cols = model.hidden_dim;    // 1536
+    let n_blocks = n_cols / 256;      // 6
+    let row_bytes = n_blocks * 144;
+
+    // Repack weight once (olorin). batch1 already proved this matches ggml byte-for-byte.
+    let mut packed = vec![0u8; n_rows * row_bytes];
+    unsafe {
+        olorin::kernels::ffi_inference::q4k_repack_8x8(
+            lw.w_gate, packed.as_mut_ptr(), n_rows as i32, n_cols as i32,
+        );
+    }
+
+    // Load libggml base first (ggml-cpu depends on it), then ggml-cpu.
+    let _ggml_base = unsafe { Library::new(LIBGGML_BASE).expect("load libggml-base.so") };
+    let ggml_cpu = unsafe { Library::new(LIBGGML_CPU).expect("load libggml-cpu.so") };
+
+    // ggml_quantize_mat_q8_K_4x8(x, vy, k): 3 args, processes EXACTLY 4 rows.
+    type QuantMat4x8Fn = unsafe extern "C" fn(*const f32, *mut std::ffi::c_void, i64);
+    type GemmFn = unsafe extern "C" fn(
+        i32, *mut f32, usize, *const std::ffi::c_void, *const std::ffi::c_void, i32, i32);
+
+    let ggml_quant_mat: Symbol<QuantMat4x8Fn> = unsafe {
+        ggml_cpu.get(b"ggml_quantize_mat_q8_K_4x8\0").expect("find ggml_quantize_mat_q8_K_4x8")
+    };
+    let ggml_gemm: Symbol<GemmFn> = unsafe {
+        ggml_cpu.get(b"ggml_gemm_q4_K_8x8_q8_K\0").expect("find ggml_gemm_q4_K_8x8_q8_K")
+    };
+
+    // ggml's gemm requires nr % 4 == 0. Test N = 4 and N = 8.
+    for &n in &[4usize, 8usize] {
+        // Build N deterministic f32 input rows (row-major: row k at k*n_cols).
+        let mut x = vec![0.0f32; n_cols * n];
+        for k in 0..n {
+            for i in 0..n_cols {
+                x[k * n_cols + i] = (((i + k * 13) as f32) * 0.0179 - 0.3).sin() * 0.35;
+            }
+        }
+
+        // --- ggml side ---
+        // block_q8_Kx4 = { d[4], qs[QK_K*4=1024], bsums[QK_K/4=64] } per super-block
+        // sized 16 + 1024 + 128 = 1168 bytes. For n_blocks super-blocks × n/4 row groups:
+        //   total = (n / 4) * n_blocks * 1168
+        let blk_q8kx4_sz = 16usize + 1024 + 128; // 1168
+        let groups = n / 4;
+        let group_bytes = n_blocks * blk_q8kx4_sz;
+        let ggml_q8_bytes = groups * group_bytes;
+        let mut ggml_q8 = vec![0u8; ggml_q8_bytes];
+        // One call per 4-row group. ggml's quant hardcodes nrow=4.
+        for g in 0..groups {
+            unsafe {
+                ggml_quant_mat(
+                    x[g * 4 * n_cols..].as_ptr(),
+                    ggml_q8[g * group_bytes..].as_mut_ptr() as *mut std::ffi::c_void,
+                    n_cols as i64,
+                );
+            }
+        }
+        let mut ref_out = vec![0.0f32; n * n_rows];
+        unsafe {
+            ggml_gemm(
+                n_cols as i32,
+                ref_out.as_mut_ptr(),
+                n_rows,  // bs = row stride in f32 elements
+                packed.as_ptr() as *const std::ffi::c_void,
+                ggml_q8.as_ptr() as *const std::ffi::c_void,
+                n as i32,
+                n_rows as i32,
+            );
+        }
+
+        // --- olorin side ---
+        // Quantize each row via olorin's per-row quant. batch2 already proved
+        // olorin's q4k dot matches ggml's non-batched matvec at 1.55e-6 tolerance,
+        // and olorin's quant is a separate verified primitive.
+        let qs_stride = n_cols + 12;
+        let mut q8_qs = vec![0i8; qs_stride * n];
+        let mut q8_d = vec![0.0f32; n_blocks * n];
+        let mut q8_bsums = vec![0i16; n_blocks * 16 * n];
+        for k in 0..n {
+            olorin::inference::matmul::quant_input(
+                &x[k * n_cols..(k + 1) * n_cols],
+                &mut q8_qs[k * qs_stride..(k + 1) * qs_stride],
+                &mut q8_d[k * n_blocks..(k + 1) * n_blocks],
+                &mut q8_bsums[k * n_blocks * 16..(k + 1) * n_blocks * 16],
+            );
+        }
+        let mut new_out = vec![0.0f32; n * n_rows];
+        let mut scratch = vec![0u8; 144];
+        let mut acc_scratch = vec![0.0f32; 2 * n];
+        let pow2 = olorin::inference::matmul::pow2_table();
+        unsafe {
+            olorin::kernels::ffi_inference::q4k_8x8_q8k_gemm(
+                packed.as_ptr(),
+                q8_qs.as_ptr(),
+                q8_d.as_ptr(),
+                q8_bsums.as_ptr(),
+                pow2.as_ptr(),
+                scratch.as_mut_ptr(),
+                acc_scratch.as_mut_ptr(),
+                new_out.as_mut_ptr(),
+                n_rows as i32, n_cols as i32, n as i32,
+            );
+        }
+
+        // Bit-exact comparison.
+        let mut first_diff: Option<usize> = None;
+        let mut max_abs_diff = 0.0f32;
+        let mut n_diff = 0usize;
+        for i in 0..(n * n_rows) {
+            if ref_out[i].to_bits() != new_out[i].to_bits() {
+                if first_diff.is_none() { first_diff = Some(i); }
+                n_diff += 1;
+                let d = (ref_out[i] - new_out[i]).abs();
+                if d > max_abs_diff { max_abs_diff = d; }
+            }
+        }
+        if let Some(idx) = first_diff {
+            let row = idx / n_rows;   // input token
+            let col = idx % n_rows;   // output feature
+            eprintln!(
+                "N={n}: {} / {} outputs differ; max |ggml - olorin| = {max_abs_diff:e}",
+                n_diff, n * n_rows
+            );
+            eprintln!(
+                "first diff at token={row} feature={col}: ggml=0x{:08x} ({}) olorin=0x{:08x} ({})",
+                ref_out[idx].to_bits(), ref_out[idx],
+                new_out[idx].to_bits(), new_out[idx],
+            );
+            panic!("q4k_8x8_q8k_gemm diverges from ggml_gemm_q4_K_8x8_q8_K (not bit-exact)");
+        }
+        eprintln!("PASS: batch4 N={n} — {} outputs match ggml byte-for-byte", n * n_rows);
+    }
+}

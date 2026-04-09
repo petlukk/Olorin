@@ -150,34 +150,35 @@ func dot_sb_pair(
     return reduce_add(combined)
 }
 
-// Build the 8-lane bsums-paired vector used for the mins correction.
-// bsums[bs..bs+16] holds 16 i16 per-sub-sub-block sums; hadd pairs them
-// into 8 paired sums (one per sub-block).
-func bsums_paired(bsums: *i16, bs: i32) -> i16x8 {
-    let lo: i16x8 = load(bsums, bs)
-    let hi: i16x8 = load(bsums, bs + 8)
-    return hadd_i16(lo, hi)
+// Read one of the 8 per-sub-block 6-bit mins values from a reconstructed
+// Q4K scales[12] buffer. sb in 0..7.
+func mins_value_i32(q4: *mut u8, sp: i32, sb: i32) -> i32 {
+    if sb < 4 {
+        return ubyte(q4, sp + 4 + sb) & 63
+    } else {
+        let k: i32 = sb - 4
+        return (ubyte(q4, sp + 8 + k) >> 4) | ((ubyte(q4, sp + 4 + k) >> 6) << 4)
+    }
 }
 
-// Compute row r's mins contribution for one super-block using the 8-lane
-// bsums pair vector and the row's reconstructed Q4K scales[12] layout.
-// Returns a single i32 that llama's path stores into an i32 register per
-// sb iter for the mins FMA (but olorin collapses all 8 sub-blocks in one
-// madd_i16 to avoid extra shuffles — equivalent integer sum).
-//
-// This mirrors q4k_dot.ea::row_mins_bp; bit-exact result.
-func row_mins_bp(q4: *mut u8, sp: i32, bp: i16x8) -> i32 {
-    let mins: i16x8 = [
-        to_i16(ubyte(q4, sp + 4) & 63),
-        to_i16(ubyte(q4, sp + 5) & 63),
-        to_i16(ubyte(q4, sp + 6) & 63),
-        to_i16(ubyte(q4, sp + 7) & 63),
-        to_i16((ubyte(q4, sp + 8) >> 4) | ((ubyte(q4, sp + 4) >> 6) << 4)),
-        to_i16((ubyte(q4, sp + 9) >> 4) | ((ubyte(q4, sp + 5) >> 6) << 4)),
-        to_i16((ubyte(q4, sp + 10) >> 4) | ((ubyte(q4, sp + 6) >> 6) << 4)),
-        to_i16((ubyte(q4, sp + 11) >> 4) | ((ubyte(q4, sp + 7) >> 6) << 4))
-    ]
-    return reduce_add(madd_i16(mins, bp))
+// Per-sub-block-pair mins contribution for ggml's batched gemm order.
+// Pair k in 0..4 covers sub-blocks 2k and 2k+1. Returns the scalar i32
+// value that ggml produces per-sb via _mm512_madd_epi16(bsums_hsum, mins_01)
+// then feeds into one _mm512_fmadd_ps. The caller FMAs each pair's result
+// separately into acc_min — 4 FMAs per super-block per row, matching
+// ggml's per-lane sequence.
+func mins_pair_i32(
+    q4: *mut u8, sp: i32,
+    bsums: *i16, bs: i32,
+    k: i32
+) -> i32 {
+    let m_lo: i32 = mins_value_i32(q4, sp, 2 * k    )
+    let m_hi: i32 = mins_value_i32(q4, sp, 2 * k + 1)
+    let b0: i32 = to_i32(bsums[bs + 4 * k    ])
+    let b1: i32 = to_i32(bsums[bs + 4 * k + 1])
+    let b2: i32 = to_i32(bsums[bs + 4 * k + 2])
+    let b3: i32 = to_i32(bsums[bs + 4 * k + 3])
+    return m_lo * (b0 + b1) + m_hi * (b2 + b3)
 }
 
 // ---------------------------------------------------------------------------
@@ -249,25 +250,31 @@ export func q4k_8x8_q8k_matvec(
                 // and 2k+1 (high nibbles of the same bytes).
                 let q8_off: i32 = b * 256
                 let nib_base: i32 = 16
+                // Four single-rounded FMAs per super-block — sb = 0,1,2,3
+                // ascending. sb k covers source sub-blocks 2k and 2k+1.
+                // Scalar fma(a,b,c) lowers to vfmadd132ss on x86; matches
+                // ggml's _mm512_fmadd_ps per-lane bit pattern.
                 let i32_0: i32 = dot_sb_pair(scr, nib_base +  0, q8_qs, q8_off +   0, s0, s1, mask_lo, shift4)
-                acc = acc + to_f32(i32_0) * d_prod
+                acc = fma(to_f32(i32_0), d_prod, acc)
                 let i32_1: i32 = dot_sb_pair(scr, nib_base + 32, q8_qs, q8_off +  64, s2, s3, mask_lo, shift4)
-                acc = acc + to_f32(i32_1) * d_prod
+                acc = fma(to_f32(i32_1), d_prod, acc)
                 let i32_2: i32 = dot_sb_pair(scr, nib_base + 64, q8_qs, q8_off + 128, s4, s5, mask_lo, shift4)
-                acc = acc + to_f32(i32_2) * d_prod
+                acc = fma(to_f32(i32_2), d_prod, acc)
                 let i32_3: i32 = dot_sb_pair(scr, nib_base + 96, q8_qs, q8_off + 192, s6, s7, mask_lo, shift4)
-                acc = acc + to_f32(i32_3) * d_prod
+                acc = fma(to_f32(i32_3), d_prod, acc)
 
-                // Mins correction — parallel accumulator in acc_min,
-                // subtracted once at the end after all super-blocks.
-                // Olorin computes the mins term for all 8 sub-blocks with
-                // one madd_i16(mins_i16x8, bsums_paired_i16x8) → scalar,
-                // which is mathematically equivalent to ggml's per-sb mins
-                // FMA sum (integer math is associative) and produces the
-                // same final acc_min after summing over all super-blocks.
-                let bp: i16x8 = bsums_paired(q8_bsums, b * 16)
-                let mins_i32: i32 = row_mins_bp(scr, sp, bp)
-                acc_min = acc_min + to_f32(mins_i32) * dmin_prod
+                // Mins correction — four FMAs per super-block, one per
+                // sb pair, matching ggml's per-lane sequence
+                // (acc_min_rows += fmadd(cvt_i32(mins_pair_k), dmin_prod, acc_min)).
+                let bs_off: i32 = b * 16
+                let mp0: i32 = mins_pair_i32(scr, sp, q8_bsums, bs_off, 0)
+                acc_min = fma(to_f32(mp0), dmin_prod, acc_min)
+                let mp1: i32 = mins_pair_i32(scr, sp, q8_bsums, bs_off, 1)
+                acc_min = fma(to_f32(mp1), dmin_prod, acc_min)
+                let mp2: i32 = mins_pair_i32(scr, sp, q8_bsums, bs_off, 2)
+                acc_min = fma(to_f32(mp2), dmin_prod, acc_min)
+                let mp3: i32 = mins_pair_i32(scr, sp, q8_bsums, bs_off, 3)
+                acc_min = fma(to_f32(mp3), dmin_prod, acc_min)
 
                 b = b + 1
             }
@@ -375,19 +382,33 @@ export func q4k_8x8_q8k_gemm(
                     let d_prod: f32 = d_row * row_d
                     let dmin_prod: f32 = dmin_row * row_d
 
+                    // Four single-rounded FMAs per super-block, same
+                    // ascending order as matvec. Read-modify-write on
+                    // acc_scratch[col] keeps per-column accumulation
+                    // independent across the inner col loop.
                     let i32_0: i32 = dot_sb_pair(scr, 16,     q8_qs, q8_off +   0, s0, s1, mask_lo, shift4)
-                    acc_scratch[col] = acc_scratch[col] + to_f32(i32_0) * d_prod
+                    acc_scratch[col] = fma(to_f32(i32_0), d_prod, acc_scratch[col])
                     let i32_1: i32 = dot_sb_pair(scr, 16 + 32, q8_qs, q8_off +  64, s2, s3, mask_lo, shift4)
-                    acc_scratch[col] = acc_scratch[col] + to_f32(i32_1) * d_prod
+                    acc_scratch[col] = fma(to_f32(i32_1), d_prod, acc_scratch[col])
                     let i32_2: i32 = dot_sb_pair(scr, 16 + 64, q8_qs, q8_off + 128, s4, s5, mask_lo, shift4)
-                    acc_scratch[col] = acc_scratch[col] + to_f32(i32_2) * d_prod
+                    acc_scratch[col] = fma(to_f32(i32_2), d_prod, acc_scratch[col])
                     let i32_3: i32 = dot_sb_pair(scr, 16 + 96, q8_qs, q8_off + 192, s6, s7, mask_lo, shift4)
-                    acc_scratch[col] = acc_scratch[col] + to_f32(i32_3) * d_prod
+                    acc_scratch[col] = fma(to_f32(i32_3), d_prod, acc_scratch[col])
 
-                    let bp: i16x8 = bsums_paired(q8_bsums, col * q8_bsums_stride + b * 16)
-                    let mins_i32: i32 = row_mins_bp(scr, sp, bp)
+                    // Mins — four FMAs per super-block per column.
+                    let bs_off: i32 = col * q8_bsums_stride + b * 16
+                    let mp0: i32 = mins_pair_i32(scr, sp, q8_bsums, bs_off, 0)
                     acc_scratch[n_cols_batch + col] =
-                        acc_scratch[n_cols_batch + col] + to_f32(mins_i32) * dmin_prod
+                        fma(to_f32(mp0), dmin_prod, acc_scratch[n_cols_batch + col])
+                    let mp1: i32 = mins_pair_i32(scr, sp, q8_bsums, bs_off, 1)
+                    acc_scratch[n_cols_batch + col] =
+                        fma(to_f32(mp1), dmin_prod, acc_scratch[n_cols_batch + col])
+                    let mp2: i32 = mins_pair_i32(scr, sp, q8_bsums, bs_off, 2)
+                    acc_scratch[n_cols_batch + col] =
+                        fma(to_f32(mp2), dmin_prod, acc_scratch[n_cols_batch + col])
+                    let mp3: i32 = mins_pair_i32(scr, sp, q8_bsums, bs_off, 3)
+                    acc_scratch[n_cols_batch + col] =
+                        fma(to_f32(mp3), dmin_prod, acc_scratch[n_cols_batch + col])
 
                     col = col + 1
                 }
