@@ -136,8 +136,10 @@ impl Engine {
                 output.push_str(&text);
             }
 
-            // Forward to get next logits
-            let logits = self.state.forward_one(&self.model, token_id, &self.pool);
+            // Forward to get next logits (forward_batch N=1 uses packed
+            // weights, avoiding mmap page re-faults from the packed buffer
+            // evicting model pages on memory-constrained machines)
+            let logits = self.state.forward_batch(&self.model, &[token_id], &self.pool);
             logits_snapshot.clear();
             logits_snapshot.extend_from_slice(logits);
         }
