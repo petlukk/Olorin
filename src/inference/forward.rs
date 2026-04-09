@@ -126,7 +126,36 @@ pub struct Gemma4State {
 
     // KV cache
     pub cache: KvCache,
+
+    // ---- Batched prompt-eval buffers (Task 12) ------------------------
+    // Column-major: column k at offset k * <per-column-size>. Sized for
+    // MAX_BATCH prompt tokens. Used by forward_batch once the batched
+    // kernels are wired up in Tasks 13–19. Single-token forward_one does
+    // not touch these. #[allow(dead_code)] scoped to each field stays
+    // until Task 19 wires them up.
+    #[allow(dead_code)] pub(crate) batch_x: Vec<f32>,        // {hd, MAX_BATCH}
+    #[allow(dead_code)] pub(crate) batch_x_norm: Vec<f32>,   // {hd, MAX_BATCH}
+    #[allow(dead_code)] pub(crate) batch_q: Vec<f32>,        // {max_qkv, MAX_BATCH}
+    #[allow(dead_code)] pub(crate) batch_k: Vec<f32>,        // {max_kv,  MAX_BATCH}
+    #[allow(dead_code)] pub(crate) batch_v: Vec<f32>,        // {max_kv,  MAX_BATCH}
+    #[allow(dead_code)] pub(crate) batch_attn_out: Vec<f32>, // {max_qkv, MAX_BATCH}
+    #[allow(dead_code)] pub(crate) batch_wo_out: Vec<f32>,   // {hd,      MAX_BATCH}
+    #[allow(dead_code)] pub(crate) batch_attn_res: Vec<f32>, // {hd,      MAX_BATCH}
+    #[allow(dead_code)] pub(crate) batch_gate: Vec<f32>,     // {max_ffn, MAX_BATCH}
+    #[allow(dead_code)] pub(crate) batch_up: Vec<f32>,       // {max_ffn, MAX_BATCH}
+    #[allow(dead_code)] pub(crate) batch_down: Vec<f32>,     // {hd,      MAX_BATCH}
+    // Q8K quant scratch, sized for the largest column (max_ffn) so the
+    // same buffer handles pre-attn (hd), post-attn (max_qkv), and post-
+    // gate/up (max_ffn) quantization.
+    #[allow(dead_code)] pub(crate) batch_q8_qs: Vec<i8>,     // {(max_ffn + 12), MAX_BATCH}
+    #[allow(dead_code)] pub(crate) batch_q8_d: Vec<f32>,     // {max_ffn/256,    MAX_BATCH}
+    #[allow(dead_code)] pub(crate) batch_q8_bsums: Vec<i16>, // {(max_ffn/256)*16, MAX_BATCH}
+    #[allow(dead_code)] pub(crate) max_batch: usize,
 }
+
+/// Maximum number of prompt tokens processed in one forward_batch call.
+/// Larger prompts are chunked. 64 is a reasonable starting cap.
+pub const MAX_BATCH: usize = 64;
 
 impl Gemma4State {
     pub fn new(
@@ -202,6 +231,24 @@ impl Gemma4State {
             ple_q8_qs: vec![0; model.ple_dim + 12],
             ple_q8_d: vec![0.0; (model.ple_dim / 256).max(1)],
             ple_q8_bsums: vec![0; ((model.ple_dim / 256).max(1)) * 16],
+
+            // Batched prompt-eval buffers (Task 12). Allocated once here;
+            // forward_batch reuses them across prompt chunks.
+            batch_x:        vec![0.0; hd       * MAX_BATCH],
+            batch_x_norm:   vec![0.0; hd       * MAX_BATCH],
+            batch_q:        vec![0.0; max_qkv  * MAX_BATCH],
+            batch_k:        vec![0.0; max_kv   * MAX_BATCH],
+            batch_v:        vec![0.0; max_kv   * MAX_BATCH],
+            batch_attn_out: vec![0.0; max_qkv  * MAX_BATCH],
+            batch_wo_out:   vec![0.0; hd       * MAX_BATCH],
+            batch_attn_res: vec![0.0; hd       * MAX_BATCH],
+            batch_gate:     vec![0.0; max_ffn  * MAX_BATCH],
+            batch_up:       vec![0.0; max_ffn  * MAX_BATCH],
+            batch_down:     vec![0.0; hd       * MAX_BATCH],
+            batch_q8_qs:    vec![0;   (max_ffn + 12) * MAX_BATCH],
+            batch_q8_d:     vec![0.0; n_blocks_ffn   * MAX_BATCH],
+            batch_q8_bsums: vec![0;   n_blocks_ffn * 16 * MAX_BATCH],
+            max_batch: MAX_BATCH,
 
             cache,
         }

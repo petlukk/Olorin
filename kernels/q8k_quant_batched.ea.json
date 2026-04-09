@@ -1,0 +1,12 @@
+{
+  "library": "/root/dev/olorin/target/release/build/olorin-30f5016df977a983/out/libq8k_quant_batched.so",
+  "exports": [
+    {
+      "name": "q8k_quant_batched",
+      "args": [{"name": "src", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "dst_qs", "type": "*mut i8", "direction": "out", "cap": "( n_cols + 12 ) * n_batch", "count": null}, {"name": "dst_d", "type": "*mut f32", "direction": "out", "cap": "( n_cols / 256 ) * n_batch", "count": null}, {"name": "dst_bsums", "type": "*mut i16", "direction": "out", "cap": "( n_cols / 256 ) * 16 * n_batch", "count": null}, {"name": "n_cols", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "n_batch", "type": "i32", "direction": "in", "cap": null, "count": null}],
+      "return_type": null
+    }
+  ],
+  "structs": [
+  ]
+}

@@ -590,3 +590,76 @@ fn batch4_q4k_8x8_q8k_gemm_bitexact_vs_ggml_avx512() {
         eprintln!("PASS: batch4 N={n} — {} outputs match ggml byte-for-byte", n * n_rows);
     }
 }
+
+// ---------------------------------------------------------------------------
+// batch5: q8k_quant_batched bit-exact vs N independent quant_input calls
+// ---------------------------------------------------------------------------
+//
+// Task 13 acceptance test. The batched Eä kernel inlines quant_f32_q8k's
+// body in a per-column loop — output must be byte-for-byte identical to
+// looping quant_input over the N columns.
+
+#[test]
+fn batch5_q8k_quant_batched_matches_n_calls() {
+    olorin::kernels::ffi::init().unwrap();
+    let n_cols: usize = 1536;
+    let n_blocks = n_cols / 256;
+    let n_batch: usize = 4;
+
+    // Deterministic input — mix of small positive, small negative, zeros
+    // near the clipping boundary to exercise the round-half-to-even path.
+    let mut x = vec![0.0f32; n_cols * n_batch];
+    for k in 0..n_batch {
+        for i in 0..n_cols {
+            x[k * n_cols + i] = (((i + k * 11) as f32) * 0.0137 - 0.5).sin() * 0.5;
+        }
+    }
+
+    // Reference: N independent calls to olorin's existing quant_input.
+    let qs_stride = n_cols + 12;
+    let mut ref_qs = vec![0i8; qs_stride * n_batch];
+    let mut ref_d = vec![0.0f32; n_blocks * n_batch];
+    let mut ref_bsums = vec![0i16; n_blocks * 16 * n_batch];
+    for k in 0..n_batch {
+        olorin::inference::matmul::quant_input(
+            &x[k * n_cols..(k + 1) * n_cols],
+            &mut ref_qs[k * qs_stride..(k + 1) * qs_stride],
+            &mut ref_d[k * n_blocks..(k + 1) * n_blocks],
+            &mut ref_bsums[k * n_blocks * 16..(k + 1) * n_blocks * 16],
+        );
+    }
+
+    // New: one batched call.
+    let mut new_qs = vec![0i8; qs_stride * n_batch];
+    let mut new_d = vec![0.0f32; n_blocks * n_batch];
+    let mut new_bsums = vec![0i16; n_blocks * 16 * n_batch];
+    unsafe {
+        olorin::kernels::ffi_inference::q8k_quant_batched(
+            x.as_ptr(),
+            new_qs.as_mut_ptr(),
+            new_d.as_mut_ptr(),
+            new_bsums.as_mut_ptr(),
+            n_cols as i32,
+            n_batch as i32,
+        );
+    }
+
+    // qs byte-for-byte comparison.
+    assert_eq!(
+        new_qs, ref_qs,
+        "q8k_quant_batched qs differs from looped quant_input"
+    );
+    // d bit-for-bit (f32 bit pattern) comparison.
+    let ref_d_bits: Vec<u32> = ref_d.iter().map(|f| f.to_bits()).collect();
+    let new_d_bits: Vec<u32> = new_d.iter().map(|f| f.to_bits()).collect();
+    assert_eq!(
+        new_d_bits, ref_d_bits,
+        "q8k_quant_batched d differs from looped quant_input"
+    );
+    // bsums i16 comparison.
+    assert_eq!(
+        new_bsums, ref_bsums,
+        "q8k_quant_batched bsums differs from looped quant_input"
+    );
+    eprintln!("PASS: batch5 — {} columns × {} elements bit-exact", n_batch, n_cols);
+}
