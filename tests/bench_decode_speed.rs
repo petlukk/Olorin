@@ -125,23 +125,29 @@ fn olorin_full_bench() {
     prompt_ids.extend(tokenizer.encode(PROMPT));
     let n_prompt = prompt_ids.len();
 
-    // ── Prefill (prompt eval) — batched gemm path ─────────────────────
+    // ── Prefill (prompt eval) ────────────────────────────────────────────
     let t_prefill = Instant::now();
-    let logits = state.forward_batch(&model, &prompt_ids, &pool);
+    let mut last_logits_ptr: *const f32 = std::ptr::null();
+    let mut last_logits_len: usize = 0;
+    for &tok in &prompt_ids {
+        let logits = state.forward_one(&model, tok, &pool);
+        last_logits_ptr = logits.as_ptr();
+        last_logits_len = logits.len();
+    }
     let prefill_secs = t_prefill.elapsed().as_secs_f64();
     let prefill_tps = n_prompt as f64 / prefill_secs;
     let prefill_ms_per_tok = prefill_secs * 1000.0 / n_prompt as f64;
-    let mut next = argmax(logits);
+    let last_logits =
+        unsafe { std::slice::from_raw_parts(last_logits_ptr, last_logits_len) };
+    let mut next = argmax(last_logits);
 
     // ── Decode (eval) ────────────────────────────────────────────────────
-    // Use forward_batch(N=1) so decode also reads packed weights, avoiding
-    // mmap page re-faults from the 776MB packed buffer evicting model pages.
     let mut step_ms: Vec<f64> = Vec::with_capacity(N_DECODE);
 
     let cpu_before_decode = proc_cpu_seconds();
     let t_ttft = Instant::now();
     {
-        let logits = state.forward_batch(&model, &[next], &pool);
+        let logits = state.forward_one(&model, next, &pool);
         next = argmax(logits);
     }
     let ttft_ms = t_ttft.elapsed().as_secs_f64() * 1000.0;
@@ -150,7 +156,7 @@ fn olorin_full_bench() {
     let t_decode = Instant::now();
     for _ in 1..N_DECODE {
         let t_step = Instant::now();
-        let logits = state.forward_batch(&model, &[next], &pool);
+        let logits = state.forward_one(&model, next, &pool);
         next = argmax(logits);
         step_ms.push(t_step.elapsed().as_secs_f64() * 1000.0);
     }

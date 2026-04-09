@@ -98,10 +98,13 @@ impl Engine {
         // 3. Reset state for new sequence
         self.state.reset();
 
-        // 4. Prefill: batched forward over all prompt tokens at once.
-        // forward_batch returns last-token logits — ready for decode.
+        // 4. Prefill: forward each prompt token (discard logits except last)
+        let n_prompt = tokens.len();
+        for &tok in &tokens[..n_prompt - 1] {
+            self.state.forward_one(&self.model, tok, &self.pool);
+        }
         let mut logits_snapshot = {
-            let logits = self.state.forward_batch(&self.model, &tokens, &self.pool);
+            let logits = self.state.forward_one(&self.model, tokens[n_prompt - 1], &self.pool);
             logits.to_vec()
         };
 
@@ -112,7 +115,6 @@ impl Engine {
         let stop_ids = &self.tokenizer.stop_ids;
 
         for _ in 0..self.max_tokens {
-            // Sample
             let token_id = sample(
                 &mut logits_snapshot,
                 self.temperature,
@@ -122,24 +124,17 @@ impl Engine {
                 &mut rng,
             );
 
-            // Check EOS / stop tokens
             if token_id == eos || stop_ids.contains(&token_id) {
                 break;
             }
 
-            // Hide CONTROL / USER_DEFINED tokens (e.g. <|think|>, <|channel>,
-            // <channel|>) from user-facing output. They still advance the
-            // model state via forward_one below.
             if !self.tokenizer.is_control_or_user_defined(token_id) {
                 let text = self.tokenizer.decode(&[token_id]);
                 on_token(&text);
                 output.push_str(&text);
             }
 
-            // Forward to get next logits (forward_batch N=1 uses packed
-            // weights, avoiding mmap page re-faults from the packed buffer
-            // evicting model pages on memory-constrained machines)
-            let logits = self.state.forward_batch(&self.model, &[token_id], &self.pool);
+            let logits = self.state.forward_one(&self.model, token_id, &self.pool);
             logits_snapshot.clear();
             logits_snapshot.extend_from_slice(logits);
         }

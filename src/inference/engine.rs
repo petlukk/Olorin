@@ -432,12 +432,6 @@ impl Gemma4Model {
             layers.push(lw);
         }
 
-        // 8b. Persistent Q4K repack into one contiguous buffer (llama.cpp style)
-        let packed_weights = crate::inference::engine_helpers::repack_all_q4k(
-            &mut layers, n_heads, n_kv_heads, &head_dim_k, &head_dim_v,
-            hidden_dim, &ffn_dim,
-        );
-
         // 9. Global tensors
         let embed_weight = tensor_ptr::<u8>(gguf, "token_embd.weight")?;
         let embed_idx = gguf.tensor_map["token_embd.weight"];
@@ -490,7 +484,7 @@ impl Gemma4Model {
             ple_model_proj,
             ple_proj_norm,
             _bf16_bufs: bf16_bufs,
-            _packed_weights: packed_weights,
+            _packed_weights: Vec::new(),
         })
     }
 }
