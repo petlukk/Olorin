@@ -952,3 +952,118 @@ fn batch9_kv_cache_store_batch_matches_n_stores() {
         n_batch
     );
 }
+
+// ---------------------------------------------------------------------------
+// batch10: attention_decode_batch vs N sequential attention_decode calls
+// ---------------------------------------------------------------------------
+//
+// Task 18 acceptance test. attention_decode_batch processes N queries in
+// one call with per-query causal attn_len; the reference path loops N
+// queries through the existing single-query attention_decode, each with
+// its own attn_len and its own q/attn_out slice. Outputs must be
+// bit-for-bit identical.
+//
+// Uses a real model to get the KvCache + thread pool wired up correctly,
+// then primes the cache with (pos_base + N) deterministic positions and
+// runs attention for the last N of them.
+
+#[test]
+fn batch10_attention_batched_matches_n_decode_calls() {
+    if !has_model() { eprintln!("SKIP: no model"); return; }
+    let gguf = olorin::inference::gguf::GgufFile::open(Path::new(&model_path())).unwrap();
+    let model = olorin::inference::engine::Gemma4Model::from_gguf(&gguf).unwrap();
+    olorin::kernels::ffi::init().unwrap();
+    let pool = olorin::inference::threadpool::ThreadPool::new();
+
+    // Layer 0 (sliding window) exercises the ring-buffer path. Its head
+    // dim is 256 in gemma E2B.
+    let il: usize = 0;
+    let n_heads = model.n_heads;
+    let n_kv_heads = model.n_kv_heads;
+    let head_dim = model.head_dim_k[il];
+    let kv_dim = n_kv_heads * head_dim;
+    let q_stride = n_heads * head_dim;
+    let gqa_ratio = n_heads / n_kv_heads;
+    let scale = 1.0f32;
+
+    let pos_base: usize = 10;
+    let n_batch: usize = 4;
+
+    // Build two identical states. We'll drive attention through each.
+    let mut state_ref = olorin::inference::forward::Gemma4State::new(&model, 512, &pool);
+    let mut state_new = olorin::inference::forward::Gemma4State::new(&model, 512, &pool);
+
+    // Prime both caches with (pos_base + n_batch) deterministic K/V positions.
+    // Use layer il's actual KV dim so store() writes the right number of bytes.
+    let mut k_f32 = vec![0.0f32; kv_dim];
+    let mut v_f32 = vec![0.0f32; kv_dim];
+    for p in 0..(pos_base + n_batch) {
+        for i in 0..kv_dim {
+            k_f32[i] = (((i + p * 17) as f32) * 0.007 - 0.2).sin() * 0.4;
+            v_f32[i] = (((i + p * 23) as f32) * 0.009 + 0.1).cos() * 0.35;
+        }
+        state_ref.cache.store(il, &k_f32, &v_f32);
+        state_ref.cache.advance();
+        state_new.cache.store(il, &k_f32, &v_f32);
+        state_new.cache.advance();
+    }
+    assert_eq!(state_ref.cache.seq_len(), pos_base + n_batch);
+    assert_eq!(state_new.cache.seq_len(), pos_base + n_batch);
+
+    // Build N deterministic query vectors in state_new.batch_q (column-major).
+    for k in 0..n_batch {
+        for i in 0..q_stride {
+            state_new.batch_q[k * q_stride + i] =
+                (((i + k * 31) as f32) * 0.013 - 0.35).sin() * 0.3;
+        }
+    }
+
+    // Reference path: for each query k, copy it into state_ref.q and call
+    // attention_decode with attn_len = pos_base + k + 1. Copy the output
+    // out to a per-k slot for comparison.
+    let mut ref_out_all = vec![0.0f32; q_stride * n_batch];
+    for k in 0..n_batch {
+        for i in 0..q_stride {
+            state_ref.q[i] = state_new.batch_q[k * q_stride + i];
+        }
+        let attn_len = pos_base + k + 1;
+        let k_ptr = state_ref.cache.k_ptr(il);
+        let v_ptr = state_ref.cache.v_ptr(il);
+        olorin::inference::attention_decode(
+            &mut state_ref,
+            n_heads, n_kv_heads, gqa_ratio, head_dim,
+            kv_dim, attn_len, scale, k_ptr, v_ptr,
+            &pool,
+        );
+        for i in 0..q_stride {
+            ref_out_all[k * q_stride + i] = state_ref.attn_out[i];
+        }
+    }
+
+    // Batched path: one call to attention_decode_batch.
+    let k_ptr = state_new.cache.k_ptr(il);
+    let v_ptr = state_new.cache.v_ptr(il);
+    olorin::inference::attention_decode_batch(
+        &mut state_new,
+        n_heads, n_kv_heads, gqa_ratio, head_dim,
+        kv_dim, pos_base, n_batch, scale, k_ptr, v_ptr,
+        &pool,
+    );
+
+    // Bit-exact comparison. state_new.batch_attn_out holds the batched output.
+    for k in 0..n_batch {
+        for i in 0..q_stride {
+            let r = ref_out_all[k * q_stride + i];
+            let n = state_new.batch_attn_out[k * q_stride + i];
+            assert_eq!(
+                r.to_bits(), n.to_bits(),
+                "batch10 diff at query={} elem={} ref={} new={}",
+                k, i, r, n,
+            );
+        }
+    }
+    eprintln!(
+        "PASS: batch10 — {} queries × {} elements bit-exact (layer {}, head_dim {})",
+        n_batch, q_stride, il, head_dim
+    );
+}

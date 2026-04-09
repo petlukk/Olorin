@@ -79,7 +79,7 @@ pub struct Gemma4State {
     pub(crate) q8_bsums: Vec<i16>,
 
     // QKV buffers
-    pub(crate) q: Vec<f32>,
+    pub q: Vec<f32>,
     pub(crate) k: Vec<f32>,
     pub(crate) v: Vec<f32>,
 
@@ -135,10 +135,10 @@ pub struct Gemma4State {
     // until Task 19 wires them up.
     #[allow(dead_code)] pub(crate) batch_x: Vec<f32>,        // {hd, MAX_BATCH}
     #[allow(dead_code)] pub(crate) batch_x_norm: Vec<f32>,   // {hd, MAX_BATCH}
-    #[allow(dead_code)] pub(crate) batch_q: Vec<f32>,        // {max_qkv, MAX_BATCH}
+    #[allow(dead_code)] pub batch_q: Vec<f32>,               // {max_qkv, MAX_BATCH}
     #[allow(dead_code)] pub(crate) batch_k: Vec<f32>,        // {max_kv,  MAX_BATCH}
     #[allow(dead_code)] pub(crate) batch_v: Vec<f32>,        // {max_kv,  MAX_BATCH}
-    #[allow(dead_code)] pub(crate) batch_attn_out: Vec<f32>, // {max_qkv, MAX_BATCH}
+    #[allow(dead_code)] pub batch_attn_out: Vec<f32>,        // {max_qkv, MAX_BATCH}
     #[allow(dead_code)] pub(crate) batch_wo_out: Vec<f32>,   // {hd,      MAX_BATCH}
     #[allow(dead_code)] pub(crate) batch_attn_res: Vec<f32>, // {hd,      MAX_BATCH}
     #[allow(dead_code)] pub(crate) batch_gate: Vec<f32>,     // {max_ffn, MAX_BATCH}

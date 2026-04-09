@@ -137,7 +137,119 @@ pub(crate) fn v_bare_norm_per_head(
     });
 }
 
-pub(crate) fn attention_decode(
+/// Batched version of `attention_decode`: run attention for `n_batch`
+/// query positions in one call, using column-major `state.batch_q` and
+/// `state.batch_attn_out` (column k at offset `k * n_heads * head_dim`).
+///
+/// Query `k` attends to KV positions `[0, pos_base + k + 1)` — the causal
+/// mask is applied by passing a different `attn_len = pos_base + k + 1`
+/// per iteration. The caller must have written KV for positions
+/// `[pos_base, pos_base + n_batch)` into the cache before calling this.
+///
+/// Output is bit-for-bit identical to calling `attention_decode` once per
+/// query with the corresponding `attn_len` and per-query q/attn_out slices.
+#[allow(clippy::too_many_arguments, dead_code)]
+pub fn attention_decode_batch(
+    state: &mut Gemma4State,
+    n_heads: usize,
+    _n_kv_heads: usize,
+    gqa_ratio: usize,
+    head_dim: usize,
+    kv_dim: usize,
+    pos_base: usize,
+    n_batch: usize,
+    scale: f32,
+    k_ptr: *const u16,
+    v_ptr: *const u16,
+    pool: &crate::inference::threadpool::ThreadPool,
+) {
+    let stride_kv = kv_dim;
+    let q_stride = n_heads * head_dim;
+    let kv_scratch_stride = state.kv_scratch_stride;
+    let attn_scores_stride = state.attn_scores_stride;
+
+    let q_addr = state.batch_q.as_ptr() as usize;
+    let attn_out_addr = state.batch_attn_out.as_mut_ptr() as usize;
+    let kv_scratch_addr = state.kv_f32_scratch.as_mut_ptr() as usize;
+    let attn_scores_addr = state.attn_scores.as_mut_ptr() as usize;
+    let k_addr = k_ptr as usize;
+    let v_addr = v_ptr as usize;
+
+    let n_workers = n_heads.min(pool.thread_count()).max(1);
+
+    pool.run(n_workers, |tid, nt| {
+        let per = (n_heads + nt - 1) / nt;
+        let h_start = tid * per;
+        let h_end = ((tid + 1) * per).min(n_heads);
+        if h_start >= h_end { return; }
+
+        let q_base_ptr = q_addr as *const f32;
+        let attn_out_base_ptr = attn_out_addr as *mut f32;
+        let k_ptr = k_addr as *const u16;
+        let v_ptr = v_addr as *const u16;
+
+        let kv_scratch_base = unsafe {
+            (kv_scratch_addr as *mut f32).add(tid * kv_scratch_stride)
+        };
+        let attn_scores_base = unsafe {
+            (attn_scores_addr as *mut f32).add(tid * attn_scores_stride)
+        };
+
+        for h in h_start..h_end {
+            let kv_h = h / gqa_ratio;
+            let q_head_off = h * head_dim;
+
+            for k in 0..n_batch {
+                let attn_len = pos_base + k + 1;
+                let q_slice_ptr = unsafe { q_base_ptr.add(k * q_stride + q_head_off) };
+
+                // Q · K for each cached position
+                for p in 0..attn_len {
+                    let k_offset = p * stride_kv + kv_h * head_dim;
+                    let k_src = unsafe { k_ptr.add(k_offset) };
+                    unsafe {
+                        ffi_inference::f16_to_f32(k_src, kv_scratch_base, head_dim as i32);
+                    }
+                    let dot = ffi_inference::f32_dot(
+                        q_slice_ptr,
+                        kv_scratch_base as *const f32,
+                        head_dim as i32,
+                    );
+                    unsafe { *attn_scores_base.add(p) = dot; }
+                }
+
+                // Softmax with scale
+                unsafe {
+                    ffi_inference::softmax_f32(attn_scores_base, attn_len as i32, scale);
+                }
+
+                // Weighted V sum into batch_attn_out[k*q_stride + q_head_off..+head_dim]
+                let out_base = unsafe {
+                    attn_out_base_ptr.add(k * q_stride + q_head_off)
+                };
+                unsafe {
+                    std::ptr::write_bytes(out_base, 0, head_dim);
+                }
+                for p in 0..attn_len {
+                    let v_offset = p * stride_kv + kv_h * head_dim;
+                    let v_src = unsafe { v_ptr.add(v_offset) };
+                    unsafe {
+                        ffi_inference::f16_to_f32(v_src, kv_scratch_base, head_dim as i32);
+                    }
+                    let s = unsafe { *attn_scores_base.add(p) };
+                    ffi_inference::f32_dot_acc(
+                        out_base,
+                        kv_scratch_base as *const f32,
+                        s,
+                        head_dim as i32,
+                    );
+                }
+            }
+        }
+    });
+}
+
+pub fn attention_decode(
     state: &mut Gemma4State,
     n_heads: usize,
     _n_kv_heads: usize,
