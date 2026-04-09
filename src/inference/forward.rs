@@ -133,7 +133,7 @@ pub struct Gemma4State {
     // kernels are wired up in Tasks 13–19. Single-token forward_one does
     // not touch these. #[allow(dead_code)] scoped to each field stays
     // until Task 19 wires them up.
-    #[allow(dead_code)] pub(crate) batch_x: Vec<f32>,        // {hd, MAX_BATCH}
+    #[allow(dead_code)] pub batch_x: Vec<f32>,                // {hd, MAX_BATCH}
     #[allow(dead_code)] pub(crate) batch_x_norm: Vec<f32>,   // {hd, MAX_BATCH}
     #[allow(dead_code)] pub batch_q: Vec<f32>,               // {max_qkv, MAX_BATCH}
     #[allow(dead_code)] pub(crate) batch_k: Vec<f32>,        // {max_kv,  MAX_BATCH}
