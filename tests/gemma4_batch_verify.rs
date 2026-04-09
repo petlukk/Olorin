@@ -841,3 +841,114 @@ fn batch8_gelu_mul_batched_matches_n_calls() {
     }
     eprintln!("PASS: batch8 — {} columns × {} elements bit-exact", n, n_cols);
 }
+
+// ---------------------------------------------------------------------------
+// batch9: KvCache::store_batch bit-exact vs N store() calls
+// ---------------------------------------------------------------------------
+//
+// Task 17 acceptance test. Two identical caches: one gets N single-position
+// store() calls, the other gets one store_batch() call for the same data.
+// Read back the raw K/V buffers at positions 0..N via k_ptr/v_ptr and
+// assert byte equality. Exercises both a sliding-window layer and a global
+// layer since the ring-buffer modulo logic differs.
+
+#[test]
+fn batch9_kv_cache_store_batch_matches_n_stores() {
+    use olorin::inference::cache::KvCache;
+    use olorin::inference::engine::AttnType;
+
+    let n_kv_heads = 1;
+    let head_dim = 256;
+    let stride = n_kv_heads * head_dim;
+    let window = 512;
+    let max_seq_len = 2048;
+    let n_batch: usize = 6;
+
+    // Two layers: 0 = sliding window, 1 = global. No shared sources.
+    let attn_types = vec![AttnType::SlidingWindow, AttnType::Global];
+    let shared_source = vec![None, None];
+    let head_dim_v = vec![head_dim, head_dim];
+
+    let mut cache_ref = KvCache::new(
+        2, n_kv_heads, head_dim_v.clone(), window, max_seq_len,
+        attn_types.clone(), shared_source.clone(),
+    );
+    let mut cache_new = KvCache::new(
+        2, n_kv_heads, head_dim_v, window, max_seq_len,
+        attn_types, shared_source,
+    );
+
+    // Build N deterministic K/V positions for each of the two layers.
+    let mut k_all = vec![0.0f32; stride * n_batch * 2];  // [layer, position, elem]
+    let mut v_all = vec![0.0f32; stride * n_batch * 2];
+    for l in 0..2 {
+        for k in 0..n_batch {
+            for i in 0..stride {
+                let idx = l * stride * n_batch + k * stride + i;
+                k_all[idx] = (((i + k * 17 + l * 101) as f32) * 0.011 - 0.3).sin() * 0.5;
+                v_all[idx] = (((i + k * 13 + l * 103) as f32) * 0.013 + 0.1).cos() * 0.4;
+            }
+        }
+    }
+
+    // Reference cache: N single-position store() calls per layer, in order.
+    for k in 0..n_batch {
+        for l in 0..2 {
+            let base = l * stride * n_batch + k * stride;
+            cache_ref.store(l, &k_all[base..base + stride], &v_all[base..base + stride]);
+        }
+        cache_ref.advance();
+    }
+
+    // New cache: one store_batch() per layer, then advance_by(N).
+    for l in 0..2 {
+        let base = l * stride * n_batch;
+        let end = base + stride * n_batch;
+        cache_new.store_batch(
+            l,
+            &k_all[base..end],
+            &v_all[base..end],
+            n_batch,
+        );
+    }
+    cache_new.advance_by(n_batch);
+
+    // seq_len must match.
+    assert_eq!(cache_ref.seq_len(), n_batch);
+    assert_eq!(cache_new.seq_len(), n_batch);
+
+    // Compare raw K/V slabs for both layers. For sliding-window layer 0 at
+    // seq_len=0 with n_batch=6 ≤ window=512, positions 0..6 map to cache
+    // offsets 0..6 — same as global layer 1. So the first N*stride u16s
+    // of each layer's buffer should match byte-for-byte.
+    for l in 0..2 {
+        let slab_bytes = stride * n_batch;
+        let ref_slice = unsafe {
+            std::slice::from_raw_parts(cache_ref.k_ptr(l), slab_bytes)
+        };
+        let new_slice = unsafe {
+            std::slice::from_raw_parts(cache_new.k_ptr(l), slab_bytes)
+        };
+        assert_eq!(
+            ref_slice, new_slice,
+            "K mismatch on layer {} (attn_type {})",
+            l, if l == 0 { "SlidingWindow" } else { "Global" },
+        );
+
+        let ref_slice_v = unsafe {
+            std::slice::from_raw_parts(cache_ref.v_ptr(l), slab_bytes)
+        };
+        let new_slice_v = unsafe {
+            std::slice::from_raw_parts(cache_new.v_ptr(l), slab_bytes)
+        };
+        assert_eq!(
+            ref_slice_v, new_slice_v,
+            "V mismatch on layer {}", l,
+        );
+    }
+
+    eprintln!(
+        "PASS: batch9 — {} positions × 2 layers (sliding + global) bit-exact",
+        n_batch
+    );
+}

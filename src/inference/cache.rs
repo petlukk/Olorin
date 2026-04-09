@@ -138,6 +138,61 @@ impl KvCache {
         }
     }
 
+    /// Store K and V for `n_batch` consecutive positions starting at the
+    /// current `seq_len`. Layout of `k_batch`/`v_batch` is column-major
+    /// `{n_kv_heads * head_dim_v, n_batch}` — column k starts at offset
+    /// `k * (n_kv_heads * head_dim_v[layer])`.
+    ///
+    /// Does NOT advance `seq_len` — the caller is responsible for calling
+    /// `advance_by(n_batch)` after writing all layers for this batch step.
+    ///
+    /// Per-position write semantics are bit-for-bit identical to calling
+    /// `store` once per position (same f32→f16 conversion, same ring-buffer
+    /// modulo logic for sliding-window layers).
+    pub fn store_batch(
+        &mut self,
+        layer: usize,
+        k_batch: &[f32],
+        v_batch: &[f32],
+        n_batch: usize,
+    ) {
+        // Shared layers use another layer's storage — skip just like store().
+        if self.shared_source[layer].is_some() {
+            return;
+        }
+
+        let hd = self.head_dim_v[layer];
+        let stride = self.n_kv_heads * hd;
+        debug_assert_eq!(k_batch.len(), stride * n_batch);
+        debug_assert_eq!(v_batch.len(), stride * n_batch);
+
+        let attn = self.attn_types[layer];
+        let window = self.window_size;
+        let seq_len = self.seq_len;
+
+        let kb = &mut self.k[layer];
+        let vb = &mut self.v[layer];
+
+        for k in 0..n_batch {
+            let pos = match attn {
+                AttnType::SlidingWindow => (seq_len + k) % window,
+                AttnType::Global => seq_len + k,
+            };
+            let cache_off = pos * stride;
+            let src_off = k * stride;
+            for i in 0..stride {
+                kb[cache_off + i] = f32_to_f16(k_batch[src_off + i]);
+                vb[cache_off + i] = f32_to_f16(v_batch[src_off + i]);
+            }
+        }
+    }
+
+    /// Advance sequence position by `n` tokens. Pairs with `store_batch`.
+    #[inline]
+    pub fn advance_by(&mut self, n: usize) {
+        self.seq_len += n;
+    }
+
     /// Pointer to K buffer for a layer, resolving shared source.
     #[inline]
     pub fn k_ptr(&self, layer: usize) -> *const u16 {
