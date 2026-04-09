@@ -60,14 +60,6 @@ pub struct LayerWeights {
     pub proj_dtype: u32,
     pub post_norm: *const f32,        // [hidden_dim]
     pub layer_output_scale: f32,      // scalar
-    // Repacked Q4K pointers into Gemma4Model::_packed_weights (null if not Q4K)
-    pub wq_packed: *const u8,
-    pub wk_packed: *const u8,
-    pub wv_packed: *const u8,
-    pub wo_packed: *const u8,
-    pub w_gate_packed: *const u8,
-    pub w_up_packed: *const u8,
-    pub w_down_packed: *const u8,
 }
 
 impl std::fmt::Debug for LayerWeights {
@@ -117,7 +109,6 @@ pub struct Gemma4Model {
     pub ple_proj_norm: *const f32,    // [ple_dim]
 
     _bf16_bufs: Vec<Vec<f32>>,        // BF16→f32 conversion buffers (kept alive)
-    _packed_weights: Vec<u8>,         // contiguous Q4K 8x8 repack (lw.*_packed → here)
 }
 
 unsafe impl Send for Gemma4Model {}
@@ -239,10 +230,6 @@ fn compute_kv_shared(
 
 impl Gemma4Model {
     pub fn from_gguf(gguf: &GgufFile) -> Result<Self, String> {
-        // Kernel runtime must be live before we can repack Q4K weights.
-        // init() is idempotent — safe even if the caller already ran it.
-        crate::kernels::ffi::init()?;
-
         // 1. Architecture name
         let arch = gguf.get_str("general.architecture").unwrap_or("gemma4");
         eprintln!("[gemma4] architecture: {arch}");
@@ -424,10 +411,6 @@ impl Gemma4Model {
                 proj_dtype: tensor_dtype(gguf, &format!("{b}.proj.weight")),
                 post_norm: load_norm_ptr(gguf, &format!("{b}.post_norm.weight"), &mut bf16_bufs),
                 layer_output_scale: read_f32_scalar(gguf, &format!("{b}.layer_output_scale.weight")),
-                wq_packed: std::ptr::null(), wk_packed: std::ptr::null(),
-                wv_packed: std::ptr::null(), wo_packed: std::ptr::null(),
-                w_gate_packed: std::ptr::null(), w_up_packed: std::ptr::null(),
-                w_down_packed: std::ptr::null(),
             };
             layers.push(lw);
         }
@@ -484,7 +467,6 @@ impl Gemma4Model {
             ple_model_proj,
             ple_proj_norm,
             _bf16_bufs: bf16_bufs,
-            _packed_weights: Vec::new(),
         })
     }
 }
