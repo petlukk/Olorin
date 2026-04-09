@@ -22,6 +22,11 @@ pub const GGML_TYPE_Q4_K: u32 = 12;
 pub const GGML_TYPE_Q5_K: u32 = 13;
 pub const GGML_TYPE_Q6_K: u32 = 14;
 
+/// Byte size of a Q4K tensor's repacked 8x8 representation.
+pub fn q4k_packed_size(n_rows: usize, n_cols: usize) -> usize {
+    (n_cols / 256) * n_rows * 144 // sizeof(block_q4_K) == 144
+}
+
 // ---------------------------------------------------------------------------
 // pow2 table for Q4K f16→f32 inline conversion
 // ---------------------------------------------------------------------------

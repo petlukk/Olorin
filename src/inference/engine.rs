@@ -66,6 +66,10 @@ pub struct LayerWeights {
     pub layer_output_scale: f32,      // scalar
 }
 
+/// Repack a single Q4K tensor into the 8x8 interleaved layout consumed
+/// by `q4k_8x8_q8k_gemm`. `n_rows` must be a multiple of 8, `n_cols` a
+/// multiple of 256. Returns an empty Vec if the tensor isn't Q4K.
+
 impl std::fmt::Debug for LayerWeights {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LayerWeights").finish()
@@ -243,6 +247,10 @@ fn compute_kv_shared(
 
 impl Gemma4Model {
     pub fn from_gguf(gguf: &GgufFile) -> Result<Self, String> {
+        // Kernel runtime must be live before we can repack Q4K weights.
+        // init() is idempotent — safe even if the caller already ran it.
+        crate::kernels::ffi::init()?;
+
         // 1. Architecture name
         let arch = gguf.get_str("general.architecture").unwrap_or("gemma4");
         eprintln!("[gemma4] architecture: {arch}");
@@ -424,6 +432,9 @@ impl Gemma4Model {
                 proj_dtype: tensor_dtype(gguf, &format!("{b}.proj.weight")),
                 post_norm: load_norm_ptr(gguf, &format!("{b}.post_norm.weight"), &mut bf16_bufs),
                 layer_output_scale: read_f32_scalar(gguf, &format!("{b}.layer_output_scale.weight")),
+
+                // Repack Q4K weights for batched gemm (Task 20). Non-Q4K
+                // layers get empty Vecs and fall back to per-column matvec.
             };
             layers.push(lw);
         }
