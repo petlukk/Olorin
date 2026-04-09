@@ -28,13 +28,39 @@ pub struct TensorInfo {
     pub offset: u64,
 }
 
+/// Memory-mapped GGUF file. The model data lives in the page cache
+/// (evictable under memory pressure) rather than heap, saving ~3.3GB
+/// of heap for a Gemma 4 E2B Q4_K_M model.
 pub struct GgufFile {
     pub version: u32,
     pub metadata: HashMap<String, MetaValue>,
     pub tensors: Vec<TensorInfo>,
     pub tensor_map: HashMap<String, usize>,
     pub data_offset: u64,
-    raw: Vec<u8>,
+    mmap: MmapBuf,
+}
+
+/// Owned mmap region. Unmapped on Drop.
+struct MmapBuf {
+    ptr: *mut u8,
+    len: usize,
+}
+
+unsafe impl Send for MmapBuf {}
+unsafe impl Sync for MmapBuf {}
+
+impl MmapBuf {
+    fn as_slice(&self) -> &[u8] {
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+    }
+}
+
+impl Drop for MmapBuf {
+    fn drop(&mut self) {
+        if !self.ptr.is_null() && self.len > 0 {
+            unsafe { libc::munmap(self.ptr as *mut libc::c_void, self.len); }
+        }
+    }
 }
 
 impl std::fmt::Debug for GgufFile {
@@ -44,7 +70,7 @@ impl std::fmt::Debug for GgufFile {
             .field("n_tensors", &self.tensors.len())
             .field("n_metadata", &self.metadata.len())
             .field("data_offset", &self.data_offset)
-            .field("raw_len", &self.raw.len())
+            .field("mmap_len", &self.mmap.len)
             .finish()
     }
 }
@@ -228,9 +254,39 @@ fn tensor_byte_size(dims: &[u64], dtype: u32) -> Result<usize> {
 }
 
 impl GgufFile {
+    fn mmap_file(path: &std::path::Path) -> Result<MmapBuf> {
+        use std::os::unix::io::AsRawFd;
+        let file = std::fs::File::open(path)
+            .map_err(|e| Error::Inference(format!("open {}: {e}", path.display())))?;
+        let len = file.metadata()
+            .map_err(|e| Error::Inference(format!("stat {}: {e}", path.display())))?
+            .len() as usize;
+        if len == 0 {
+            return Err(Error::Inference("empty GGUF file".into()));
+        }
+        let ptr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ,
+                libc::MAP_PRIVATE,
+                file.as_raw_fd(),
+                0,
+            )
+        };
+        if ptr == libc::MAP_FAILED {
+            return Err(Error::Inference(format!(
+                "mmap {} ({len} bytes): {}",
+                path.display(),
+                std::io::Error::last_os_error(),
+            )));
+        }
+        Ok(MmapBuf { ptr: ptr as *mut u8, len })
+    }
+
     pub fn open(path: &std::path::Path) -> Result<Self> {
-        let raw = std::fs::read(path)
-            .map_err(|e| Error::Inference(format!("read {}: {e}", path.display())))?;
+        let mmap = Self::mmap_file(path)?;
+        let raw = mmap.as_slice();
         if raw.len() < 24 {
             return Err(Error::Inference("file too small for GGUF header".into()));
         }
@@ -275,7 +331,7 @@ impl GgufFile {
 
         let data_offset = align_up(pos as u64, ALIGNMENT);
 
-        Ok(GgufFile { version, metadata, tensors, tensor_map, data_offset, raw })
+        Ok(GgufFile { version, metadata, tensors, tensor_map, data_offset, mmap })
     }
 
     pub fn tensor_data(&self, name: &str) -> Option<&[u8]> {
@@ -283,10 +339,11 @@ impl GgufFile {
         let ti = &self.tensors[idx];
         let start = self.data_offset as usize + ti.offset as usize;
         let size = tensor_byte_size(&ti.dims, ti.dtype).ok()?;
-        if start + size > self.raw.len() {
+        let raw = self.mmap.as_slice();
+        if start + size > raw.len() {
             return None;
         }
-        Some(&self.raw[start..start + size])
+        Some(&raw[start..start + size])
     }
 
     pub fn get_str(&self, key: &str) -> Option<&str> {
