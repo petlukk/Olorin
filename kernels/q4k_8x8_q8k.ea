@@ -279,3 +279,131 @@ export func q4k_8x8_q8k_matvec(
         tile = tile + 1
     }
 }
+
+// ---------------------------------------------------------------------------
+// q4k_8x8_q8k_gemm — N>1 batched prompt-eval gemm
+// ---------------------------------------------------------------------------
+//
+// For each of n_cols_batch input columns, compute the same inner loop as
+// q4k_8x8_q8k_matvec against the shared packed weight tile. Per-output-column
+// f32 reduction order is IDENTICAL to the matvec (Task 10 asserts this with
+// bit-exact equality, not tolerance).
+//
+// Savings over looping matvec N times: the unpack_row + scale extraction
+// (read once per (tile, row, block)) is amortized across all N columns.
+// Per-column inner dot is still the 4-FMA-per-block ggml order.
+//
+// Column-major input layouts:
+//   q8_qs:    column k starts at offset k * (n_cols + 12)
+//   q8_d:     column k starts at offset k * n_blocks
+//   q8_bsums: column k starts at offset k * n_blocks * 16
+//   output:   column k starts at offset k * n_rows
+//
+// Caller-provided scratches:
+//   scratch:     144 bytes — standard block_q4_K unpack buffer for one row
+//   acc_scratch: 2 * n_cols_batch f32 — slot [col] is acc, [n_cols_batch+col]
+//                is acc_min. Zeroed per (tile, row) by the kernel.
+
+export func q4k_8x8_q8k_gemm(
+    weight_packed: *restrict u8,
+    q8_qs: *restrict i8,
+    q8_d: *restrict f32,
+    q8_bsums: *i16,
+    pow2: *f32,
+    scratch: *mut u8,
+    acc_scratch: *mut f32,
+    out output: *mut f32 [cap: n_rows * n_cols_batch],
+    n_rows: i32,
+    n_cols: i32,
+    n_cols_batch: i32
+) {
+    let mask_lo: u8x32 = splat(15)
+    let shift4: u8x32 = splat(4)
+    let n_blocks: i32 = n_cols / 256
+    let n_tiles: i32 = n_rows / 8
+    let q8_qs_stride: i32 = n_cols + 12
+    let q8_d_stride: i32 = n_blocks
+    let q8_bsums_stride: i32 = n_blocks * 16
+
+    // scr aliases scratch for the read helpers, same as matvec.
+    let scr: *mut u8 = scratch
+
+    let mut tile: i32 = 0
+    while tile < n_tiles {
+        let mut r: i32 = 0
+        while r < 8 {
+            // Init per-column accumulators for this (tile, row).
+            let mut ci: i32 = 0
+            while ci < n_cols_batch {
+                acc_scratch[ci] = 0.0
+                acc_scratch[n_cols_batch + ci] = 0.0
+                ci = ci + 1
+            }
+
+            let mut b: i32 = 0
+            while b < n_blocks {
+                let tile_base: i32 = (tile * n_blocks + b) * 1152
+                unpack_row(weight_packed, tile_base, r, scratch)
+
+                // Read row-level data ONCE, reuse across all n_cols_batch
+                // input columns. This is the gemm's whole point.
+                let d_row: f32 = f16_load(scr, 0, pow2)
+                let dmin_row: f32 = f16_load(scr, 2, pow2)
+
+                let sp: i32 = 4
+                let sp32: *mut i32 = ptr_as_i32(ptr_as_i8(scr))
+                let u0: i32 = sp32[sp / 4]
+                let u2: i32 = sp32[(sp + 8) / 4]
+                let sc03: i32 = u0 & 0x3f3f3f3f
+                let sc47: i32 = (u2 & 0x0f0f0f0f) | (((u0 >> 6) & 0x03030303) << 4)
+                let s0: i16 = to_i16(sc03 & 255)
+                let s1: i16 = to_i16((sc03 >> 8) & 255)
+                let s2: i16 = to_i16((sc03 >> 16) & 255)
+                let s3: i16 = to_i16((sc03 >> 24) & 255)
+                let s4: i16 = to_i16(sc47 & 255)
+                let s5: i16 = to_i16((sc47 >> 8) & 255)
+                let s6: i16 = to_i16((sc47 >> 16) & 255)
+                let s7: i16 = to_i16((sc47 >> 24) & 255)
+
+                // Per-column inner loop — each column k runs the same four
+                // FMAs + mins term as matvec, feeding its own accumulator
+                // lane in acc_scratch.
+                let mut col: i32 = 0
+                while col < n_cols_batch {
+                    let q8_off: i32 = col * q8_qs_stride + b * 256
+                    let row_d: f32 = q8_d[col * q8_d_stride + b]
+                    let d_prod: f32 = d_row * row_d
+                    let dmin_prod: f32 = dmin_row * row_d
+
+                    let i32_0: i32 = dot_sb_pair(scr, 16,     q8_qs, q8_off +   0, s0, s1, mask_lo, shift4)
+                    acc_scratch[col] = acc_scratch[col] + to_f32(i32_0) * d_prod
+                    let i32_1: i32 = dot_sb_pair(scr, 16 + 32, q8_qs, q8_off +  64, s2, s3, mask_lo, shift4)
+                    acc_scratch[col] = acc_scratch[col] + to_f32(i32_1) * d_prod
+                    let i32_2: i32 = dot_sb_pair(scr, 16 + 64, q8_qs, q8_off + 128, s4, s5, mask_lo, shift4)
+                    acc_scratch[col] = acc_scratch[col] + to_f32(i32_2) * d_prod
+                    let i32_3: i32 = dot_sb_pair(scr, 16 + 96, q8_qs, q8_off + 192, s6, s7, mask_lo, shift4)
+                    acc_scratch[col] = acc_scratch[col] + to_f32(i32_3) * d_prod
+
+                    let bp: i16x8 = bsums_paired(q8_bsums, col * q8_bsums_stride + b * 16)
+                    let mins_i32: i32 = row_mins_bp(scr, sp, bp)
+                    acc_scratch[n_cols_batch + col] =
+                        acc_scratch[n_cols_batch + col] + to_f32(mins_i32) * dmin_prod
+
+                    col = col + 1
+                }
+
+                b = b + 1
+            }
+
+            // Deferred subtract + store — per column.
+            let mut co: i32 = 0
+            while co < n_cols_batch {
+                output[co * n_rows + tile * 8 + r] =
+                    acc_scratch[co] - acc_scratch[n_cols_batch + co]
+                co = co + 1
+            }
+            r = r + 1
+        }
+        tile = tile + 1
+    }
+}

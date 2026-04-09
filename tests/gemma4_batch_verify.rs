@@ -288,3 +288,118 @@ fn batch2_q4k_8x8_q8k_matvec_bitexact_vs_existing_matvec() {
         n_rows
     );
 }
+
+// ---------------------------------------------------------------------------
+// batch3: q4k_8x8_q8k_gemm bit-exact per-column vs looped matvec
+// ---------------------------------------------------------------------------
+//
+// Run the gemm for N input columns and compare each output column byte-for-byte
+// to running the matvec once per column. Per-column f32 reduction order is
+// identical (the gemm just shares the per-(tile,row,block) unpack + scale
+// extraction across the N columns), so every output bit must match.
+
+#[test]
+fn batch3_q4k_8x8_q8k_gemm_bitexact_per_column() {
+    if !has_model() { eprintln!("SKIP: no model"); return; }
+    let gguf = olorin::inference::gguf::GgufFile::open(Path::new(&model_path())).unwrap();
+    let model = olorin::inference::engine::Gemma4Model::from_gguf(&gguf).unwrap();
+    olorin::kernels::ffi::init().unwrap();
+
+    // Same weight pick as batch2: layer 0 ffn_gate (Q4K in Q4_K_M quant).
+    let lw = &model.layers[0];
+    assert_eq!(lw.w_gate_dtype, olorin::inference::matmul::GGML_TYPE_Q4_K);
+    let n_rows = model.ffn_dim[0];        // 6144
+    let n_cols = model.hidden_dim;        // 1536
+    let n_blocks = n_cols / 256;
+    let row_bytes = n_blocks * 144;
+
+    // Repack the weight once.
+    let mut packed = vec![0u8; n_rows * row_bytes];
+    unsafe {
+        olorin::kernels::ffi_inference::q4k_repack_8x8(
+            lw.w_gate, packed.as_mut_ptr(), n_rows as i32, n_cols as i32,
+        );
+    }
+
+    let pow2 = olorin::inference::matmul::pow2_table();
+
+    for &n in &[2usize, 8usize] {
+        // Build N deterministic input columns.
+        let mut x = vec![0.0f32; n_cols * n];
+        for k in 0..n {
+            for i in 0..n_cols {
+                x[k * n_cols + i] = (((i + k * 7) as f32) * 0.0137 - 0.5).cos() * 0.4;
+            }
+        }
+        // Quantize each column independently to Q8K.
+        let qs_stride = n_cols + 12;
+        let mut q8_qs = vec![0i8; qs_stride * n];
+        let mut q8_d = vec![0.0f32; n_blocks * n];
+        let mut q8_bsums = vec![0i16; n_blocks * 16 * n];
+        for k in 0..n {
+            olorin::inference::matmul::quant_input(
+                &x[k * n_cols..(k + 1) * n_cols],
+                &mut q8_qs[k * qs_stride..(k + 1) * qs_stride],
+                &mut q8_d[k * n_blocks..(k + 1) * n_blocks],
+                &mut q8_bsums[k * n_blocks * 16..(k + 1) * n_blocks * 16],
+            );
+        }
+
+        // Reference: N matvec calls, one per column.
+        let mut ref_out = vec![0.0f32; n_rows * n];
+        let mut scratch = vec![0u8; 144];
+        for k in 0..n {
+            unsafe {
+                olorin::kernels::ffi_inference::q4k_8x8_q8k_matvec(
+                    packed.as_ptr(),
+                    q8_qs[k * qs_stride..].as_ptr(),
+                    q8_d[k * n_blocks..].as_ptr(),
+                    q8_bsums[k * n_blocks * 16..].as_ptr(),
+                    pow2.as_ptr(),
+                    scratch.as_mut_ptr(),
+                    ref_out[k * n_rows..].as_mut_ptr(),
+                    n_rows as i32, n_cols as i32,
+                );
+            }
+        }
+
+        // New: gemm in one call.
+        let mut new_out = vec![0.0f32; n_rows * n];
+        let mut acc_scratch = vec![0.0f32; 2 * n];
+        unsafe {
+            olorin::kernels::ffi_inference::q4k_8x8_q8k_gemm(
+                packed.as_ptr(),
+                q8_qs.as_ptr(),
+                q8_d.as_ptr(),
+                q8_bsums.as_ptr(),
+                pow2.as_ptr(),
+                scratch.as_mut_ptr(),
+                acc_scratch.as_mut_ptr(),
+                new_out.as_mut_ptr(),
+                n_rows as i32, n_cols as i32, n as i32,
+            );
+        }
+
+        // Bit-exact comparison.
+        let mut first_mismatch: Option<usize> = None;
+        let mut max_abs_diff = 0.0f32;
+        for i in 0..(n_rows * n) {
+            if ref_out[i].to_bits() != new_out[i].to_bits() {
+                if first_mismatch.is_none() { first_mismatch = Some(i); }
+                let d = (ref_out[i] - new_out[i]).abs();
+                if d > max_abs_diff { max_abs_diff = d; }
+            }
+        }
+        if let Some(idx) = first_mismatch {
+            let col = idx / n_rows;
+            let row = idx % n_rows;
+            eprintln!(
+                "N={n}: first mismatch col={col} row={row} ref=0x{:08x} new=0x{:08x} max_abs_diff={max_abs_diff:e}",
+                ref_out[idx].to_bits(),
+                new_out[idx].to_bits(),
+            );
+            panic!("q4k_8x8_q8k_gemm diverges from looped matvec (must be bit-exact per column)");
+        }
+        eprintln!("PASS: batch3 N={n} — {} outputs bit-exact", n_rows * n);
+    }
+}

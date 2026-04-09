@@ -10,6 +10,7 @@ pub struct KernelTableInference {
     pub quant_f32_q8k:         QuantF32Q8kFn,
     pub q4k_repack_8x8:        Q4kRepack8x8Fn,
     pub q4k_8x8_q8k_matvec:    Q4k8x8Q8kMatvecFn,
+    pub q4k_8x8_q8k_gemm:      Q4k8x8Q8kGemmFn,
     pub q4k_dot_q8k:           Q4kDotQ8kFn,
     pub q4k_dot_q8k_4row:      Q4kDot4RowFn,
     pub q4k_dot_q8k_4row_dual: Q4kDot4RowDualFn,
@@ -115,6 +116,7 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
             quant_f32_q8k:         std::mem::transmute(sym(&q4kq, b"quant_f32_q8k\0")?),
             q4k_repack_8x8:        std::mem::transmute(sym(&q4kr, b"q4k_repack_8x8\0")?),
             q4k_8x8_q8k_matvec:    std::mem::transmute(sym(&q4k8, b"q4k_8x8_q8k_matvec\0")?),
+            q4k_8x8_q8k_gemm:      std::mem::transmute(sym(&q4k8, b"q4k_8x8_q8k_gemm\0")?),
             q4k_dot_q8k:           std::mem::transmute(sym(&q4kd, b"q4k_dot_q8k\0")?),
             q4k_dot_q8k_4row:      std::mem::transmute(sym(&q4kd, b"q4k_dot_q8k_4row\0")?),
             q4k_dot_q8k_4row_dual: std::mem::transmute(sym(&q4kd, b"q4k_dot_q8k_4row_dual\0")?),
@@ -172,6 +174,25 @@ pub unsafe fn q4k_8x8_q8k_matvec(
 ) {
     (k().q4k_8x8_q8k_matvec)(
         weight_packed, q8_qs, q8_d, q8_bsums, pow2, scratch, output, n_rows, n_cols)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn q4k_8x8_q8k_gemm(
+    weight_packed: *const u8,
+    q8_qs: *const i8,
+    q8_d: *const f32,
+    q8_bsums: *const i16,
+    pow2: *const f32,
+    scratch: *mut u8,
+    acc_scratch: *mut f32,
+    output: *mut f32,
+    n_rows: i32,
+    n_cols: i32,
+    n_cols_batch: i32,
+) {
+    (k().q4k_8x8_q8k_gemm)(
+        weight_packed, q8_qs, q8_d, q8_bsums, pow2,
+        scratch, acc_scratch, output, n_rows, n_cols, n_cols_batch)
 }
 
 pub unsafe fn q4k_dot_q8k(

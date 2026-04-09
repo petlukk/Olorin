@@ -5,6 +5,11 @@
       "name": "q4k_8x8_q8k_matvec",
       "args": [{"name": "weight_packed", "type": "*restrict u8", "direction": "in", "cap": null, "count": null}, {"name": "q8_qs", "type": "*restrict i8", "direction": "in", "cap": null, "count": null}, {"name": "q8_d", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "q8_bsums", "type": "*i16", "direction": "in", "cap": null, "count": null}, {"name": "pow2", "type": "*f32", "direction": "in", "cap": null, "count": null}, {"name": "scratch", "type": "*mut u8", "direction": "in", "cap": null, "count": null}, {"name": "output", "type": "*mut f32", "direction": "out", "cap": "n_rows", "count": null}, {"name": "n_rows", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "n_cols", "type": "i32", "direction": "in", "cap": null, "count": null}],
       "return_type": null
+    },
+    {
+      "name": "q4k_8x8_q8k_gemm",
+      "args": [{"name": "weight_packed", "type": "*restrict u8", "direction": "in", "cap": null, "count": null}, {"name": "q8_qs", "type": "*restrict i8", "direction": "in", "cap": null, "count": null}, {"name": "q8_d", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "q8_bsums", "type": "*i16", "direction": "in", "cap": null, "count": null}, {"name": "pow2", "type": "*f32", "direction": "in", "cap": null, "count": null}, {"name": "scratch", "type": "*mut u8", "direction": "in", "cap": null, "count": null}, {"name": "acc_scratch", "type": "*mut f32", "direction": "in", "cap": null, "count": null}, {"name": "output", "type": "*mut f32", "direction": "out", "cap": "n_rows * n_cols_batch", "count": null}, {"name": "n_rows", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "n_cols", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "n_cols_batch", "type": "i32", "direction": "in", "cap": null, "count": null}],
+      "return_type": null
     }
   ],
   "structs": [
