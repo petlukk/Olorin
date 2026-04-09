@@ -1,52 +1,62 @@
-//! GGUF tensor helpers + per-layer Q4K repack.
+//! GGUF tensor helpers + Q4K weight repack.
 
 use crate::inference::gguf::GgufFile;
 use crate::inference::engine::LayerWeights;
-use crate::inference::matmul::{self, q4k_packed_size};
-use crate::kernels::ffi_inference;
+use crate::inference::matmul::{q4k_packed_size, GGML_TYPE_Q4_K};
 
-/// Repack one layer's Q4K weights into `buf`. Returns (offsets, sizes)
-/// for each of the 7 weights: [wq, wk, wv, wo, gate, up, down].
-/// Non-Q4K weights get (0, 0) → the caller sees an empty slice and
-/// falls back to per-column matvec.
+/// Repack all Q4K weights into one contiguous buffer (llama.cpp style).
+/// Sets each layer's w*_packed pointers into the returned Vec.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn repack_layer(
-    buf: &mut [u8],
-    lw: &LayerWeights,
-    n_heads: usize,
-    n_kv_heads: usize,
-    head_dim: usize,
-    head_dim_v: usize,
-    hd: usize,
-    ffn_dim: usize,
-) -> ([usize; 7], [usize; 7]) {
-    let q4k = matmul::GGML_TYPE_Q4_K;
-    let specs: [(u32, *const u8, usize, usize); 7] = [
-        (lw.wq_dtype,     lw.wq,     n_heads * head_dim,     hd),
-        (lw.wk_dtype,     lw.wk,     n_kv_heads * head_dim,  hd),
-        (lw.wv_dtype,     lw.wv,     n_kv_heads * head_dim_v, hd),
-        (lw.wo_dtype,     lw.wo,     hd,                     n_heads * head_dim),
-        (lw.w_gate_dtype, lw.w_gate, ffn_dim,                hd),
-        (lw.w_up_dtype,   lw.w_up,   ffn_dim,                hd),
-        (lw.w_down_dtype, lw.w_down, hd,                     ffn_dim),
-    ];
-    let mut offsets = [0usize; 7];
-    let mut sizes = [0usize; 7];
-    let mut cursor = 0usize;
-    for (i, &(dtype, src, n_rows, n_cols)) in specs.iter().enumerate() {
-        if dtype == q4k {
-            let sz = q4k_packed_size(n_rows, n_cols);
-            offsets[i] = cursor;
-            sizes[i] = sz;
-            unsafe {
-                ffi_inference::q4k_repack_8x8(
-                    src, buf[cursor..].as_mut_ptr(), n_rows as i32, n_cols as i32,
-                );
-            }
-            cursor += sz;
+pub(crate) fn repack_all_q4k(
+    layers: &mut [LayerWeights],
+    n_heads: usize, n_kv_heads: usize,
+    head_dim_k: &[usize], head_dim_v: &[usize],
+    hd: usize, ffn_dim: &[usize],
+) -> Vec<u8> {
+    // Pass 1: total packed size
+    let mut total = 0usize;
+    for (i, lw) in layers.iter().enumerate() {
+        for &(dt, nr, nc) in &weight_specs_size(lw, n_heads, n_kv_heads, head_dim_k[i], head_dim_v[i], hd, ffn_dim[i]) {
+            if dt == GGML_TYPE_Q4_K { total += q4k_packed_size(nr, nc); }
         }
     }
-    (offsets, sizes)
+    let mut buf = vec![0u8; total];
+    let mut cursor = 0usize;
+    let t = std::time::Instant::now();
+    // Pass 2: repack each Q4K tensor
+    for (i, lw) in layers.iter_mut().enumerate() {
+        let specs = weight_specs_src(lw, n_heads, n_kv_heads, head_dim_k[i], head_dim_v[i], hd, ffn_dim[i]);
+        let ptrs: [&mut *const u8; 7] = [
+            &mut lw.wq_packed, &mut lw.wk_packed, &mut lw.wv_packed,
+            &mut lw.wo_packed, &mut lw.w_gate_packed, &mut lw.w_up_packed,
+            &mut lw.w_down_packed,
+        ];
+        for (j, &(dt, src, nr, nc)) in specs.iter().enumerate() {
+            if dt == GGML_TYPE_Q4_K {
+                let sz = q4k_packed_size(nr, nc);
+                unsafe {
+                    crate::kernels::ffi_inference::q4k_repack_8x8(
+                        src, buf[cursor..].as_mut_ptr(), nr as i32, nc as i32,
+                    );
+                }
+                *ptrs[j] = buf[cursor..].as_ptr();
+                cursor += sz;
+            }
+        }
+    }
+    eprintln!("[gemma4] Q4K repack: {} MB in {:?}", total / 1_000_000, t.elapsed());
+    buf
+}
+
+fn weight_specs_size(lw: &LayerWeights, nh: usize, nkv: usize, hdk: usize, hdv: usize, hd: usize, ffn: usize) -> [(u32, usize, usize); 7] {
+    [(lw.wq_dtype, nh*hdk, hd), (lw.wk_dtype, nkv*hdk, hd), (lw.wv_dtype, nkv*hdv, hd),
+     (lw.wo_dtype, hd, nh*hdk), (lw.w_gate_dtype, ffn, hd), (lw.w_up_dtype, ffn, hd), (lw.w_down_dtype, hd, ffn)]
+}
+
+fn weight_specs_src(lw: &LayerWeights, nh: usize, nkv: usize, hdk: usize, hdv: usize, hd: usize, ffn: usize) -> [(u32, *const u8, usize, usize); 7] {
+    [(lw.wq_dtype, lw.wq, nh*hdk, hd), (lw.wk_dtype, lw.wk, nkv*hdk, hd), (lw.wv_dtype, lw.wv, nkv*hdv, hd),
+     (lw.wo_dtype, lw.wo, hd, nh*hdk), (lw.w_gate_dtype, lw.w_gate, ffn, hd), (lw.w_up_dtype, lw.w_up, ffn, hd),
+     (lw.w_down_dtype, lw.w_down, hd, ffn)]
 }
 
 /// Convert BF16 tensor data to a new Vec<f32>. Returns the vec.

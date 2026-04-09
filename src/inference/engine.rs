@@ -6,9 +6,7 @@
 use crate::inference::gguf::{GgufFile, MetaValue};
 use crate::inference::engine_helpers::load_norm_ptr;
 
-// ---------------------------------------------------------------------------
 // Attention type per layer
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AttnType {
@@ -16,9 +14,7 @@ pub enum AttnType {
     Global,
 }
 
-// ---------------------------------------------------------------------------
 // Per-layer weight pointers (raw into mmap)
-// ---------------------------------------------------------------------------
 
 pub struct LayerWeights {
     // Pre-attention RMSNorm
@@ -64,11 +60,15 @@ pub struct LayerWeights {
     pub proj_dtype: u32,
     pub post_norm: *const f32,        // [hidden_dim]
     pub layer_output_scale: f32,      // scalar
+    // Repacked Q4K pointers into Gemma4Model::_packed_weights (null if not Q4K)
+    pub wq_packed: *const u8,
+    pub wk_packed: *const u8,
+    pub wv_packed: *const u8,
+    pub wo_packed: *const u8,
+    pub w_gate_packed: *const u8,
+    pub w_up_packed: *const u8,
+    pub w_down_packed: *const u8,
 }
-
-/// Repack a single Q4K tensor into the 8x8 interleaved layout consumed
-/// by `q4k_8x8_q8k_gemm`. `n_rows` must be a multiple of 8, `n_cols` a
-/// multiple of 256. Returns an empty Vec if the tensor isn't Q4K.
 
 impl std::fmt::Debug for LayerWeights {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -76,9 +76,7 @@ impl std::fmt::Debug for LayerWeights {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Gemma4Model
-// ---------------------------------------------------------------------------
 
 pub struct Gemma4Model {
     pub n_layers: usize,
@@ -118,16 +116,14 @@ pub struct Gemma4Model {
     pub ple_model_proj: *const u8,    // [hidden_dim, ple_dim * n_layers] BF16
     pub ple_proj_norm: *const f32,    // [ple_dim]
 
-    // BF16->f32 conversion buffers owned by the model (kept alive)
-    _bf16_bufs: Vec<Vec<f32>>,
+    _bf16_bufs: Vec<Vec<f32>>,        // BF16→f32 conversion buffers (kept alive)
+    _packed_weights: Vec<u8>,         // contiguous Q4K 8x8 repack (lw.*_packed → here)
 }
 
 unsafe impl Send for Gemma4Model {}
 unsafe impl Sync for Gemma4Model {}
 
-// ---------------------------------------------------------------------------
 // Metadata helpers
-// ---------------------------------------------------------------------------
 
 fn get_meta_u32(gguf: &GgufFile, key: &str) -> Option<u32> {
     match gguf.metadata.get(key)? {
@@ -206,9 +202,7 @@ fn read_f32_scalar(gguf: &GgufFile, name: &str) -> f32 {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Shared KV source mapping
-// ---------------------------------------------------------------------------
 
 /// Compute kv_shared_source. Layers that share KV walk back to find the
 /// nearest earlier layer of the same attention type that owns its own KV.
@@ -241,9 +235,7 @@ fn compute_kv_shared(
         .collect()
 }
 
-// ---------------------------------------------------------------------------
 // Model loading
-// ---------------------------------------------------------------------------
 
 impl Gemma4Model {
     pub fn from_gguf(gguf: &GgufFile) -> Result<Self, String> {
@@ -432,12 +424,19 @@ impl Gemma4Model {
                 proj_dtype: tensor_dtype(gguf, &format!("{b}.proj.weight")),
                 post_norm: load_norm_ptr(gguf, &format!("{b}.post_norm.weight"), &mut bf16_bufs),
                 layer_output_scale: read_f32_scalar(gguf, &format!("{b}.layer_output_scale.weight")),
-
-                // Repack Q4K weights for batched gemm (Task 20). Non-Q4K
-                // layers get empty Vecs and fall back to per-column matvec.
+                wq_packed: std::ptr::null(), wk_packed: std::ptr::null(),
+                wv_packed: std::ptr::null(), wo_packed: std::ptr::null(),
+                w_gate_packed: std::ptr::null(), w_up_packed: std::ptr::null(),
+                w_down_packed: std::ptr::null(),
             };
             layers.push(lw);
         }
+
+        // 8b. Persistent Q4K repack into one contiguous buffer (llama.cpp style)
+        let packed_weights = crate::inference::engine_helpers::repack_all_q4k(
+            &mut layers, n_heads, n_kv_heads, &head_dim_k, &head_dim_v,
+            hidden_dim, &ffn_dim,
+        );
 
         // 9. Global tensors
         let embed_weight = tensor_ptr::<u8>(gguf, "token_embd.weight")?;
@@ -491,6 +490,7 @@ impl Gemma4Model {
             ple_model_proj,
             ple_proj_norm,
             _bf16_bufs: bf16_bufs,
+            _packed_weights: packed_weights,
         })
     }
 }

@@ -14,7 +14,7 @@ fn matmul_batched(
     pool: &ThreadPool,
     dtype: u32,
     weight_unpacked: *const u8,
-    weight_packed: &[u8],
+    weight_packed: *const u8,
     q8_qs: &[i8],
     q8_d: &[f32],
     q8_bsums: &[i16],
@@ -27,11 +27,11 @@ fn matmul_batched(
     n_batch: usize,
 ) {
     debug_assert_eq!(output.len(), n_rows * n_batch);
-    if dtype == matmul::GGML_TYPE_Q4_K && !weight_packed.is_empty() {
+    if !weight_packed.is_null() {
         let pow2 = matmul::pow2_table();
         unsafe {
             ffi_inference::q4k_8x8_q8k_gemm(
-                weight_packed.as_ptr(),
+                weight_packed,
                 q8_qs.as_ptr(),
                 q8_d.as_ptr(),
                 q8_bsums.as_ptr(),
@@ -94,18 +94,6 @@ impl Gemma4State {
         let kv_stride_v = n_kv_heads * head_dim_v;
         let ffn_dim = model.ffn_dim[il];
 
-        // ── 0. Repack Q4K weights into per-layer scratch ─────────────
-        let (rp_off, rp_sz) = super::engine_helpers::repack_layer(
-            &mut self.layer_repack, lw,
-            n_heads, n_kv_heads, head_dim, head_dim_v, hd, ffn_dim,
-        );
-        // Helper: get packed slice for weight index (0=wq, 1=wk, etc.)
-        macro_rules! packed {
-            ($idx:expr) => {
-                &self.layer_repack[rp_off[$idx]..rp_off[$idx] + rp_sz[$idx]]
-            };
-        }
-
         // RoPE params (layer-type dependent)
         let n_rot = if model.is_swa[il] { model.rope_dim_swa } else { model.rope_dim_global };
         let rope_theta = if model.is_swa[il] { model.rope_theta_swa } else { model.rope_theta_global };
@@ -155,7 +143,7 @@ impl Gemma4State {
 
         // ── 3. Q projection (gemm or fallback) ───────────────────────
         matmul_batched(
-            pool, lw.wq_dtype, lw.wq, packed!(0),
+            pool, lw.wq_dtype, lw.wq, lw.wq_packed,
             &self.batch_q8_qs, &self.batch_q8_d, &self.batch_q8_bsums,
             &mut self.gemm_scratch, &mut self.gemm_acc_scratch, &mut self.q6k_d_scratch,
             &mut self.batch_q[..q_stride * n_batch],
@@ -179,7 +167,7 @@ impl Gemma4State {
         if has_kv {
             // K projection
             matmul_batched(
-                pool, lw.wk_dtype, lw.wk, packed!(1),
+                pool, lw.wk_dtype, lw.wk, lw.wk_packed,
                 &self.batch_q8_qs, &self.batch_q8_d, &self.batch_q8_bsums,
                 &mut self.gemm_scratch, &mut self.gemm_acc_scratch, &mut self.q6k_d_scratch,
                 &mut self.batch_k[..kv_stride * n_batch],
@@ -187,7 +175,7 @@ impl Gemma4State {
             );
             // V projection
             matmul_batched(
-                pool, lw.wv_dtype, lw.wv, packed!(2),
+                pool, lw.wv_dtype, lw.wv, lw.wv_packed,
                 &self.batch_q8_qs, &self.batch_q8_d, &self.batch_q8_bsums,
                 &mut self.gemm_scratch, &mut self.gemm_acc_scratch, &mut self.q6k_d_scratch,
                 &mut self.batch_v[..kv_stride_v * n_batch],
@@ -282,7 +270,7 @@ impl Gemma4State {
             );
         }
         matmul_batched(
-            pool, lw.wo_dtype, lw.wo, packed!(3),
+            pool, lw.wo_dtype, lw.wo, lw.wo_packed,
             &self.batch_q8_qs, &self.batch_q8_d, &self.batch_q8_bsums,
             &mut self.gemm_scratch, &mut self.gemm_acc_scratch, &mut self.q6k_d_scratch,
             &mut self.batch_wo_out[..hd * n_batch],
@@ -343,14 +331,14 @@ impl Gemma4State {
         }
         // gate + up separately (dual-matvec optimization is single-column only)
         matmul_batched(
-            pool, lw.w_gate_dtype, lw.w_gate, packed!(4),
+            pool, lw.w_gate_dtype, lw.w_gate, lw.w_gate_packed,
             &self.batch_q8_qs, &self.batch_q8_d, &self.batch_q8_bsums,
             &mut self.gemm_scratch, &mut self.gemm_acc_scratch, &mut self.q6k_d_scratch,
             &mut self.batch_gate[..ffn_dim * n_batch],
             ffn_dim, hd, n_batch,
         );
         matmul_batched(
-            pool, lw.w_up_dtype, lw.w_up, packed!(5),
+            pool, lw.w_up_dtype, lw.w_up, lw.w_up_packed,
             &self.batch_q8_qs, &self.batch_q8_d, &self.batch_q8_bsums,
             &mut self.gemm_scratch, &mut self.gemm_acc_scratch, &mut self.q6k_d_scratch,
             &mut self.batch_up[..ffn_dim * n_batch],
@@ -376,7 +364,7 @@ impl Gemma4State {
             );
         }
         matmul_batched(
-            pool, lw.w_down_dtype, lw.w_down, packed!(6),
+            pool, lw.w_down_dtype, lw.w_down, lw.w_down_packed,
             &self.batch_q8_qs, &self.batch_q8_d, &self.batch_q8_bsums,
             &mut self.gemm_scratch, &mut self.gemm_acc_scratch, &mut self.q6k_d_scratch,
             &mut self.batch_down[..hd * n_batch],

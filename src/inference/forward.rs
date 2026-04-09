@@ -167,11 +167,6 @@ pub struct Gemma4State {
     pub(crate) gemm_scratch: Vec<u8>,        // 144 bytes
     pub(crate) gemm_acc_scratch: Vec<f32>,   // 2 * MAX_BATCH
 
-    // Per-layer Q4K repack scratch (Task 20). Sized for the largest
-    // single layer's total packed Q4K data. Repacked on-the-fly at the
-    // start of each layer_forward_batch; overwritten each layer so the
-    // memory footprint stays constant (~20MB for the largest layer).
-    pub(crate) layer_repack: Vec<u8>,
 }
 
 /// Maximum number of prompt tokens processed in one forward_batch call.
@@ -278,31 +273,6 @@ impl Gemma4State {
             gemm_scratch:      vec![0u8; 144],
             gemm_acc_scratch:  vec![0.0f32; 2 * MAX_BATCH],
 
-            // Per-layer repack scratch: compute max total packed bytes
-            // across all layers. For each Q4K weight in a layer, the
-            // packed size is n_rows * (n_cols/256) * 144.
-            layer_repack: {
-                use crate::inference::matmul::q4k_packed_size;
-                use crate::inference::matmul::GGML_TYPE_Q4_K;
-                let mut max_total = 0usize;
-                for il in 0..model.n_layers {
-                    let lw = &model.layers[il];
-                    let q_rows = model.n_heads * model.head_dim_k[il];
-                    let kv_rows = model.n_kv_heads * model.head_dim_k[il];
-                    let kv_rows_v = model.n_kv_heads * model.head_dim_v[il];
-                    let ffn = model.ffn_dim[il];
-                    let mut total = 0usize;
-                    if lw.wq_dtype == GGML_TYPE_Q4_K { total += q4k_packed_size(q_rows, hd); }
-                    if lw.wk_dtype == GGML_TYPE_Q4_K { total += q4k_packed_size(kv_rows, hd); }
-                    if lw.wv_dtype == GGML_TYPE_Q4_K { total += q4k_packed_size(kv_rows_v, hd); }
-                    if lw.wo_dtype == GGML_TYPE_Q4_K { total += q4k_packed_size(hd, q_rows); }
-                    if lw.w_gate_dtype == GGML_TYPE_Q4_K { total += q4k_packed_size(ffn, hd); }
-                    if lw.w_up_dtype == GGML_TYPE_Q4_K { total += q4k_packed_size(ffn, hd); }
-                    if lw.w_down_dtype == GGML_TYPE_Q4_K { total += q4k_packed_size(hd, ffn); }
-                    if total > max_total { max_total = total; }
-                }
-                vec![0u8; max_total]
-            },
 
             cache,
         }
