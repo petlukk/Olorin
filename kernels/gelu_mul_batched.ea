@@ -1,0 +1,57 @@
+// gelu_mul_batched.ea — Fused GELU-gated linear unit for N columns.
+//
+// Applies gelu_mul to each of n_batch columns of a {n_cols, N} tensor.
+// Per-column body is a verbatim inline of kernels/gemma4_gelu.ea, so
+// output is bit-for-bit identical to looping gelu_mul N times.
+//
+// Column-major: column k in gate/up/dst starts at offset k * n_cols.
+
+export func gelu_mul_batched(
+    gate: *restrict f32,
+    up: *restrict f32,
+    out dst: *mut f32 [cap: n_cols * n_batch],
+    n_cols: i32,
+    n_batch: i32
+) {
+    let v_half: f32x4 = splat(0.5)
+    let v_coeff: f32x4 = splat(0.7978845608)   // sqrt(2/pi)
+    let v_cubic: f32x4 = splat(0.044715)
+    let v_two: f32x4 = splat(2.0)
+    let v_one: f32x4 = splat(1.0)
+
+    let mut col: i32 = 0
+    while col < n_batch {
+        let base: i32 = col * n_cols
+
+        let mut i: i32 = 0
+        while i + 4 <= n_cols {
+            let g: f32x4 = load(gate, base + i)
+            let u: f32x4 = load(up, base + i)
+
+            let g3: f32x4 = g .* g .* g
+            let inner: f32x4 = v_coeff .* (g .+ v_cubic .* g3)
+
+            let e: f32x4 = exp(v_two .* inner)
+            let th: f32x4 = v_one .- v_two ./ (e .+ v_one)
+
+            let gelu: f32x4 = g .* v_half .* (v_one .+ th)
+
+            store(dst, base + i, gelu .* u)
+            i = i + 4
+        }
+
+        // Scalar tail
+        while i < n_cols {
+            let x: f32 = gate[base + i]
+            let x3: f32 = x * x * x
+            let inner: f32 = 0.7978845608 * (x + 0.044715 * x3)
+            let e: f32 = exp(2.0 * inner)
+            let th: f32 = 1.0 - 2.0 / (e + 1.0)
+            let gelu: f32 = x * 0.5 * (1.0 + th)
+            dst[base + i] = gelu * up[base + i]
+            i = i + 1
+        }
+
+        col = col + 1
+    }
+}

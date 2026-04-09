@@ -663,3 +663,181 @@ fn batch5_q8k_quant_batched_matches_n_calls() {
     );
     eprintln!("PASS: batch5 — {} columns × {} elements bit-exact", n_batch, n_cols);
 }
+
+// ---------------------------------------------------------------------------
+// batch6: gemma4_rmsnorm_batched bit-exact vs N gemma4_rmsnorm calls
+// ---------------------------------------------------------------------------
+
+#[test]
+fn batch6_rmsnorm_batched_matches_n_calls() {
+    olorin::kernels::ffi::init().unwrap();
+    let hd: usize = 1536;
+    let n: usize = 4;
+
+    let mut x = vec![0.0f32; hd * n];
+    for i in 0..hd * n {
+        x[i] = ((i as f32) * 0.013 - 0.4).sin() * 0.6;
+    }
+    let mut w = vec![0.0f32; hd];
+    for i in 0..hd {
+        w[i] = 1.0 + (i as f32 * 0.001).cos() * 0.1;
+    }
+    let eps = 1e-6f32;
+
+    // Reference: N sequential rmsnorm calls.
+    let mut ref_out = vec![0.0f32; hd * n];
+    for k in 0..n {
+        olorin::kernels::ffi_inference::gemma4_rmsnorm(
+            x[k * hd..].as_ptr(),
+            w.as_ptr(),
+            ref_out[k * hd..].as_mut_ptr(),
+            hd as i32,
+            eps,
+        );
+    }
+
+    // Batched: one call.
+    let mut new_out = vec![0.0f32; hd * n];
+    unsafe {
+        olorin::kernels::ffi_inference::gemma4_rmsnorm_batched(
+            x.as_ptr(),
+            w.as_ptr(),
+            new_out.as_mut_ptr(),
+            hd as i32,
+            eps,
+            n as i32,
+        );
+    }
+
+    for i in 0..hd * n {
+        assert_eq!(
+            ref_out[i].to_bits(),
+            new_out[i].to_bits(),
+            "rmsnorm_batched diff at col={} row={} ref={} new={}",
+            i / hd, i % hd, ref_out[i], new_out[i],
+        );
+    }
+    eprintln!("PASS: batch6 — {} columns × {} elements bit-exact", n, hd);
+}
+
+// ---------------------------------------------------------------------------
+// batch7: gemma4_rope_batched bit-exact vs N gemma4_rope calls with
+// per-position cos/sin tables.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn batch7_rope_batched_matches_n_calls() {
+    olorin::kernels::ffi::init().unwrap();
+    let n_heads: usize = 8;
+    let head_dim: usize = 256;
+    let half: usize = head_dim / 2;
+    let n: usize = 4;
+
+    let qk_stride = n_heads * head_dim;
+
+    // Deterministic Q-like input.
+    let mut ref_data = vec![0.0f32; qk_stride * n];
+    for i in 0..ref_data.len() {
+        ref_data[i] = ((i as f32) * 0.019 - 0.3).cos() * 0.4;
+    }
+    let mut new_data = ref_data.clone();
+
+    // Per-column cos/sin tables — caller-built, one slot per position.
+    // Deterministic values; content doesn't matter for the correctness
+    // check as long as ref and batched see the same tables.
+    let mut cos_tables = vec![0.0f32; half * n];
+    let mut sin_tables = vec![0.0f32; half * n];
+    for k in 0..n {
+        for d in 0..half {
+            let theta = (k as f32) * 0.12 + (d as f32) * 0.017;
+            cos_tables[k * half + d] = theta.cos();
+            sin_tables[k * half + d] = theta.sin();
+        }
+    }
+
+    // Reference: N sequential gemma4_rope calls, each with its own cos/sin.
+    for k in 0..n {
+        olorin::kernels::ffi_inference::gemma4_rope(
+            ref_data[k * qk_stride..].as_mut_ptr(),
+            cos_tables[k * half..].as_ptr(),
+            sin_tables[k * half..].as_ptr(),
+            head_dim as i32,
+            n_heads as i32,
+        );
+    }
+
+    // Batched: one call with concatenated tables.
+    unsafe {
+        olorin::kernels::ffi_inference::gemma4_rope_batched(
+            new_data.as_mut_ptr(),
+            cos_tables.as_ptr(),
+            sin_tables.as_ptr(),
+            head_dim as i32,
+            n_heads as i32,
+            n as i32,
+        );
+    }
+
+    for i in 0..ref_data.len() {
+        assert_eq!(
+            ref_data[i].to_bits(),
+            new_data[i].to_bits(),
+            "rope_batched diff at col={} elem={}",
+            i / qk_stride,
+            i % qk_stride,
+        );
+    }
+    eprintln!("PASS: batch7 — {} positions × {} elements bit-exact", n, qk_stride);
+}
+
+// ---------------------------------------------------------------------------
+// batch8: gelu_mul_batched bit-exact vs N gelu_mul calls
+// ---------------------------------------------------------------------------
+
+#[test]
+fn batch8_gelu_mul_batched_matches_n_calls() {
+    olorin::kernels::ffi::init().unwrap();
+    let n_cols: usize = 6144;   // gemma E2B ffn_dim
+    let n: usize = 4;
+
+    let mut gate = vec![0.0f32; n_cols * n];
+    let mut up = vec![0.0f32; n_cols * n];
+    for i in 0..gate.len() {
+        gate[i] = ((i as f32) * 0.017 - 0.6).tanh() * 0.7;
+        up[i] = ((i as f32) * 0.021 + 0.3).sin() * 0.5;
+    }
+
+    // Reference: N sequential gelu_mul calls.
+    let mut ref_out = vec![0.0f32; n_cols * n];
+    for k in 0..n {
+        olorin::kernels::ffi_inference::gelu_mul(
+            gate[k * n_cols..].as_ptr(),
+            up[k * n_cols..].as_ptr(),
+            ref_out[k * n_cols..].as_mut_ptr(),
+            n_cols as i32,
+        );
+    }
+
+    // Batched: one call.
+    let mut new_out = vec![0.0f32; n_cols * n];
+    unsafe {
+        olorin::kernels::ffi_inference::gelu_mul_batched(
+            gate.as_ptr(),
+            up.as_ptr(),
+            new_out.as_mut_ptr(),
+            n_cols as i32,
+            n as i32,
+        );
+    }
+
+    for i in 0..ref_out.len() {
+        assert_eq!(
+            ref_out[i].to_bits(),
+            new_out[i].to_bits(),
+            "gelu_mul_batched diff at col={} elem={}",
+            i / n_cols,
+            i % n_cols,
+        );
+    }
+    eprintln!("PASS: batch8 — {} columns × {} elements bit-exact", n, n_cols);
+}

@@ -23,8 +23,11 @@ pub struct KernelTableInference {
     pub f16_to_f32:            F16ToF32Fn,
     pub softmax_f32:           SoftmaxF32Fn,
     pub gemma4_rmsnorm:        Gemma4RmsnormFn,
+    pub gemma4_rmsnorm_batched: Gemma4RmsnormBatchedFn,
     pub gelu_mul:              GeluMulFn,
+    pub gelu_mul_batched:      GeluMulBatchedFn,
     pub gemma4_rope:           Gemma4RopeFn,
+    pub gemma4_rope_batched:   Gemma4RopeBatchedFn,
     pub bf16_dot_f32:          Bf16DotF32Fn,
     pub bf16_dot_f32_4row:     Bf16Dot4RowFn,
     pub vec_add_f32:           VecAddF32Fn,
@@ -97,8 +100,11 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
     let f16_conv_lib = load("f16_convert")?;
     let softmax_lib  = load("softmax")?;
     let gemma4_rmsnorm_lib = load("gemma4_rmsnorm")?;
+    let gemma4_rmsnorm_batched_lib = load("gemma4_rmsnorm_batched")?;
     let gemma4_gelu_lib    = load("gemma4_gelu")?;
+    let gelu_mul_batched_lib = load("gelu_mul_batched")?;
     let gemma4_rope_lib    = load("gemma4_rope")?;
+    let gemma4_rope_batched_lib = load("gemma4_rope_batched")?;
     let bf16_matvec_lib    = load("bf16_matvec")?;
     let vec_ops_lib        = load("vec_ops")?;
     let attn_ops_lib       = load("attn_ops")?;
@@ -131,8 +137,11 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
             f16_to_f32:     std::mem::transmute(sym(&f16_conv_lib, b"f16_to_f32\0")?),
             softmax_f32:    std::mem::transmute(sym(&softmax_lib, b"softmax_f32\0")?),
             gemma4_rmsnorm: std::mem::transmute(sym(&gemma4_rmsnorm_lib, b"gemma4_rmsnorm\0")?),
+            gemma4_rmsnorm_batched: std::mem::transmute(sym(&gemma4_rmsnorm_batched_lib, b"gemma4_rmsnorm_batched\0")?),
             gelu_mul:       std::mem::transmute(sym(&gemma4_gelu_lib, b"gelu_mul\0")?),
+            gelu_mul_batched: std::mem::transmute(sym(&gelu_mul_batched_lib, b"gelu_mul_batched\0")?),
             gemma4_rope:    std::mem::transmute(sym(&gemma4_rope_lib, b"gemma4_rope\0")?),
+            gemma4_rope_batched: std::mem::transmute(sym(&gemma4_rope_batched_lib, b"gemma4_rope_batched\0")?),
             bf16_dot_f32:      std::mem::transmute(sym(&bf16_matvec_lib, b"bf16_dot_f32\0")?),
             bf16_dot_f32_4row: std::mem::transmute(sym(&bf16_matvec_lib, b"bf16_dot_f32_4row\0")?),
             vec_add_f32:       std::mem::transmute(sym(&vec_ops_lib, b"vec_add_f32\0")?),
@@ -143,7 +152,7 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
             f32_dot_acc:       std::mem::transmute(sym(&attn_ops_lib, b"f32_dot_acc\0")?),
             bare_rmsnorm_f32:  std::mem::transmute(sym(&bare_rmsnorm_lib, b"bare_rmsnorm_f32\0")?),
             softcap_f32:       std::mem::transmute(sym(&softcap_lib, b"softcap_f32\0")?),
-            libs: vec![q4kq, q4kr, q4k8, q8kb, q4kd, q5kd, q6kd, f16_conv_lib, softmax_lib, gemma4_rmsnorm_lib, gemma4_gelu_lib, gemma4_rope_lib, bf16_matvec_lib, vec_ops_lib, attn_ops_lib, bare_rmsnorm_lib, softcap_lib],
+            libs: vec![q4kq, q4kr, q4k8, q8kb, q4kd, q5kd, q6kd, f16_conv_lib, softmax_lib, gemma4_rmsnorm_lib, gemma4_rmsnorm_batched_lib, gemma4_gelu_lib, gelu_mul_batched_lib, gemma4_rope_lib, gemma4_rope_batched_lib, bf16_matvec_lib, vec_ops_lib, attn_ops_lib, bare_rmsnorm_lib, softcap_lib],
         };
         Ok(t)
     }
@@ -283,12 +292,39 @@ pub fn gemma4_rmsnorm(x: *const f32, weight: *const f32, out: *mut f32, n: i32, 
     unsafe { (k().gemma4_rmsnorm)(x, weight, out, n, eps) }
 }
 
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn gemma4_rmsnorm_batched(
+    x: *const f32, weight: *const f32, out: *mut f32,
+    hd: i32, eps: f32, n_batch: i32,
+) {
+    (k().gemma4_rmsnorm_batched)(x, weight, out, hd, eps, n_batch)
+}
+
 pub fn gelu_mul(gate: *const f32, up: *const f32, out: *mut f32, n: i32) {
     unsafe { (k().gelu_mul)(gate, up, out, n) }
 }
 
+pub unsafe fn gelu_mul_batched(
+    gate: *const f32, up: *const f32, out: *mut f32,
+    n_cols: i32, n_batch: i32,
+) {
+    (k().gelu_mul_batched)(gate, up, out, n_cols, n_batch)
+}
+
 pub fn gemma4_rope(data: *mut f32, cos_table: *const f32, sin_table: *const f32, head_dim: i32, n_heads: i32) {
     unsafe { (k().gemma4_rope)(data, cos_table, sin_table, head_dim, n_heads) }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn gemma4_rope_batched(
+    data: *mut f32,
+    cos_tables: *const f32,
+    sin_tables: *const f32,
+    head_dim: i32,
+    n_heads: i32,
+    n_batch: i32,
+) {
+    (k().gemma4_rope_batched)(data, cos_tables, sin_tables, head_dim, n_heads, n_batch)
 }
 
 pub unsafe fn bf16_dot_f32(

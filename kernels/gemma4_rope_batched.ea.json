@@ -1,0 +1,12 @@
+{
+  "library": "/root/dev/olorin/target/release/build/olorin-30f5016df977a983/out/libgemma4_rope_batched.so",
+  "exports": [
+    {
+      "name": "gemma4_rope_batched",
+      "args": [{"name": "data", "type": "*mut f32", "direction": "in", "cap": null, "count": null}, {"name": "cos_tables", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "sin_tables", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "head_dim", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "n_heads", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "n_batch", "type": "i32", "direction": "in", "cap": null, "count": null}],
+      "return_type": null
+    }
+  ],
+  "structs": [
+  ]
+}

@@ -40,8 +40,13 @@ pub type F32ToF16Fn = unsafe extern "C" fn(*const f32, *mut u16, i32);
 pub type F16ToF32Fn = unsafe extern "C" fn(*const u16, *mut f32, i32);
 pub type SoftmaxF32Fn = unsafe extern "C" fn(*mut f32, i32, f32);
 pub type Gemma4RmsnormFn = unsafe extern "C" fn(*const f32, *const f32, *mut f32, i32, f32);
+pub type Gemma4RmsnormBatchedFn = unsafe extern "C" fn(
+    *const f32, *const f32, *mut f32, i32, f32, i32);
 pub type GeluMulFn = unsafe extern "C" fn(*const f32, *const f32, *mut f32, i32);
+pub type GeluMulBatchedFn = unsafe extern "C" fn(*const f32, *const f32, *mut f32, i32, i32);
 pub type Gemma4RopeFn = unsafe extern "C" fn(*mut f32, *const f32, *const f32, i32, i32);
+pub type Gemma4RopeBatchedFn = unsafe extern "C" fn(
+    *mut f32, *const f32, *const f32, i32, i32, i32);
 pub type Bf16DotF32Fn = unsafe extern "C" fn(*const u16, *const f32, *mut i32, i32) -> f32;
 pub type Bf16Dot4RowFn = unsafe extern "C" fn(
     *const u16, *const u16, *const u16, *const u16,

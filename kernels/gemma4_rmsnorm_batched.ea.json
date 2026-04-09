@@ -1,0 +1,12 @@
+{
+  "library": "/root/dev/olorin/target/release/build/olorin-30f5016df977a983/out/libgemma4_rmsnorm_batched.so",
+  "exports": [
+    {
+      "name": "gemma4_rmsnorm_batched",
+      "args": [{"name": "src", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "weight", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "dst", "type": "*mut f32", "direction": "out", "cap": "hd * n_batch", "count": null}, {"name": "hd", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "eps", "type": "f32", "direction": "in", "cap": null, "count": null}, {"name": "n_batch", "type": "i32", "direction": "in", "cap": null, "count": null}],
+      "return_type": null
+    }
+  ],
+  "structs": [
+  ]
+}

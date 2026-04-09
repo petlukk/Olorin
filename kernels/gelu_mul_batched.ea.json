@@ -1,0 +1,12 @@
+{
+  "library": "/root/dev/olorin/target/release/build/olorin-30f5016df977a983/out/libgelu_mul_batched.so",
+  "exports": [
+    {
+      "name": "gelu_mul_batched",
+      "args": [{"name": "gate", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "up", "type": "*restrict f32", "direction": "in", "cap": null, "count": null}, {"name": "dst", "type": "*mut f32", "direction": "out", "cap": "n_cols * n_batch", "count": null}, {"name": "n_cols", "type": "i32", "direction": "in", "cap": null, "count": null}, {"name": "n_batch", "type": "i32", "direction": "in", "cap": null, "count": null}],
+      "return_type": null
+    }
+  ],
+  "structs": [
+  ]
+}

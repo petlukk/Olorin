@@ -1,0 +1,74 @@
+// gemma4_rmsnorm_batched.ea — RMSNorm for N columns of a {hd, N} tensor.
+//
+// Applies gemma4_rmsnorm to each of n_batch columns independently. Each
+// column is n=hd elements; the per-column body is a verbatim inline of
+// kernels/gemma4_rmsnorm.ea so the output is bit-for-bit identical to
+// looping gemma4_rmsnorm N times.
+//
+// Column-major layout: column k starts at src + k * hd, written to
+// dst + k * hd. Weight is shared across all columns (per-feature scale).
+
+export func gemma4_rmsnorm_batched(
+    src: *restrict f32,
+    weight: *restrict f32,
+    out dst: *mut f32 [cap: hd * n_batch],
+    hd: i32,
+    eps: f32,
+    n_batch: i32
+) {
+    let mut col: i32 = 0
+    while col < n_batch {
+        let base: i32 = col * hd
+
+        // Pass 1: Sum of squares with dual accumulators for ILP
+        let mut acc0: f32x4 = splat(0.0)
+        let mut acc1: f32x4 = splat(0.0)
+        let mut i: i32 = 0
+
+        while i + 8 <= hd {
+            let v0: f32x4 = load(src, base + i)
+            let v1: f32x4 = load(src, base + i + 4)
+            acc0 = fma(v0, v0, acc0)
+            acc1 = fma(v1, v1, acc1)
+            i = i + 8
+        }
+
+        while i + 4 <= hd {
+            let v: f32x4 = load(src, base + i)
+            acc0 = fma(v, v, acc0)
+            i = i + 4
+        }
+
+        let mut ss: f32 = reduce_add(acc0) + reduce_add(acc1)
+
+        // Scalar tail for remainder
+        while i < hd {
+            ss = ss + src[base + i] * src[base + i]
+            i = i + 1
+        }
+
+        // Compute scale = rsqrt(mean(x^2) + eps)
+        let mean: f32 = ss / to_f32(hd)
+        let scale: f32 = rsqrt(mean + eps)
+
+        // Pass 2: Apply weight * x * scale
+        let v_scale: f32x4 = splat(scale)
+        i = 0
+
+        while i + 4 <= hd {
+            let vx: f32x4 = load(src, base + i)
+            let vw: f32x4 = load(weight, i)
+            let normed: f32x4 = vx .* v_scale
+            store(dst, base + i, normed .* vw)
+            i = i + 4
+        }
+
+        // Scalar tail
+        while i < hd {
+            dst[base + i] = src[base + i] * scale * weight[i]
+            i = i + 1
+        }
+
+        col = col + 1
+    }
+}
