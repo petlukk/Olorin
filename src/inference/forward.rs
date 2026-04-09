@@ -150,7 +150,17 @@ pub struct Gemma4State {
     #[allow(dead_code)] pub(crate) batch_q8_qs: Vec<i8>,     // {(max_ffn + 12), MAX_BATCH}
     #[allow(dead_code)] pub(crate) batch_q8_d: Vec<f32>,     // {max_ffn/256,    MAX_BATCH}
     #[allow(dead_code)] pub(crate) batch_q8_bsums: Vec<i16>, // {(max_ffn/256)*16, MAX_BATCH}
-    #[allow(dead_code)] pub(crate) max_batch: usize,
+    pub(crate) max_batch: usize,
+
+    // Per-token RoPE cos/sin scratch for batched rope (column k at k*half,
+    // where `half` = current layer's rope_dim/2). Sized for the largest
+    // rope_dim any layer uses.
+    pub(crate) batch_cos: Vec<f32>,          // {max_head/2, MAX_BATCH}
+    pub(crate) batch_sin: Vec<f32>,          // {max_head/2, MAX_BATCH}
+
+    // Per-token PLE signals: prepare_ple result stashed once per batch
+    // token before the layer loop. Column k at k*(ple_dim*n_layers).
+    pub(crate) batch_ple_signal: Vec<f32>,   // {ple_dim*n_layers, MAX_BATCH}
 }
 
 /// Maximum number of prompt tokens processed in one forward_batch call.
@@ -250,6 +260,10 @@ impl Gemma4State {
             batch_q8_bsums: vec![0;   n_blocks_ffn * 16 * MAX_BATCH],
             max_batch: MAX_BATCH,
 
+            batch_cos:         vec![0.0; (max_head / 2) * MAX_BATCH],
+            batch_sin:         vec![0.0; (max_head / 2) * MAX_BATCH],
+            batch_ple_signal:  vec![0.0; model.ple_dim * model.n_layers * MAX_BATCH],
+
             cache,
         }
     }
@@ -317,22 +331,8 @@ impl Gemma4State {
         );
     }
 
-    /// Run a prompt-eval forward pass over `tokens`. Returns the final-token logits.
-    /// During Phase A this is a thin loop over `forward_one`; later phases replace
-    /// the body with batched gemm.
-    pub fn forward_batch(
-        &mut self,
-        model: &Gemma4Model,
-        tokens: &[u32],
-        pool: &crate::inference::threadpool::ThreadPool,
-    ) -> &[f32] {
-        assert!(!tokens.is_empty(), "forward_batch requires at least one token");
-        let last = *tokens.last().unwrap();
-        for &t in &tokens[..tokens.len() - 1] {
-            let _ = self.forward_one(model, t, pool);
-        }
-        self.forward_one(model, last, pool)
-    }
+    // `forward_batch` lives in `forward_attn_batched.rs` alongside the
+    // per-layer batched body it drives.
 
     /// Run one decode step. Returns logits slice.
     pub fn forward_one(&mut self, model: &Gemma4Model, token_id: u32, pool: &crate::inference::threadpool::ThreadPool) -> &[f32] {

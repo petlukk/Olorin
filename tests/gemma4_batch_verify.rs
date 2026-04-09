@@ -1067,3 +1067,58 @@ fn batch10_attention_batched_matches_n_decode_calls() {
         n_batch, q_stride, il, head_dim
     );
 }
+
+// ---------------------------------------------------------------------------
+// batch11: forward_batch end-to-end vs N independent forward_one calls.
+//
+// This is the Task 19 payoff gate: run forward_batch over N tokens and
+// compare the last-token logits to N sequential forward_one calls on a
+// fresh state. Uses unrepacked weights via looped par_matvec; tolerance
+// accounts for thread-pool nondeterminism in par_matvec accumulation
+// order between the two paths.
+// ---------------------------------------------------------------------------
+
+fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
+    a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max)
+}
+
+#[test]
+fn batch11_forward_batch_vs_forward_one_n2_n4_n8() {
+    if !has_model() {
+        eprintln!("SKIP: no model");
+        return;
+    }
+    eprintln!("=== batch11: forward_batch vs N forward_one — Task 19 payoff ===");
+    let gguf = olorin::inference::gguf::GgufFile::open(Path::new(&model_path())).unwrap();
+    let model = olorin::inference::engine::Gemma4Model::from_gguf(&gguf).unwrap();
+    olorin::kernels::ffi::init().unwrap();
+    let pool = olorin::inference::threadpool::ThreadPool::new();
+
+    // Deterministic prompt: BOS + a few ASCII token ids in the vocab range.
+    // Gemma-4's BOS = 2; we use small-token ids that exist in the base vocab.
+    let full: [u32; 8] = [2, 1001, 1050, 1100, 1150, 1200, 1250, 1300];
+
+    for &n in &[2usize, 4, 8] {
+        let tokens = &full[..n];
+
+        let mut a = olorin::inference::forward::Gemma4State::new(&model, 512, &pool);
+        let mut logits_one = vec![];
+        for &t in tokens {
+            logits_one = a.forward_one(&model, t, &pool).to_vec();
+        }
+
+        let mut b = olorin::inference::forward::Gemma4State::new(&model, 512, &pool);
+        let logits_batch = b.forward_batch(&model, tokens, &pool).to_vec();
+
+        assert_eq!(logits_one.len(), logits_batch.len());
+        let diff = max_abs_diff(&logits_one, &logits_batch);
+        eprintln!("  N={n}: max abs diff = {diff}");
+        // 5e-3 tolerance: threadpool accumulation order + q8k quant scale
+        // rounding can drift on the vocab_size (262144) lm_head matmul.
+        assert!(
+            diff < 5e-3,
+            "batch11 N={n}: forward_batch diverges from forward_one, max abs diff = {diff}",
+        );
+    }
+    eprintln!("PASS: batch11");
+}
