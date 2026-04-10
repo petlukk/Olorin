@@ -2,6 +2,8 @@
 //
 // Uses LLVM exp intrinsic (llvm.exp.v4f32) for correct SIMD exp.
 // 1. Scale, 2. Find max, 3. Subtract max + exp, 4. Sum, 5. Normalize
+//
+// Tail handling: scalar only (no overlap-load), matching x86 exactly.
 
 #[cfg(aarch64)]
 
@@ -39,26 +41,12 @@ export func softmax_f32(data: *mut f32, n: i32, scale: f32) {
 
     let mut s: f32 = reduce_add(v_sum)
 
-    // Tail: overlap-load last 4 for SIMD exp
-    if i < n {
-        if n >= 4 {
-            let tail_off: i32 = n - 4
-            let e: f32x4 = exp(load(data, tail_off) .- v_m)
-            store(data, tail_off, e)
-            let mut j: i32 = i
-            while j < n {
-                s = s + data[j]
-                j = j + 1
-            }
-        } else {
-            // n < 4: first decode step (seq_len 1..3)
-            while i < n {
-                let v: f32 = data[i] - m
-                data[i] = exp(v)
-                s = s + data[i]
-                i = i + 1
-            }
-        }
+    // Scalar tail — no overlap-load, matching x86 exactly.
+    while i < n {
+        let v: f32 = data[i] - m
+        data[i] = exp(v)
+        s = s + data[i]
+        i = i + 1
     }
 
     // Pass 3: Normalize

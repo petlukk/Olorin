@@ -10,7 +10,7 @@ use crate::inference::engine::Gemma4Model;
 use crate::inference::matmul;
 use crate::kernels::ffi_inference;
 
-use super::forward::{compute_rope_tables, diag_enabled, l2_norm, Gemma4State};
+use super::forward::{compute_rope_tables, diag_enabled, l2_norm, timing_enabled, Gemma4State};
 
 impl Gemma4State {
     /// Full layer forward pass matching llama.cpp gemma4-iswa.cpp.
@@ -49,6 +49,9 @@ impl Gemma4State {
             None
         };
 
+        let timing = timing_enabled();
+        let lt0 = std::time::Instant::now();
+
         compute_rope_tables(
             &mut self.cos_table,
             &mut self.sin_table,
@@ -74,12 +77,15 @@ impl Gemma4State {
             &mut self.q8_d,
             &mut self.q8_bsums,
         );
+        let lt_norm_quant = lt0.elapsed();
 
         if diag && il == 0 {
             eprintln!("[gemma4] L0 attn_norm L2={:.4} (llama.cpp: 452.89)", l2_norm(&self.x_norm[..hd]));
             eprintln!("[gemma4] L0 attn_norm first4=[{:.4},{:.4},{:.4},{:.4}] (llama.cpp: [-10.64,-8.44,1.21,-12.26])",
                 self.x_norm[0], self.x_norm[1], self.x_norm[2], self.x_norm[3]);
         }
+
+        let lt1 = std::time::Instant::now();
 
         // ── 2. Q projection ─────────────────────────────────────────
         matmul::par_matvec(pool,
@@ -170,6 +176,8 @@ impl Gemma4State {
             }
         }
 
+        let lt2 = std::time::Instant::now();
+
         // ── 5. Attention (GQA, scale=1.0) ────────────────────────────
         // llama.cpp: f_attention_scale = 1.0 for Gemma4
         let attn_scale = 1.0f32;
@@ -190,6 +198,8 @@ impl Gemma4State {
                 l2_norm(&self.attn_out[..n_heads * head_dim]),
                 self.attn_out[0], self.attn_out[1], self.attn_out[2], self.attn_out[3]);
         }
+
+        let lt3 = std::time::Instant::now();
 
         // ── 6. Wo + post-attention norm + residual ───────────────────
         let attn_out_dim = n_heads * head_dim;
@@ -267,6 +277,8 @@ impl Gemma4State {
             );
         }
 
+        let lt4 = std::time::Instant::now();
+
         // ── 9. PLE ──────────────────────────────────────────────────
         if model.ple_dim > 0 && !lw.inp_gate.is_null() && !lw.proj.is_null() {
             let ple_dim = model.ple_dim;
@@ -336,6 +348,17 @@ impl Gemma4State {
                 "[gemma4] L{il} out L2={:.4} scale={:.6}",
                 l2_norm(&self.x[..hd]), out_scale
             );
+        }
+
+        if timing && (il == 0 || il == model.n_layers - 1) {
+            let lt_total = lt0.elapsed();
+            eprintln!("[layer {il}] norm+q8k={:.2}ms qkv+rope={:.2}ms attn={:.2}ms wo+ffn={:.2}ms ple+scale={:.2}ms total={:.2}ms",
+                lt_norm_quant.as_secs_f64() * 1000.0,
+                (lt2 - lt1).as_secs_f64() * 1000.0,
+                (lt3 - lt2).as_secs_f64() * 1000.0,
+                (lt4 - lt3).as_secs_f64() * 1000.0,
+                (lt_total - (lt4 - lt0)).as_secs_f64() * 1000.0,
+                lt_total.as_secs_f64() * 1000.0);
         }
     }
 

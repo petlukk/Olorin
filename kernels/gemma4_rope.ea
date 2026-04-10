@@ -6,13 +6,28 @@
 //
 // new_re = re * cos[d] - im * sin[d]
 // new_im = re * sin[d] + im * cos[d]
+//
+// SIMD: process 4 dimension pairs per iteration via f32x4.
 
 export func gemma4_rope(data: *mut f32, cos_table: *restrict f32, sin_table: *restrict f32, head_dim: i32, n_heads: i32) {
     let half_dim: i32 = head_dim / 2
     let mut h: i32 = 0
     while h < n_heads {
         let base: i32 = h * head_dim
+
+        // SIMD: 4 pairs per iteration
         let mut d: i32 = 0
+        while d + 4 <= half_dim {
+            let re: f32x4 = load(data, base + d)
+            let im: f32x4 = load(data, base + d + half_dim)
+            let c: f32x4 = load(cos_table, d)
+            let s: f32x4 = load(sin_table, d)
+            store(data, base + d,            re .* c .- im .* s)
+            store(data, base + d + half_dim, re .* s .+ im .* c)
+            d = d + 4
+        }
+
+        // Scalar tail
         while d < half_dim {
             let re: f32 = data[base + d]
             let im: f32 = data[base + d + half_dim]
@@ -22,6 +37,7 @@ export func gemma4_rope(data: *mut f32, cos_table: *restrict f32, sin_table: *re
             data[base + d + half_dim] = re * s + im * c
             d = d + 1
         }
+
         h = h + 1
     }
 }
