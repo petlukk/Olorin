@@ -12,5 +12,6 @@ mod forward_attn;
 mod forward_attn_heads;
 pub mod graph;
 pub mod matmul_graph;
+mod forward_graph;
 
 pub use forward_attn_heads::attention_decode;

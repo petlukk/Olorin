@@ -194,7 +194,7 @@ impl Gemma4State {
             ffn_q8_bsums: vec![0; n_blocks_ffn * 16],
 
             logits: vec![0.0; model.vocab_size],
-            q6k_d_scratch: vec![0.0; std::cmp::max(n_blocks_out, n_blocks_ffn) * 4],
+            q6k_d_scratch: vec![0.0; std::cmp::max(n_blocks_out, n_blocks_ffn) * 4 * n_thread_slots],
 
             cos_table: vec![0.0; max_head / 2],
             sin_table: vec![0.0; max_head / 2],
@@ -356,6 +356,26 @@ impl Gemma4State {
         }
 
         self.cache.advance();
+        &self.logits
+    }
+
+    /// Run one decode step using graph-loop threading.
+    /// All pool threads execute the forward pass together with spin-barriers.
+    pub fn forward_one_graph(&mut self, model: &Gemma4Model, token_id: u32, pool: &crate::inference::threadpool::GraphPool) -> &[f32] {
+        let state_ptr = self as *mut Gemma4State as usize;
+        let model_ptr = model as *const Gemma4Model as usize;
+        let barrier_ptr = pool.barrier() as *const crate::inference::threadpool::SpinBarrier as usize;
+        let chunk_ptr = pool.chunk() as *const std::sync::atomic::AtomicI32 as usize;
+        let nth = pool.thread_count();
+
+        pool.run(nth, move |tid, _nth| {
+            let state = unsafe { &mut *(state_ptr as *mut Gemma4State) };
+            let model = unsafe { &*(model_ptr as *const Gemma4Model) };
+            let barrier = unsafe { &*(barrier_ptr as *const crate::inference::threadpool::SpinBarrier) };
+            let chunk = unsafe { &*(chunk_ptr as *const std::sync::atomic::AtomicI32) };
+            super::forward_graph::forward_one_inner(state, model, token_id, barrier, chunk, tid, nth);
+        });
+
         &self.logits
     }
 

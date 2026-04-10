@@ -1824,3 +1824,39 @@ fn olorin_f32_to_f16(x: f32) -> u16 {
     let result = ((new_exp as u32) << 10) | (mantissa >> 13);
     (sign | result + half) as u16
 }
+
+#[test]
+fn step17_graph_forward_vs_legacy() {
+    // Compare forward_one_graph (GraphPool) vs forward_one (ThreadPool).
+    // BOS token — logits should be identical.
+    if !has_model() { eprintln!("SKIP: no model"); return; }
+    olorin::kernels::ffi::init().unwrap();
+
+    let gguf = olorin::inference::gguf::GgufFile::open(std::path::Path::new(&model_path())).unwrap();
+    let model = olorin::inference::engine::Gemma4Model::from_gguf(&gguf).unwrap();
+
+    // Legacy path
+    let legacy_pool = olorin::inference::threadpool::ThreadPool::new();
+    let mut legacy_state = olorin::inference::forward::Gemma4State::new(&model, 512, &legacy_pool);
+    let legacy_logits = legacy_state.forward_one(&model, 2, &legacy_pool).to_vec();
+
+    // Graph path
+    let graph_pool = olorin::inference::threadpool::GraphPool::new();
+    let mut graph_state = olorin::inference::forward::Gemma4State::new(&model, 512, &legacy_pool);
+    let graph_logits = graph_state.forward_one_graph(&model, 2, &graph_pool).to_vec();
+
+    eprintln!("=== Step 17: graph forward vs legacy forward (BOS) ===");
+    eprintln!("  legacy logits L2={:.4}", l2(&legacy_logits));
+    eprintln!("  graph  logits L2={:.4}", l2(&graph_logits));
+
+    let mut max_abs = 0.0f32;
+    for i in 0..legacy_logits.len() {
+        let err = (legacy_logits[i] - graph_logits[i]).abs();
+        if err > max_abs { max_abs = err; }
+    }
+    eprintln!("  max_abs_err={max_abs:.8}");
+
+    // Should be bit-exact or near-exact (same ops, same order)
+    assert!(max_abs < 0.001, "graph forward diverges from legacy: {max_abs}");
+    eprintln!("PASS: graph forward matches legacy");
+}
