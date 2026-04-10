@@ -56,6 +56,162 @@ impl SpinBarrier {
 }
 
 // ---------------------------------------------------------------------------
+// GraphPool — graph-loop threading matching llama.cpp
+// ---------------------------------------------------------------------------
+
+use super::graph::{GraphCtx, OpList};
+
+/// Thread pool where all threads execute the entire op-list together.
+/// Workers sleep (condvar) between tokens, spin-barrier between ops.
+/// Matches llama.cpp's ggml_graph_compute_thread loop.
+pub struct GraphPool {
+    shared: Box<GraphPoolShared>,
+    workers: Vec<JoinHandle<()>>,
+    n_threads: usize,
+}
+
+struct GraphPoolShared {
+    // Sleep/wake between tokens
+    mutex: Mutex<GraphPoolState>,
+    cond: Condvar,
+    // Spin-barrier between ops
+    barrier: SpinBarrier,
+    // Work-stealing for matmul
+    ctx: GraphCtx,
+}
+
+struct GraphPoolState {
+    ops_ptr: usize,  // *const OpList, valid only during execute()
+    n_ops: usize,
+    generation: u64,
+    n_threads_total: usize,
+    done_count: AtomicUsize,
+    shutdown: bool,
+}
+
+// Safety: ops_ptr is only read while execute() holds the OpList alive.
+unsafe impl Send for GraphPoolState {}
+unsafe impl Sync for GraphPoolState {}
+
+impl GraphPool {
+    pub fn new() -> Self {
+        let n_threads = thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+
+        let shared = Box::new(GraphPoolShared {
+            mutex: Mutex::new(GraphPoolState {
+                ops_ptr: 0,
+                n_ops: 0,
+                generation: 0,
+                n_threads_total: n_threads,
+                done_count: AtomicUsize::new(0),
+                shutdown: false,
+            }),
+            cond: Condvar::new(),
+            barrier: SpinBarrier::new(n_threads),
+            ctx: GraphCtx::new(),
+        });
+
+        // Leak shared to get 'static reference for workers
+        let shared_ref: &'static GraphPoolShared = unsafe {
+            &*(Box::into_raw(shared) as *const GraphPoolShared)
+        };
+
+        let mut workers = Vec::with_capacity(n_threads);
+        for tid in 0..n_threads {
+            let s = shared_ref as *const GraphPoolShared as usize;
+            let handle = thread::spawn(move || {
+                let shared = unsafe { &*(s as *const GraphPoolShared) };
+                let mut last_gen: u64 = 0;
+                loop {
+                    // Sleep until new graph or shutdown
+                    let (ops_ptr, n_ops);
+                    {
+                        let mut state = shared.mutex.lock().unwrap();
+                        while state.generation == last_gen && !state.shutdown {
+                            state = shared.cond.wait(state).unwrap();
+                        }
+                        if state.shutdown { return; }
+                        last_gen = state.generation;
+                        ops_ptr = state.ops_ptr;
+                        n_ops = state.n_ops;
+                    }
+
+                    // Execute all ops with spin-barriers (llama.cpp graph loop)
+                    let ops = unsafe { &*(ops_ptr as *const OpList) };
+                    for i in 0..n_ops {
+                        ops.ops[i](tid, n_threads, &shared.ctx);
+                        if i + 1 < n_ops {
+                            shared.barrier.wait();
+                        }
+                    }
+
+                    // Signal completion
+                    if shared.mutex.lock().unwrap().done_count
+                        .fetch_sub(1, Ordering::AcqRel) == 1
+                    {
+                        // Last thread — notify dispatcher
+                        shared.cond.notify_all();
+                    }
+                }
+            });
+            workers.push(handle);
+        }
+
+        // Reconstruct Box from leaked pointer for Drop
+        let shared = unsafe { Box::from_raw(shared_ref as *const _ as *mut GraphPoolShared) };
+
+        GraphPool { shared, workers, n_threads }
+    }
+
+    pub fn thread_count(&self) -> usize {
+        self.n_threads
+    }
+
+    /// Execute an op-list. All threads run all ops with spin-barriers between.
+    /// Blocks until all threads complete.
+    pub fn execute(&self, ops: &OpList) {
+        if ops.len() == 0 { return; }
+
+        {
+            let mut state = self.shared.mutex.lock().unwrap();
+            state.ops_ptr = ops as *const OpList as usize;
+            state.n_ops = ops.len();
+            state.done_count.store(self.n_threads, Ordering::Release);
+            state.generation += 1;
+        }
+        self.shared.cond.notify_all();
+
+        // Wait for all threads to finish
+        {
+            let mut state = self.shared.mutex.lock().unwrap();
+            while state.done_count.load(Ordering::Acquire) != 0 {
+                state = self.shared.cond.wait(state).unwrap();
+            }
+        }
+    }
+
+    /// Access the shared GraphCtx (for resetting current_chunk before matmul ops).
+    pub fn ctx(&self) -> &GraphCtx {
+        &self.shared.ctx
+    }
+}
+
+impl Drop for GraphPool {
+    fn drop(&mut self) {
+        {
+            let mut state = self.shared.mutex.lock().unwrap();
+            state.shutdown = true;
+        }
+        self.shared.cond.notify_all();
+        for handle in self.workers.drain(..) {
+            let _ = handle.join();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Legacy ThreadPool (mutex/condvar dispatch)
 // ---------------------------------------------------------------------------
 
