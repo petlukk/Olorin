@@ -1,11 +1,63 @@
-//! Persistent thread pool for parallel matmul dispatch.
+//! Thread pools for parallel compute dispatch.
 //!
-//! Workers sleep on a condvar between dispatches. The dispatcher stores
-//! closures as raw pointers and blocks until all workers complete.
+//! Two implementations:
+//! - `ThreadPool`: legacy mutex/condvar dispatch (used during migration)
+//! - `SpinBarrier`: atomic barrier matching llama.cpp ggml_barrier()
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
+
+// ---------------------------------------------------------------------------
+// SpinBarrier — matches llama.cpp ggml_barrier() exactly
+// ---------------------------------------------------------------------------
+
+/// Atomic spin-barrier. All n_threads call wait(); last arrival resets and
+/// signals others. Spin-loop uses YIELD (ARM) / PAUSE (x86).
+/// Ref: llama.cpp ggml-cpu.c:562
+#[repr(C, align(64))]
+pub struct SpinBarrier {
+    n_threads: i32,
+    n_barrier: AtomicI32,
+    n_barrier_passed: AtomicI32,
+}
+
+impl SpinBarrier {
+    pub fn new(n_threads: usize) -> Self {
+        Self {
+            n_threads: n_threads as i32,
+            n_barrier: AtomicI32::new(0),
+            n_barrier_passed: AtomicI32::new(0),
+        }
+    }
+
+    #[inline]
+    pub fn wait(&self) {
+        if self.n_threads <= 1 { return; }
+
+        let old_passed = self.n_barrier_passed.load(Ordering::Relaxed);
+
+        // Enter barrier (full seq-cst fence)
+        let n = self.n_barrier.fetch_add(1, Ordering::SeqCst);
+
+        if n == self.n_threads - 1 {
+            // Last thread — reset counter and signal
+            self.n_barrier.store(0, Ordering::Relaxed);
+            self.n_barrier_passed.fetch_add(1, Ordering::SeqCst);
+            return;
+        }
+
+        // Spin until last thread signals
+        while self.n_barrier_passed.load(Ordering::Relaxed) == old_passed {
+            std::hint::spin_loop();
+        }
+        std::sync::atomic::fence(Ordering::SeqCst);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Legacy ThreadPool (mutex/condvar dispatch)
+// ---------------------------------------------------------------------------
 
 static NOOP_FN: &(dyn Fn(usize, usize) + Send + Sync) = &|_, _| {};
 
