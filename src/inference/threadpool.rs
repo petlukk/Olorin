@@ -61,44 +61,155 @@ impl SpinBarrier {
 
 use super::graph::{GraphCtx, OpList};
 
-/// Graph pool: reuses legacy ThreadPool's proven condvar dispatch but adds
-/// run_graph() for executing a function on all threads with spin-barriers.
-/// Workers sleep between dispatches (condvar), spin within forward pass (barriers).
+/// Graph pool matching llama.cpp's threading model exactly:
+/// - N-1 worker threads sleep on condvar between dispatches
+/// - Main thread (ith=0) calls run_graph() which:
+///   1. Kicks workers via condvar broadcast
+///   2. Runs work function as ith=0 itself
+///   3. Returns when all threads (including main) complete
+/// - Inside work: spin-barriers between ops, work-stealing for matmul
 pub struct GraphPool {
-    inner: ThreadPool,
-    pub barrier: SpinBarrier,
-    pub current_chunk: AtomicI32,
+    shared: *mut GraphPoolShared, // leaked, lives forever
+    workers: Vec<JoinHandle<()>>,
+    n_threads: usize,
 }
+
+struct GraphPoolShared {
+    // Wake workers
+    mutex: Mutex<GraphPoolState>,
+    cond: Condvar,
+    // Spin-barrier between ops (all n_threads participate)
+    pub barrier: SpinBarrier,
+    // Work-stealing for matmul
+    pub current_chunk: AtomicI32,
+    n_threads: usize,
+}
+
+struct GraphPoolState {
+    work_fn: usize,    // fn pointer
+    work_data: usize,  // data pointer
+    generation: u64,
+    shutdown: bool,
+}
+
+unsafe impl Send for GraphPoolState {}
+unsafe impl Sync for GraphPoolState {}
+
+type GraphWorkFn = unsafe fn(*const (), usize, usize, &SpinBarrier, &AtomicI32);
 
 impl GraphPool {
     pub fn new() -> Self {
-        let inner = ThreadPool::new();
-        let n = inner.thread_count();
-        Self {
-            inner,
-            barrier: SpinBarrier::new(n),
+        let n_threads = thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+
+        let shared = Box::into_raw(Box::new(GraphPoolShared {
+            mutex: Mutex::new(GraphPoolState {
+                work_fn: 0,
+                work_data: 0,
+                generation: 0,
+                shutdown: false,
+            }),
+            cond: Condvar::new(),
+            barrier: SpinBarrier::new(n_threads),
             current_chunk: AtomicI32::new(0),
+            n_threads,
+        }));
+
+        // Spawn N-1 workers (ith=1..N-1). Main thread is ith=0.
+        let mut workers = Vec::with_capacity(n_threads - 1);
+        for tid in 1..n_threads {
+            let s = shared as usize;
+            let handle = thread::spawn(move || {
+                let shared = unsafe { &*(s as *const GraphPoolShared) };
+                let mut last_gen: u64 = 0;
+                loop {
+                    // Poll briefly then sleep (matching llama check_for_work)
+                    let (work_fn, work_data);
+                    {
+                        let mut state = shared.mutex.lock().unwrap();
+                        while state.generation == last_gen && !state.shutdown {
+                            state = shared.cond.wait(state).unwrap();
+                        }
+                        if state.shutdown { return; }
+                        last_gen = state.generation;
+                        work_fn = state.work_fn;
+                        work_data = state.work_data;
+                    }
+
+                    // Run the work function as this thread
+                    let f: GraphWorkFn = unsafe { std::mem::transmute(work_fn) };
+                    unsafe {
+                        f(work_data as *const (), tid, shared.n_threads,
+                          &shared.barrier, &shared.current_chunk);
+                    }
+                    // Worker done — goes back to sleep. No signalling needed:
+                    // main thread also runs compute_thread and hits the final
+                    // barrier, so it knows when everyone is done.
+                }
+            });
+            workers.push(handle);
         }
+
+        GraphPool { shared, workers, n_threads }
     }
 
-    pub fn thread_count(&self) -> usize {
-        self.inner.thread_count()
-    }
+    pub fn thread_count(&self) -> usize { self.n_threads }
+    pub fn barrier(&self) -> &SpinBarrier { unsafe { &(*self.shared).barrier } }
+    pub fn chunk(&self) -> &AtomicI32 { unsafe { &(*self.shared).current_chunk } }
 
-    /// Execute a function on all threads. Each thread gets (tid, nth).
-    /// The function can use &self.barrier and &self.current_chunk for
-    /// internal synchronization (spin-barriers between ops).
-    /// Barrier reference for use in forward_one_graph.
-    pub fn barrier(&self) -> &SpinBarrier { &self.barrier }
+    /// Execute work on all threads. Main thread (ith=0) participates directly.
+    /// Matches llama.cpp: kickoff workers, then main runs compute_thread.
+    pub fn run_graph<F>(&self, f: &F)
+    where F: Fn(usize, usize, &SpinBarrier, &AtomicI32) + Send + Sync
+    {
+        unsafe fn trampoline<F: Fn(usize, usize, &SpinBarrier, &AtomicI32)>(
+            data: *const (), tid: usize, nth: usize,
+            barrier: &SpinBarrier, chunk: &AtomicI32,
+        ) {
+            let f = &*(data as *const F);
+            f(tid, nth, barrier, chunk);
+        }
 
-    /// Chunk counter reference for work-stealing matmul.
-    pub fn chunk(&self) -> &AtomicI32 { &self.current_chunk }
+        let shared = unsafe { &*self.shared };
 
-    /// Legacy-style run: dispatch closure to all threads.
-    pub fn run(&self, n: usize, f: impl Fn(usize, usize) + Send + Sync) {
-        self.inner.run(n, f);
+        // Kickoff: wake workers 1..N-1
+        {
+            let mut state = shared.mutex.lock().unwrap();
+            state.work_fn = trampoline::<F> as usize;
+            state.work_data = f as *const F as *const () as usize;
+            state.generation += 1;
+        }
+        shared.cond.notify_all();
+
+        // Main thread runs as ith=0 (like llama.cpp line 3299)
+        f(0, self.n_threads, &shared.barrier, &shared.current_chunk);
+
+        // Main is done. Workers are also done (they hit the same final barrier
+        // inside forward_one_inner). No extra sync needed — f contains a
+        // terminal barrier.
     }
 }
+
+impl Drop for GraphPool {
+    fn drop(&mut self) {
+        unsafe {
+            {
+                let mut state = (*self.shared).mutex.lock().unwrap();
+                state.shutdown = true;
+            }
+            (*self.shared).cond.notify_all();
+        }
+        for handle in self.workers.drain(..) {
+            let _ = handle.join();
+        }
+        unsafe { drop(Box::from_raw(self.shared)); }
+    }
+}
+
+// Safety: shared is heap-allocated and outlives all workers
+unsafe impl Send for GraphPool {}
+unsafe impl Sync for GraphPool {}
 
 // ---------------------------------------------------------------------------
 // Legacy ThreadPool (mutex/condvar dispatch)

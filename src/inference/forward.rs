@@ -360,19 +360,15 @@ impl Gemma4State {
     }
 
     /// Run one decode step using graph-loop threading.
-    /// All pool threads execute the forward pass together with spin-barriers.
+    /// Main thread participates as ith=0, workers 1..N-1 spin-barrier.
+    /// Matches llama.cpp: kickoff → main runs compute_thread → return.
     pub fn forward_one_graph(&mut self, model: &Gemma4Model, token_id: u32, pool: &crate::inference::threadpool::GraphPool) -> &[f32] {
         let state_ptr = self as *mut Gemma4State as usize;
         let model_ptr = model as *const Gemma4Model as usize;
-        let barrier_ptr = pool.barrier() as *const crate::inference::threadpool::SpinBarrier as usize;
-        let chunk_ptr = pool.chunk() as *const std::sync::atomic::AtomicI32 as usize;
-        let nth = pool.thread_count();
 
-        pool.run(nth, move |tid, _nth| {
+        pool.run_graph(&|tid, nth, barrier, chunk| {
             let state = unsafe { &mut *(state_ptr as *mut Gemma4State) };
             let model = unsafe { &*(model_ptr as *const Gemma4Model) };
-            let barrier = unsafe { &*(barrier_ptr as *const crate::inference::threadpool::SpinBarrier) };
-            let chunk = unsafe { &*(chunk_ptr as *const std::sync::atomic::AtomicI32) };
             super::forward_graph::forward_one_inner(state, model, token_id, barrier, chunk, tid, nth);
         });
 

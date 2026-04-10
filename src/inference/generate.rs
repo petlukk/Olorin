@@ -20,6 +20,7 @@ pub struct Engine {
     tokenizer: Tokenizer,
     state: Gemma4State,
     pool: crate::inference::threadpool::ThreadPool,
+    graph_pool: crate::inference::threadpool::GraphPool,
     pub max_tokens: usize,
     pub temperature: f32,
     pub top_k: usize,
@@ -39,6 +40,7 @@ impl Engine {
         crate::kernels::ffi::init()
             .map_err(|e| Error::Inference(e))?;
         let pool = crate::inference::threadpool::ThreadPool::new();
+        let graph_pool = crate::inference::threadpool::GraphPool::new();
         eprintln!("[Olorin] Thread pool: {} threads", pool.thread_count());
         let state = Gemma4State::new(&model, max_seq_len, &pool);
 
@@ -48,6 +50,7 @@ impl Engine {
             tokenizer,
             state,
             pool,
+            graph_pool,
             // Defaults match llama.cpp + GGUF metadata for this model:
             //   general.sampling.top_k = 64
             //   general.sampling.top_p = 0.95
@@ -101,10 +104,10 @@ impl Engine {
         // 4. Prefill: forward each prompt token (discard logits except last)
         let n_prompt = tokens.len();
         for &tok in &tokens[..n_prompt - 1] {
-            self.state.forward_one(&self.model, tok, &self.pool);
+            self.state.forward_one_graph(&self.model, tok, &self.graph_pool);
         }
         let mut logits_snapshot = {
-            let logits = self.state.forward_one(&self.model, tokens[n_prompt - 1], &self.pool);
+            let logits = self.state.forward_one_graph(&self.model, tokens[n_prompt - 1], &self.graph_pool);
             logits.to_vec()
         };
 
@@ -134,7 +137,7 @@ impl Engine {
                 output.push_str(&text);
             }
 
-            let logits = self.state.forward_one(&self.model, token_id, &self.pool);
+            let logits = self.state.forward_one_graph(&self.model, token_id, &self.graph_pool);
             logits_snapshot.clear();
             logits_snapshot.extend_from_slice(logits);
         }
