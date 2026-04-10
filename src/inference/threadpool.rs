@@ -4,7 +4,7 @@
 //! - `ThreadPool`: legacy mutex/condvar dispatch (used during migration)
 //! - `SpinBarrier`: atomic barrier matching llama.cpp ggml_barrier()
 
-use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering, fence};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 
@@ -56,46 +56,55 @@ impl SpinBarrier {
 }
 
 // ---------------------------------------------------------------------------
-// GraphPool — graph-loop threading matching llama.cpp
+// GraphPool — graph-loop threading matching llama.cpp exactly
+// Ref: ggml-cpu.c ggml_graph_compute / ggml_graph_compute_kickoff /
+//      ggml_graph_compute_secondary_thread / ggml_graph_compute_check_for_work
 // ---------------------------------------------------------------------------
 
-use super::graph::{GraphCtx, OpList};
+/// Packed n_graph: (graph_counter << 16) | n_active_threads.
+/// Workers detect new work by comparing n_graph against their last value.
+/// Ref: ggml-cpu.c GGML_THREADPOOL_N_THREADS_BITS
+const N_THREADS_BITS: u32 = 16;
+const N_THREADS_MASK: i32 = (1 << N_THREADS_BITS) - 1;
 
-/// Graph pool matching llama.cpp's threading model exactly:
-/// - N-1 worker threads sleep on condvar between dispatches
-/// - Main thread (ith=0) calls run_graph() which:
-///   1. Kicks workers via condvar broadcast
-///   2. Runs work function as ith=0 itself
-///   3. Returns when all threads (including main) complete
-/// - Inside work: spin-barriers between ops, work-stealing for matmul
+/// Spin-poll rounds before falling to condvar sleep.
+/// Ref: ggml-cpu.c ggml_graph_compute_poll_for_work (1024*128*poll, poll=1)
+const SPIN_POLL_ROUNDS: u64 = 1024 * 128;
+
+type GraphWorkFn = unsafe fn(*const (), usize, usize, &SpinBarrier, &AtomicI32);
+
+/// Graph pool matching llama.cpp's threadpool model exactly:
+/// - N-1 worker threads spin-poll then condvar-sleep between dispatches
+/// - Kickoff: store n_graph (SeqCst) + broadcast under lock
+/// - Main thread (ith=0) participates via same work function
+/// - Spin-barriers between ops, work-stealing for matmul
+/// Ref: ggml-cpu.c:3237 ggml_graph_compute
 pub struct GraphPool {
-    shared: *mut GraphPoolShared, // leaked, lives forever
+    shared: *mut GraphPoolShared,
     workers: Vec<JoinHandle<()>>,
     n_threads: usize,
 }
 
+#[repr(C, align(64))]
 struct GraphPoolShared {
-    // Wake workers
-    mutex: Mutex<GraphPoolState>,
+    // Condvar for sleep fallback (hybrid poll/wait like llama.cpp)
+    mutex: Mutex<()>,
     cond: Condvar,
+    // (graph_counter << 16) | n_active_threads
+    // SeqCst store in kickoff, Relaxed poll in workers
+    // Ref: ggml-cpu.c:475 atomic_int n_graph
+    n_graph: AtomicI32,
+    stop: AtomicBool,
+    // Work function + data: set before n_graph SeqCst store,
+    // read after worker's SeqCst fence — happens-before guaranteed.
+    work_fn: AtomicUsize,
+    work_data: AtomicUsize,
     // Spin-barrier between ops (all n_threads participate)
     pub barrier: SpinBarrier,
     // Work-stealing for matmul
     pub current_chunk: AtomicI32,
     n_threads: usize,
 }
-
-struct GraphPoolState {
-    work_fn: usize,    // fn pointer
-    work_data: usize,  // data pointer
-    generation: u64,
-    shutdown: bool,
-}
-
-unsafe impl Send for GraphPoolState {}
-unsafe impl Sync for GraphPoolState {}
-
-type GraphWorkFn = unsafe fn(*const (), usize, usize, &SpinBarrier, &AtomicI32);
 
 impl GraphPool {
     pub fn new() -> Self {
@@ -104,49 +113,25 @@ impl GraphPool {
             .unwrap_or(1);
 
         let shared = Box::into_raw(Box::new(GraphPoolShared {
-            mutex: Mutex::new(GraphPoolState {
-                work_fn: 0,
-                work_data: 0,
-                generation: 0,
-                shutdown: false,
-            }),
+            mutex: Mutex::new(()),
             cond: Condvar::new(),
+            n_graph: AtomicI32::new(0),
+            stop: AtomicBool::new(false),
+            work_fn: AtomicUsize::new(0),
+            work_data: AtomicUsize::new(0),
             barrier: SpinBarrier::new(n_threads),
             current_chunk: AtomicI32::new(0),
             n_threads,
         }));
 
         // Spawn N-1 workers (ith=1..N-1). Main thread is ith=0.
-        let mut workers = Vec::with_capacity(n_threads - 1);
+        // Ref: ggml-cpu.c:3212
+        let mut workers = Vec::with_capacity(n_threads.saturating_sub(1));
         for tid in 1..n_threads {
             let s = shared as usize;
             let handle = thread::spawn(move || {
                 let shared = unsafe { &*(s as *const GraphPoolShared) };
-                let mut last_gen: u64 = 0;
-                loop {
-                    // Poll briefly then sleep (matching llama check_for_work)
-                    let (work_fn, work_data);
-                    {
-                        let mut state = shared.mutex.lock().unwrap();
-                        while state.generation == last_gen && !state.shutdown {
-                            state = shared.cond.wait(state).unwrap();
-                        }
-                        if state.shutdown { return; }
-                        last_gen = state.generation;
-                        work_fn = state.work_fn;
-                        work_data = state.work_data;
-                    }
-
-                    // Run the work function as this thread
-                    let f: GraphWorkFn = unsafe { std::mem::transmute(work_fn) };
-                    unsafe {
-                        f(work_data as *const (), tid, shared.n_threads,
-                          &shared.barrier, &shared.current_chunk);
-                    }
-                    // Worker done — goes back to sleep. No signalling needed:
-                    // main thread also runs compute_thread and hits the final
-                    // barrier, so it knows when everyone is done.
-                }
+                graph_worker_loop(shared, tid);
             });
             workers.push(handle);
         }
@@ -159,7 +144,7 @@ impl GraphPool {
     pub fn chunk(&self) -> &AtomicI32 { unsafe { &(*self.shared).current_chunk } }
 
     /// Execute work on all threads. Main thread (ith=0) participates directly.
-    /// Matches llama.cpp: kickoff workers, then main runs compute_thread.
+    /// Ref: ggml-cpu.c:3296-3299 kickoff then compute_thread(&workers[0])
     pub fn run_graph<F>(&self, f: &F)
     where F: Fn(usize, usize, &SpinBarrier, &AtomicI32) + Send + Sync
     {
@@ -173,32 +158,95 @@ impl GraphPool {
 
         let shared = unsafe { &*self.shared };
 
-        // Kickoff: wake workers 1..N-1
+        // Set work fn/data BEFORE SeqCst store — relaxed stores become visible
+        // to workers after their SeqCst fence (thread_sync).
+        shared.work_fn.store(trampoline::<F> as usize, Ordering::Relaxed);
+        shared.work_data.store(f as *const F as *const () as usize, Ordering::Relaxed);
+
+        // Kickoff: update n_graph + broadcast UNDER lock.
+        // Ref: ggml-cpu.c:3126 ggml_graph_compute_kickoff
         {
-            let mut state = shared.mutex.lock().unwrap();
-            state.work_fn = trampoline::<F> as usize;
-            state.work_data = f as *const F as *const () as usize;
-            state.generation += 1;
+            let _guard = shared.mutex.lock().unwrap();
+            let old = shared.n_graph.load(Ordering::Relaxed);
+            let counter = (old >> N_THREADS_BITS) + 1;
+            let new_val = (counter << N_THREADS_BITS)
+                | (shared.n_threads as i32 & N_THREADS_MASK);
+            shared.n_graph.store(new_val, Ordering::SeqCst);
+            shared.cond.notify_all();
         }
-        shared.cond.notify_all();
 
-        // Main thread runs as ith=0 (like llama.cpp line 3299)
+        // Main thread participates as ith=0.
+        // Ref: ggml-cpu.c:3299 ggml_graph_compute_thread(&workers[0])
         f(0, self.n_threads, &shared.barrier, &shared.current_chunk);
+    }
+}
 
-        // Main is done. Workers are also done (they hit the same final barrier
-        // inside forward_one_inner). No extra sync needed — f contains a
-        // terminal barrier.
+/// Worker thread main loop matching llama.cpp secondary_thread.
+/// Ref: ggml-cpu.c:3088 ggml_graph_compute_secondary_thread
+fn graph_worker_loop(shared: &GraphPoolShared, tid: usize) {
+    let mut last_graph: i32 = 0;
+
+    loop {
+        // Phase 1: Spin-poll n_graph for new work.
+        // Ref: ggml-cpu.c:3054 ggml_graph_compute_poll_for_work
+        let mut pending = false;
+        for _ in 0..SPIN_POLL_ROUNDS {
+            if shared.stop.load(Ordering::Relaxed) { return; }
+            let ng = shared.n_graph.load(Ordering::Relaxed);
+            if ng != last_graph {
+                pending = (tid as i32) < (ng & N_THREADS_MASK);
+                last_graph = ng;
+                break;
+            }
+            std::hint::spin_loop();
+        }
+
+        // Phase 2: Condvar sleep if spin-poll found nothing.
+        // Ref: ggml-cpu.c:3069 ggml_graph_compute_check_for_work (mutex path)
+        if !pending {
+            let mut guard = shared.mutex.lock().unwrap();
+            loop {
+                if shared.stop.load(Ordering::Relaxed) { return; }
+                let ng = shared.n_graph.load(Ordering::Relaxed);
+                if ng != last_graph {
+                    pending = (tid as i32) < (ng & N_THREADS_MASK);
+                    last_graph = ng;
+                    break;
+                }
+                guard = shared.cond.wait(guard).unwrap();
+            }
+            drop(guard);
+        }
+
+        if shared.stop.load(Ordering::Relaxed) { return; }
+        if !pending { continue; }
+
+        // Thread sync: SeqCst fence ensures work_fn/work_data stores are visible.
+        // Ref: ggml-cpu.c:3044 ggml_graph_compute_thread_sync
+        fence(Ordering::SeqCst);
+
+        // Execute work function.
+        // Ref: ggml-cpu.c:3116-3118
+        let work_fn = shared.work_fn.load(Ordering::Relaxed);
+        let work_data = shared.work_data.load(Ordering::Relaxed);
+        let f: GraphWorkFn = unsafe { std::mem::transmute(work_fn) };
+        unsafe {
+            f(work_data as *const (), tid, shared.n_threads,
+              &shared.barrier, &shared.current_chunk);
+        }
     }
 }
 
 impl Drop for GraphPool {
     fn drop(&mut self) {
-        unsafe {
-            {
-                let mut state = (*self.shared).mutex.lock().unwrap();
-                state.shutdown = true;
-            }
-            (*self.shared).cond.notify_all();
+        let shared = unsafe { &*self.shared };
+        // Signal stop + bump n_graph to wake spinning workers
+        shared.stop.store(true, Ordering::SeqCst);
+        {
+            let _guard = shared.mutex.lock().unwrap();
+            let old = shared.n_graph.load(Ordering::Relaxed);
+            shared.n_graph.store(old.wrapping_add(1), Ordering::SeqCst);
+            shared.cond.notify_all();
         }
         for handle in self.workers.drain(..) {
             let _ = handle.join();
