@@ -4,6 +4,7 @@ pub mod gguf;
 pub mod tokenizer;
 pub mod cache;
 pub mod matmul;
+pub mod repack;
 pub mod dequant;
 pub mod generate;
 pub mod threadpool;
