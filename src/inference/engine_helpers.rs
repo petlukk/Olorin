@@ -95,3 +95,40 @@ pub(crate) fn try_repack_q4k(
     if !q4k_8x8_supported() { return None; }
     Some(crate::inference::repack::q4k_repack_8x8(weight, n_rows, n_cols))
 }
+
+/// Populate all 7 Q4K _repacked fields on a LayerWeights instance.
+///
+/// Called by `Gemma4Model::from_gguf` once per layer, after the layer has
+/// been constructed. Uses `try_repack_q4k` to gate per-weight; any weight
+/// that fails the gate (e.g., non-Q4K dtype, odd row count, CPU lacks
+/// required features) stays `None` and the forward path falls through to
+/// the existing 4-row kernel for that weight.
+///
+/// # Shape parameters (from Gemma 4 layer metadata)
+/// - `n_heads`, `n_kv_heads`: global attention head counts
+/// - `head_dim_k`, `head_dim_v`: per-layer K/V head dims (SWA vs global)
+/// - `hidden_dim`: global model width
+/// - `ffn_dim`: per-layer FFN width
+///
+/// # Safety
+/// Same contract as `try_repack_q4k` for each weight pointer.
+pub(crate) fn populate_q4k_repacked(
+    lw: &mut crate::inference::engine::LayerWeights,
+    n_heads: usize,
+    n_kv_heads: usize,
+    head_dim_k: usize,
+    head_dim_v: usize,
+    hidden_dim: usize,
+    ffn_dim: usize,
+) {
+    // Attention projections. Weight shape = [n_cols, n_rows] in GGUF, but
+    // matmul call sites pass n_rows as "output dim" — match those shapes.
+    lw.wq_repacked = try_repack_q4k(lw.wq, lw.wq_dtype, n_heads * head_dim_k, hidden_dim);
+    lw.wk_repacked = try_repack_q4k(lw.wk, lw.wk_dtype, n_kv_heads * head_dim_k, hidden_dim);
+    lw.wv_repacked = try_repack_q4k(lw.wv, lw.wv_dtype, n_kv_heads * head_dim_v, hidden_dim);
+    lw.wo_repacked = try_repack_q4k(lw.wo, lw.wo_dtype, hidden_dim, n_heads * head_dim_k);
+    // FFN projections
+    lw.w_gate_repacked = try_repack_q4k(lw.w_gate, lw.w_gate_dtype, ffn_dim, hidden_dim);
+    lw.w_up_repacked = try_repack_q4k(lw.w_up, lw.w_up_dtype, ffn_dim, hidden_dim);
+    lw.w_down_repacked = try_repack_q4k(lw.w_down, lw.w_down_dtype, hidden_dim, ffn_dim);
+}

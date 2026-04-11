@@ -4,7 +4,7 @@
 //! global layers have head_dim 512, ffn 12288. KV sharing across last N layers.
 
 use crate::inference::gguf::{GgufFile, MetaValue};
-use crate::inference::engine_helpers::load_norm_ptr;
+use crate::inference::engine_helpers::{self, load_norm_ptr};
 
 // Attention type per layer
 
@@ -241,6 +241,9 @@ fn compute_kv_shared(
 
 impl Gemma4Model {
     pub fn from_gguf(gguf: &GgufFile) -> Result<Self, String> {
+        // Phase B.1: layer loop needs SIMD kernels (for q4k_repack_8x8). Idempotent.
+        crate::kernels::ffi::init().map_err(|e| format!("ffi init: {e}"))?;
+
         // 1. Architecture name
         let arch = gguf.get_str("general.architecture").unwrap_or("gemma4");
         eprintln!("[gemma4] architecture: {arch}");
@@ -432,6 +435,10 @@ impl Gemma4Model {
                 w_down_repacked: None,
             };
             layers.push(lw);
+            engine_helpers::populate_q4k_repacked(
+                layers.last_mut().unwrap(),
+                n_heads, n_kv_heads, head_dim_k[i], head_dim_v[i], hidden_dim, ffn_dim[i],
+            );
         }
 
         // 9. Global tensors
