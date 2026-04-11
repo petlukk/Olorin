@@ -30,6 +30,42 @@ struct FwdCtx<'a> {
 unsafe impl<'a> Send for FwdCtx<'a> {}
 unsafe impl<'a> Sync for FwdCtx<'a> {}
 
+/// Dispatch a single matvec_ws call through either the repacked 8x8 path
+/// or the standard 4-row matvec_ws fallback, depending on whether the
+/// weight has been repacked at model load time.
+///
+/// Not `unsafe fn` — `matmul_graph::q4k_matvec_8x8_ws` and
+/// `matmul_graph::matvec_ws` are both safe public fns that take raw
+/// pointers, matching the calling style used elsewhere in this file.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn matvec_step(
+    dtype: u32,
+    weight: *const u8,
+    repacked: Option<&[u8]>,
+    q8: *const i8,
+    q8_d: *const f32,
+    bsums: *const i16,
+    output: *mut f32,
+    d_scratch: *mut f32,
+    n_rows: usize,
+    n_cols: usize,
+    current_chunk: &AtomicI32,
+    ith: usize,
+    nth: usize,
+) {
+    match repacked {
+        Some(p) => matmul_graph::q4k_matvec_8x8_ws(
+            p.as_ptr(), q8, q8_d, bsums, output,
+            n_rows, n_cols, current_chunk, ith, nth,
+        ),
+        None => matmul_graph::matvec_ws(
+            dtype, weight, q8, q8_d, bsums, output, d_scratch,
+            n_rows, n_cols, current_chunk, ith, nth,
+        ),
+    }
+}
+
 /// Run one decode step using graph-loop threading.
 /// Called by ONE thread (dispatcher), which then wakes all workers.
 /// All n_threads (including dispatcher as ith=0) execute this together.
@@ -140,8 +176,8 @@ fn layer_forward_graph(
     // ── 2. Q projection (work-stealing) ──────────────────────────
     current_chunk.store(nth as i32, Ordering::Relaxed);
     barrier.wait();
-    matmul_graph::matvec_ws(
-        lw.wq_dtype, lw.wq,
+    matvec_step(
+        lw.wq_dtype, lw.wq, lw.wq_repacked.as_deref(),
         state.q8_qs.as_ptr(), state.q8_d.as_ptr(), state.q8_bsums.as_ptr(),
         state.q.as_mut_ptr(), state.q6k_d_scratch.as_mut_ptr(),
         n_heads * head_dim, hd,
@@ -179,8 +215,8 @@ fn layer_forward_graph(
         // K matmul (work-stealing)
         current_chunk.store(nth as i32, Ordering::Relaxed);
         barrier.wait();
-        matmul_graph::matvec_ws(
-            lw.wk_dtype, lw.wk,
+        matvec_step(
+            lw.wk_dtype, lw.wk, lw.wk_repacked.as_deref(),
             state.q8_qs.as_ptr(), state.q8_d.as_ptr(), state.q8_bsums.as_ptr(),
             state.k.as_mut_ptr(), state.q6k_d_scratch.as_mut_ptr(),
             kv_dim, hd,
@@ -191,8 +227,8 @@ fn layer_forward_graph(
         // V matmul (work-stealing)
         current_chunk.store(nth as i32, Ordering::Relaxed);
         barrier.wait();
-        matmul_graph::matvec_ws(
-            lw.wv_dtype, lw.wv,
+        matvec_step(
+            lw.wv_dtype, lw.wv, lw.wv_repacked.as_deref(),
             state.q8_qs.as_ptr(), state.q8_d.as_ptr(), state.q8_bsums.as_ptr(),
             state.v.as_mut_ptr(), state.q6k_d_scratch.as_mut_ptr(),
             kv_dim_v, hd,
@@ -285,8 +321,8 @@ fn layer_forward_graph(
 
     current_chunk.store(nth as i32, Ordering::Relaxed);
     barrier.wait();
-    matmul_graph::matvec_ws(
-        lw.wo_dtype, lw.wo,
+    matvec_step(
+        lw.wo_dtype, lw.wo, lw.wo_repacked.as_deref(),
         state.q8_qs.as_ptr(), state.q8_d.as_ptr(), state.q8_bsums.as_ptr(),
         state.wo_out.as_mut_ptr(), state.q6k_d_scratch.as_mut_ptr(),
         hd, n_heads * head_dim,
@@ -322,21 +358,37 @@ fn layer_forward_graph(
     // ── 8. FFN gate+up (work-stealing) ───────────────────────────
     let ffn_dim = model.ffn_dim[il];
     if lw.w_gate_dtype == matmul::GGML_TYPE_Q4_K && lw.w_up_dtype == matmul::GGML_TYPE_Q4_K {
+        // ffn_gate / ffn_up always repack together on Gemma-family models
+        // (same dims + dtype gate in engine_helpers::populate_q4k_repacked).
+        // The "one Some, one None" hybrid case is unreachable here.
+        debug_assert!(
+            lw.w_gate_repacked.is_some() == lw.w_up_repacked.is_some(),
+            "ffn_gate/ffn_up repack invariant violated in layer {il}"
+        );
         current_chunk.store(nth as i32, Ordering::Relaxed);
         barrier.wait();
-        matmul_graph::q4k_matvec_dual_ws(
-            lw.w_gate, lw.w_up,
-            state.q8_qs.as_ptr(), state.q8_d.as_ptr(), state.q8_bsums.as_ptr(),
-            state.gate.as_mut_ptr(), state.up.as_mut_ptr(),
-            ffn_dim, hd,
-            current_chunk, ith, nth,
-        );
+        match (lw.w_gate_repacked.as_deref(), lw.w_up_repacked.as_deref()) {
+            (Some(g), Some(u)) => matmul_graph::q4k_matvec_dual_8x8_ws(
+                g.as_ptr(), u.as_ptr(),
+                state.q8_qs.as_ptr(), state.q8_d.as_ptr(), state.q8_bsums.as_ptr(),
+                state.gate.as_mut_ptr(), state.up.as_mut_ptr(),
+                ffn_dim, hd,
+                current_chunk, ith, nth,
+            ),
+            _ => matmul_graph::q4k_matvec_dual_ws(
+                lw.w_gate, lw.w_up,
+                state.q8_qs.as_ptr(), state.q8_d.as_ptr(), state.q8_bsums.as_ptr(),
+                state.gate.as_mut_ptr(), state.up.as_mut_ptr(),
+                ffn_dim, hd,
+                current_chunk, ith, nth,
+            ),
+        }
         barrier.wait();
     } else {
         current_chunk.store(nth as i32, Ordering::Relaxed);
         barrier.wait();
-        matmul_graph::matvec_ws(
-            lw.w_gate_dtype, lw.w_gate,
+        matvec_step(
+            lw.w_gate_dtype, lw.w_gate, lw.w_gate_repacked.as_deref(),
             state.q8_qs.as_ptr(), state.q8_d.as_ptr(), state.q8_bsums.as_ptr(),
             state.gate.as_mut_ptr(), state.q6k_d_scratch.as_mut_ptr(),
             ffn_dim, hd, current_chunk, ith, nth,
@@ -344,8 +396,8 @@ fn layer_forward_graph(
         barrier.wait();
         current_chunk.store(nth as i32, Ordering::Relaxed);
         barrier.wait();
-        matmul_graph::matvec_ws(
-            lw.w_up_dtype, lw.w_up,
+        matvec_step(
+            lw.w_up_dtype, lw.w_up, lw.w_up_repacked.as_deref(),
             state.q8_qs.as_ptr(), state.q8_d.as_ptr(), state.q8_bsums.as_ptr(),
             state.up.as_mut_ptr(), state.q6k_d_scratch.as_mut_ptr(),
             ffn_dim, hd, current_chunk, ith, nth,
@@ -367,8 +419,8 @@ fn layer_forward_graph(
 
     current_chunk.store(nth as i32, Ordering::Relaxed);
     barrier.wait();
-    matmul_graph::matvec_ws(
-        lw.w_down_dtype, lw.w_down,
+    matvec_step(
+        lw.w_down_dtype, lw.w_down, lw.w_down_repacked.as_deref(),
         state.ffn_q8_qs.as_ptr(), state.ffn_q8_d.as_ptr(), state.ffn_q8_bsums.as_ptr(),
         state.down.as_mut_ptr(), state.q6k_d_scratch.as_mut_ptr(),
         hd, ffn_dim,

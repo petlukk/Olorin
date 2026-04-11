@@ -239,7 +239,6 @@ pub fn q6k_matvec_ws(
 ///
 /// `current_chunk` must be reset to `nth` before calling (by the preceding
 /// op, inside the graph-loop barrier lifecycle).
-#[allow(dead_code)] // wired into forward_graph.rs in Task 6
 pub fn q4k_matvec_8x8_ws(
     packed: *const u8,
     q8: *const i8, q8_d: *const f32, bsums: *const i16,
@@ -287,7 +286,6 @@ pub fn q4k_matvec_8x8_ws(
 /// `up_w`. Both weights must have identical `(n_rows, n_cols)` — the
 /// repack invariant for `ffn_gate` / `ffn_up` on Gemma-family models
 /// guarantees this at load time.
-#[allow(dead_code)] // wired into forward_graph.rs in Task 6
 pub fn q4k_matvec_dual_8x8_ws(
     gate_w: *const u8, up_w: *const u8,
     q8: *const i8, q8_d: *const f32, bsums: *const i16,
