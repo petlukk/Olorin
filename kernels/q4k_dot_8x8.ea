@@ -1,0 +1,228 @@
+// q4k_dot_8x8.ea — Q4Kx8 repacked matvec kernel (x86 AVX2 SIMD).
+//
+// Line-for-line translation of ggml_gemv_q4_K_8x8_q8_K (arch/x86/repack.cpp:1464).
+// blend_epi32 emulated via shuffle_bytes(u8x32)+OR.
+// shuffle_epi32 on Q8K via shuffle_bytes(i8x32).
+// Scales/mins constructed as i16x16 literals from scalar utmp decode.
+
+#[cfg(x86_64)]
+
+func ubyte(p: *restrict u8, off: i32) -> i32 {
+    return to_i32(p[off]) & 255
+}
+
+export func q4k_8x8_q8k_matvec(
+    packed: *restrict u8,
+    q8_qs: *restrict i8,
+    q8_d: *restrict f32,
+    q8_bsums: *restrict i16,
+    pow2: *restrict f32,
+    scratch: *mut u8,
+    out: *mut f32,
+    n_rows: i32,
+    n_cols: i32
+) {
+    let nb: i32 = n_cols / 256
+    let m4b: u8x32 = splat(15)
+    let shift4: u8x32 = splat(4)
+    let km1: i32 = 0x3f3f3f3f
+    let km2: i32 = 0x0f0f0f0f
+    let km3: i32 = 0x03030303
+
+    // blend_even masks: per-lane [a_dw0, b_dw0, a_dw2, b_dw2]
+    let bea_lo: u8x16 = [0,1,2,3, 128,128,128,128, 8,9,10,11, 128,128,128,128]
+    let beb_lo: u8x16 = [128,128,128,128, 0,1,2,3, 128,128,128,128, 8,9,10,11]
+    let bea: u8x32 = concat_u8x16(bea_lo, bea_lo)
+    let beb: u8x32 = concat_u8x16(beb_lo, beb_lo)
+    // blend_odd masks: per-lane [a_dw1, b_dw1, a_dw3, b_dw3]
+    let boa_lo: u8x16 = [4,5,6,7, 128,128,128,128, 12,13,14,15, 128,128,128,128]
+    let bob_lo: u8x16 = [128,128,128,128, 4,5,6,7, 128,128,128,128, 12,13,14,15]
+    let boa: u8x32 = concat_u8x16(boa_lo, boa_lo)
+    let bob: u8x32 = concat_u8x16(bob_lo, bob_lo)
+
+    // Q8K dword broadcast masks (per-lane)
+    let qm0_h: u8x16 = [0,1,2,3, 0,1,2,3, 0,1,2,3, 0,1,2,3]
+    let qm1_h: u8x16 = [4,5,6,7, 4,5,6,7, 4,5,6,7, 4,5,6,7]
+    let qm2_h: u8x16 = [8,9,10,11, 8,9,10,11, 8,9,10,11, 8,9,10,11]
+    let qm3_h: u8x16 = [12,13,14,15, 12,13,14,15, 12,13,14,15, 12,13,14,15]
+    let qm0: u8x32 = concat_u8x16(qm0_h, qm0_h)
+    let qm1: u8x32 = concat_u8x16(qm1_h, qm1_h)
+    let qm2: u8x32 = concat_u8x16(qm2_h, qm2_h)
+    let qm3: u8x32 = concat_u8x16(qm3_h, qm3_h)
+
+    let d16: *restrict i16 = ptr_as_i16(ptr_as_i8(packed))
+    let out_f32: *mut f32 = ptr_as_f32(ptr_as_i8(out))
+    let scratch_i16: *mut i16 = ptr_as_i16(ptr_as_i8(scratch))
+
+    let mut x: i32 = 0
+    while x < n_rows / 8 {
+        let mut acc_row: f32x8 = splat(0.0)
+        let mut acc_min: f32x8 = splat(0.0)
+
+        let mut b: i32 = 0
+        while b < nb {
+            let bp: i32 = (x * nb + b) * 1152
+
+            // col_scale: d[0..7] rearranged to blend order [0,4,1,5,2,6,3,7]
+            let d_raw: i16x8 = load(d16, bp / 2)
+            let col_d: f32x8 = shuffle(cvt_f16_f32(d_raw), [0,4,1,5,2,6,3,7])
+            // col_dmin: natural order (mins path is not blended)
+            let dm_raw: i16x8 = load(d16, bp / 2 + 8)
+            let col_dmin: f32x8 = cvt_f16_f32(dm_raw)
+            let row_sc: f32x8 = splat(q8_d[b])
+
+            let mut iacc_b: i32x8 = splat(0)
+            let mut iacc_min_b: i32x8 = splat(0)
+
+            // bsums: hadd 16 i16 → 8 i16, broadcast to both lanes
+            let bs_lo: i16x8 = load(q8_bsums, b * 16)
+            let bs_hi: i16x8 = load(q8_bsums, b * 16 + 8)
+            let q8s_half: i16x8 = hadd_i16(bs_lo, bs_hi)
+            store(scratch_i16, 0, q8s_half)
+
+            let mut sb: i32 = 0
+            while sb < 4 {
+                let qs: i32 = bp + 128 + sb * 256
+
+                // ── Load + nibble extract ─────────────────────────
+                let r03_0: u8x32 = load(packed, qs)
+                let r47_0: u8x32 = load(packed, qs + 32)
+                let r03_1: u8x32 = load(packed, qs + 64)
+                let r47_1: u8x32 = load(packed, qs + 96)
+                let r03_2: u8x32 = load(packed, qs + 128)
+                let r47_2: u8x32 = load(packed, qs + 160)
+                let r03_3: u8x32 = load(packed, qs + 192)
+                let r47_3: u8x32 = load(packed, qs + 224)
+
+                // Low nibbles
+                let l03_0: u8x32 = r03_0 .& m4b
+                let l47_0: u8x32 = r47_0 .& m4b
+                let l03_1: u8x32 = r03_1 .& m4b
+                let l47_1: u8x32 = r47_1 .& m4b
+                let l03_2: u8x32 = r03_2 .& m4b
+                let l47_2: u8x32 = r47_2 .& m4b
+                let l03_3: u8x32 = r03_3 .& m4b
+                let l47_3: u8x32 = r47_3 .& m4b
+                // High nibbles
+                let h03_0: u8x32 = (r03_0 .>> shift4) .& m4b
+                let h47_0: u8x32 = (r47_0 .>> shift4) .& m4b
+                let h03_1: u8x32 = (r03_1 .>> shift4) .& m4b
+                let h47_1: u8x32 = (r47_1 .>> shift4) .& m4b
+                let h03_2: u8x32 = (r03_2 .>> shift4) .& m4b
+                let h47_2: u8x32 = (r47_2 .>> shift4) .& m4b
+                let h03_3: u8x32 = (r03_3 .>> shift4) .& m4b
+                let h47_3: u8x32 = (r47_3 .>> shift4) .& m4b
+
+                // ── Scale decode (utmp) ───────────────────────────
+                let sp: *restrict i32 = ptr_as_i32(ptr_as_i8(packed))
+                let sc0: i32 = bp + 32 + 24 * sb
+                let u00: i32 = sp[sc0/4]
+                let u01: i32 = sp[sc0/4+1]
+                let u02: i32 = sp[sc0/4+2]
+                let t00: i32 = u00 & km1
+                let t02: i32 = u01 & km1
+                let t01: i32 = (u02 & km2) | (((u00 >> 6) & km3) << 4)
+                let t03: i32 = ((u02 >> 4) & km2) | (((u01 >> 6) & km3) << 4)
+
+                let sc1: i32 = sc0 + 12
+                let u10: i32 = sp[sc1/4]
+                let u11: i32 = sp[sc1/4+1]
+                let u12: i32 = sp[sc1/4+2]
+                let t10: i32 = u10 & km1
+                let t12: i32 = u11 & km1
+                let t11: i32 = (u12 & km2) | (((u10 >> 6) & km3) << 4)
+                let t13: i32 = ((u12 >> 4) & km2) | (((u11 >> 6) & km3) << 4)
+
+                // scales_0: [s0,s0,s4,s4, s1,s1,s5,s5, s2,s2,s6,s6, s3,s3,s7,s7]
+                let scales_0: i16x16 = [
+                    to_i16(t00 & 255), to_i16(t00 & 255),
+                    to_i16(t01 & 255), to_i16(t01 & 255),
+                    to_i16((t00>>8) & 255), to_i16((t00>>8) & 255),
+                    to_i16((t01>>8) & 255), to_i16((t01>>8) & 255),
+                    to_i16((t00>>16) & 255), to_i16((t00>>16) & 255),
+                    to_i16((t01>>16) & 255), to_i16((t01>>16) & 255),
+                    to_i16((t00>>24) & 255), to_i16((t00>>24) & 255),
+                    to_i16((t01>>24) & 255), to_i16((t01>>24) & 255)
+                ]
+                let scales_1: i16x16 = [
+                    to_i16(t10 & 255), to_i16(t10 & 255),
+                    to_i16(t11 & 255), to_i16(t11 & 255),
+                    to_i16((t10>>8) & 255), to_i16((t10>>8) & 255),
+                    to_i16((t11>>8) & 255), to_i16((t11>>8) & 255),
+                    to_i16((t10>>16) & 255), to_i16((t10>>16) & 255),
+                    to_i16((t11>>16) & 255), to_i16((t11>>16) & 255),
+                    to_i16((t10>>24) & 255), to_i16((t10>>24) & 255),
+                    to_i16((t11>>24) & 255), to_i16((t11>>24) & 255)
+                ]
+                // mins_01: interleaved [mn0_sb0,mn0_sb1, mn1_sb0,mn1_sb1, ...] natural order
+                let mins_01: i16x16 = [
+                    to_i16(t02 & 255), to_i16(t12 & 255),
+                    to_i16((t02>>8) & 255), to_i16((t12>>8) & 255),
+                    to_i16((t02>>16) & 255), to_i16((t12>>16) & 255),
+                    to_i16((t02>>24) & 255), to_i16((t12>>24) & 255),
+                    to_i16(t03 & 255), to_i16(t13 & 255),
+                    to_i16((t03>>8) & 255), to_i16((t13>>8) & 255),
+                    to_i16((t03>>16) & 255), to_i16((t13>>16) & 255),
+                    to_i16((t03>>24) & 255), to_i16((t13>>24) & 255)
+                ]
+
+                // ── Q8K load + broadcast ──────────────────────────
+                let q8b: i32 = b * 256 + sb * 64
+                let la: i8x16 = load(q8_qs, q8b)
+                let lb: i8x16 = load(q8_qs, q8b + 16)
+                let lc: i8x16 = load(q8_qs, q8b + 32)
+                let ld: i8x16 = load(q8_qs, q8b + 48)
+                let v00: i8x32 = concat_i8x16(la, la)
+                let v01: i8x32 = concat_i8x16(lb, lb)
+                let v10: i8x32 = concat_i8x16(lc, lc)
+                let v11: i8x32 = concat_i8x16(ld, ld)
+
+                // ── Low nibble: 8 maddubs (blend_even/odd pattern) ─
+                let mut ia0: i16x16 = splat(to_i16(0))
+                ia0 = ia0 .+ maddubs_i16(shuffle_bytes(l03_0, bea) .| shuffle_bytes(l47_0, beb), shuffle_bytes(v00, qm0))
+                ia0 = ia0 .+ maddubs_i16(shuffle_bytes(l03_0, boa) .| shuffle_bytes(l47_0, bob), shuffle_bytes(v00, qm1))
+                ia0 = ia0 .+ maddubs_i16(shuffle_bytes(l03_1, bea) .| shuffle_bytes(l47_1, beb), shuffle_bytes(v00, qm2))
+                ia0 = ia0 .+ maddubs_i16(shuffle_bytes(l03_1, boa) .| shuffle_bytes(l47_1, bob), shuffle_bytes(v00, qm3))
+                ia0 = ia0 .+ maddubs_i16(shuffle_bytes(l03_2, bea) .| shuffle_bytes(l47_2, beb), shuffle_bytes(v01, qm0))
+                ia0 = ia0 .+ maddubs_i16(shuffle_bytes(l03_2, boa) .| shuffle_bytes(l47_2, bob), shuffle_bytes(v01, qm1))
+                ia0 = ia0 .+ maddubs_i16(shuffle_bytes(l03_3, bea) .| shuffle_bytes(l47_3, beb), shuffle_bytes(v01, qm2))
+                ia0 = ia0 .+ maddubs_i16(shuffle_bytes(l03_3, boa) .| shuffle_bytes(l47_3, bob), shuffle_bytes(v01, qm3))
+                let iacc_0: i32x8 = madd_i16(ia0, scales_0)
+
+                // ── High nibble: 8 maddubs ────────────────────────
+                let mut ia1: i16x16 = splat(to_i16(0))
+                ia1 = ia1 .+ maddubs_i16(shuffle_bytes(h03_0, bea) .| shuffle_bytes(h47_0, beb), shuffle_bytes(v10, qm0))
+                ia1 = ia1 .+ maddubs_i16(shuffle_bytes(h03_0, boa) .| shuffle_bytes(h47_0, bob), shuffle_bytes(v10, qm1))
+                ia1 = ia1 .+ maddubs_i16(shuffle_bytes(h03_1, bea) .| shuffle_bytes(h47_1, beb), shuffle_bytes(v10, qm2))
+                ia1 = ia1 .+ maddubs_i16(shuffle_bytes(h03_1, boa) .| shuffle_bytes(h47_1, bob), shuffle_bytes(v10, qm3))
+                ia1 = ia1 .+ maddubs_i16(shuffle_bytes(h03_2, bea) .| shuffle_bytes(h47_2, beb), shuffle_bytes(v11, qm0))
+                ia1 = ia1 .+ maddubs_i16(shuffle_bytes(h03_2, boa) .| shuffle_bytes(h47_2, bob), shuffle_bytes(v11, qm1))
+                ia1 = ia1 .+ maddubs_i16(shuffle_bytes(h03_3, bea) .| shuffle_bytes(h47_3, beb), shuffle_bytes(v11, qm2))
+                ia1 = ia1 .+ maddubs_i16(shuffle_bytes(h03_3, boa) .| shuffle_bytes(h47_3, bob), shuffle_bytes(v11, qm3))
+                let iacc_1: i32x8 = madd_i16(ia1, scales_1)
+
+                iacc_b = iacc_b .+ iacc_0 .+ iacc_1
+
+                // ── Mins correction ───────────────────────────────
+                let bp0: i16 = scratch_i16[sb * 2]
+                let bp1: i16 = scratch_i16[sb * 2 + 1]
+                let q8s_sb: i16x16 = [bp0,bp1,bp0,bp1, bp0,bp1,bp0,bp1, bp0,bp1,bp0,bp1, bp0,bp1,bp0,bp1]
+                iacc_min_b = iacc_min_b .+ madd_i16(q8s_sb, mins_01)
+
+                sb = sb + 1
+            }
+
+            // FMA
+            acc_row = fma(to_f32(iacc_b), col_d .* row_sc, acc_row)
+            acc_min = fma(to_f32(iacc_min_b), col_dmin .* row_sc, acc_min)
+
+            b = b + 1
+        }
+
+        // Permute acc_row from blend order to natural, then subtract mins
+        let row_nat: f32x8 = shuffle(acc_row, [0,2,4,6,1,3,5,7])
+        store(out_f32, x * 8, row_nat .- acc_min)
+
+        x = x + 1
+    }
+}
