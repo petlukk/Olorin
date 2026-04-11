@@ -466,39 +466,6 @@ pub fn matvec(
     }
 }
 
-/// Row bytes for a given dtype and column count.
-#[inline]
-pub fn row_bytes_for_dtype(dtype: u32, n_cols: usize) -> usize {
-    match dtype {
-        GGML_TYPE_Q4_K => q4k_row_bytes(n_cols),
-        GGML_TYPE_Q5_K => q5k_row_bytes(n_cols),
-        GGML_TYPE_Q6_K => q6k_row_bytes(n_cols),
-        _ => panic!("unsupported weight dtype {dtype}"),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Row byte helpers (for external callers computing offsets)
-// ---------------------------------------------------------------------------
-
-/// Bytes per row for Q4K weight matrix with given column count.
-#[inline]
-pub fn q4k_row_bytes(n_cols: usize) -> usize {
-    (n_cols / Q4K_BLOCK_SIZE) * Q4K_BLOCK_BYTES
-}
-
-/// Bytes per row for Q5K weight matrix with given column count.
-#[inline]
-pub fn q5k_row_bytes(n_cols: usize) -> usize {
-    (n_cols / Q5K_BLOCK_SIZE) * Q5K_BLOCK_BYTES
-}
-
-/// Bytes per row for Q6K weight matrix with given column count.
-#[inline]
-pub fn q6k_row_bytes(n_cols: usize) -> usize {
-    (n_cols / Q6K_BLOCK_SIZE) * Q6K_BLOCK_BYTES
-}
-
 // ---------------------------------------------------------------------------
 // Parallel matvec — splits quad loop across ThreadPool workers
 // ---------------------------------------------------------------------------
