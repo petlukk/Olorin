@@ -88,8 +88,8 @@ impl Gemma4State {
         let lt1 = std::time::Instant::now();
 
         // ── 2. Q projection ─────────────────────────────────────────
-        matmul::par_matvec(pool,
-            lw.wq_dtype, lw.wq,
+        matmul::par_matvec_maybe_repacked(pool,
+            lw.wq_dtype, lw.wq, lw.wq_repacked.as_deref(),
             &self.q8_qs, &self.q8_d, &self.q8_bsums,
             &mut self.q, &mut self.q6k_d_scratch,
             n_heads * head_dim, hd,
@@ -120,14 +120,14 @@ impl Gemma4State {
             let kv_dim = n_kv_heads * head_dim;
             let kv_dim_v = n_kv_heads * head_dim_v;
 
-            matmul::par_matvec(pool,
-                lw.wk_dtype, lw.wk,
+            matmul::par_matvec_maybe_repacked(pool,
+                lw.wk_dtype, lw.wk, lw.wk_repacked.as_deref(),
                 &self.q8_qs, &self.q8_d, &self.q8_bsums,
                 &mut self.k, &mut self.q6k_d_scratch,
                 kv_dim, hd,
             );
-            matmul::par_matvec(pool,
-                lw.wv_dtype, lw.wv,
+            matmul::par_matvec_maybe_repacked(pool,
+                lw.wv_dtype, lw.wv, lw.wv_repacked.as_deref(),
                 &self.q8_qs, &self.q8_d, &self.q8_bsums,
                 &mut self.v, &mut self.q6k_d_scratch,
                 kv_dim_v, hd,
@@ -209,8 +209,8 @@ impl Gemma4State {
             &mut self.q8_d,
             &mut self.q8_bsums,
         );
-        matmul::par_matvec(pool,
-            lw.wo_dtype, lw.wo,
+        matmul::par_matvec_maybe_repacked(pool,
+            lw.wo_dtype, lw.wo, lw.wo_repacked.as_deref(),
             &self.q8_qs, &self.q8_d, &self.q8_bsums,
             &mut self.wo_out, &mut self.q6k_d_scratch,
             hd, attn_out_dim,
@@ -382,22 +382,22 @@ impl Gemma4State {
                 lw.w_gate_dtype, lw.w_up_dtype, lw.w_down_dtype, ffn_dim);
         }
         if lw.w_gate_dtype == matmul::GGML_TYPE_Q4_K && lw.w_up_dtype == matmul::GGML_TYPE_Q4_K {
-            matmul::par_q4k_matvec_dual(pool,
-                lw.w_gate,
-                lw.w_up,
+            matmul::par_q4k_matvec_dual_maybe_repacked(pool,
+                lw.w_gate, lw.w_up,
+                lw.w_gate_repacked.as_deref(), lw.w_up_repacked.as_deref(),
                 &self.q8_qs, &self.q8_d, &self.q8_bsums,
                 &mut self.gate, &mut self.up,
                 ffn_dim, hd,
             );
         } else {
-            matmul::par_matvec(pool,
-                lw.w_gate_dtype, lw.w_gate,
+            matmul::par_matvec_maybe_repacked(pool,
+                lw.w_gate_dtype, lw.w_gate, lw.w_gate_repacked.as_deref(),
                 &self.q8_qs, &self.q8_d, &self.q8_bsums,
                 &mut self.gate, &mut self.q6k_d_scratch,
                 ffn_dim, hd,
             );
-            matmul::par_matvec(pool,
-                lw.w_up_dtype, lw.w_up,
+            matmul::par_matvec_maybe_repacked(pool,
+                lw.w_up_dtype, lw.w_up, lw.w_up_repacked.as_deref(),
                 &self.q8_qs, &self.q8_d, &self.q8_bsums,
                 &mut self.up, &mut self.q6k_d_scratch,
                 ffn_dim, hd,
@@ -446,8 +446,8 @@ impl Gemma4State {
         );
 
         // Down projection: ffn_dim -> hidden_dim
-        matmul::par_matvec(pool,
-            lw.w_down_dtype, lw.w_down,
+        matmul::par_matvec_maybe_repacked(pool,
+            lw.w_down_dtype, lw.w_down, lw.w_down_repacked.as_deref(),
             &self.ffn_q8_qs, &self.ffn_q8_d, &self.ffn_q8_bsums,
             &mut self.down, &mut self.q6k_d_scratch,
             hd, ffn_dim,

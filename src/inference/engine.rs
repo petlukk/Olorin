@@ -60,6 +60,17 @@ pub struct LayerWeights {
     pub proj_dtype: u32,
     pub post_norm: *const f32,        // [hidden_dim]
     pub layer_output_scale: f32,      // scalar
+
+    // Phase B.1: Q4K 8x8 repacked buffers. `Some` if the weight was eligible
+    // for the q4k_8x8_q8k_matvec fast path (Q4K dtype, rows%8==0, CPU supports
+    // AVX2 or NEON dotprod); `None` means fall through to the 4-row path.
+    pub wq_repacked: Option<Vec<u8>>,
+    pub wk_repacked: Option<Vec<u8>>,
+    pub wv_repacked: Option<Vec<u8>>,
+    pub wo_repacked: Option<Vec<u8>>,
+    pub w_gate_repacked: Option<Vec<u8>>,
+    pub w_up_repacked: Option<Vec<u8>>,
+    pub w_down_repacked: Option<Vec<u8>>,
 }
 
 impl std::fmt::Debug for LayerWeights {
@@ -411,6 +422,14 @@ impl Gemma4Model {
                 proj_dtype: tensor_dtype(gguf, &format!("{b}.proj.weight")),
                 post_norm: load_norm_ptr(gguf, &format!("{b}.post_norm.weight"), &mut bf16_bufs),
                 layer_output_scale: read_f32_scalar(gguf, &format!("{b}.layer_output_scale.weight")),
+                // Phase B.1: repacked buffers populated after struct construction (Task 7).
+                wq_repacked: None,
+                wk_repacked: None,
+                wv_repacked: None,
+                wo_repacked: None,
+                w_gate_repacked: None,
+                w_up_repacked: None,
+                w_down_repacked: None,
             };
             layers.push(lw);
         }

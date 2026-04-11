@@ -24,7 +24,7 @@ pub use super::matmul_seq::{
 pub use super::matmul_par::par_q4k_matvec_dual;
 
 // Private imports for the dispatchers below.
-use super::matmul_par::{par_q4k_matvec, par_q5k_matvec, par_q6k_matvec};
+use super::matmul_par::{par_q4k_matvec, par_q5k_matvec, par_q6k_matvec, par_q4k_8x8_matvec};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -190,5 +190,78 @@ pub fn par_matvec(
         GGML_TYPE_Q5_K => par_q5k_matvec(pool, weight, input_qs, input_d, input_bsums, output, n_rows, n_cols),
         GGML_TYPE_Q6_K => par_q6k_matvec(pool, weight, input_qs, input_d, input_bsums, output, d_scratch, n_rows, n_cols),
         _ => panic!("unsupported weight dtype {dtype}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase B.1: dispatch wrappers that accept an optional repacked buffer
+// ---------------------------------------------------------------------------
+
+/// Parallel matvec with an optional pre-repacked `block_q4_Kx8` buffer.
+///
+/// When `repacked` is `Some(buf)`, dispatches to `par_q4k_8x8_matvec` which
+/// uses the 8x8 kernel (8 rows per SIMD pass). When `None`, falls through
+/// to the standard `par_matvec` which uses the 4-row kernel via dtype
+/// dispatch.
+#[allow(clippy::too_many_arguments)]
+pub fn par_matvec_maybe_repacked(
+    pool: &ThreadPool,
+    dtype: u32,
+    weight: *const u8,
+    repacked: Option<&[u8]>,
+    input_qs: &[i8],
+    input_d: &[f32],
+    input_bsums: &[i16],
+    output: &mut [f32],
+    d_scratch: &mut [f32],
+    n_rows: usize,
+    n_cols: usize,
+) {
+    if let Some(buf) = repacked {
+        par_q4k_8x8_matvec(pool, buf.as_ptr(), input_qs, input_d, input_bsums, output, n_rows, n_cols);
+    } else {
+        par_matvec(pool, dtype, weight, input_qs, input_d, input_bsums, output, d_scratch, n_rows, n_cols);
+    }
+}
+
+/// Parallel Q4K dual (gate+up) matvec with optional repacked buffers.
+///
+/// Four cases:
+/// - Both repacked: two separate 8x8 calls (loses dual's Q8-input-sharing
+///   bandwidth win, gains 8x8 throughput; net TBD, measure at Phase B.3).
+/// - One repacked, one not: hybrid — 8x8 for the repacked one, single-row
+///   `q4k_matvec` for the other. Rare in practice.
+/// - Neither: fall through to existing `par_q4k_matvec_dual`.
+#[allow(clippy::too_many_arguments)]
+pub fn par_q4k_matvec_dual_maybe_repacked(
+    pool: &ThreadPool,
+    gate_weight: *const u8,
+    up_weight: *const u8,
+    gate_repacked: Option<&[u8]>,
+    up_repacked: Option<&[u8]>,
+    input_qs: &[i8],
+    input_d: &[f32],
+    input_bsums: &[i16],
+    gate_output: &mut [f32],
+    up_output: &mut [f32],
+    n_rows: usize,
+    n_cols: usize,
+) {
+    match (gate_repacked, up_repacked) {
+        (Some(g), Some(u)) => {
+            par_q4k_8x8_matvec(pool, g.as_ptr(), input_qs, input_d, input_bsums, gate_output, n_rows, n_cols);
+            par_q4k_8x8_matvec(pool, u.as_ptr(), input_qs, input_d, input_bsums, up_output, n_rows, n_cols);
+        }
+        (Some(g), None) => {
+            par_q4k_8x8_matvec(pool, g.as_ptr(), input_qs, input_d, input_bsums, gate_output, n_rows, n_cols);
+            q4k_matvec(up_weight, input_qs, input_d, input_bsums, up_output, n_rows, n_cols);
+        }
+        (None, Some(u)) => {
+            q4k_matvec(gate_weight, input_qs, input_d, input_bsums, gate_output, n_rows, n_cols);
+            par_q4k_8x8_matvec(pool, u.as_ptr(), input_qs, input_d, input_bsums, up_output, n_rows, n_cols);
+        }
+        (None, None) => {
+            par_q4k_matvec_dual(pool, gate_weight, up_weight, input_qs, input_d, input_bsums, gate_output, up_output, n_rows, n_cols);
+        }
     }
 }

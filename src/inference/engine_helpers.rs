@@ -52,3 +52,46 @@ pub(crate) fn load_norm_ptr(
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Phase B.1: Q4K 8x8 repack gating
+// ---------------------------------------------------------------------------
+
+/// Runtime check: is the `q4k_8x8_q8k_matvec` kernel supported on this CPU?
+///
+/// The repacked kernel uses architecture-specific SIMD intrinsics that
+/// require either AVX2 (x86_64) or NEON dotprod (aarch64). On any other
+/// architecture, or on a CPU that lacks those features, we must not
+/// dispatch to the repacked path.
+#[inline]
+pub(crate) fn q4k_8x8_supported() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    { return std::is_x86_feature_detected!("avx2"); }
+    #[cfg(target_arch = "aarch64")]
+    { return std::arch::is_aarch64_feature_detected!("dotprod"); }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    { return false; }
+}
+
+/// Attempt to repack a Q4K weight matrix into the `block_q4_Kx8` layout.
+/// Returns `None` if the weight is not eligible:
+/// - `dtype` is not Q4K
+/// - `n_rows` is not a multiple of 8
+/// - `n_cols` is not a multiple of 256 (Q4K superblock size)
+/// - the CPU does not support the required SIMD features
+///
+/// # Safety
+/// The caller asserts `weight` is valid for `n_rows * (n_cols / 256) * 144`
+/// readable bytes, and that `olorin::kernels::ffi::init()` has been called.
+pub(crate) fn try_repack_q4k(
+    weight: *const u8,
+    dtype: u32,
+    n_rows: usize,
+    n_cols: usize,
+) -> Option<Vec<u8>> {
+    if dtype != crate::inference::matmul::GGML_TYPE_Q4_K { return None; }
+    if n_rows % 8 != 0 { return None; }
+    if n_cols % 256 != 0 { return None; }
+    if !q4k_8x8_supported() { return None; }
+    Some(crate::inference::repack::q4k_repack_8x8(weight, n_rows, n_cols))
+}
