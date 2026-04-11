@@ -62,3 +62,16 @@ pub type Q4k8x8MatvecFn = unsafe extern "C" fn(
     i32,         // n_rows
     i32,         // n_cols
 );
+pub type Q4k8x8MatvecDualFn = unsafe extern "C" fn(
+    *const u8,   // packed_a (block_q4_Kx8 tiles, first weight matrix)
+    *const u8,   // packed_b (block_q4_Kx8 tiles, second weight matrix)
+    *const i8,   // q8_qs    (shared Q8K input column)
+    *const f32,  // q8_d     (shared)
+    *const i16,  // q8_bsums (shared)
+    *const f32,  // pow2     (shared scale LUT)
+    *mut u8,     // scratch  (128 bytes, shared — bsums hadd only depends on Q8K)
+    *mut f32,    // out_a    (n_rows scores for first matrix)
+    *mut f32,    // out_b    (n_rows scores for second matrix)
+    i32,         // n_rows
+    i32,         // n_cols
+);
