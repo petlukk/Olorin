@@ -58,23 +58,6 @@ func copy_deltas(
     store(dst_f32, dst_idx, v)
 }
 
-// Interleave one 8-byte qs slice from each of 4 source rows into one
-// 32-byte dst chunk. Four i64-aligned 8-byte transfers → 32 bytes.
-func interleave_qs_chunk(
-    row0_qs64: *restrict i64,
-    row1_qs64: *restrict i64,
-    row2_qs64: *restrict i64,
-    row3_qs64: *restrict i64,
-    dst_qs64: *mut i64,
-    src_i64_off: i32,
-    dst_i64_off: i32
-) {
-    dst_qs64[dst_i64_off    ] = row0_qs64[src_i64_off]
-    dst_qs64[dst_i64_off + 1] = row1_qs64[src_i64_off]
-    dst_qs64[dst_i64_off + 2] = row2_qs64[src_i64_off]
-    dst_qs64[dst_i64_off + 3] = row3_qs64[src_i64_off]
-}
-
 export func q8k_repack_4(
     row0_qs:    *restrict i8,
     row1_qs:    *restrict i8,
@@ -104,46 +87,40 @@ export func q8k_repack_4(
     let row3_qs64: *restrict i64 = ptr_as_i64(row3_qs)
 
     // Super-block strides: 1168 B = 146 i64 = 584 i16 = 292 f32.
+    // Stride/offset constants in i64 units (1168 B per block_q8_Kx4).
+    let super_block_i64: i32 = 146       // 1168 / 8 — full struct stride
+    let qs_i64_off:      i32 = 2         // 16   / 8 — byte offset of qs within block
+    let bsums_i64_off:   i32 = 130       // 1040 / 8 — byte offset of bsums within block
+
     let mut b: i32 = 0
     while b < nb {
         // ── Section 1: deltas (16 B, one f32x4 SIMD store) ───────────
         copy_deltas(row_d, dst_f32, b)
 
-        // ── Section 2: qs[1024] — 4-row 8-byte interleave ────────────
-        // For (sb ∈ 0..8, qchunk ∈ 0..4):
-        //   src_i64_off (per row) = b*32 + sb*4 + qchunk
-        //   dst_i64_off (chunk base) = b*146 + 2
-        //                            + (sb/2)*32 + (sb%2)*16 + qchunk*4
-        // interleave_qs_chunk then writes rows 0..3 at chunk+0, +1, +2, +3.
-        let qs_b_src: i32 = b * 32        // b*256 bytes / 8
-        let qs_b_dst: i32 = b * 146 + 2   // (b*1168 + 16) / 8
+        // ── Section 2: qs[1024] 4-row interleave ──
+        // Layout formula (from research note):
+        //   dst[off + (sb/2)*256 + (sb%2)*128 + qc*32 + r*8 + (p%8)] = rowN_qs[sb*32 + qc*8 + (p%8)]
+        // In i64 units (8 bytes per row per qchunk):
+        //   dst_i64[qs_b_dst + sb_iter*32 + half*16 + qc*4 + r]
+        //     = rowN_qs64[b*32 + sb_iter*8 + half*4 + qc]
+        let qs_b_dst: i32 = b * super_block_i64 + qs_i64_off
 
         let mut sb_iter: i32 = 0
         while sb_iter < 4 {
-            // sb_within = 0 → s = sb_iter*2
-            let s0_src: i32 = qs_b_src + sb_iter * 8
-            let s0_dst: i32 = qs_b_dst + sb_iter * 32
-            interleave_qs_chunk(row0_qs64, row1_qs64, row2_qs64, row3_qs64,
-                                dst_i64, s0_src + 0, s0_dst +  0)
-            interleave_qs_chunk(row0_qs64, row1_qs64, row2_qs64, row3_qs64,
-                                dst_i64, s0_src + 1, s0_dst +  4)
-            interleave_qs_chunk(row0_qs64, row1_qs64, row2_qs64, row3_qs64,
-                                dst_i64, s0_src + 2, s0_dst +  8)
-            interleave_qs_chunk(row0_qs64, row1_qs64, row2_qs64, row3_qs64,
-                                dst_i64, s0_src + 3, s0_dst + 12)
-
-            // sb_within = 1 → s = sb_iter*2 + 1
-            let s1_src: i32 = s0_src + 4
-            let s1_dst: i32 = s0_dst + 16
-            interleave_qs_chunk(row0_qs64, row1_qs64, row2_qs64, row3_qs64,
-                                dst_i64, s1_src + 0, s1_dst +  0)
-            interleave_qs_chunk(row0_qs64, row1_qs64, row2_qs64, row3_qs64,
-                                dst_i64, s1_src + 1, s1_dst +  4)
-            interleave_qs_chunk(row0_qs64, row1_qs64, row2_qs64, row3_qs64,
-                                dst_i64, s1_src + 2, s1_dst +  8)
-            interleave_qs_chunk(row0_qs64, row1_qs64, row2_qs64, row3_qs64,
-                                dst_i64, s1_src + 3, s1_dst + 12)
-
+            let mut half: i32 = 0
+            while half < 2 {
+                let s_src_base: i32 = b * 32 + sb_iter * 8 + half * 4
+                let s_dst_base: i32 = qs_b_dst + sb_iter * 32 + half * 16
+                let mut qc: i32 = 0
+                while qc < 4 {
+                    dst_i64[s_dst_base + qc * 4 + 0] = row0_qs64[s_src_base + qc]
+                    dst_i64[s_dst_base + qc * 4 + 1] = row1_qs64[s_src_base + qc]
+                    dst_i64[s_dst_base + qc * 4 + 2] = row2_qs64[s_src_base + qc]
+                    dst_i64[s_dst_base + qc * 4 + 3] = row3_qs64[s_src_base + qc]
+                    qc = qc + 1
+                }
+                half = half + 1
+            }
             sb_iter = sb_iter + 1
         }
 
@@ -155,12 +132,7 @@ export func q8k_repack_4(
         // Dest i16 index (inside bsums[64]):
         //   sb_iter*16 + (r/2)*8 + (r%2)*4 + {0,1,2,3}
         //
-        // Absolute dst i16 index: b*584 + 520 + above.
-        // Each copy is a 4-i16 = 8-byte MOVQ via *i16 pointer subscripts.
-        // (Expressed with a *i64 cast of the i16 region — natural for 8-byte
-        // granular transfers.)
-        let bs_b_dst_i16: i32 = b * 584 + 520
-
+        // Each copy is a 4-i16 = 8-byte MOVQ via *i64 pointer subscripts.
         // We use i64 views for 8-byte transfers. Each 4-i16 group is 8 bytes
         // = 1 i64 element. The i16 pointer offsets must be aligned to 4-i16
         // (8-byte) granularity — by construction they are: sb_iter*16 is
@@ -173,19 +145,17 @@ export func q8k_repack_4(
 
         // In i64 units (divide i16 index by 4):
         //   source per row: sb_iter * 1 (4 i16 = 1 i64)
-        //   dst base per super-block: (b*584 + 520) / 4 = b*146 + 130
         //   dst per-sb_iter stride: 16 i16 / 4 = 4 i64
         //   dst per-row offset inside sb_iter: {0,1,2,3} i64 (0/4/8/12 i16)
-        let bs_b_dst_i64: i32 = b * 146 + 130
+        let bs_b_dst_i64: i32 = b * super_block_i64 + bsums_i64_off
 
         let mut si: i32 = 0
         while si < 4 {
-            let src_i64: i32 = si
             let dst_base_i64: i32 = bs_b_dst_i64 + si * 4
-            dst_b64[dst_base_i64    ] = row0_b64[src_i64]
-            dst_b64[dst_base_i64 + 1] = row1_b64[src_i64]
-            dst_b64[dst_base_i64 + 2] = row2_b64[src_i64]
-            dst_b64[dst_base_i64 + 3] = row3_b64[src_i64]
+            dst_b64[dst_base_i64    ] = row0_b64[si]
+            dst_b64[dst_base_i64 + 1] = row1_b64[si]
+            dst_b64[dst_base_i64 + 2] = row2_b64[si]
+            dst_b64[dst_base_i64 + 3] = row3_b64[si]
             si = si + 1
         }
 
