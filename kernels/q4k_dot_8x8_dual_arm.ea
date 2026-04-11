@@ -1,0 +1,371 @@
+// q4k_dot_8x8_dual_arm.ea — Q4Kx8 repacked fused dual matvec kernel (ARM NEON + dotprod).
+//
+// Fuses two weight matrices (e.g. ffn_gate + ffn_up) against the same Q8K
+// input column. Shares Q8 qs loads + broadcast state across both weight
+// streams; keeps separate acc0_mat_a/acc1_mat_a and acc0_mat_b/acc1_mat_b
+// half-row accumulators, and separate per-super-block bias vectors.
+//
+// Structural mirror of kernels/q4k_dot_8x8_dual.ea (x86 AVX2) adapted to
+// NEON intrinsics. Per-output to_bits() equality holds against calling
+// q4k_8x8_q8k_matvec twice on (packed_a, q8k) and (packed_b, q8k) because
+// rows are independent and the A-side reduction order is unchanged by
+// interleaving B-side integer work inside the sb body.
+//
+// See docs/superpowers/research/2026-04-11-q4k-8x8-dual-fusion.md for the
+// shared vs. weight-specific split.
+
+#[cfg(aarch64)]
+
+func ubyte(p: *restrict u8, off: i32) -> i32 {
+    return to_i32(p[off]) & 255
+}
+
+export func q4k_8x8_q8k_matvec_dual(
+    packed_a: *restrict u8,
+    packed_b: *restrict u8,
+    q8_qs: *restrict i8,
+    q8_d: *restrict f32,
+    q8_bsums: *restrict i16,
+    pow2: *restrict f32,
+    scratch: *mut u8,
+    out_a: *mut f32,
+    out_b: *mut f32,
+    n_rows: i32,
+    n_cols: i32
+) {
+    let nb: i32 = n_cols / 256
+    let m4b: i8x16 = splat(15)
+    let shift4: i8x16 = splat(4)
+    let km1: i32 = 0x3f3f3f3f
+    let km2: i32 = 0x0f0f0f0f
+    let km3: i32 = 0x03030303
+
+    // Broadcast mask: duplicate low 8 bytes to high 8 bytes
+    let dup8: u8x16 = [0,1,2,3,4,5,6,7, 0,1,2,3,4,5,6,7]
+
+    let d16_mat_a: *restrict i16 = ptr_as_i16(ptr_as_i8(packed_a))
+    let d16_mat_b: *restrict i16 = ptr_as_i16(ptr_as_i8(packed_b))
+    let packed_a_i8: *restrict i8 = ptr_as_i8(packed_a)
+    let packed_b_i8: *restrict i8 = ptr_as_i8(packed_b)
+    let out_mat_a_f32: *mut f32 = ptr_as_f32(ptr_as_i8(out_a))
+    let out_mat_b_f32: *mut f32 = ptr_as_f32(ptr_as_i8(out_b))
+    let scratch_i16: *mut i16 = ptr_as_i16(ptr_as_i8(scratch))
+
+    let mut x: i32 = 0
+    while x < n_rows / 8 {
+        // Tile-level accumulators: 2 x f32x4 = 8 rows per matrix
+        let mut acc0_mat_a: f32x4 = splat(0.0)
+        let mut acc1_mat_a: f32x4 = splat(0.0)
+        let mut acc0_mat_b: f32x4 = splat(0.0)
+        let mut acc1_mat_b: f32x4 = splat(0.0)
+
+        let mut b: i32 = 0
+        while b < nb {
+            // Tile-block pointer. Shared because packed_a and packed_b have
+            // identical shape (gate and up always co-repack).
+            let bp: i32 = (x * nb + b) * 1152
+
+            // Column scales + dmins per matrix.
+            let q4d0_mat_a: f32x4 = cvt_f16_f32(load(d16_mat_a, bp / 2))
+            let q4d1_mat_a: f32x4 = cvt_f16_f32(load(d16_mat_a, bp / 2 + 4))
+            let q4d0_mat_b: f32x4 = cvt_f16_f32(load(d16_mat_b, bp / 2))
+            let q4d1_mat_b: f32x4 = cvt_f16_f32(load(d16_mat_b, bp / 2 + 4))
+
+            // Q8K row scale: shared.
+            let q8d: f32x4 = splat(q8_d[b])
+
+            let sb_sc0_mat_a: f32x4 = q4d0_mat_a .* q8d
+            let sb_sc1_mat_a: f32x4 = q4d1_mat_a .* q8d
+            let sb_sc0_mat_b: f32x4 = q4d0_mat_b .* q8d
+            let sb_sc1_mat_b: f32x4 = q4d1_mat_b .* q8d
+
+            let q4dm0_mat_a: f32x4 = cvt_f16_f32(load(d16_mat_a, bp / 2 + 8))
+            let q4dm1_mat_a: f32x4 = cvt_f16_f32(load(d16_mat_a, bp / 2 + 12))
+            let q4dm0_mat_b: f32x4 = cvt_f16_f32(load(d16_mat_b, bp / 2 + 8))
+            let q4dm1_mat_b: f32x4 = cvt_f16_f32(load(d16_mat_b, bp / 2 + 12))
+
+            let sb_mn0_mat_a: f32x4 = q4dm0_mat_a .* q8d
+            let sb_mn1_mat_a: f32x4 = q4dm1_mat_a .* q8d
+            let sb_mn0_mat_b: f32x4 = q4dm0_mat_b .* q8d
+            let sb_mn1_mat_b: f32x4 = q4dm1_mat_b .* q8d
+
+            // Super-block bias accumulators — reset per super-block,
+            // accumulated across 4 sub-blocks, subtracted from acc at
+            // end of super-block.
+            let mut bias0_mat_a: i32x4 = splat(0)
+            let mut bias1_mat_a: i32x4 = splat(0)
+            let mut bias0_mat_b: i32x4 = splat(0)
+            let mut bias1_mat_b: i32x4 = splat(0)
+
+            // Bsums hadd: shared. Depends only on Q8K input.
+            // Loads need explicit i16x8 type annotations — Ea load is
+            // type-directed, so inferring from hadd_i16 argument slot
+            // picks i16x4 (the narrow match) by default.
+            let bs_lo: i16x8 = load(q8_bsums, b * 16)
+            let bs_hi: i16x8 = load(q8_bsums, b * 16 + 8)
+            let bsums: i16x8 = addp_i16(bs_lo, bs_hi)
+            store(scratch_i16, 0, bsums)
+
+            let mut sb: i32 = 0
+            while sb < 4 {
+                // ═══ SHARED offsets and Q8K broadcasts ══════════════════
+                // Scale decode offsets are the same for both weights because
+                // the packed layout and super-block stride match.
+                let sc0: i32 = bp + 32 + 24 * sb
+                let sc1: i32 = sc0 + 12
+                let q4_base: i32 = bp + 128 + sb * 256
+
+                // Q8K broadcast: 8 chunks of 8 bytes, each duplicated to 16
+                // bytes via shuffle_bytes(dup8). Shared between A-side and
+                // B-side dot loops — the primary fusion win.
+                // Ea load is type-directed — explicit i8x16 loads force a
+                // 16-byte load; dup8 uses only bytes 0-7 of each (upper
+                // half is wasted but harmless).
+                let q8b: i32 = b * 256 + sb * 64
+                let q8r_0: i8x16 = load(q8_qs, q8b)
+                let q8r_1: i8x16 = load(q8_qs, q8b + 8)
+                let q8r_2: i8x16 = load(q8_qs, q8b + 16)
+                let q8r_3: i8x16 = load(q8_qs, q8b + 24)
+                let q8r_4: i8x16 = load(q8_qs, q8b + 32)
+                let q8r_5: i8x16 = load(q8_qs, q8b + 40)
+                let q8r_6: i8x16 = load(q8_qs, q8b + 48)
+                let q8r_7: i8x16 = load(q8_qs, q8b + 56)
+                let q8_0: i8x16 = shuffle_bytes(q8r_0, dup8)
+                let q8_1: i8x16 = shuffle_bytes(q8r_1, dup8)
+                let q8_2: i8x16 = shuffle_bytes(q8r_2, dup8)
+                let q8_3: i8x16 = shuffle_bytes(q8r_3, dup8)
+                let q8_4: i8x16 = shuffle_bytes(q8r_4, dup8)
+                let q8_5: i8x16 = shuffle_bytes(q8r_5, dup8)
+                let q8_6: i8x16 = shuffle_bytes(q8r_6, dup8)
+                let q8_7: i8x16 = shuffle_bytes(q8r_7, dup8)
+
+                // Bsum scalars from shared scratch — same reads for both.
+                let bs0: i16 = scratch_i16[sb * 2]
+                let bs1: i16 = scratch_i16[sb * 2 + 1]
+
+                // ═══ A-SIDE BLOCK ═══════════════════════════════════════
+                // ── Scale decode (utmp) from packed_a ──
+                let sp_mat_a: *restrict i32 = ptr_as_i32(ptr_as_i8(packed_a))
+                let u00_mat_a: i32 = sp_mat_a[sc0/4]
+                let u01_mat_a: i32 = sp_mat_a[sc0/4+1]
+                let u02_mat_a: i32 = sp_mat_a[sc0/4+2]
+                let t00_mat_a: i32 = u00_mat_a & km1
+                let t02_mat_a: i32 = u01_mat_a & km1
+                let t01_mat_a: i32 = (u02_mat_a & km2) | (((u00_mat_a >> 6) & km3) << 4)
+                let t03_mat_a: i32 = ((u02_mat_a >> 4) & km2) | (((u01_mat_a >> 6) & km3) << 4)
+
+                let u10_mat_a: i32 = sp_mat_a[sc1/4]
+                let u11_mat_a: i32 = sp_mat_a[sc1/4+1]
+                let u12_mat_a: i32 = sp_mat_a[sc1/4+2]
+                let t10_mat_a: i32 = u10_mat_a & km1
+                let t12_mat_a: i32 = u11_mat_a & km1
+                let t11_mat_a: i32 = (u12_mat_a & km2) | (((u10_mat_a >> 6) & km3) << 4)
+                let t13_mat_a: i32 = ((u12_mat_a >> 4) & km2) | (((u11_mat_a >> 6) & km3) << 4)
+
+                let sc_lo_0_mat_a: i32x4 = [t00_mat_a & 255, (t00_mat_a>>8)&255, (t00_mat_a>>16)&255, (t00_mat_a>>24)&255]
+                let sc_hi_0_mat_a: i32x4 = [t01_mat_a & 255, (t01_mat_a>>8)&255, (t01_mat_a>>16)&255, (t01_mat_a>>24)&255]
+                let sc_lo_1_mat_a: i32x4 = [t10_mat_a & 255, (t10_mat_a>>8)&255, (t10_mat_a>>16)&255, (t10_mat_a>>24)&255]
+                let sc_hi_1_mat_a: i32x4 = [t11_mat_a & 255, (t11_mat_a>>8)&255, (t11_mat_a>>16)&255, (t11_mat_a>>24)&255]
+
+                // ── A-side cp loop: vdot into alo*_mat_a, ahi*_mat_a ──
+                let mut alo0_mat_a: i32x4 = splat(0)
+                let mut alo1_mat_a: i32x4 = splat(0)
+                let mut alo2_mat_a: i32x4 = splat(0)
+                let mut alo3_mat_a: i32x4 = splat(0)
+                let mut ahi0_mat_a: i32x4 = splat(0)
+                let mut ahi1_mat_a: i32x4 = splat(0)
+                let mut ahi2_mat_a: i32x4 = splat(0)
+                let mut ahi3_mat_a: i32x4 = splat(0)
+
+                let mut cp: i32 = 0
+                while cp < 4 {
+                    let qp0: i8x16 = load(packed_a_i8, q4_base + 16 * cp)
+                    let qp1: i8x16 = load(packed_a_i8, q4_base + 16 * cp + 64)
+                    let qp2: i8x16 = load(packed_a_i8, q4_base + 16 * cp + 128)
+                    let qp3: i8x16 = load(packed_a_i8, q4_base + 16 * cp + 192)
+
+                    let lo0: i8x16 = qp0 .& m4b
+                    let lo1: i8x16 = qp1 .& m4b
+                    let lo2: i8x16 = qp2 .& m4b
+                    let lo3: i8x16 = qp3 .& m4b
+
+                    let hi0: i8x16 = (qp0 .>> shift4) .& m4b
+                    let hi1: i8x16 = (qp1 .>> shift4) .& m4b
+                    let hi2: i8x16 = (qp2 .>> shift4) .& m4b
+                    let hi3: i8x16 = (qp3 .>> shift4) .& m4b
+
+                    if cp == 0 {
+                        alo0_mat_a = vdot_i32(lo0, q8_0) .+ vdot_i32(lo1, q8_1) .+ vdot_i32(lo2, q8_2) .+ vdot_i32(lo3, q8_3)
+                        ahi0_mat_a = vdot_i32(hi0, q8_4) .+ vdot_i32(hi1, q8_5) .+ vdot_i32(hi2, q8_6) .+ vdot_i32(hi3, q8_7)
+                    }
+                    if cp == 1 {
+                        alo1_mat_a = vdot_i32(lo0, q8_0) .+ vdot_i32(lo1, q8_1) .+ vdot_i32(lo2, q8_2) .+ vdot_i32(lo3, q8_3)
+                        ahi1_mat_a = vdot_i32(hi0, q8_4) .+ vdot_i32(hi1, q8_5) .+ vdot_i32(hi2, q8_6) .+ vdot_i32(hi3, q8_7)
+                    }
+                    if cp == 2 {
+                        alo2_mat_a = vdot_i32(lo0, q8_0) .+ vdot_i32(lo1, q8_1) .+ vdot_i32(lo2, q8_2) .+ vdot_i32(lo3, q8_3)
+                        ahi2_mat_a = vdot_i32(hi0, q8_4) .+ vdot_i32(hi1, q8_5) .+ vdot_i32(hi2, q8_6) .+ vdot_i32(hi3, q8_7)
+                    }
+                    if cp == 3 {
+                        alo3_mat_a = vdot_i32(lo0, q8_0) .+ vdot_i32(lo1, q8_1) .+ vdot_i32(lo2, q8_2) .+ vdot_i32(lo3, q8_3)
+                        ahi3_mat_a = vdot_i32(hi0, q8_4) .+ vdot_i32(hi1, q8_5) .+ vdot_i32(hi2, q8_6) .+ vdot_i32(hi3, q8_7)
+                    }
+
+                    cp = cp + 1
+                }
+
+                // ── A-side scale application: hadd pairs, mul, fma ──
+                let plo_03_mat_a: i32x4 = addp_i32(alo0_mat_a, alo1_mat_a)
+                let sumf_lo_03_mat_a: f32x4 = to_f32(sc_lo_0_mat_a .* plo_03_mat_a)
+                acc0_mat_a = fma(sb_sc0_mat_a, sumf_lo_03_mat_a, acc0_mat_a)
+                let plo_47_mat_a: i32x4 = addp_i32(alo2_mat_a, alo3_mat_a)
+                let sumf_lo_47_mat_a: f32x4 = to_f32(sc_lo_0_mat_a .* plo_47_mat_a)
+                acc1_mat_a = fma(sb_sc1_mat_a, sumf_lo_47_mat_a, acc1_mat_a)
+
+                let phi_03_mat_a: i32x4 = addp_i32(ahi0_mat_a, ahi1_mat_a)
+                let sumf_hi_03_mat_a: f32x4 = to_f32(sc_lo_1_mat_a .* phi_03_mat_a)
+                acc0_mat_a = fma(sb_sc0_mat_a, sumf_hi_03_mat_a, acc0_mat_a)
+                let phi_47_mat_a: i32x4 = addp_i32(ahi2_mat_a, ahi3_mat_a)
+                let sumf_hi_47_mat_a: f32x4 = to_f32(sc_lo_1_mat_a .* phi_47_mat_a)
+                acc1_mat_a = fma(sb_sc1_mat_a, sumf_hi_47_mat_a, acc1_mat_a)
+
+                // ── A-side bias accumulation (mins correction) ──
+                // Array literal must sit in a typed let-binding — bare
+                // [a, b, c, d] in an operator slot has no vector type context.
+                let b0_0_mat_a: i32 = (t02_mat_a & 255) * to_i32(bs0) + (t12_mat_a & 255) * to_i32(bs1)
+                let b0_1_mat_a: i32 = ((t02_mat_a>>8)&255) * to_i32(bs0) + ((t12_mat_a>>8)&255) * to_i32(bs1)
+                let b0_2_mat_a: i32 = ((t02_mat_a>>16)&255) * to_i32(bs0) + ((t12_mat_a>>16)&255) * to_i32(bs1)
+                let b0_3_mat_a: i32 = ((t02_mat_a>>24)&255) * to_i32(bs0) + ((t12_mat_a>>24)&255) * to_i32(bs1)
+                let bias_delta0_mat_a: i32x4 = [b0_0_mat_a, b0_1_mat_a, b0_2_mat_a, b0_3_mat_a]
+                bias0_mat_a = bias0_mat_a .+ bias_delta0_mat_a
+
+                let b1_0_mat_a: i32 = (t03_mat_a & 255) * to_i32(bs0) + (t13_mat_a & 255) * to_i32(bs1)
+                let b1_1_mat_a: i32 = ((t03_mat_a>>8)&255) * to_i32(bs0) + ((t13_mat_a>>8)&255) * to_i32(bs1)
+                let b1_2_mat_a: i32 = ((t03_mat_a>>16)&255) * to_i32(bs0) + ((t13_mat_a>>16)&255) * to_i32(bs1)
+                let b1_3_mat_a: i32 = ((t03_mat_a>>24)&255) * to_i32(bs0) + ((t13_mat_a>>24)&255) * to_i32(bs1)
+                let bias_delta1_mat_a: i32x4 = [b1_0_mat_a, b1_1_mat_a, b1_2_mat_a, b1_3_mat_a]
+                bias1_mat_a = bias1_mat_a .+ bias_delta1_mat_a
+
+                // ═══ B-SIDE BLOCK ═══════════════════════════════════════
+                // ── Scale decode (utmp) from packed_b. Reuses shared sc0/sc1. ──
+                let sp_mat_b: *restrict i32 = ptr_as_i32(ptr_as_i8(packed_b))
+                let u00_mat_b: i32 = sp_mat_b[sc0/4]
+                let u01_mat_b: i32 = sp_mat_b[sc0/4+1]
+                let u02_mat_b: i32 = sp_mat_b[sc0/4+2]
+                let t00_mat_b: i32 = u00_mat_b & km1
+                let t02_mat_b: i32 = u01_mat_b & km1
+                let t01_mat_b: i32 = (u02_mat_b & km2) | (((u00_mat_b >> 6) & km3) << 4)
+                let t03_mat_b: i32 = ((u02_mat_b >> 4) & km2) | (((u01_mat_b >> 6) & km3) << 4)
+
+                let u10_mat_b: i32 = sp_mat_b[sc1/4]
+                let u11_mat_b: i32 = sp_mat_b[sc1/4+1]
+                let u12_mat_b: i32 = sp_mat_b[sc1/4+2]
+                let t10_mat_b: i32 = u10_mat_b & km1
+                let t12_mat_b: i32 = u11_mat_b & km1
+                let t11_mat_b: i32 = (u12_mat_b & km2) | (((u10_mat_b >> 6) & km3) << 4)
+                let t13_mat_b: i32 = ((u12_mat_b >> 4) & km2) | (((u11_mat_b >> 6) & km3) << 4)
+
+                let sc_lo_0_mat_b: i32x4 = [t00_mat_b & 255, (t00_mat_b>>8)&255, (t00_mat_b>>16)&255, (t00_mat_b>>24)&255]
+                let sc_hi_0_mat_b: i32x4 = [t01_mat_b & 255, (t01_mat_b>>8)&255, (t01_mat_b>>16)&255, (t01_mat_b>>24)&255]
+                let sc_lo_1_mat_b: i32x4 = [t10_mat_b & 255, (t10_mat_b>>8)&255, (t10_mat_b>>16)&255, (t10_mat_b>>24)&255]
+                let sc_hi_1_mat_b: i32x4 = [t11_mat_b & 255, (t11_mat_b>>8)&255, (t11_mat_b>>16)&255, (t11_mat_b>>24)&255]
+
+                // ── B-side cp loop (reuses shared q8_0..q8_7 broadcasts) ──
+                let mut alo0_mat_b: i32x4 = splat(0)
+                let mut alo1_mat_b: i32x4 = splat(0)
+                let mut alo2_mat_b: i32x4 = splat(0)
+                let mut alo3_mat_b: i32x4 = splat(0)
+                let mut ahi0_mat_b: i32x4 = splat(0)
+                let mut ahi1_mat_b: i32x4 = splat(0)
+                let mut ahi2_mat_b: i32x4 = splat(0)
+                let mut ahi3_mat_b: i32x4 = splat(0)
+
+                cp = 0
+                while cp < 4 {
+                    let qp0: i8x16 = load(packed_b_i8, q4_base + 16 * cp)
+                    let qp1: i8x16 = load(packed_b_i8, q4_base + 16 * cp + 64)
+                    let qp2: i8x16 = load(packed_b_i8, q4_base + 16 * cp + 128)
+                    let qp3: i8x16 = load(packed_b_i8, q4_base + 16 * cp + 192)
+
+                    let lo0: i8x16 = qp0 .& m4b
+                    let lo1: i8x16 = qp1 .& m4b
+                    let lo2: i8x16 = qp2 .& m4b
+                    let lo3: i8x16 = qp3 .& m4b
+
+                    let hi0: i8x16 = (qp0 .>> shift4) .& m4b
+                    let hi1: i8x16 = (qp1 .>> shift4) .& m4b
+                    let hi2: i8x16 = (qp2 .>> shift4) .& m4b
+                    let hi3: i8x16 = (qp3 .>> shift4) .& m4b
+
+                    if cp == 0 {
+                        alo0_mat_b = vdot_i32(lo0, q8_0) .+ vdot_i32(lo1, q8_1) .+ vdot_i32(lo2, q8_2) .+ vdot_i32(lo3, q8_3)
+                        ahi0_mat_b = vdot_i32(hi0, q8_4) .+ vdot_i32(hi1, q8_5) .+ vdot_i32(hi2, q8_6) .+ vdot_i32(hi3, q8_7)
+                    }
+                    if cp == 1 {
+                        alo1_mat_b = vdot_i32(lo0, q8_0) .+ vdot_i32(lo1, q8_1) .+ vdot_i32(lo2, q8_2) .+ vdot_i32(lo3, q8_3)
+                        ahi1_mat_b = vdot_i32(hi0, q8_4) .+ vdot_i32(hi1, q8_5) .+ vdot_i32(hi2, q8_6) .+ vdot_i32(hi3, q8_7)
+                    }
+                    if cp == 2 {
+                        alo2_mat_b = vdot_i32(lo0, q8_0) .+ vdot_i32(lo1, q8_1) .+ vdot_i32(lo2, q8_2) .+ vdot_i32(lo3, q8_3)
+                        ahi2_mat_b = vdot_i32(hi0, q8_4) .+ vdot_i32(hi1, q8_5) .+ vdot_i32(hi2, q8_6) .+ vdot_i32(hi3, q8_7)
+                    }
+                    if cp == 3 {
+                        alo3_mat_b = vdot_i32(lo0, q8_0) .+ vdot_i32(lo1, q8_1) .+ vdot_i32(lo2, q8_2) .+ vdot_i32(lo3, q8_3)
+                        ahi3_mat_b = vdot_i32(hi0, q8_4) .+ vdot_i32(hi1, q8_5) .+ vdot_i32(hi2, q8_6) .+ vdot_i32(hi3, q8_7)
+                    }
+
+                    cp = cp + 1
+                }
+
+                // ── B-side scale application ──
+                let plo_03_mat_b: i32x4 = addp_i32(alo0_mat_b, alo1_mat_b)
+                let sumf_lo_03_mat_b: f32x4 = to_f32(sc_lo_0_mat_b .* plo_03_mat_b)
+                acc0_mat_b = fma(sb_sc0_mat_b, sumf_lo_03_mat_b, acc0_mat_b)
+                let plo_47_mat_b: i32x4 = addp_i32(alo2_mat_b, alo3_mat_b)
+                let sumf_lo_47_mat_b: f32x4 = to_f32(sc_lo_0_mat_b .* plo_47_mat_b)
+                acc1_mat_b = fma(sb_sc1_mat_b, sumf_lo_47_mat_b, acc1_mat_b)
+
+                let phi_03_mat_b: i32x4 = addp_i32(ahi0_mat_b, ahi1_mat_b)
+                let sumf_hi_03_mat_b: f32x4 = to_f32(sc_lo_1_mat_b .* phi_03_mat_b)
+                acc0_mat_b = fma(sb_sc0_mat_b, sumf_hi_03_mat_b, acc0_mat_b)
+                let phi_47_mat_b: i32x4 = addp_i32(ahi2_mat_b, ahi3_mat_b)
+                let sumf_hi_47_mat_b: f32x4 = to_f32(sc_lo_1_mat_b .* phi_47_mat_b)
+                acc1_mat_b = fma(sb_sc1_mat_b, sumf_hi_47_mat_b, acc1_mat_b)
+
+                // ── B-side bias accumulation ──
+                let b0_0_mat_b: i32 = (t02_mat_b & 255) * to_i32(bs0) + (t12_mat_b & 255) * to_i32(bs1)
+                let b0_1_mat_b: i32 = ((t02_mat_b>>8)&255) * to_i32(bs0) + ((t12_mat_b>>8)&255) * to_i32(bs1)
+                let b0_2_mat_b: i32 = ((t02_mat_b>>16)&255) * to_i32(bs0) + ((t12_mat_b>>16)&255) * to_i32(bs1)
+                let b0_3_mat_b: i32 = ((t02_mat_b>>24)&255) * to_i32(bs0) + ((t12_mat_b>>24)&255) * to_i32(bs1)
+                let bias_delta0_mat_b: i32x4 = [b0_0_mat_b, b0_1_mat_b, b0_2_mat_b, b0_3_mat_b]
+                bias0_mat_b = bias0_mat_b .+ bias_delta0_mat_b
+
+                let b1_0_mat_b: i32 = (t03_mat_b & 255) * to_i32(bs0) + (t13_mat_b & 255) * to_i32(bs1)
+                let b1_1_mat_b: i32 = ((t03_mat_b>>8)&255) * to_i32(bs0) + ((t13_mat_b>>8)&255) * to_i32(bs1)
+                let b1_2_mat_b: i32 = ((t03_mat_b>>16)&255) * to_i32(bs0) + ((t13_mat_b>>16)&255) * to_i32(bs1)
+                let b1_3_mat_b: i32 = ((t03_mat_b>>24)&255) * to_i32(bs0) + ((t13_mat_b>>24)&255) * to_i32(bs1)
+                let bias_delta1_mat_b: i32x4 = [b1_0_mat_b, b1_1_mat_b, b1_2_mat_b, b1_3_mat_b]
+                bias1_mat_b = bias1_mat_b .+ bias_delta1_mat_b
+
+                sb = sb + 1
+            }
+
+            // End of super-block: subtract mins for both matrices.
+            // acc -= to_f32(bias) * sb_mn
+            acc0_mat_a = acc0_mat_a .- to_f32(bias0_mat_a) .* sb_mn0_mat_a
+            acc1_mat_a = acc1_mat_a .- to_f32(bias1_mat_a) .* sb_mn1_mat_a
+            acc0_mat_b = acc0_mat_b .- to_f32(bias0_mat_b) .* sb_mn0_mat_b
+            acc1_mat_b = acc1_mat_b .- to_f32(bias1_mat_b) .* sb_mn1_mat_b
+
+            b = b + 1
+        }
+
+        // End of tile: store both matrices' 8-row results (two f32x4 halves each).
+        store(out_mat_a_f32, x * 8, acc0_mat_a)
+        store(out_mat_a_f32, x * 8 + 4, acc1_mat_a)
+        store(out_mat_b_f32, x * 8, acc0_mat_b)
+        store(out_mat_b_f32, x * 8 + 4, acc1_mat_b)
+
+        x = x + 1
+    }
+}
