@@ -278,8 +278,9 @@ func unpack_weight_sb(
 
 Actually, Eä functions can return tuples / arrays of vectors directly
 or write into a caller-allocated scratch buffer. The existing olorin
-matvec `q4k_dot_8x8.ea` lines 60-150 do this inline — for the gemm the
-same 90 lines become a helper called once per sb-iter per super-block.
+matvec `kernels/q4k_dot_8x8.ea` lines 85-115 do this inline (8 packed
+loads + low/high nibble extract); for the gemm the same ~30 source
+lines become a helper with expanded output for 32 nibble vectors.
 **Estimated Eä size: ~90 lines.**
 
 ### Section B — per-(sb-iter) scale decode (shared across all rp)
@@ -304,7 +305,8 @@ func decode_scales_sb(
 ```
 
 The utmp scalar block already exists in olorin's matvec at
-`q4k_dot_8x8.ea` ~line 100 — re-use the same integer-bit manipulation.
+`kernels/q4k_dot_8x8.ea` lines 116-167 (utmp dance + scales_0/1 +
+mins_01 literal build) — re-use the same integer-bit manipulation.
 The vector construction uses `_mm_set_epi32` → `cvtepu8_epi16` + a few
 `_mm256_shuffle_epi32` ops. **Estimated Eä size: ~55 lines.**
 
@@ -425,16 +427,20 @@ body wrapped in its own outer x loop.
 **This is over the 500-line limit by ~15 lines.** Mitigations the Task 5
 implementer should try first, in order:
 
-1. Inline `decode_scales_sb` back into the outer loop (55 → 0 in helper,
-   +55 at call site, net ~0 — but removes one helper's overhead).
+1. Inline `decode_scales_sb` back into the outer loop. Realistic
+   savings are ~10-15 lines from eliminating the helper's signature,
+   braces, parameter packing/unpacking, and any locals that become
+   dead code after inlining. This drops 515 to ~500-505 — **not
+   sufficient alone**; combine with mitigation 3 for margin.
 2. Fold the tail-y path into the main loop with a runtime `if rp_max`
    branch (saves ~60 lines of duplication; adds ~10 of branching).
 3. Hoist the bsums hadd computation into a separate helper called once
    per rp (currently ~6 lines inside `acc_rp_sb`, split across both
    paths — saves ~6 per path).
 
-If all three applied, estimate drops to ~440 lines. The first is the
-simplest and alone brings the file to under 500 comfortably.
+If all three applied, estimate drops to ~440 lines. Mitigation 1 alone
+only reaches ~500-505, so stack mitigation 3 on top for a comfortable
+margin below the 500-line hard limit.
 
 ## `block_q8_Kx4` field offsets (for the Eä kernel)
 
@@ -588,9 +594,11 @@ required for the gemm either.
 2. Add a second pointer arg for the output stride `bs: i32` and the
    tile dimensions `nr, nc: i32`.
 3. Extract Section A (weight unpack) into helper `unpack_weight_sb`
-   — lift lines 60-150 of the existing matvec.
+   — lift lines 85-115 of the existing matvec (nibble extract on 8
+   packed loads).
 4. Extract Section B (scale decode) into helper `decode_scales_sb`
-   — lift lines ~100-130.
+   — lift lines 116-167 (utmp dance + scales_0/1 + mins_01 literal
+   build).
 5. Write Section C (`acc_rp_sb`) from scratch using the matvec's
    inner dot+FMA block as a template; multiply accumulator slots by 4
    (rp=4 rows of A at once).
