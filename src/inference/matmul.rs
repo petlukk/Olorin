@@ -24,7 +24,7 @@ pub use super::matmul_seq::{
 pub use super::matmul_par::par_q4k_matvec_dual;
 
 // Private imports for the dispatchers below.
-use super::matmul_par::{par_q4k_matvec, par_q5k_matvec, par_q6k_matvec, par_q4k_8x8_matvec};
+use super::matmul_par::{par_q4k_matvec, par_q5k_matvec, par_q6k_matvec, par_q4k_8x8_matvec, par_q4k_8x8_matvec_dual};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -226,12 +226,16 @@ pub fn par_matvec_maybe_repacked(
 
 /// Parallel Q4K dual (gate+up) matvec with optional repacked buffers.
 ///
-/// Four cases:
-/// - Both repacked: two separate 8x8 calls (loses dual's Q8-input-sharing
-///   bandwidth win, gains 8x8 throughput; net TBD, measure at Phase B.3).
-/// - One repacked, one not: hybrid — 8x8 for the repacked one, single-row
-///   `q4k_matvec` for the other. Rare in practice.
-/// - Neither: fall through to existing `par_q4k_matvec_dual`.
+/// Phase B.2: when both gate and up are repacked, routes through the fused
+/// `par_q4k_8x8_matvec_dual`, which shares Q8 input loads + v00..v11
+/// broadcasts across both weight streams. When neither is repacked, falls
+/// through to the existing `par_q4k_matvec_dual` (4-row kernel).
+///
+/// The (Some, None) / (None, Some) "hybrid dual" cases are unreachable on
+/// Gemma-family models: `populate_q4k_repacked` in `engine_helpers.rs`
+/// repacks `ffn_gate` and `ffn_up` with the same `(ffn_dim, hidden_dim)`
+/// dims and dtype gate, so they're always both repacked or both not. A
+/// `debug_assert!` catches future models that break the invariant.
 #[allow(clippy::too_many_arguments)]
 pub fn par_q4k_matvec_dual_maybe_repacked(
     pool: &ThreadPool,
@@ -247,21 +251,21 @@ pub fn par_q4k_matvec_dual_maybe_repacked(
     n_rows: usize,
     n_cols: usize,
 ) {
+    debug_assert!(
+        gate_repacked.is_some() == up_repacked.is_some(),
+        "ffn_gate and ffn_up always repack together on Gemma-family models; \
+         hybrid repacking is unreachable and unsupported"
+    );
     match (gate_repacked, up_repacked) {
-        (Some(g), Some(u)) => {
-            par_q4k_8x8_matvec(pool, g.as_ptr(), input_qs, input_d, input_bsums, gate_output, n_rows, n_cols);
-            par_q4k_8x8_matvec(pool, u.as_ptr(), input_qs, input_d, input_bsums, up_output, n_rows, n_cols);
-        }
-        (Some(g), None) => {
-            par_q4k_8x8_matvec(pool, g.as_ptr(), input_qs, input_d, input_bsums, gate_output, n_rows, n_cols);
-            q4k_matvec(up_weight, input_qs, input_d, input_bsums, up_output, n_rows, n_cols);
-        }
-        (None, Some(u)) => {
-            q4k_matvec(gate_weight, input_qs, input_d, input_bsums, gate_output, n_rows, n_cols);
-            par_q4k_8x8_matvec(pool, u.as_ptr(), input_qs, input_d, input_bsums, up_output, n_rows, n_cols);
-        }
-        (None, None) => {
-            par_q4k_matvec_dual(pool, gate_weight, up_weight, input_qs, input_d, input_bsums, gate_output, up_output, n_rows, n_cols);
-        }
+        (Some(g), Some(u)) => par_q4k_8x8_matvec_dual(
+            pool, g.as_ptr(), u.as_ptr(),
+            input_qs, input_d, input_bsums,
+            gate_output, up_output, n_rows, n_cols,
+        ),
+        _ => par_q4k_matvec_dual(
+            pool, gate_weight, up_weight,
+            input_qs, input_d, input_bsums,
+            gate_output, up_output, n_rows, n_cols,
+        ),
     }
 }

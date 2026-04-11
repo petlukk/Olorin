@@ -409,3 +409,91 @@ pub(super) fn par_q4k_8x8_matvec(
         }
     });
 }
+
+/// Phase B.2: Parallel fused dual Q4K 8×8 matvec on Path A.
+///
+/// Mirrors `par_q4k_8x8_matvec` structure: tile-slice `n_tiles` across
+/// pool workers, each thread calls `q4k_8x8_q8k_matvec_dual` on its
+/// slice with its own stack-allocated 128-byte scratch, writing into
+/// both output slices. Bit-exact against two separate
+/// `par_q4k_8x8_matvec` calls per `tests/dual_q4k_8x8.rs`.
+///
+/// Requirements:
+/// - `n_rows % 8 == 0`
+/// - `n_cols % 256 == 0`
+/// - `packed_a`, `packed_b` each point to `(n_rows / 8) * n_blocks * 1152`
+///   bytes, identical shape.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn par_q4k_8x8_matvec_dual(
+    pool: &ThreadPool,
+    packed_a: *const u8,
+    packed_b: *const u8,
+    input_qs: &[i8], input_d: &[f32], input_bsums: &[i16],
+    output_a: &mut [f32],
+    output_b: &mut [f32],
+    n_rows: usize, n_cols: usize,
+) {
+    debug_assert!(n_rows % 8 == 0, "par_q4k_8x8_matvec_dual: n_rows must be multiple of 8");
+    debug_assert!(n_cols % Q4K_BLOCK_SIZE == 0, "par_q4k_8x8_matvec_dual: n_cols must be multiple of 256");
+
+    let n_blocks = n_cols / Q4K_BLOCK_SIZE;
+    let tile_bytes = n_blocks * 1152;
+    let n_tiles = n_rows / 8;
+    let n_threads = pool.thread_count().min(n_tiles.max(1));
+
+    let pow2 = pow2_table();
+
+    // Single-thread fast path
+    if n_threads <= 1 {
+        let mut scratch = [0u8; 128];
+        unsafe {
+            ffi_inference::q4k_8x8_q8k_matvec_dual(
+                packed_a, packed_b,
+                input_qs.as_ptr(),
+                input_d.as_ptr(),
+                input_bsums.as_ptr(),
+                pow2.as_ptr(),
+                scratch.as_mut_ptr(),
+                output_a.as_mut_ptr(),
+                output_b.as_mut_ptr(),
+                n_rows as i32,
+                n_cols as i32,
+            );
+        }
+        return;
+    }
+
+    // Multi-thread: slice n_tiles across n_threads.
+    let q8 = SendPtr(input_qs.as_ptr());
+    let bsums = SendPtr(input_bsums.as_ptr());
+    let q8_d = SendPtr(input_d.as_ptr());
+    let pow2_ptr = SendPtr(pow2.as_ptr());
+    let out_a_ptr = SendMutPtr(output_a.as_mut_ptr());
+    let out_b_ptr = SendMutPtr(output_b.as_mut_ptr());
+    let wa = SendPtr(packed_a);
+    let wb = SendPtr(packed_b);
+
+    pool.run(n_threads, move |tid, nt| {
+        let start_tile = tid * n_tiles / nt;
+        let end_tile = (tid + 1) * n_tiles / nt;
+        let tile_count = end_tile - start_tile;
+        if tile_count == 0 { return; }
+        let slice_rows = tile_count * 8;
+        let mut scratch = [0u8; 128];
+        unsafe {
+            ffi_inference::q4k_8x8_q8k_matvec_dual(
+                wa.add(start_tile * tile_bytes),
+                wb.add(start_tile * tile_bytes),
+                q8.ptr(),
+                q8_d.ptr(),
+                bsums.ptr(),
+                pow2_ptr.ptr(),
+                scratch.as_mut_ptr(),
+                out_a_ptr.add(start_tile * 8),
+                out_b_ptr.add(start_tile * 8),
+                slice_rows as i32,
+                n_cols as i32,
+            );
+        }
+    });
+}
