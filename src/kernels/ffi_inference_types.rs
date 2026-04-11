@@ -45,3 +45,20 @@ pub type F32DotFn      = unsafe extern "C" fn(*const f32, *const f32, i32) -> f3
 pub type F32DotAccFn   = unsafe extern "C" fn(*mut f32, *const f32, f32, i32);
 pub type BareRmsnormF32Fn = unsafe extern "C" fn(*mut f32, i32, f32);
 pub type SoftcapF32Fn = unsafe extern "C" fn(*mut f32, i32, f32);
+pub type Q4kRepack8x8Fn = unsafe extern "C" fn(
+    *const u8,   // src (standard Q4K blocks, row-major)
+    *mut u8,     // dst (block_q4_Kx8 interleaved tiles)
+    i32,         // n_rows (multiple of 8)
+    i32,         // n_cols (multiple of 256)
+);
+pub type Q4k8x8MatvecFn = unsafe extern "C" fn(
+    *const u8,   // packed (block_q4_Kx8 tiles)
+    *const i8,   // q8_qs
+    *const f32,  // q8_d
+    *const i16,  // q8_bsums
+    *const f32,  // pow2 (scale LUT, same as q4k_dot_q8k)
+    *mut u8,     // scratch (utmp[32] = 128 bytes, caller-owned)
+    *mut f32,    // out (n_rows scores)
+    i32,         // n_rows
+    i32,         // n_cols
+);
