@@ -9,13 +9,6 @@ func ubyte(p: *restrict u8, off: i32) -> i32 {
     return to_i32(p[off]) & 255
 }
 
-func f16_arm(p: *restrict u8, off: i32) -> f32 {
-    let p16: *restrict i16 = ptr_as_i16(ptr_as_i8(p))
-    let raw: i16x4 = load(p16, off / 2)
-    let wide: f32x4 = cvt_f16_f32(raw)
-    return reduce_add(wide .* [1.0, 0.0, 0.0, 0.0])
-}
-
 export func q4k_8x8_q8k_matvec(
     packed: *restrict u8,
     q8_qs: *restrict i8,
@@ -38,6 +31,7 @@ export func q4k_8x8_q8k_matvec(
     let dup8: u8x16 = [0,1,2,3,4,5,6,7, 0,1,2,3,4,5,6,7]
 
     let d16: *restrict i16 = ptr_as_i16(ptr_as_i8(packed))
+    let packed_i8: *restrict i8 = ptr_as_i8(packed)
     let out_f32: *mut f32 = ptr_as_f32(ptr_as_i8(out))
     let scratch_i16: *mut i16 = ptr_as_i16(ptr_as_i8(scratch))
 
@@ -67,8 +61,13 @@ export func q4k_8x8_q8k_matvec(
             let mut bias0: i32x4 = splat(0)
             let mut bias1: i32x4 = splat(0)
 
-            // bsums: pairwise add 16 → 8 values
-            let bsums: i16x8 = hadd_i16(load(q8_bsums, b * 16), load(q8_bsums, b * 16 + 8))
+            // bsums: pairwise add 16 → 8 values.
+            // Loads need explicit i16x8 type annotations (Ea load is
+            // type-directed — inferring from the hadd_i16 argument slot
+            // picks the narrowest match, giving i16x4 instead).
+            let bs_lo: i16x8 = load(q8_bsums, b * 16)
+            let bs_hi: i16x8 = load(q8_bsums, b * 16 + 8)
+            let bsums: i16x8 = addp_i16(bs_lo, bs_hi)
             store(scratch_i16, 0, bsums)
 
             let mut sb: i32 = 0
@@ -111,16 +110,28 @@ export func q4k_8x8_q8k_matvec(
 
                 let q4_base: i32 = bp + 128 + sb * 256
 
-                // Load Q8K: 8 chunks of 8 bytes, each broadcast to 16 bytes
+                // Load Q8K: 8 chunks of 8 bytes, each broadcast to 16 bytes.
+                // Ea load is type-directed — explicit i8x16 loads force a
+                // 16-byte load, of which dup8 uses only bytes 0-7 (upper
+                // half is wasted but harmless). Can't use i8x8 loads
+                // because shuffle_bytes requires N=16 or 32.
                 let q8b: i32 = b * 256 + sb * 64
-                let q8_0: i8x16 = shuffle_bytes(load(q8_qs, q8b), dup8)
-                let q8_1: i8x16 = shuffle_bytes(load(q8_qs, q8b + 8), dup8)
-                let q8_2: i8x16 = shuffle_bytes(load(q8_qs, q8b + 16), dup8)
-                let q8_3: i8x16 = shuffle_bytes(load(q8_qs, q8b + 24), dup8)
-                let q8_4: i8x16 = shuffle_bytes(load(q8_qs, q8b + 32), dup8)
-                let q8_5: i8x16 = shuffle_bytes(load(q8_qs, q8b + 40), dup8)
-                let q8_6: i8x16 = shuffle_bytes(load(q8_qs, q8b + 48), dup8)
-                let q8_7: i8x16 = shuffle_bytes(load(q8_qs, q8b + 56), dup8)
+                let q8r_0: i8x16 = load(q8_qs, q8b)
+                let q8r_1: i8x16 = load(q8_qs, q8b + 8)
+                let q8r_2: i8x16 = load(q8_qs, q8b + 16)
+                let q8r_3: i8x16 = load(q8_qs, q8b + 24)
+                let q8r_4: i8x16 = load(q8_qs, q8b + 32)
+                let q8r_5: i8x16 = load(q8_qs, q8b + 40)
+                let q8r_6: i8x16 = load(q8_qs, q8b + 48)
+                let q8r_7: i8x16 = load(q8_qs, q8b + 56)
+                let q8_0: i8x16 = shuffle_bytes(q8r_0, dup8)
+                let q8_1: i8x16 = shuffle_bytes(q8r_1, dup8)
+                let q8_2: i8x16 = shuffle_bytes(q8r_2, dup8)
+                let q8_3: i8x16 = shuffle_bytes(q8r_3, dup8)
+                let q8_4: i8x16 = shuffle_bytes(q8r_4, dup8)
+                let q8_5: i8x16 = shuffle_bytes(q8r_5, dup8)
+                let q8_6: i8x16 = shuffle_bytes(q8r_6, dup8)
+                let q8_7: i8x16 = shuffle_bytes(q8r_7, dup8)
 
                 // Column pairs: 4 pairs (01, 23, 45, 67)
                 // Each 16-byte load covers 2 columns × 8 bytes
@@ -135,10 +146,10 @@ export func q4k_8x8_q8k_matvec(
 
                 let mut cp: i32 = 0
                 while cp < 4 {
-                    let qp0: i8x16 = load(packed, q4_base + 16 * cp)
-                    let qp1: i8x16 = load(packed, q4_base + 16 * cp + 64)
-                    let qp2: i8x16 = load(packed, q4_base + 16 * cp + 128)
-                    let qp3: i8x16 = load(packed, q4_base + 16 * cp + 192)
+                    let qp0: i8x16 = load(packed_i8, q4_base + 16 * cp)
+                    let qp1: i8x16 = load(packed_i8, q4_base + 16 * cp + 64)
+                    let qp2: i8x16 = load(packed_i8, q4_base + 16 * cp + 128)
+                    let qp3: i8x16 = load(packed_i8, q4_base + 16 * cp + 192)
 
                     // Low nibbles + vdot
                     let lo0: i8x16 = qp0 .& m4b
@@ -186,20 +197,20 @@ export func q4k_8x8_q8k_matvec(
                 // vpaddq_s32(alo0, alo1) = [col0_cp0, col1_cp0, col0_cp1, col1_cp1] = rows 0,1,2,3
 
                 // Low nibbles: cols 0-3
-                let plo_03: i32x4 = hadd_i32(alo0, alo1)
+                let plo_03: i32x4 = addp_i32(alo0, alo1)
                 let sumf_lo_03: f32x4 = to_f32(sc_lo_0 .* plo_03)
                 acc0 = fma(sb_sc0, sumf_lo_03, acc0)
                 // Low nibbles: cols 4-7
-                let plo_47: i32x4 = hadd_i32(alo2, alo3)
+                let plo_47: i32x4 = addp_i32(alo2, alo3)
                 let sumf_lo_47: f32x4 = to_f32(sc_lo_0 .* plo_47)
                 acc1 = fma(sb_sc1, sumf_lo_47, acc1)
 
                 // High nibbles: cols 0-3
-                let phi_03: i32x4 = hadd_i32(ahi0, ahi1)
+                let phi_03: i32x4 = addp_i32(ahi0, ahi1)
                 let sumf_hi_03: f32x4 = to_f32(sc_lo_1 .* phi_03)
                 acc0 = fma(sb_sc0, sumf_hi_03, acc0)
                 // High nibbles: cols 4-7
-                let phi_47: i32x4 = hadd_i32(ahi2, ahi3)
+                let phi_47: i32x4 = addp_i32(ahi2, ahi3)
                 let sumf_hi_47: f32x4 = to_f32(sc_lo_1 .* phi_47)
                 acc1 = fma(sb_sc1, sumf_hi_47, acc1)
 
@@ -216,18 +227,22 @@ export func q4k_8x8_q8k_matvec(
                     // TODO: accumulate into bias0 per lane
                     j = j + 1
                 }
-                // Simpler: construct i32x4 for bias
+                // Build i32x4 deltas via typed intermediates — bare array
+                // literals in a .+ slot have no type context, so Ea refuses
+                // them. The let-binding provides the vector type context.
                 let b0_0: i32 = (t02 & 255) * to_i32(bs0) + (t12 & 255) * to_i32(bs1)
                 let b0_1: i32 = ((t02>>8)&255) * to_i32(bs0) + ((t12>>8)&255) * to_i32(bs1)
                 let b0_2: i32 = ((t02>>16)&255) * to_i32(bs0) + ((t12>>16)&255) * to_i32(bs1)
                 let b0_3: i32 = ((t02>>24)&255) * to_i32(bs0) + ((t12>>24)&255) * to_i32(bs1)
-                bias0 = bias0 .+ [b0_0, b0_1, b0_2, b0_3]
+                let bias_delta0: i32x4 = [b0_0, b0_1, b0_2, b0_3]
+                bias0 = bias0 .+ bias_delta0
 
                 let b1_0: i32 = (t03 & 255) * to_i32(bs0) + (t13 & 255) * to_i32(bs1)
                 let b1_1: i32 = ((t03>>8)&255) * to_i32(bs0) + ((t13>>8)&255) * to_i32(bs1)
                 let b1_2: i32 = ((t03>>16)&255) * to_i32(bs0) + ((t13>>16)&255) * to_i32(bs1)
                 let b1_3: i32 = ((t03>>24)&255) * to_i32(bs0) + ((t13>>24)&255) * to_i32(bs1)
-                bias1 = bias1 .+ [b1_0, b1_1, b1_2, b1_3]
+                let bias_delta1: i32x4 = [b1_0, b1_1, b1_2, b1_3]
+                bias1 = bias1 .+ bias_delta1
 
                 sb = sb + 1
             }
