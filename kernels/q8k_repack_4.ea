@@ -1,0 +1,194 @@
+// q8k_repack_4.ea — Pack 4 per-row Q8K inputs into block_q8_Kx4 tiles.
+//
+// Target layout: llama.cpp block_q8_Kx4 (repack.h:96-100), consumed by
+// the AVX2 gemm path in llama.cpp/ggml/src/ggml-cpu/arch/x86/repack.cpp
+// function ggml_gemm_q4_K_8x8_q8_K (line 2042) and its Eä translation
+// kernels/q4k_dot_8x8_gemm.ea (to be written in Phase 2 Plan 1 Task 5).
+//
+// Layout is confirmed in:
+//   docs/superpowers/research/2026-04-11-q4k-8x8-gemm-ea-template.md
+// sections 4 (qs byte interleave) and 5 (bsums byte interleave).
+//
+// Per super-block (1168 bytes):
+//   dst[  0.. 16) — d[4]    : 4 × f32 row deltas
+//   dst[ 16..1040) — qs[1024]: 4-row 8-byte-granular interleave
+//   dst[1040..1168) — bsums[64]: row-group-ordered with granularity 4 i16 per row
+//
+// qs layout: for (row r, sub-block s, quant position p) with r∈0..4, s∈0..8, p∈0..32:
+//   dst_byte_off = 16 + (s/2)*256 + (s%2)*128 + (p/8)*32 + r*8 + (p%8)
+// Eight-byte-granular: inside each 32-byte chunk, row r gets 8 contiguous
+// bytes at offset r*8. Chunks within a sub-block are laid out by qchunk
+// (p/8) and sub-block half (s%2).
+//
+// bsums layout: for (row r, sub-block s, bsum-half h) with r∈0..4, s∈0..8, h∈0..2:
+//   i16_off = (s/2)*16 + (r/2)*8 + (r%2)*4 + (s%2)*2 + h
+// Rows 0,1 occupy the low 128-bit half of each sb_iter's 16-i16 group;
+// rows 2,3 the high 128-bit half. Each row contributes 4 i16 per sb_iter
+// (2 sub-blocks × 2 halves), contiguous in both source and destination.
+//
+// SIMD strategy:
+//   - Deltas: one f32x4 load + store per super-block.
+//   - qs: 8-byte-granular interleave via *i64 pointer subscripts — the
+//     same pattern kernels/q4k_repack.ea uses for Q4K weight repacking.
+//     LLVM lowers a naturally-aligned 8-byte scalar i64 load/store to a
+//     single MOVQ on x86, which IS the hardware 64-bit SIMD transfer.
+//     Ea's i8x8 / i16x4 / u8x8 types are NEON-only and rejected on x86
+//     (see eacompute/src/codegen/mod.rs:382-394), so this is the only
+//     way to hit a 64-bit-granular store without synthesising a
+//     two-source byte-blend (for which Eä has no intrinsic).
+//   - bsums: same 64-bit MOVQ-per-slice pattern, using *i16 subscripts
+//     on aligned 4-i16 groups.
+//
+// No arithmetic, no shuffles, no fallbacks. Every transfer is a native
+// load/store that compiles to a single instruction.
+
+#[cfg(x86_64)]
+
+// Copy the 4 row deltas for super-block b.
+// row_d points to f32[nb*4]: row_d[b*4 + r] is row r's delta for super-block b.
+// One f32x4 SIMD load+store.
+func copy_deltas(
+    row_d: *restrict f32,
+    dst_f32: *mut f32,
+    b: i32
+) {
+    let src_idx: i32 = b * 4
+    let dst_idx: i32 = b * 292  // 1168 / 4 = 292 f32 per super-block
+    let v: f32x4 = load(row_d, src_idx)
+    store(dst_f32, dst_idx, v)
+}
+
+// Interleave one 8-byte qs slice from each of 4 source rows into one
+// 32-byte dst chunk. Four i64-aligned 8-byte transfers → 32 bytes.
+func interleave_qs_chunk(
+    row0_qs64: *restrict i64,
+    row1_qs64: *restrict i64,
+    row2_qs64: *restrict i64,
+    row3_qs64: *restrict i64,
+    dst_qs64: *mut i64,
+    src_i64_off: i32,
+    dst_i64_off: i32
+) {
+    dst_qs64[dst_i64_off    ] = row0_qs64[src_i64_off]
+    dst_qs64[dst_i64_off + 1] = row1_qs64[src_i64_off]
+    dst_qs64[dst_i64_off + 2] = row2_qs64[src_i64_off]
+    dst_qs64[dst_i64_off + 3] = row3_qs64[src_i64_off]
+}
+
+export func q8k_repack_4(
+    row0_qs:    *restrict i8,
+    row1_qs:    *restrict i8,
+    row2_qs:    *restrict i8,
+    row3_qs:    *restrict i8,
+    row_d:      *restrict f32,
+    row0_bsums: *restrict i16,
+    row1_bsums: *restrict i16,
+    row2_bsums: *restrict i16,
+    row3_bsums: *restrict i16,
+    dst:        *mut u8,
+    nb:         i32
+) {
+    // Typed views onto dst for the three output sections.
+    let dst_f32: *mut f32 = ptr_as_f32(dst)
+    let dst_i64: *mut i64 = ptr_as_i64(dst)
+    let dst_i16: *mut i16 = ptr_as_i16(dst)
+
+    // Typed views onto the 4 per-row qs inputs as i64* for 8-byte copies.
+    // Each per-row qs buffer is nb*256 bytes. 8-byte slice at byte offset B
+    // corresponds to i64 index B/8. Source stride between sub-blocks is
+    // 32 bytes = 4 i64 elements; between qchunks within a sub-block is
+    // 8 bytes = 1 i64 element.
+    let row0_qs64: *restrict i64 = ptr_as_i64(row0_qs)
+    let row1_qs64: *restrict i64 = ptr_as_i64(row1_qs)
+    let row2_qs64: *restrict i64 = ptr_as_i64(row2_qs)
+    let row3_qs64: *restrict i64 = ptr_as_i64(row3_qs)
+
+    // Super-block strides: 1168 B = 146 i64 = 584 i16 = 292 f32.
+    let mut b: i32 = 0
+    while b < nb {
+        // ── Section 1: deltas (16 B, one f32x4 SIMD store) ───────────
+        copy_deltas(row_d, dst_f32, b)
+
+        // ── Section 2: qs[1024] — 4-row 8-byte interleave ────────────
+        // For (sb ∈ 0..8, qchunk ∈ 0..4):
+        //   src_i64_off (per row) = b*32 + sb*4 + qchunk
+        //   dst_i64_off (chunk base) = b*146 + 2
+        //                            + (sb/2)*32 + (sb%2)*16 + qchunk*4
+        // interleave_qs_chunk then writes rows 0..3 at chunk+0, +1, +2, +3.
+        let qs_b_src: i32 = b * 32        // b*256 bytes / 8
+        let qs_b_dst: i32 = b * 146 + 2   // (b*1168 + 16) / 8
+
+        let mut sb_iter: i32 = 0
+        while sb_iter < 4 {
+            // sb_within = 0 → s = sb_iter*2
+            let s0_src: i32 = qs_b_src + sb_iter * 8
+            let s0_dst: i32 = qs_b_dst + sb_iter * 32
+            interleave_qs_chunk(row0_qs64, row1_qs64, row2_qs64, row3_qs64,
+                                dst_i64, s0_src + 0, s0_dst +  0)
+            interleave_qs_chunk(row0_qs64, row1_qs64, row2_qs64, row3_qs64,
+                                dst_i64, s0_src + 1, s0_dst +  4)
+            interleave_qs_chunk(row0_qs64, row1_qs64, row2_qs64, row3_qs64,
+                                dst_i64, s0_src + 2, s0_dst +  8)
+            interleave_qs_chunk(row0_qs64, row1_qs64, row2_qs64, row3_qs64,
+                                dst_i64, s0_src + 3, s0_dst + 12)
+
+            // sb_within = 1 → s = sb_iter*2 + 1
+            let s1_src: i32 = s0_src + 4
+            let s1_dst: i32 = s0_dst + 16
+            interleave_qs_chunk(row0_qs64, row1_qs64, row2_qs64, row3_qs64,
+                                dst_i64, s1_src + 0, s1_dst +  0)
+            interleave_qs_chunk(row0_qs64, row1_qs64, row2_qs64, row3_qs64,
+                                dst_i64, s1_src + 1, s1_dst +  4)
+            interleave_qs_chunk(row0_qs64, row1_qs64, row2_qs64, row3_qs64,
+                                dst_i64, s1_src + 2, s1_dst +  8)
+            interleave_qs_chunk(row0_qs64, row1_qs64, row2_qs64, row3_qs64,
+                                dst_i64, s1_src + 3, s1_dst + 12)
+
+            sb_iter = sb_iter + 1
+        }
+
+        // ── Section 3: bsums[64] — row-group interleave ──────────────
+        // For each sb_iter ∈ 0..4 and each row r ∈ 0..4, copy 4 i16
+        // (2 sub-blocks × 2 halves) as one 8-byte (4-i16) transfer.
+        //
+        // Source i16 index (per row): sb_iter * 4 + {0,1,2,3}
+        // Dest i16 index (inside bsums[64]):
+        //   sb_iter*16 + (r/2)*8 + (r%2)*4 + {0,1,2,3}
+        //
+        // Absolute dst i16 index: b*584 + 520 + above.
+        // Each copy is a 4-i16 = 8-byte MOVQ via *i16 pointer subscripts.
+        // (Expressed with a *i64 cast of the i16 region — natural for 8-byte
+        // granular transfers.)
+        let bs_b_dst_i16: i32 = b * 584 + 520
+
+        // We use i64 views for 8-byte transfers. Each 4-i16 group is 8 bytes
+        // = 1 i64 element. The i16 pointer offsets must be aligned to 4-i16
+        // (8-byte) granularity — by construction they are: sb_iter*16 is
+        // always a multiple of 4, (r/2)*8 + (r%2)*4 ∈ {0,4,8,12}.
+        let row0_b64: *restrict i64 = ptr_as_i64(ptr_as_i8(row0_bsums))
+        let row1_b64: *restrict i64 = ptr_as_i64(ptr_as_i8(row1_bsums))
+        let row2_b64: *restrict i64 = ptr_as_i64(ptr_as_i8(row2_bsums))
+        let row3_b64: *restrict i64 = ptr_as_i64(ptr_as_i8(row3_bsums))
+        let dst_b64:  *mut i64      = ptr_as_i64(ptr_as_i8(dst_i16))
+
+        // In i64 units (divide i16 index by 4):
+        //   source per row: sb_iter * 1 (4 i16 = 1 i64)
+        //   dst base per super-block: (b*584 + 520) / 4 = b*146 + 130
+        //   dst per-sb_iter stride: 16 i16 / 4 = 4 i64
+        //   dst per-row offset inside sb_iter: {0,1,2,3} i64 (0/4/8/12 i16)
+        let bs_b_dst_i64: i32 = b * 146 + 130
+
+        let mut si: i32 = 0
+        while si < 4 {
+            let src_i64: i32 = si
+            let dst_base_i64: i32 = bs_b_dst_i64 + si * 4
+            dst_b64[dst_base_i64    ] = row0_b64[src_i64]
+            dst_b64[dst_base_i64 + 1] = row1_b64[src_i64]
+            dst_b64[dst_base_i64 + 2] = row2_b64[src_i64]
+            dst_b64[dst_base_i64 + 3] = row3_b64[src_i64]
+            si = si + 1
+        }
+
+        b = b + 1
+    }
+}
