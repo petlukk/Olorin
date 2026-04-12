@@ -17,5 +17,7 @@ mod forward_attn_heads;
 pub mod graph;
 pub mod matmul_graph;
 mod forward_graph;
+pub(crate) mod forward_batch;
+mod forward_batch_layer;
 
 pub use forward_attn_heads::attention_decode;
