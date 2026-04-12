@@ -428,6 +428,23 @@ impl Gemma4State {
         &self.logits
     }
 
+    /// Batched forward pass. Processes N tokens using gemm for all Q4K matmuls.
+    /// Returns logits for the last token.
+    pub fn forward_batch(&mut self, model: &Gemma4Model, tokens: &[u32], pool: &crate::inference::threadpool::GraphPool) -> &[f32] {
+        assert!(!tokens.is_empty());
+        assert!(tokens.len() <= self.max_batch);
+        let state_ptr = self as *mut Gemma4State as usize;
+        let model_ptr = model as *const Gemma4Model as usize;
+
+        pool.run_graph(&|tid, nth, barrier, chunk| {
+            let state = unsafe { &mut *(state_ptr as *mut Gemma4State) };
+            let model = unsafe { &*(model_ptr as *const Gemma4Model) };
+            super::forward_batch::forward_batch_inner(state, model, tokens, barrier, chunk, tid, nth);
+        });
+
+        &self.logits
+    }
+
     /// Reset state for a new sequence.
     pub fn reset(&mut self) {
         self.cache.reset();
