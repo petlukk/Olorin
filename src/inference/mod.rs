@@ -6,6 +6,7 @@ pub mod cache;
 pub mod matmul;
 mod matmul_seq;
 mod matmul_par;
+pub(crate) mod matmul_batch;
 pub mod repack;
 pub mod dequant;
 pub mod generate;
