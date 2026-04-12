@@ -75,3 +75,26 @@ pub type Q4k8x8MatvecDualFn = unsafe extern "C" fn(
     i32,         // n_rows
     i32,         // n_cols
 );
+pub type Q8kRepack4Fn = unsafe extern "C" fn(
+    *const i8,   // row0_qs
+    *const i8,   // row1_qs
+    *const i8,   // row2_qs
+    *const i8,   // row3_qs
+    *const f32,  // row_d (4 × nb floats)
+    *const i16,  // row0_bsums
+    *const i16,  // row1_bsums
+    *const i16,  // row2_bsums
+    *const i16,  // row3_bsums
+    *mut u8,     // dst (block_q8_Kx4 output)
+    i32,         // nb (number of super-blocks)
+);
+pub type Q4k8x8GemmFn = unsafe extern "C" fn(
+    *const u8,   // packed (block_q4_Kx8 tiles)
+    *const u8,   // q8_a (block_q8_Kx4 tiles)
+    *mut u8,     // scratch (64+ bytes)
+    *mut f32,    // out
+    i32,         // bs (row stride in floats)
+    i32,         // n (inner dimension)
+    i32,         // nr (A rows, must be % 4 == 0)
+    i32,         // nc (B cols, must be % 8 == 0)
+);

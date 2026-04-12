@@ -1,9 +1,10 @@
-// q8k_repack_4.ea — Pack 4 per-row Q8K inputs into block_q8_Kx4 tiles.
+// q8k_repack_4_arm.ea — Pack 4 per-row Q8K inputs into block_q8_Kx4 tiles.
+//
+// ARM NEON mirror of q8k_repack_4.ea. Identical logic — the body is
+// arch-agnostic (*i64 pointer subscripts + f32x4 load/store).
 //
 // Target layout: llama.cpp block_q8_Kx4 (repack.h:96-100), consumed by
-// the AVX2 gemm path in llama.cpp/ggml/src/ggml-cpu/arch/x86/repack.cpp
-// function ggml_gemm_q4_K_8x8_q8_K (line 2042) and its Eä translation
-// kernels/q4k_dot_8x8_gemm.ea (to be written in Phase 2 Plan 1 Task 5).
+// the NEON gemm path kernels/q4k_dot_8x8_gemm_arm.ea (Phase 2 Plan 1 T6).
 //
 // Layout is confirmed in:
 //   docs/superpowers/research/2026-04-11-q4k-8x8-gemm-ea-template.md
@@ -29,20 +30,16 @@
 // SIMD strategy:
 //   - Deltas: one f32x4 load + store per super-block.
 //   - qs: 8-byte-granular interleave via *i64 pointer subscripts — the
-//     same pattern kernels/q4k_repack.ea uses for Q4K weight repacking.
-//     LLVM lowers a naturally-aligned 8-byte scalar i64 load/store to a
-//     single MOVQ on x86, which IS the hardware 64-bit SIMD transfer.
-//     Ea's i8x8 / i16x4 / u8x8 types are NEON-only and rejected on x86
-//     (see eacompute/src/codegen/mod.rs:382-394), so this is the only
-//     way to hit a 64-bit-granular store without synthesising a
-//     two-source byte-blend (for which Eä has no intrinsic).
-//   - bsums: same 64-bit MOVQ-per-slice pattern, using *i16 subscripts
-//     on aligned 4-i16 groups.
+//     same pattern kernels/q4k_repack_arm.ea uses for Q4K weight repacking.
+//     On AArch64, a naturally-aligned 8-byte i64 load/store compiles to a
+//     single LDR/STR X register transfer.
+//   - bsums: same 64-bit pattern, using *i16 subscripts on aligned 4-i16
+//     groups.
 //
 // No arithmetic, no shuffles, no fallbacks. Every transfer is a native
 // load/store that compiles to a single instruction.
 
-#[cfg(x86_64)]
+#[cfg(aarch64)]
 
 // Copy the 4 row deltas for super-block b.
 // row_d points to f32[nb*4]: row_d[b*4 + r] is row r's delta for super-block b.
@@ -132,7 +129,7 @@ export func q8k_repack_4(
         // Dest i16 index (inside bsums[64]):
         //   sb_iter*16 + (r/2)*8 + (r%2)*4 + {0,1,2,3}
         //
-        // Each copy is a 4-i16 = 8-byte MOVQ via *i64 pointer subscripts.
+        // Each copy is a 4-i16 = 8-byte transfer via *i64 pointer subscripts.
         // We use i64 views for 8-byte transfers. Each 4-i16 group is 8 bytes
         // = 1 i64 element. The i16 pointer offsets must be aligned to 4-i16
         // (8-byte) granularity — by construction they are: sb_iter*16 is
