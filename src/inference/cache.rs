@@ -138,6 +138,38 @@ impl KvCache {
         }
     }
 
+    /// Store N tokens' K and V into the cache at sequential positions starting from seq_len.
+    pub fn store_batch(&mut self, layer: usize, k_batch: &[f32], v_batch: &[f32], n: usize) {
+        if self.shared_source[layer].is_some() {
+            return;
+        }
+        let hd = self.head_dim_v[layer];
+        let stride = self.n_kv_heads * hd;
+        debug_assert_eq!(k_batch.len(), stride * n);
+        debug_assert_eq!(v_batch.len(), stride * n);
+
+        let kb = &mut self.k[layer];
+        let vb = &mut self.v[layer];
+
+        for t in 0..n {
+            let pos = match self.attn_types[layer] {
+                AttnType::SlidingWindow => (self.seq_len + t) % self.window_size,
+                AttnType::Global => self.seq_len + t,
+            };
+            let cache_off = pos * stride;
+            let src_off = t * stride;
+            for i in 0..stride {
+                kb[cache_off + i] = f32_to_f16(k_batch[src_off + i]);
+                vb[cache_off + i] = f32_to_f16(v_batch[src_off + i]);
+            }
+        }
+    }
+
+    /// Advance sequence position by N tokens.
+    pub fn advance_n(&mut self, n: usize) {
+        self.seq_len += n;
+    }
+
     /// Pointer to K buffer for a layer, resolving shared source.
     #[inline]
     pub fn k_ptr(&self, layer: usize) -> *const u16 {
