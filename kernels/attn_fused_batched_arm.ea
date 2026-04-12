@@ -1,0 +1,180 @@
+// attn_fused_batched_arm.ea — Fused batched causal attention, one head (ARM NEON)
+//
+// For each query token i in [0..n_batch):
+//   1. QK^T: dot(q[i], k_cache[j]) for valid j, with causal mask
+//   2. Softmax over valid scores (scale = attn_scale)
+//   3. Weighted V accumulation into output
+//
+// K/V cache stored as f16 (u16 pointers). head_dim must be multiple of 4.
+
+#[cfg(aarch64)]
+
+export func attn_fused_batched(
+    q: *f32,
+    k_cache: *u16,
+    v_cache: *u16,
+    out dst: *mut f32,
+    scores_buf: *mut f32,
+    kv_scratch: *mut f32,
+    head_dim: i32,
+    q_stride: i32,
+    out_stride: i32,
+    stride_kv: i32,
+    kv_head_offset: i32,
+    n_kv: i32,
+    n_batch: i32,
+    cache_start: i32,
+    attn_scale: f32
+) {
+    let kp: *u16 = k_cache
+    let vp: *u16 = v_cache
+    let kp_i16: *i16 = ptr_as_i16(kp)
+    let vp_i16: *i16 = ptr_as_i16(vp)
+
+    let mut qi: i32 = 0
+    while qi < n_batch {
+        // Number of valid KV positions for this query (causal mask)
+        let attn_len: i32 = cache_start + qi + 1
+        let mut valid: i32 = attn_len
+        if valid > n_kv { valid = n_kv }
+
+        // Pointer to this query token's data
+        let q_off: i32 = qi * q_stride
+
+        // --- Pass 1: QK^T dot products ---
+        let mut j: i32 = 0
+        while j < valid {
+            // Convert K[j] from f16 to f32 into kv_scratch
+            let k_off: i32 = j * stride_kv + kv_head_offset
+            let mut d: i32 = 0
+            while d + 4 <= head_dim {
+                let h: i16x4 = load(kp_i16, k_off + d)
+                let v: f32x4 = cvt_f16_f32(h)
+                store(kv_scratch, d, v)
+                d = d + 4
+            }
+
+            // Dot product: q[qi] . kv_scratch
+            let mut acc0: f32x4 = splat(0.0)
+            let mut acc1: f32x4 = splat(0.0)
+            d = 0
+            while d + 8 <= head_dim {
+                let vq0: f32x4 = load(q, q_off + d)
+                let vk0: f32x4 = load(kv_scratch, d)
+                let vq1: f32x4 = load(q, q_off + d + 4)
+                let vk1: f32x4 = load(kv_scratch, d + 4)
+                acc0 = fma(vq0, vk0, acc0)
+                acc1 = fma(vq1, vk1, acc1)
+                d = d + 8
+            }
+            while d + 4 <= head_dim {
+                let vq: f32x4 = load(q, q_off + d)
+                let vk: f32x4 = load(kv_scratch, d)
+                acc0 = fma(vq, vk, acc0)
+                d = d + 4
+            }
+            let dot: f32 = reduce_add(acc0) + reduce_add(acc1)
+            scores_buf[j] = dot
+
+            j = j + 1
+        }
+
+        // --- Pass 2: Softmax over scores[0..valid) ---
+        // 2a: Scale and find max
+        let v_scale: f32x4 = splat(attn_scale)
+        let mut v_max: f32x4 = splat(-1000000.0)
+        let mut si: i32 = 0
+        while si + 4 <= valid {
+            let sv: f32x4 = load_f32x4(scores_buf, si) .* v_scale
+            store(scores_buf, si, sv)
+            v_max = max(v_max, sv)
+            si = si + 4
+        }
+        let mut m: f32 = reduce_max(v_max)
+        while si < valid {
+            scores_buf[si] = scores_buf[si] * attn_scale
+            if scores_buf[si] > m { m = scores_buf[si] }
+            si = si + 1
+        }
+
+        // 2b: Subtract max, exp, sum
+        let v_m: f32x4 = splat(m)
+        let mut v_sum: f32x4 = splat(0.0)
+        si = 0
+        while si + 4 <= valid {
+            let e: f32x4 = exp(load_f32x4(scores_buf, si) .- v_m)
+            store(scores_buf, si, e)
+            v_sum = v_sum .+ e
+            si = si + 4
+        }
+        let mut s: f32 = reduce_add(v_sum)
+        while si < valid {
+            let ev: f32 = exp(scores_buf[si] - m)
+            scores_buf[si] = ev
+            s = s + ev
+            si = si + 1
+        }
+
+        // 2c: Normalize
+        let inv_s: f32 = 1.0 / s
+        let v_inv: f32x4 = splat(inv_s)
+        si = 0
+        while si + 4 <= valid {
+            store(scores_buf, si, load_f32x4(scores_buf, si) .* v_inv)
+            si = si + 4
+        }
+        while si < valid {
+            scores_buf[si] = scores_buf[si] * inv_s
+            si = si + 1
+        }
+
+        // --- Pass 3: Weighted V accumulation ---
+        // Zero output for this query token
+        let out_off: i32 = qi * out_stride
+        let zero: f32x4 = splat(0.0)
+        let mut d: i32 = 0
+        while d + 4 <= head_dim {
+            store(dst, out_off + d, zero)
+            d = d + 4
+        }
+
+        // Accumulate: dst[qi] += scores[j] * V[j]
+        j = 0
+        while j < valid {
+            let w: f32 = scores_buf[j]
+            let vw: f32x4 = splat(w)
+
+            // Convert V[j] from f16 to f32 into kv_scratch
+            let v_off: i32 = j * stride_kv + kv_head_offset
+            d = 0
+            while d + 4 <= head_dim {
+                let h: i16x4 = load(vp_i16, v_off + d)
+                let vf: f32x4 = cvt_f16_f32(h)
+                store(kv_scratch, d, vf)
+                d = d + 4
+            }
+
+            // FMA accumulate into output
+            d = 0
+            while d + 8 <= head_dim {
+                let vo0: f32x4 = load(dst, out_off + d)
+                let va0: f32x4 = load(kv_scratch, d)
+                let vo1: f32x4 = load(dst, out_off + d + 4)
+                let va1: f32x4 = load(kv_scratch, d + 4)
+                store(dst, out_off + d, fma(va0, vw, vo0))
+                store(dst, out_off + d + 4, fma(va1, vw, vo1))
+                d = d + 8
+            }
+            while d + 4 <= head_dim {
+                let vo: f32x4 = load(dst, out_off + d)
+                let va: f32x4 = load(kv_scratch, d)
+                store(dst, out_off + d, fma(va, vw, vo))
+                d = d + 4
+            }
+
+            j = j + 1
+        }
+
+        qi = qi + 1
+    }
+}
