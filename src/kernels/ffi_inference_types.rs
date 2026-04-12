@@ -98,3 +98,20 @@ pub type Q4k8x8GemmFn = unsafe extern "C" fn(
     i32,         // nr (A rows, must be % 4 == 0)
     i32,         // nc (B cols, must be % 8 == 0)
 );
+pub type AttnFusedBatchedFn = unsafe extern "C" fn(
+    *const f32,  // q
+    *const u16,  // k_cache
+    *const u16,  // v_cache
+    *mut f32,    // dst
+    *mut f32,    // scores_buf
+    *mut f32,    // kv_scratch
+    i32,         // head_dim
+    i32,         // q_stride
+    i32,         // out_stride
+    i32,         // stride_kv
+    i32,         // kv_head_offset
+    i32,         // n_kv
+    i32,         // n_batch
+    i32,         // cache_start
+    f32,         // attn_scale
+);

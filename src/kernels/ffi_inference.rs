@@ -36,6 +36,7 @@ pub struct KernelTableInference {
     pub q4k_8x8_q8k_matvec_dual: Q4k8x8MatvecDualFn,
     pub q8k_repack_4:            Q8kRepack4Fn,
     pub q4k_8x8_q8k_gemm:       Q4k8x8GemmFn,
+    pub attn_fused_batched:      AttnFusedBatchedFn,
 }
 
 // SAFETY: KernelTableInference holds function pointers and library handles.
@@ -107,6 +108,7 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
     let q4k_dot_8x8_dual_lib = load("q4k_dot_8x8_dual")?;
     let q8k_repack_4_lib     = load("q8k_repack_4")?;
     let q4k_dot_8x8_gemm_lib = load("q4k_dot_8x8_gemm")?;
+    let attn_fused_batched_lib = load("attn_fused_batched")?;
 
     unsafe {
         let sym = |lib: &Library, name: &[u8]| -> Result<usize, String> {
@@ -147,7 +149,8 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
             q4k_8x8_q8k_matvec_dual: std::mem::transmute(sym(&q4k_dot_8x8_dual_lib, b"q4k_8x8_q8k_matvec_dual\0")?),
             q8k_repack_4:            std::mem::transmute(sym(&q8k_repack_4_lib,     b"q8k_repack_4\0")?),
             q4k_8x8_q8k_gemm:       std::mem::transmute(sym(&q4k_dot_8x8_gemm_lib, b"q4k_8x8_q8k_gemm\0")?),
-            libs: vec![q4kq, q4kd, q5kd, q6kd, f16_conv_lib, softmax_lib, gemma4_rmsnorm_lib, gemma4_gelu_lib, gemma4_rope_lib, bf16_matvec_lib, vec_ops_lib, attn_ops_lib, bare_rmsnorm_lib, softcap_lib, q4k_repack_lib, q4k_dot_8x8_lib, q4k_dot_8x8_dual_lib, q8k_repack_4_lib, q4k_dot_8x8_gemm_lib],
+            attn_fused_batched:      std::mem::transmute(sym(&attn_fused_batched_lib, b"attn_fused_batched\0")?),
+            libs: vec![q4kq, q4kd, q5kd, q6kd, f16_conv_lib, softmax_lib, gemma4_rmsnorm_lib, gemma4_gelu_lib, gemma4_rope_lib, bf16_matvec_lib, vec_ops_lib, attn_ops_lib, bare_rmsnorm_lib, softcap_lib, q4k_repack_lib, q4k_dot_8x8_lib, q4k_dot_8x8_dual_lib, q8k_repack_4_lib, q4k_dot_8x8_gemm_lib, attn_fused_batched_lib],
         };
         Ok(t)
     }
@@ -361,4 +364,29 @@ pub unsafe fn q4k_8x8_q8k_gemm(
     nc: i32,
 ) {
     (k().q4k_8x8_q8k_gemm)(packed, q8_a, scratch, out, bs, n, nr, nc)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn attn_fused_batched(
+    q: *const f32,
+    k_cache: *const u16,
+    v_cache: *const u16,
+    dst: *mut f32,
+    scores_buf: *mut f32,
+    kv_scratch: *mut f32,
+    head_dim: i32,
+    q_stride: i32,
+    out_stride: i32,
+    stride_kv: i32,
+    kv_head_offset: i32,
+    n_kv: i32,
+    n_batch: i32,
+    cache_start: i32,
+    attn_scale: f32,
+) {
+    (k().attn_fused_batched)(
+        q, k_cache, v_cache, dst, scores_buf, kv_scratch,
+        head_dim, q_stride, out_stride, stride_kv, kv_head_offset,
+        n_kv, n_batch, cache_start, attn_scale,
+    )
 }
