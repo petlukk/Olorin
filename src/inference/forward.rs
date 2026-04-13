@@ -142,6 +142,13 @@ pub struct Gemma4State {
     pub(crate) batch_up: Vec<f32>,
     pub(crate) batch_down: Vec<f32>,
     pub(crate) batch_ple_signal: Vec<f32>,
+    // Batch Q8K buffers for work-stealing GEMM (all N tokens quantized before barrier)
+    pub(crate) batch_q8_qs: Vec<i8>,
+    pub(crate) batch_q8_d: Vec<f32>,
+    pub(crate) batch_q8_bsums: Vec<i16>,
+    pub(crate) batch_ffn_q8_qs: Vec<i8>,
+    pub(crate) batch_ffn_q8_d: Vec<f32>,
+    pub(crate) batch_ffn_q8_bsums: Vec<i16>,
     pub(crate) max_batch: usize,
 
     // KV cache
@@ -237,6 +244,13 @@ impl Gemma4State {
             batch_up: vec![0.0; max_ffn * max_batch],
             batch_down: vec![0.0; hd * max_batch],
             batch_ple_signal: vec![0.0; model.ple_dim * model.n_layers * max_batch],
+            // Q8K stride: max(hd, max_qkv) + 12 per token (Wo quantizes attn_out)
+            batch_q8_qs: vec![0; (max_qkv.max(hd) + 12) * max_batch],
+            batch_q8_d: vec![0.0; (max_qkv.max(hd) / 256) * max_batch],
+            batch_q8_bsums: vec![0; (max_qkv.max(hd) / 256) * 16 * max_batch],
+            batch_ffn_q8_qs: vec![0; (max_ffn + 12) * max_batch],
+            batch_ffn_q8_d: vec![0.0; n_blocks_ffn * max_batch],
+            batch_ffn_q8_bsums: vec![0; n_blocks_ffn * 16 * max_batch],
             max_batch,
 
             cache,
