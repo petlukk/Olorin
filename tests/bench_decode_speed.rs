@@ -114,7 +114,7 @@ fn olorin_full_bench() {
     olorin::kernels::ffi::init().unwrap();
     let pool = olorin::inference::threadpool::ThreadPool::new();
     let graph_pool = olorin::inference::threadpool::GraphPool::new();
-    let mut state = olorin::inference::forward::Gemma4State::new(&model, 2048, &pool);
+    let mut state = olorin::inference::forward::Gemma4State::new(&model, 512, &pool);
     let load_ms = t_load.elapsed().as_secs_f64() * 1000.0;
 
     let rss_after_load = rss_mb();
@@ -165,7 +165,7 @@ fn olorin_full_bench() {
 
     let peak_rss = peak_rss_mb();
     let rss_after = rss_mb();
-    let kv_bytes = kv_cache_bytes(&model, 2048);
+    let kv_bytes = kv_cache_bytes(&model, 512);
     let kv_mb = kv_bytes as f64 / (1024.0 * 1024.0);
 
     // ── Report ────────────────────────────────────────────────────────────
@@ -193,7 +193,7 @@ fn olorin_full_bench() {
     eprintln!("  peak rss (VmHWM):     {:>10.1} MB", peak_rss);
     eprintln!("  model resident:       {:>10.1} MB  (rss after load - before)",
         rss_after_load - rss_before);
-    eprintln!("  kv cache (computed):  {:>10.1} MB  (max_seq_len=2048, f16, shared layers excluded)",
+    eprintln!("  kv cache (computed):  {:>10.1} MB  (max_seq_len=512, f16, shared layers excluded)",
         kv_mb);
     eprintln!();
     eprintln!("cpu utilization (decode window):");
