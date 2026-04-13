@@ -306,8 +306,9 @@ pub fn matvec_ws(
     }
 }
 
-/// Q4K 8×8 repacked batch matvec: work-stealing across output row tiles.
-/// Processes all N tokens per claimed tile. Constant barrier count.
+/// Q4K 8×8 repacked batch matvec: 2D work-stealing across (row_tiles × token_chunks).
+/// Matches llama.cpp's ggml_compute_forward_mul_mat chunking: flattened 2D grid,
+/// each thread claims (tile, token_range) pairs via atomic fetch_add.
 #[allow(clippy::too_many_arguments)]
 pub fn q4k_matvec_8x8_batch_ws(
     packed: *const u8, batch_q8_qs: *const i8, batch_q8_d: *const f32,
@@ -325,13 +326,22 @@ pub fn q4k_matvec_8x8_batch_ws(
     let pow2 = pow2_table();
     let mut scratch = [0u8; 128];
 
+    // 2D chunking: dim0 = row tiles (8 rows each), dim1 = token chunks
+    let tok_chunk_size = 16usize;
+    let n_tok_chunks = (n_tokens + tok_chunk_size - 1) / tok_chunk_size;
+    let total_chunks = n_tiles * n_tok_chunks;
+
     let mut chunk = ith as i32;
-    while (chunk as usize) < n_tiles {
-        let tile = chunk as usize;
+    while (chunk as usize) < total_chunks {
+        let tile = (chunk as usize) % n_tiles;
+        let tok_idx = (chunk as usize) / n_tiles;
+        let t_start = tok_idx * tok_chunk_size;
+        let t_end = (t_start + tok_chunk_size).min(n_tokens);
+
         let w_ptr = unsafe { packed.add(tile * tile_bytes) };
         let out_col_off = tile * 8;
 
-        for t in 0..n_tokens {
+        for t in t_start..t_end {
             let q8 = unsafe { batch_q8_qs.add(t * qs_stride) };
             let q8_d = unsafe { batch_q8_d.add(t * n_blocks) };
             let bsums = unsafe { batch_q8_bsums.add(t * n_blocks * 16) };
@@ -349,7 +359,7 @@ pub fn q4k_matvec_8x8_batch_ws(
     }
 }
 
-/// Batch matvec fallback (any dtype): work-stealing across 4-row chunks, all N tokens per chunk.
+/// Batch matvec fallback (any dtype): 2D work-stealing across (4-row chunks × token chunks).
 #[allow(clippy::too_many_arguments)]
 pub fn matvec_batch_ws(
     dtype: u32, weight: *const u8, batch_q8_qs: *const i8,
@@ -366,11 +376,20 @@ pub fn matvec_batch_ws(
     let scratch_per = n_blocks * 4;
     let my_scratch = unsafe { d_scratch.add(ith * scratch_per) };
 
-    let mut chunk = ith as i32;
-    while (chunk as usize) < full_quads {
-        let base_row = (chunk as usize) * 4;
+    // 2D chunking: dim0 = row quads (4 rows each), dim1 = token chunks
+    let tok_chunk_size = 16usize;
+    let n_tok_chunks = (n_tokens + tok_chunk_size - 1) / tok_chunk_size;
+    let total_chunks = full_quads * n_tok_chunks;
 
-        for t in 0..n_tokens {
+    let mut chunk = ith as i32;
+    while (chunk as usize) < total_chunks {
+        let quad = (chunk as usize) % full_quads;
+        let tok_idx = (chunk as usize) / full_quads;
+        let t_start = tok_idx * tok_chunk_size;
+        let t_end = (t_start + tok_chunk_size).min(n_tokens);
+        let base_row = quad * 4;
+
+        for t in t_start..t_end {
             let q8 = unsafe { batch_q8_qs.add(t * qs_stride) };
             let q8_d = unsafe { batch_q8_d.add(t * n_blocks) };
             let bsums = unsafe { batch_q8_bsums.add(t * n_blocks * 16) };
