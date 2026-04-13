@@ -9,7 +9,8 @@
 
 use std::sync::atomic::{AtomicI32, Ordering};
 use crate::inference::engine::Gemma4Model;
-use crate::inference::forward::Gemma4State;
+use crate::inference::forward::{timing_enabled, Gemma4State};
+use crate::inference::forward_batch_layer::BatchLayerTiming;
 use crate::inference::matmul;
 use crate::inference::matmul_graph;
 use crate::inference::dequant;
@@ -55,10 +56,20 @@ pub(crate) fn forward_batch_inner(
 
     // ── Per-layer transformer blocks ─────────────────────────────
     let seq_len = state.cache.seq_len();
+    let timing = timing_enabled();
+    let mut layer_timing = if timing && ith == 0 {
+        Some(BatchLayerTiming::new())
+    } else {
+        None
+    };
     for il in 0..model.n_layers {
         super::forward_batch_layer::layer_forward_batch(
             state, model, il, n, seq_len, barrier, current_chunk, ith, nth,
+            layer_timing.as_mut(),
         );
+    }
+    if let Some(ref t) = layer_timing {
+        t.print_summary(model.n_layers, n);
     }
 
     // ── Post-loop: final norm on last token only (thread 0) ──────

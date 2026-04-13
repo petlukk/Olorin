@@ -2,12 +2,91 @@
 //! Matches llama.cpp repack.cpp:4296-4384.
 
 use std::sync::atomic::{AtomicI32, Ordering};
+use std::time::Instant;
 use crate::inference::engine::Gemma4Model;
 use crate::inference::forward::{compute_rope_tables, Gemma4State};
 use crate::inference::matmul;
 use crate::inference::matmul_graph;
 use crate::inference::threadpool::SpinBarrier;
 use crate::kernels::ffi_inference;
+
+/// Accumulated per-op timing across all layers (microseconds).
+/// Only thread 0 writes/reads these.
+pub(crate) struct BatchLayerTiming {
+    pub attn_norm: u64,
+    pub quant_input: u64,
+    pub repack_q8: u64,
+    pub gemm_q: u64,
+    pub q_norm_rope: u64,
+    pub gemm_k: u64,
+    pub gemm_v: u64,
+    pub kv_norm_rope_cache: u64,
+    pub attention: u64,
+    pub quant_wo: u64,
+    pub repack_wo: u64,
+    pub gemm_wo: u64,
+    pub post_attn_ffn_norm: u64,
+    pub quant_ffn: u64,
+    pub repack_ffn: u64,
+    pub gemm_gate: u64,
+    pub gemm_up: u64,
+    pub gelu_mul: u64,
+    pub quant_down: u64,
+    pub repack_down: u64,
+    pub gemm_down: u64,
+    pub post_ffn_ple: u64,
+}
+
+impl BatchLayerTiming {
+    pub fn new() -> Self {
+        Self {
+            attn_norm: 0, quant_input: 0, repack_q8: 0,
+            gemm_q: 0, q_norm_rope: 0, gemm_k: 0, gemm_v: 0,
+            kv_norm_rope_cache: 0, attention: 0,
+            quant_wo: 0, repack_wo: 0, gemm_wo: 0,
+            post_attn_ffn_norm: 0, quant_ffn: 0, repack_ffn: 0,
+            gemm_gate: 0, gemm_up: 0,
+            gelu_mul: 0, quant_down: 0, repack_down: 0, gemm_down: 0,
+            post_ffn_ple: 0,
+        }
+    }
+
+    pub fn print_summary(&self, n_layers: usize, n_tokens: usize) {
+        let total = self.attn_norm + self.quant_input + self.repack_q8
+            + self.gemm_q + self.q_norm_rope + self.gemm_k + self.gemm_v
+            + self.kv_norm_rope_cache + self.attention
+            + self.quant_wo + self.repack_wo + self.gemm_wo
+            + self.post_attn_ffn_norm + self.quant_ffn + self.repack_ffn
+            + self.gemm_gate + self.gemm_up
+            + self.gelu_mul + self.quant_down + self.repack_down + self.gemm_down
+            + self.post_ffn_ple;
+        let ms = |us: u64| us as f64 / 1000.0;
+        let pct = |us: u64| if total > 0 { us as f64 / total as f64 * 100.0 } else { 0.0 };
+        eprintln!("[batch-timing] {n_layers} layers × {n_tokens} tokens, total {:.1}ms", ms(total));
+        eprintln!("  attn_norm       {:7.1}ms  ({:4.1}%)", ms(self.attn_norm), pct(self.attn_norm));
+        eprintln!("  quant_input     {:7.1}ms  ({:4.1}%)", ms(self.quant_input), pct(self.quant_input));
+        eprintln!("  repack_q8       {:7.1}ms  ({:4.1}%)", ms(self.repack_q8), pct(self.repack_q8));
+        eprintln!("  gemm_q          {:7.1}ms  ({:4.1}%)", ms(self.gemm_q), pct(self.gemm_q));
+        eprintln!("  q_norm_rope     {:7.1}ms  ({:4.1}%)", ms(self.q_norm_rope), pct(self.q_norm_rope));
+        eprintln!("  gemm_k          {:7.1}ms  ({:4.1}%)", ms(self.gemm_k), pct(self.gemm_k));
+        eprintln!("  gemm_v          {:7.1}ms  ({:4.1}%)", ms(self.gemm_v), pct(self.gemm_v));
+        eprintln!("  kv_norm_rope    {:7.1}ms  ({:4.1}%)", ms(self.kv_norm_rope_cache), pct(self.kv_norm_rope_cache));
+        eprintln!("  attention       {:7.1}ms  ({:4.1}%)", ms(self.attention), pct(self.attention));
+        eprintln!("  quant_wo        {:7.1}ms  ({:4.1}%)", ms(self.quant_wo), pct(self.quant_wo));
+        eprintln!("  repack_wo       {:7.1}ms  ({:4.1}%)", ms(self.repack_wo), pct(self.repack_wo));
+        eprintln!("  gemm_wo         {:7.1}ms  ({:4.1}%)", ms(self.gemm_wo), pct(self.gemm_wo));
+        eprintln!("  post_attn+norm  {:7.1}ms  ({:4.1}%)", ms(self.post_attn_ffn_norm), pct(self.post_attn_ffn_norm));
+        eprintln!("  quant_ffn       {:7.1}ms  ({:4.1}%)", ms(self.quant_ffn), pct(self.quant_ffn));
+        eprintln!("  repack_ffn      {:7.1}ms  ({:4.1}%)", ms(self.repack_ffn), pct(self.repack_ffn));
+        eprintln!("  gemm_gate       {:7.1}ms  ({:4.1}%)", ms(self.gemm_gate), pct(self.gemm_gate));
+        eprintln!("  gemm_up         {:7.1}ms  ({:4.1}%)", ms(self.gemm_up), pct(self.gemm_up));
+        eprintln!("  gelu_mul        {:7.1}ms  ({:4.1}%)", ms(self.gelu_mul), pct(self.gelu_mul));
+        eprintln!("  quant_down      {:7.1}ms  ({:4.1}%)", ms(self.quant_down), pct(self.quant_down));
+        eprintln!("  repack_down     {:7.1}ms  ({:4.1}%)", ms(self.repack_down), pct(self.repack_down));
+        eprintln!("  gemm_down       {:7.1}ms  ({:4.1}%)", ms(self.gemm_down), pct(self.gemm_down));
+        eprintln!("  post_ffn+ple    {:7.1}ms  ({:4.1}%)", ms(self.post_ffn_ple), pct(self.post_ffn_ple));
+    }
+}
 
 /// All threads quantize tokens in parallel. Tokens [n..n_pad) get zero-filled Q8K.
 #[inline]
@@ -97,7 +176,24 @@ pub(crate) fn layer_forward_batch(
     state: &mut Gemma4State, model: &Gemma4Model,
     il: usize, n: usize, seq_len: usize,
     barrier: &SpinBarrier, current_chunk: &AtomicI32, ith: usize, nth: usize,
+    timing: Option<&mut BatchLayerTiming>,
 ) {
+    let timing_on = timing.is_some();
+    // Reborrow helper — we pass `timing` through as Option to avoid borrow issues.
+    // Macro captures start instant and accumulates into a field.
+    macro_rules! t_start { () => { if timing_on { Some(Instant::now()) } else { None } }; }
+    macro_rules! t_accum {
+        ($start:expr, $field:ident, $tm:expr) => {
+            if let (Some(s), Some(ref mut t)) = ($start, $tm) { t.$field += s.elapsed().as_micros() as u64; }
+        };
+    }
+    // We need a raw pointer to timing to work around borrow checker with barriers.
+    // SAFETY: only thread 0 accesses timing, and it's valid for the entire call.
+    let tp: *mut BatchLayerTiming = match timing {
+        Some(t) => t as *mut _,
+        None => std::ptr::null_mut(),
+    };
+    macro_rules! tm { () => { if tp.is_null() { None } else { Some(unsafe { &mut *tp }) } }; }
     let hd = model.hidden_dim;
     let n_heads = model.n_heads;
     let n_kv_heads = model.n_kv_heads;
@@ -114,6 +210,7 @@ pub(crate) fn layer_forward_batch(
     let freq_factors = if !model.is_swa[il] { model.rope_freqs.as_deref() } else { None };
 
     // ── 1a. Attn norm (thread 0) ────────────────────────────────
+    let t0 = t_start!();
     if ith == 0 {
         for t in 0..n {
             ffi_inference::gemma4_rmsnorm(
@@ -123,14 +220,18 @@ pub(crate) fn layer_forward_batch(
         }
     }
     barrier.wait(); // B1
+    if ith == 0 { t_accum!(t0, attn_norm, tm!()); }
     // ── 1b. Parallel quant (all threads) ────────────────────────
+    let t0 = t_start!();
     parallel_batch_quant(
         &state.batch_x_norm, hd, n, n_pad,
         &mut state.batch_q8_qs, &mut state.batch_q8_d, &mut state.batch_q8_bsums,
         ith, nth,
     );
     barrier.wait(); // B2
+    if ith == 0 { t_accum!(t0, quant_input, tm!()); }
     // ── 1c. Q8K repack + chunk store ────────────────────────────
+    let t0 = t_start!();
     if ith == 0 {
         repack_q8_for_gemm(
             &state.batch_q8_qs, &state.batch_q8_d, &state.batch_q8_bsums,
@@ -139,7 +240,9 @@ pub(crate) fn layer_forward_batch(
     }
     current_chunk.store(nth as i32, Ordering::Relaxed);
     barrier.wait(); // B3
+    if ith == 0 { t_accum!(t0, repack_q8, tm!()); }
     // ── 2. Q projection GEMM ────────────────────────────────────
+    let t0 = t_start!();
     matvec_batch_step(
         lw.wq_repacked.as_deref(), lw.wq_dtype, lw.wq,
         state.batch_q8_a.as_ptr(),
@@ -150,7 +253,9 @@ pub(crate) fn layer_forward_batch(
         current_chunk, ith, nth,
     );
     barrier.wait(); // B4
+    if ith == 0 { t_accum!(t0, gemm_q, tm!()); }
     // ── 3. Q norm + RoPE (thread 0) ─────────────────────────────
+    let t0 = t_start!();
     if ith == 0 {
         for t in 0..n {
             compute_rope_tables(
@@ -175,6 +280,7 @@ pub(crate) fn layer_forward_batch(
         }
     }
     barrier.wait(); // B5
+    if ith == 0 { t_accum!(t0, q_norm_rope, tm!()); }
     // ── 4. K/V projections + norms + RoPE + cache ───────────────
     if has_kv {
         let kv_dim = n_kv_heads * head_dim;
@@ -183,6 +289,7 @@ pub(crate) fn layer_forward_batch(
         // K — reuse Q8K + repack from step 1
         current_chunk.store(nth as i32, Ordering::Relaxed);
         barrier.wait(); // B6
+        let t0 = t_start!();
         matvec_batch_step(
             lw.wk_repacked.as_deref(), lw.wk_dtype, lw.wk,
             state.batch_q8_a.as_ptr(),
@@ -193,10 +300,12 @@ pub(crate) fn layer_forward_batch(
             current_chunk, ith, nth,
         );
         barrier.wait(); // B7
+        if ith == 0 { t_accum!(t0, gemm_k, tm!()); }
 
         // V — reuse Q8K + repack from step 1
         current_chunk.store(nth as i32, Ordering::Relaxed);
         barrier.wait(); // B8
+        let t0 = t_start!();
         matvec_batch_step(
             lw.wv_repacked.as_deref(), lw.wv_dtype, lw.wv,
             state.batch_q8_a.as_ptr(),
@@ -207,8 +316,10 @@ pub(crate) fn layer_forward_batch(
             current_chunk, ith, nth,
         );
         barrier.wait(); // B9
+        if ith == 0 { t_accum!(t0, gemm_v, tm!()); }
 
         // K/V norms + RoPE + cache store (thread 0)
+        let t0 = t_start!();
         if ith == 0 {
             for t in 0..n {
                 compute_rope_tables(
@@ -243,9 +354,11 @@ pub(crate) fn layer_forward_batch(
             );
         }
         barrier.wait(); // B10
+        if ith == 0 { t_accum!(t0, kv_norm_rope_cache, tm!()); }
     }
 
     // ── 5. Attention (heads split across threads, fused kernel) ──
+    let t0 = t_start!();
     {
         let n_kv = if model.is_swa[il] {
             (seq_len + n).min(model.sliding_window)
@@ -285,7 +398,9 @@ pub(crate) fn layer_forward_batch(
         }
     }
     barrier.wait(); // B11
+    if ith == 0 { t_accum!(t0, attention, tm!()); }
     // ── 6. Wo: parallel quant + GEMM ────────────────────────────
+    let t0 = t_start!();
     {
         let ao_dim = n_heads * head_dim;
         parallel_batch_quant(
@@ -295,6 +410,8 @@ pub(crate) fn layer_forward_batch(
         );
     }
     barrier.wait(); // B12
+    if ith == 0 { t_accum!(t0, quant_wo, tm!()); }
+    let t0 = t_start!();
     if ith == 0 {
         let ao_dim = n_heads * head_dim;
         repack_q8_for_gemm(
@@ -304,6 +421,8 @@ pub(crate) fn layer_forward_batch(
     }
     current_chunk.store(nth as i32, Ordering::Relaxed);
     barrier.wait(); // B13
+    if ith == 0 { t_accum!(t0, repack_wo, tm!()); }
+    let t0 = t_start!();
     matvec_batch_step(
         lw.wo_repacked.as_deref(), lw.wo_dtype, lw.wo,
         state.batch_q8_a.as_ptr(),
@@ -314,7 +433,9 @@ pub(crate) fn layer_forward_batch(
         current_chunk, ith, nth,
     );
     barrier.wait(); // B14
+    if ith == 0 { t_accum!(t0, gemm_wo, tm!()); }
     // ── 7. Post-attn residual + FFN norm (thread 0) ─────────────
+    let t0 = t_start!();
     if ith == 0 {
         for t in 0..n {
             let off = t * hd;
@@ -340,14 +461,18 @@ pub(crate) fn layer_forward_batch(
         }
     }
     barrier.wait(); // B15
+    if ith == 0 { t_accum!(t0, post_attn_ffn_norm, tm!()); }
     // ── 7b. Parallel quant for FFN ──────────────────────────────
+    let t0 = t_start!();
     parallel_batch_quant(
         &state.batch_x_norm, hd, n, n_pad,
         &mut state.batch_q8_qs, &mut state.batch_q8_d, &mut state.batch_q8_bsums,
         ith, nth,
     );
     barrier.wait(); // B16
+    if ith == 0 { t_accum!(t0, quant_ffn, tm!()); }
     let ffn_dim = model.ffn_dim[il];
+    let t0 = t_start!();
     if ith == 0 {
         repack_q8_for_gemm(
             &state.batch_q8_qs, &state.batch_q8_d, &state.batch_q8_bsums,
@@ -356,7 +481,9 @@ pub(crate) fn layer_forward_batch(
     }
     current_chunk.store(nth as i32, Ordering::Relaxed);
     barrier.wait(); // B17
+    if ith == 0 { t_accum!(t0, repack_ffn, tm!()); }
     // ── 8. FFN gate + up ────────────────────────────────────────
+    let t0 = t_start!();
     matvec_batch_step(
         lw.w_gate_repacked.as_deref(), lw.w_gate_dtype, lw.w_gate,
         state.batch_q8_a.as_ptr(),
@@ -367,9 +494,11 @@ pub(crate) fn layer_forward_batch(
         current_chunk, ith, nth,
     );
     barrier.wait(); // B18
+    if ith == 0 { t_accum!(t0, gemm_gate, tm!()); }
     // FFN up — reuse Q8K + repack
     current_chunk.store(nth as i32, Ordering::Relaxed);
     barrier.wait(); // B19
+    let t0 = t_start!();
     matvec_batch_step(
         lw.w_up_repacked.as_deref(), lw.w_up_dtype, lw.w_up,
         state.batch_q8_a.as_ptr(),
@@ -380,17 +509,23 @@ pub(crate) fn layer_forward_batch(
         current_chunk, ith, nth,
     );
     barrier.wait(); // B20
+    if ith == 0 { t_accum!(t0, gemm_up, tm!()); }
     // ── 9. GELU + FFN down ──────────────────────────────────────
-    if ith == 0 {
-        for t in 0..n {
+    let t0 = t_start!();
+    {
+        let mut t = ith;
+        while t < n {
             ffi_inference::gelu_mul(
                 state.batch_gate[t * ffn_dim..].as_ptr(),
                 state.batch_up[t * ffn_dim..].as_ptr(),
                 state.batch_gate[t * ffn_dim..].as_mut_ptr(), ffn_dim as i32,
             );
+            t += nth;
         }
     }
     barrier.wait(); // B21
+    if ith == 0 { t_accum!(t0, gelu_mul, tm!()); }
+    let t0 = t_start!();
     parallel_batch_quant(
         &state.batch_gate, ffn_dim, n, n_pad,
         &mut state.batch_ffn_q8_qs, &mut state.batch_ffn_q8_d,
@@ -398,6 +533,8 @@ pub(crate) fn layer_forward_batch(
         ith, nth,
     );
     barrier.wait(); // B22
+    if ith == 0 { t_accum!(t0, quant_down, tm!()); }
+    let t0 = t_start!();
     if ith == 0 {
         repack_q8_for_gemm(
             &state.batch_ffn_q8_qs, &state.batch_ffn_q8_d, &state.batch_ffn_q8_bsums,
@@ -406,6 +543,8 @@ pub(crate) fn layer_forward_batch(
     }
     current_chunk.store(nth as i32, Ordering::Relaxed);
     barrier.wait(); // B23
+    if ith == 0 { t_accum!(t0, repack_down, tm!()); }
+    let t0 = t_start!();
     matvec_batch_step(
         lw.w_down_repacked.as_deref(), lw.w_down_dtype, lw.w_down,
         state.batch_ffn_q8_a.as_ptr(),
@@ -416,7 +555,9 @@ pub(crate) fn layer_forward_batch(
         current_chunk, ith, nth,
     );
     barrier.wait(); // B24
+    if ith == 0 { t_accum!(t0, gemm_down, tm!()); }
     // ── 10. Post-FFN residual + PLE + scale (thread 0) ──────────
+    let t0 = t_start!();
     if ith == 0 {
         for t in 0..n {
             let off = t * hd;
@@ -487,4 +628,5 @@ pub(crate) fn layer_forward_batch(
         }
     }
     barrier.wait(); // B25
+    if ith == 0 { t_accum!(t0, post_ffn_ple, tm!()); }
 }

@@ -4,11 +4,12 @@
 //! prefill + decode loop with streaming token output.
 
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 use crate::error::{Error, Result};
 use crate::inference::gguf::GgufFile;
 use crate::inference::engine::Gemma4Model;
+use crate::inference::forward::{timing_enabled, Gemma4State};
 use crate::inference::tokenizer::Tokenizer;
-use crate::inference::forward::Gemma4State;
 
 // ---------------------------------------------------------------------------
 // Engine
@@ -101,17 +102,24 @@ impl Engine {
         // 3. Reset state for new sequence
         self.state.reset();
 
+        let timing = timing_enabled();
+
         // 4. Prefill: batched forward (all prompt tokens at once)
+        let t_prefill_start = Instant::now();
         let mut logits_snapshot = {
             let logits = self.state.forward_batch(&self.model, &tokens, &self.graph_pool);
             logits.to_vec()
         };
+        let t_prefill = t_prefill_start.elapsed();
+        let n_prompt = tokens.len();
 
         // 5. Decode loop
+        let t_decode_start = Instant::now();
         let mut rng = xorshift_seed();
         let mut output = String::new();
         let eos = self.tokenizer.eos_id;
         let stop_ids = &self.tokenizer.stop_ids;
+        let mut n_decode = 0usize;
 
         for _ in 0..self.max_tokens {
             let token_id = sample(
@@ -127,6 +135,8 @@ impl Engine {
                 break;
             }
 
+            n_decode += 1;
+
             if !self.tokenizer.is_control_or_user_defined(token_id) {
                 let text = self.tokenizer.decode(&[token_id]);
                 on_token(&text);
@@ -136,6 +146,16 @@ impl Engine {
             let logits = self.state.forward_one_graph(&self.model, token_id, &self.graph_pool);
             logits_snapshot.clear();
             logits_snapshot.extend_from_slice(logits);
+        }
+        let t_decode = t_decode_start.elapsed();
+
+        if timing {
+            let pp_ms = t_prefill.as_secs_f64() * 1000.0;
+            let tg_ms = t_decode.as_secs_f64() * 1000.0;
+            let pp_tps = if pp_ms > 0.0 { n_prompt as f64 / (pp_ms / 1000.0) } else { 0.0 };
+            let tg_tps = if tg_ms > 0.0 { n_decode as f64 / (tg_ms / 1000.0) } else { 0.0 };
+            eprintln!("[timing] prefill: {n_prompt} tokens in {pp_ms:.1}ms ({pp_tps:.1} t/s)");
+            eprintln!("[timing] decode:  {n_decode} tokens in {tg_ms:.1}ms ({tg_tps:.1} t/s)");
         }
 
         Ok(output)
