@@ -218,9 +218,9 @@ export func q4k_8x8_q8k_gemm(
                         let phi_47: i32x4 = addp_i32(ahi2, ahi3)
 
                         let sumf_lo_03: f32x4 = to_f32(sc_lo_0 .* plo_03)
-                        let sumf_lo_47: f32x4 = to_f32(sc_lo_0 .* plo_47)
+                        let sumf_lo_47: f32x4 = to_f32(sc_hi_0 .* plo_47)
                         let sumf_hi_03: f32x4 = to_f32(sc_lo_1 .* phi_03)
-                        let sumf_hi_47: f32x4 = to_f32(sc_lo_1 .* phi_47)
+                        let sumf_hi_47: f32x4 = to_f32(sc_hi_1 .* phi_47)
 
                         // ── Bsums for this row ───────────────────────
                         let bsums_i16: *restrict i16 = ptr_as_i16(q8_i8)
