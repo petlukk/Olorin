@@ -200,33 +200,23 @@ export func q4k_8x8_q8k_matvec(
                 let plo_03: i32x4 = addp_i32(alo0, alo1)
                 let sumf_lo_03: f32x4 = to_f32(sc_lo_0 .* plo_03)
                 acc0 = fma(sb_sc0, sumf_lo_03, acc0)
-                // Low nibbles: cols 4-7
+                // Low nibbles: cols 4-7 (use sc_hi_0 — high half of sub-block 0 scales)
                 let plo_47: i32x4 = addp_i32(alo2, alo3)
-                let sumf_lo_47: f32x4 = to_f32(sc_lo_0 .* plo_47)
+                let sumf_lo_47: f32x4 = to_f32(sc_hi_0 .* plo_47)
                 acc1 = fma(sb_sc1, sumf_lo_47, acc1)
 
-                // High nibbles: cols 0-3
+                // High nibbles: cols 0-3 (use sc_lo_1 — low half of sub-block 1 scales)
                 let phi_03: i32x4 = addp_i32(ahi0, ahi1)
                 let sumf_hi_03: f32x4 = to_f32(sc_lo_1 .* phi_03)
                 acc0 = fma(sb_sc0, sumf_hi_03, acc0)
-                // High nibbles: cols 4-7
+                // High nibbles: cols 4-7 (use sc_hi_1 — high half of sub-block 1 scales)
                 let phi_47: i32x4 = addp_i32(ahi2, ahi3)
-                let sumf_hi_47: f32x4 = to_f32(sc_lo_1 .* phi_47)
+                let sumf_hi_47: f32x4 = to_f32(sc_hi_1 .* phi_47)
                 acc1 = fma(sb_sc1, sumf_hi_47, acc1)
 
                 // Mins correction
                 let bs0: i16 = scratch_i16[sb * 2]
                 let bs1: i16 = scratch_i16[sb * 2 + 1]
-                // cols 0-3 bias: bsum_lo * mins_lo_0 + bsum_hi * mins_lo_1
-                // Using scalar multiply-accumulate for mins
-                let mut j: i32 = 0
-                while j < 4 {
-                    let mn_sb0_j: i32 = (t02 >> (j * 8)) & 255
-                    let mn_sb1_j: i32 = (t12 >> (j * 8)) & 255
-                    let correction: i32 = mn_sb0_j * to_i32(bs0) + mn_sb1_j * to_i32(bs1)
-                    // TODO: accumulate into bias0 per lane
-                    j = j + 1
-                }
                 // Build i32x4 deltas via typed intermediates — bare array
                 // literals in a .+ slot have no type context, so Ea refuses
                 // them. The let-binding provides the vector type context.

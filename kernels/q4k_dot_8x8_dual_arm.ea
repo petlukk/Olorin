@@ -219,14 +219,14 @@ export func q4k_8x8_q8k_matvec_dual(
                 let sumf_lo_03_mat_a: f32x4 = to_f32(sc_lo_0_mat_a .* plo_03_mat_a)
                 acc0_mat_a = fma(sb_sc0_mat_a, sumf_lo_03_mat_a, acc0_mat_a)
                 let plo_47_mat_a: i32x4 = addp_i32(alo2_mat_a, alo3_mat_a)
-                let sumf_lo_47_mat_a: f32x4 = to_f32(sc_lo_0_mat_a .* plo_47_mat_a)
+                let sumf_lo_47_mat_a: f32x4 = to_f32(sc_hi_0_mat_a .* plo_47_mat_a)
                 acc1_mat_a = fma(sb_sc1_mat_a, sumf_lo_47_mat_a, acc1_mat_a)
 
                 let phi_03_mat_a: i32x4 = addp_i32(ahi0_mat_a, ahi1_mat_a)
                 let sumf_hi_03_mat_a: f32x4 = to_f32(sc_lo_1_mat_a .* phi_03_mat_a)
                 acc0_mat_a = fma(sb_sc0_mat_a, sumf_hi_03_mat_a, acc0_mat_a)
                 let phi_47_mat_a: i32x4 = addp_i32(ahi2_mat_a, ahi3_mat_a)
-                let sumf_hi_47_mat_a: f32x4 = to_f32(sc_lo_1_mat_a .* phi_47_mat_a)
+                let sumf_hi_47_mat_a: f32x4 = to_f32(sc_hi_1_mat_a .* phi_47_mat_a)
                 acc1_mat_a = fma(sb_sc1_mat_a, sumf_hi_47_mat_a, acc1_mat_a)
 
                 // ── A-side bias accumulation (mins correction) ──
@@ -322,14 +322,14 @@ export func q4k_8x8_q8k_matvec_dual(
                 let sumf_lo_03_mat_b: f32x4 = to_f32(sc_lo_0_mat_b .* plo_03_mat_b)
                 acc0_mat_b = fma(sb_sc0_mat_b, sumf_lo_03_mat_b, acc0_mat_b)
                 let plo_47_mat_b: i32x4 = addp_i32(alo2_mat_b, alo3_mat_b)
-                let sumf_lo_47_mat_b: f32x4 = to_f32(sc_lo_0_mat_b .* plo_47_mat_b)
+                let sumf_lo_47_mat_b: f32x4 = to_f32(sc_hi_0_mat_b .* plo_47_mat_b)
                 acc1_mat_b = fma(sb_sc1_mat_b, sumf_lo_47_mat_b, acc1_mat_b)
 
                 let phi_03_mat_b: i32x4 = addp_i32(ahi0_mat_b, ahi1_mat_b)
                 let sumf_hi_03_mat_b: f32x4 = to_f32(sc_lo_1_mat_b .* phi_03_mat_b)
                 acc0_mat_b = fma(sb_sc0_mat_b, sumf_hi_03_mat_b, acc0_mat_b)
                 let phi_47_mat_b: i32x4 = addp_i32(ahi2_mat_b, ahi3_mat_b)
-                let sumf_hi_47_mat_b: f32x4 = to_f32(sc_lo_1_mat_b .* phi_47_mat_b)
+                let sumf_hi_47_mat_b: f32x4 = to_f32(sc_hi_1_mat_b .* phi_47_mat_b)
                 acc1_mat_b = fma(sb_sc1_mat_b, sumf_hi_47_mat_b, acc1_mat_b)
 
                 // ── B-side bias accumulation ──

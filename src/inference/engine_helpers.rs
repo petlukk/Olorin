@@ -67,9 +67,8 @@ pub(crate) fn load_norm_ptr(
 pub(crate) fn q4k_8x8_supported() -> bool {
     #[cfg(target_arch = "x86_64")]
     { return std::is_x86_feature_detected!("avx2"); }
-    // TODO: ARM 8x8 repack path hangs on Pi 5 — investigate kernel
     #[cfg(target_arch = "aarch64")]
-    { return false; }
+    { return std::arch::is_aarch64_feature_detected!("dotprod"); }
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     { return false; }
 }
