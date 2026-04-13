@@ -101,13 +101,9 @@ impl Engine {
         // 3. Reset state for new sequence
         self.state.reset();
 
-        // 4. Prefill: forward each prompt token (discard logits except last)
-        let n_prompt = tokens.len();
-        for &tok in &tokens[..n_prompt - 1] {
-            self.state.forward_one_graph(&self.model, tok, &self.graph_pool);
-        }
+        // 4. Prefill: batched forward (all prompt tokens at once)
         let mut logits_snapshot = {
-            let logits = self.state.forward_one_graph(&self.model, tokens[n_prompt - 1], &self.graph_pool);
+            let logits = self.state.forward_batch(&self.model, &tokens, &self.graph_pool);
             logits.to_vec()
         };
 
