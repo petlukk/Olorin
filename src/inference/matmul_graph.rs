@@ -359,6 +359,60 @@ pub fn q4k_matvec_8x8_batch_ws(
     }
 }
 
+/// Q4K 8×8 repacked batch GEMM: work-stealing across output row tiles.
+/// Calls the GEMM kernel per claimed tile — weight data loaded once, all tokens processed.
+/// Matches llama.cpp repack.cpp:4241 `gemm(ne00, dst + src0_start, ...)`.
+///
+/// `q8_a` must be pre-repacked into block_q8_Kx4 format via q8k_repack_4.
+/// `nr` = number of tokens (must be multiple of 4, caller zero-pads).
+/// `nc` = number of output rows (total, must be multiple of 8).
+/// Output: `out[token * output_stride + row]`.
+#[allow(clippy::too_many_arguments)]
+pub fn q4k_gemm_8x8_batch_ws(
+    packed: *const u8,
+    q8_a: *const u8,
+    output: *mut f32,
+    n_inner: usize,
+    nc: usize,
+    nr: usize,
+    output_stride: usize,
+    current_chunk: &AtomicI32,
+    ith: usize,
+    _nth: usize,
+) {
+    debug_assert!(nc % 8 == 0);
+    debug_assert!(n_inner % 256 == 0);
+    debug_assert!(nr % 4 == 0);
+
+    let nb = n_inner / 256;
+    let tile_bytes = nb * 1152; // block_q4_Kx8 tile size
+    let n_tiles = nc / 8;
+
+    let mut scratch = [0u8; 128];
+
+    let mut chunk = ith as i32;
+    while (chunk as usize) < n_tiles {
+        let tile = chunk as usize;
+        let w_ptr = unsafe { packed.add(tile * tile_bytes) };
+        let col_start = tile * 8;
+
+        unsafe {
+            ffi_inference::q4k_8x8_q8k_gemm(
+                w_ptr,
+                q8_a,
+                scratch.as_mut_ptr(),
+                output.add(col_start),
+                output_stride as i32,
+                n_inner as i32,
+                nr as i32,
+                8i32,
+            );
+        }
+
+        chunk = current_chunk.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 /// Batch matvec fallback (any dtype): 2D work-stealing across (4-row chunks × token chunks).
 #[allow(clippy::too_many_arguments)]
 pub fn matvec_batch_ws(
