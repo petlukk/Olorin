@@ -1,68 +1,50 @@
-//! Per-layer batched forward — called from forward_batch.rs.
+//! Per-layer batched forward — matches forward_graph.rs threading exactly.
 //!
-//! Replicates every operation in forward_graph::layer_forward_graph,
-//! but uses gemm for Q4K matmuls and the fused attention kernel for
-//! multi-token causal attention. Falls back to per-token matvec for
-//! non-Q4K weights (Q5K/Q6K layers).
+//! All threads participate in every matmul via work-stealing (matvec_step).
+//! Small ops (norm, quant, rope, residual, PLE) are thread-0 only.
+//! Each matmul processes one token at a time with all threads work-stealing rows.
 
-use std::sync::atomic::AtomicI32;
+use std::sync::atomic::{AtomicI32, Ordering};
 use crate::inference::engine::Gemma4Model;
 use crate::inference::forward::{compute_rope_tables, Gemma4State};
 use crate::inference::matmul;
-use crate::inference::matmul_batch;
+use crate::inference::matmul_graph;
 use crate::kernels::ffi_inference;
 use crate::inference::threadpool::SpinBarrier;
 
-/// Zero-pad Q8K buffers for columns n..n_pad (make gemm's N a multiple of 4).
-fn zero_pad_q8(qs: &mut [i8], d: &mut [f32], bsums: &mut [i16],
-               n: usize, n_pad: usize, dim: usize) {
-    let nb = dim / 256;
-    let qs_stride = dim + 12;
-    for t in n..n_pad {
-        qs[t * qs_stride..(t + 1) * qs_stride].fill(0);
-        d[t * nb..(t + 1) * nb].fill(0.0);
-        bsums[t * nb * 16..(t + 1) * nb * 16].fill(0);
-    }
-}
-
-/// Batched matmul: gemm when repacked, per-token matvec fallback otherwise.
-fn batched_matmul(
-    repacked: Option<&[u8]>,
+/// Dispatch a single matvec_ws call — repacked 8x8 or standard fallback.
+/// Identical to forward_graph.rs:matvec_step.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn matvec_step(
     dtype: u32,
     weight: *const u8,
-    q8_qs: &[i8], q8_d: &[f32], q8_bsums: &[i16],
-    q8_a: &mut [u8], scratch: &mut [u8],
-    output: &mut [f32],
-    d_scratch: &mut [f32],
-    n_cols: usize, n_rows: usize, n: usize, n_pad: usize,
+    repacked: Option<&[u8]>,
+    q8: *const i8,
+    q8_d: *const f32,
+    bsums: *const i16,
+    output: *mut f32,
+    d_scratch: *mut f32,
+    n_rows: usize,
+    n_cols: usize,
+    current_chunk: &AtomicI32,
+    ith: usize,
+    nth: usize,
 ) {
     match repacked {
-        Some(rep) => unsafe {
-            matmul_batch::gemm_q4k_8x8(
-                rep.as_ptr(),
-                q8_qs.as_ptr(), q8_d.as_ptr(), q8_bsums.as_ptr(),
-                q8_a.as_mut_ptr(), scratch.as_mut_ptr(),
-                output.as_mut_ptr(), n_cols, n_rows, n_pad,
-            );
-        },
-        None => {
-            let nb = n_cols / 256;
-            let qs_stride = n_cols + 12;
-            for t in 0..n {
-                matmul::matvec(
-                    dtype, weight,
-                    &q8_qs[t * qs_stride..(t + 1) * qs_stride],
-                    &q8_d[t * nb..(t + 1) * nb],
-                    &q8_bsums[t * nb * 16..(t + 1) * nb * 16],
-                    &mut output[t * n_rows..(t + 1) * n_rows],
-                    d_scratch, n_rows, n_cols,
-                );
-            }
-        },
+        Some(p) => matmul_graph::q4k_matvec_8x8_ws(
+            p.as_ptr(), q8, q8_d, bsums, output,
+            n_rows, n_cols, current_chunk, ith, nth,
+        ),
+        None => matmul_graph::matvec_ws(
+            dtype, weight, q8, q8_d, bsums, output, d_scratch,
+            n_rows, n_cols, current_chunk, ith, nth,
+        ),
     }
 }
 
-/// Per-layer batched forward. Mirrors layer_forward_graph exactly.
+/// Per-layer batched forward. Mirrors layer_forward_graph exactly,
+/// processing N tokens per op with work-stealing matmuls.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn layer_forward_batch(
     state: &mut Gemma4State,
@@ -71,7 +53,7 @@ pub(crate) fn layer_forward_batch(
     n: usize,
     seq_len: usize,
     barrier: &SpinBarrier,
-    _current_chunk: &AtomicI32,
+    current_chunk: &AtomicI32,
     ith: usize,
     nth: usize,
 ) {
@@ -84,91 +66,121 @@ pub(crate) fn layer_forward_batch(
     let head_dim_v = model.head_dim_v[il];
     let has_kv = model.kv_shared_source[il].is_none();
     let qkv_dim = n_heads * head_dim;
-    let n_pad = (n + 3) & !3;
 
-    // ── 1. Attn norm + Q8K quant per token (thread 0) ────────────
+    let n_rot = if model.is_swa[il] { model.rope_dim_swa } else { model.rope_dim_global };
+    let rope_theta = if model.is_swa[il] { model.rope_theta_swa } else { model.rope_theta_global };
+    let freq_factors = if !model.is_swa[il] { model.rope_freqs.as_deref() } else { None };
+
+    // ── 1. Attn norm + quant per token (thread 0) ────────────────
+    // Same as forward_graph.rs step 1, looped N times.
     if ith == 0 {
-        let nb = hd / 256;
-        let qs_stride = hd + 12;
         for t in 0..n {
             ffi_inference::gemma4_rmsnorm(
                 state.batch_x[t * hd..].as_ptr(), lw.attn_norm,
                 state.batch_x_norm[t * hd..].as_mut_ptr(), hd as i32, model.rms_eps,
             );
+        }
+    }
+    barrier.wait();
+
+    // ── 2. Q projection per token (work-stealing, all threads) ───
+    // Each token: quant → barrier → WS matvec → barrier
+    for t in 0..n {
+        if ith == 0 {
             matmul::quant_input(
                 &state.batch_x_norm[t * hd..(t + 1) * hd],
-                &mut state.batch_q8_qs[t * qs_stride..(t + 1) * qs_stride],
-                &mut state.batch_q8_d[t * nb..(t + 1) * nb],
-                &mut state.batch_q8_bsums[t * nb * 16..(t + 1) * nb * 16],
+                &mut state.q8_qs, &mut state.q8_d, &mut state.q8_bsums,
             );
         }
-        zero_pad_q8(&mut state.batch_q8_qs, &mut state.batch_q8_d,
-                     &mut state.batch_q8_bsums, n, n_pad, hd);
-    }
-    barrier.wait();
-
-    // ── 2. Q projection (thread 0) ──────────────────────────────
-    if ith == 0 {
-        batched_matmul(
-            lw.wq_repacked.as_deref(), lw.wq_dtype, lw.wq,
-            &state.batch_q8_qs, &state.batch_q8_d, &state.batch_q8_bsums,
-            &mut state.batch_q8_a, &mut state.gemm_scratch,
-            &mut state.batch_q, &mut state.q6k_d_scratch,
-            hd, qkv_dim, n, n_pad,
+        barrier.wait();
+        current_chunk.store(nth as i32, Ordering::Relaxed);
+        barrier.wait();
+        matvec_step(
+            lw.wq_dtype, lw.wq, lw.wq_repacked.as_deref(),
+            state.q8_qs.as_ptr(), state.q8_d.as_ptr(), state.q8_bsums.as_ptr(),
+            unsafe { state.batch_q.as_mut_ptr().add(t * qkv_dim) },
+            state.q6k_d_scratch.as_mut_ptr(),
+            qkv_dim, hd, current_chunk, ith, nth,
         );
+        barrier.wait();
+    }
+
+    // ── 3. Q norm + RoPE per token (thread 0) ────────────────────
+    if ith == 0 {
+        for t in 0..n {
+            compute_rope_tables(&mut state.cos_table, &mut state.sin_table,
+                seq_len + t, n_rot, rope_theta, freq_factors);
+            if !lw.q_norm.is_null() {
+                for h in 0..n_heads {
+                    let off = t * qkv_dim + h * head_dim;
+                    ffi_inference::gemma4_rmsnorm(
+                        unsafe { state.batch_q.as_ptr().add(off) }, lw.q_norm,
+                        state.x_norm.as_mut_ptr(), head_dim as i32, model.rms_eps,
+                    );
+                    state.batch_q[off..off + head_dim].copy_from_slice(&state.x_norm[..head_dim]);
+                }
+            }
+            ffi_inference::gemma4_rope(
+                unsafe { state.batch_q.as_mut_ptr().add(t * qkv_dim) },
+                state.cos_table.as_ptr(), state.sin_table.as_ptr(),
+                head_dim as i32, n_heads as i32,
+            );
+        }
     }
     barrier.wait();
 
-    // ── 3-4. K/V projection + per-token norms + RoPE + cache store ────
-    let n_rot = if model.is_swa[il] { model.rope_dim_swa } else { model.rope_dim_global };
-    let rope_theta = if model.is_swa[il] { model.rope_theta_swa } else { model.rope_theta_global };
-    let freq_factors = if !model.is_swa[il] { model.rope_freqs.as_deref() } else { None };
-
+    // ── 4. K/V projections + norms + RoPE + cache (WS matmul, thread-0 small ops) ──
     if has_kv {
         let kv_dim = n_kv_heads * head_dim;
         let kv_dim_v = n_kv_heads * head_dim_v;
 
-        if ith == 0 {
-            batched_matmul(
-                lw.wk_repacked.as_deref(), lw.wk_dtype, lw.wk,
-                &state.batch_q8_qs, &state.batch_q8_d, &state.batch_q8_bsums,
-                &mut state.batch_q8_a, &mut state.gemm_scratch,
-                &mut state.batch_k, &mut state.q6k_d_scratch,
-                hd, kv_dim, n, n_pad,
+        // K matmul per token (work-stealing)
+        for t in 0..n {
+            if ith == 0 {
+                matmul::quant_input(
+                    &state.batch_x_norm[t * hd..(t + 1) * hd],
+                    &mut state.q8_qs, &mut state.q8_d, &mut state.q8_bsums,
+                );
+            }
+            barrier.wait();
+            current_chunk.store(nth as i32, Ordering::Relaxed);
+            barrier.wait();
+            matvec_step(
+                lw.wk_dtype, lw.wk, lw.wk_repacked.as_deref(),
+                state.q8_qs.as_ptr(), state.q8_d.as_ptr(), state.q8_bsums.as_ptr(),
+                unsafe { state.batch_k.as_mut_ptr().add(t * kv_dim) },
+                state.q6k_d_scratch.as_mut_ptr(),
+                kv_dim, hd, current_chunk, ith, nth,
             );
-            batched_matmul(
-                lw.wv_repacked.as_deref(), lw.wv_dtype, lw.wv,
-                &state.batch_q8_qs, &state.batch_q8_d, &state.batch_q8_bsums,
-                &mut state.batch_q8_a, &mut state.gemm_scratch,
-                &mut state.batch_v, &mut state.q6k_d_scratch,
-                hd, kv_dim_v, n, n_pad,
-            );
+            barrier.wait();
         }
-        barrier.wait();
 
+        // V matmul per token (work-stealing)
+        for t in 0..n {
+            if ith == 0 {
+                matmul::quant_input(
+                    &state.batch_x_norm[t * hd..(t + 1) * hd],
+                    &mut state.q8_qs, &mut state.q8_d, &mut state.q8_bsums,
+                );
+            }
+            barrier.wait();
+            current_chunk.store(nth as i32, Ordering::Relaxed);
+            barrier.wait();
+            matvec_step(
+                lw.wv_dtype, lw.wv, lw.wv_repacked.as_deref(),
+                state.q8_qs.as_ptr(), state.q8_d.as_ptr(), state.q8_bsums.as_ptr(),
+                unsafe { state.batch_v.as_mut_ptr().add(t * kv_dim_v) },
+                state.q6k_d_scratch.as_mut_ptr(),
+                kv_dim_v, hd, current_chunk, ith, nth,
+            );
+            barrier.wait();
+        }
+
+        // K/V norms + RoPE + cache store (thread 0)
         if ith == 0 {
             for t in 0..n {
                 compute_rope_tables(&mut state.cos_table, &mut state.sin_table,
                     seq_len + t, n_rot, rope_theta, freq_factors);
-
-                // Q norm per-head
-                if !lw.q_norm.is_null() {
-                    for h in 0..n_heads {
-                        let off = t * qkv_dim + h * head_dim;
-                        ffi_inference::gemma4_rmsnorm(
-                            unsafe { state.batch_q.as_ptr().add(off) }, lw.q_norm,
-                            state.x_norm.as_mut_ptr(), head_dim as i32, model.rms_eps,
-                        );
-                        state.batch_q[off..off + head_dim].copy_from_slice(&state.x_norm[..head_dim]);
-                    }
-                }
-                ffi_inference::gemma4_rope(
-                    unsafe { state.batch_q.as_mut_ptr().add(t * qkv_dim) },
-                    state.cos_table.as_ptr(), state.sin_table.as_ptr(),
-                    head_dim as i32, n_heads as i32,
-                );
-
-                // K norm per-head
                 if !lw.k_norm.is_null() {
                     for h in 0..n_kv_heads {
                         let off = t * kv_dim + h * head_dim;
@@ -179,7 +191,6 @@ pub(crate) fn layer_forward_batch(
                         state.batch_k[off..off + head_dim].copy_from_slice(&state.x_norm[..head_dim]);
                     }
                 }
-                // V bare norm per-head
                 for h in 0..n_kv_heads {
                     let off = t * kv_dim_v + h * head_dim_v;
                     super::forward::bare_rmsnorm(&mut state.batch_v[off..off + head_dim_v], model.rms_eps);
@@ -194,29 +205,7 @@ pub(crate) fn layer_forward_batch(
         }
         barrier.wait();
     } else {
-        // Shared KV layer — Q norm + RoPE only
-        if ith == 0 {
-            for t in 0..n {
-                compute_rope_tables(&mut state.cos_table, &mut state.sin_table,
-                    seq_len + t, n_rot, rope_theta, freq_factors);
-                if !lw.q_norm.is_null() {
-                    for h in 0..n_heads {
-                        let off = t * qkv_dim + h * head_dim;
-                        ffi_inference::gemma4_rmsnorm(
-                            unsafe { state.batch_q.as_ptr().add(off) }, lw.q_norm,
-                            state.x_norm.as_mut_ptr(), head_dim as i32, model.rms_eps,
-                        );
-                        state.batch_q[off..off + head_dim].copy_from_slice(&state.x_norm[..head_dim]);
-                    }
-                }
-                ffi_inference::gemma4_rope(
-                    unsafe { state.batch_q.as_mut_ptr().add(t * qkv_dim) },
-                    state.cos_table.as_ptr(), state.sin_table.as_ptr(),
-                    head_dim as i32, n_heads as i32,
-                );
-            }
-        }
-        barrier.wait();
+        // Shared KV layer — Q norm + RoPE only (already done in step 3)
     }
 
     // ── 5. Attention (heads split across threads, fused kernel) ──
@@ -245,41 +234,44 @@ pub(crate) fn layer_forward_batch(
                     state.batch_attn_out.as_mut_ptr().add(h * head_dim),
                     state.attn_scores.as_mut_ptr().add(ith * attn_scores_stride),
                     state.kv_f32_scratch.as_mut_ptr().add(ith * kv_scratch_stride),
-                    head_dim as i32, qkv_dim as i32, qkv_dim as i32,
-                    stride_kv as i32, (kv_h * head_dim) as i32,
-                    n_kv as i32, n as i32, seq_len as i32, 1.0f32,
+                    head_dim as i32,
+                    qkv_dim as i32,       // q_stride
+                    qkv_dim as i32,       // out_stride
+                    stride_kv as i32,
+                    (kv_h * head_dim) as i32,
+                    n_kv as i32,
+                    n as i32,
+                    seq_len as i32,
+                    1.0f32,
                 );
             }
         }
     }
     barrier.wait();
 
-    // ── 6. Quant attn_out + Wo projection (thread 0) ───────────
-    if ith == 0 {
-        let ao_dim = n_heads * head_dim;
-        let nb_ao = ao_dim / 256;
-        let qs_ao = ao_dim + 12;
-        for t in 0..n {
+    // ── 6. Wo projection per token (WS matmul) ──────────────────
+    for t in 0..n {
+        let attn_out_dim = n_heads * head_dim;
+        if ith == 0 {
             matmul::quant_input(
-                &state.batch_attn_out[t * ao_dim..(t + 1) * ao_dim],
-                &mut state.batch_q8_qs[t * qs_ao..(t + 1) * qs_ao],
-                &mut state.batch_q8_d[t * nb_ao..(t + 1) * nb_ao],
-                &mut state.batch_q8_bsums[t * nb_ao * 16..(t + 1) * nb_ao * 16],
+                &state.batch_attn_out[t * attn_out_dim..(t + 1) * attn_out_dim],
+                &mut state.q8_qs, &mut state.q8_d, &mut state.q8_bsums,
             );
         }
-        zero_pad_q8(&mut state.batch_q8_qs, &mut state.batch_q8_d,
-                     &mut state.batch_q8_bsums, n, n_pad, ao_dim);
-        batched_matmul(
-            lw.wo_repacked.as_deref(), lw.wo_dtype, lw.wo,
-            &state.batch_q8_qs, &state.batch_q8_d, &state.batch_q8_bsums,
-            &mut state.batch_q8_a, &mut state.gemm_scratch,
-            &mut state.batch_wo_out, &mut state.q6k_d_scratch,
-            ao_dim, hd, n, n_pad,
+        barrier.wait();
+        current_chunk.store(nth as i32, Ordering::Relaxed);
+        barrier.wait();
+        matvec_step(
+            lw.wo_dtype, lw.wo, lw.wo_repacked.as_deref(),
+            state.q8_qs.as_ptr(), state.q8_d.as_ptr(), state.q8_bsums.as_ptr(),
+            unsafe { state.batch_wo_out.as_mut_ptr().add(t * hd) },
+            state.q6k_d_scratch.as_mut_ptr(),
+            hd, attn_out_dim, current_chunk, ith, nth,
         );
+        barrier.wait();
     }
-    barrier.wait();
 
-    // ── 7. Post-attn norm + residual + FFN norm + quant (thread 0) ──
+    // ── 7. Post-attn norm + residual + FFN norm (thread 0) ──────
     if ith == 0 {
         for t in 0..n {
             let off = t * hd;
@@ -303,71 +295,109 @@ pub(crate) fn layer_forward_batch(
                 state.batch_x_norm[off..].as_mut_ptr(), hd as i32, model.rms_eps,
             );
         }
-        let nb = hd / 256;
-        let qs_stride = hd + 12;
-        for t in 0..n {
-            matmul::quant_input(
-                &state.batch_x_norm[t * hd..(t + 1) * hd],
-                &mut state.batch_q8_qs[t * qs_stride..(t + 1) * qs_stride],
-                &mut state.batch_q8_d[t * nb..(t + 1) * nb],
-                &mut state.batch_q8_bsums[t * nb * 16..(t + 1) * nb * 16],
-            );
-        }
-        zero_pad_q8(&mut state.batch_q8_qs, &mut state.batch_q8_d,
-                     &mut state.batch_q8_bsums, n, n_pad, hd);
     }
     barrier.wait();
 
-    // ── 8. FFN: gate + up projections (thread 0) ───────────────
+    // ── 8. FFN gate+up per token (WS matmul) ────────────────────
+    // Match forward_graph.rs: dual dispatch when both are Q4K, separate otherwise.
     let ffn_dim = model.ffn_dim[il];
-    if ith == 0 {
-        batched_matmul(
-            lw.w_gate_repacked.as_deref(), lw.w_gate_dtype, lw.w_gate,
-            &state.batch_q8_qs, &state.batch_q8_d, &state.batch_q8_bsums,
-            &mut state.batch_q8_a, &mut state.gemm_scratch,
-            &mut state.batch_gate, &mut state.q6k_d_scratch,
-            hd, ffn_dim, n, n_pad,
+    if lw.w_gate_dtype == matmul::GGML_TYPE_Q4_K && lw.w_up_dtype == matmul::GGML_TYPE_Q4_K {
+        debug_assert!(
+            lw.w_gate_repacked.is_some() == lw.w_up_repacked.is_some(),
+            "ffn_gate/ffn_up repack invariant violated in layer {il}"
         );
-        batched_matmul(
-            lw.w_up_repacked.as_deref(), lw.w_up_dtype, lw.w_up,
-            &state.batch_q8_qs, &state.batch_q8_d, &state.batch_q8_bsums,
-            &mut state.batch_q8_a, &mut state.gemm_scratch,
-            &mut state.batch_up, &mut state.q6k_d_scratch,
-            hd, ffn_dim, n, n_pad,
-        );
-    }
-    barrier.wait();
-
-    // ── 9. GELU_mul + quant + down projection (thread 0) ───────
-    if ith == 0 {
         for t in 0..n {
+            if ith == 0 {
+                matmul::quant_input(
+                    &state.batch_x_norm[t * hd..(t + 1) * hd],
+                    &mut state.q8_qs, &mut state.q8_d, &mut state.q8_bsums,
+                );
+            }
+            barrier.wait();
+            current_chunk.store(nth as i32, Ordering::Relaxed);
+            barrier.wait();
+            match (lw.w_gate_repacked.as_deref(), lw.w_up_repacked.as_deref()) {
+                (Some(g), Some(u)) => matmul_graph::q4k_matvec_dual_8x8_ws(
+                    g.as_ptr(), u.as_ptr(),
+                    state.q8_qs.as_ptr(), state.q8_d.as_ptr(), state.q8_bsums.as_ptr(),
+                    unsafe { state.batch_gate.as_mut_ptr().add(t * ffn_dim) },
+                    unsafe { state.batch_up.as_mut_ptr().add(t * ffn_dim) },
+                    ffn_dim, hd, current_chunk, ith, nth,
+                ),
+                _ => matmul_graph::q4k_matvec_dual_ws(
+                    lw.w_gate, lw.w_up,
+                    state.q8_qs.as_ptr(), state.q8_d.as_ptr(), state.q8_bsums.as_ptr(),
+                    unsafe { state.batch_gate.as_mut_ptr().add(t * ffn_dim) },
+                    unsafe { state.batch_up.as_mut_ptr().add(t * ffn_dim) },
+                    ffn_dim, hd, current_chunk, ith, nth,
+                ),
+            }
+            barrier.wait();
+        }
+    } else {
+        for t in 0..n {
+            if ith == 0 {
+                matmul::quant_input(
+                    &state.batch_x_norm[t * hd..(t + 1) * hd],
+                    &mut state.q8_qs, &mut state.q8_d, &mut state.q8_bsums,
+                );
+            }
+            barrier.wait();
+            current_chunk.store(nth as i32, Ordering::Relaxed);
+            barrier.wait();
+            matvec_step(
+                lw.w_gate_dtype, lw.w_gate, lw.w_gate_repacked.as_deref(),
+                state.q8_qs.as_ptr(), state.q8_d.as_ptr(), state.q8_bsums.as_ptr(),
+                unsafe { state.batch_gate.as_mut_ptr().add(t * ffn_dim) },
+                state.q6k_d_scratch.as_mut_ptr(),
+                ffn_dim, hd, current_chunk, ith, nth,
+            );
+            barrier.wait();
+            if ith == 0 {
+                matmul::quant_input(
+                    &state.batch_x_norm[t * hd..(t + 1) * hd],
+                    &mut state.q8_qs, &mut state.q8_d, &mut state.q8_bsums,
+                );
+            }
+            barrier.wait();
+            current_chunk.store(nth as i32, Ordering::Relaxed);
+            barrier.wait();
+            matvec_step(
+                lw.w_up_dtype, lw.w_up, lw.w_up_repacked.as_deref(),
+                state.q8_qs.as_ptr(), state.q8_d.as_ptr(), state.q8_bsums.as_ptr(),
+                unsafe { state.batch_up.as_mut_ptr().add(t * ffn_dim) },
+                state.q6k_d_scratch.as_mut_ptr(),
+                ffn_dim, hd, current_chunk, ith, nth,
+            );
+            barrier.wait();
+        }
+    }
+
+    // ── 9. GELU + quant + down matmul per token (WS) ────────────
+    for t in 0..n {
+        if ith == 0 {
             ffi_inference::gelu_mul(
                 state.batch_gate[t * ffn_dim..].as_ptr(),
                 state.batch_up[t * ffn_dim..].as_ptr(),
                 state.batch_gate[t * ffn_dim..].as_mut_ptr(), ffn_dim as i32,
             );
-        }
-        let nb_ffn = ffn_dim / 256;
-        let qs_ffn = ffn_dim + 12;
-        for t in 0..n {
             matmul::quant_input(
                 &state.batch_gate[t * ffn_dim..(t + 1) * ffn_dim],
-                &mut state.batch_ffn_q8_qs[t * qs_ffn..(t + 1) * qs_ffn],
-                &mut state.batch_ffn_q8_d[t * nb_ffn..(t + 1) * nb_ffn],
-                &mut state.batch_ffn_q8_bsums[t * nb_ffn * 16..(t + 1) * nb_ffn * 16],
+                &mut state.ffn_q8_qs, &mut state.ffn_q8_d, &mut state.ffn_q8_bsums,
             );
         }
-        zero_pad_q8(&mut state.batch_ffn_q8_qs, &mut state.batch_ffn_q8_d,
-                     &mut state.batch_ffn_q8_bsums, n, n_pad, ffn_dim);
-        batched_matmul(
-            lw.w_down_repacked.as_deref(), lw.w_down_dtype, lw.w_down,
-            &state.batch_ffn_q8_qs, &state.batch_ffn_q8_d, &state.batch_ffn_q8_bsums,
-            &mut state.batch_ffn_q8_a, &mut state.gemm_scratch,
-            &mut state.batch_down, &mut state.q6k_d_scratch,
-            ffn_dim, hd, n, n_pad,
+        barrier.wait();
+        current_chunk.store(nth as i32, Ordering::Relaxed);
+        barrier.wait();
+        matvec_step(
+            lw.w_down_dtype, lw.w_down, lw.w_down_repacked.as_deref(),
+            state.ffn_q8_qs.as_ptr(), state.ffn_q8_d.as_ptr(), state.ffn_q8_bsums.as_ptr(),
+            unsafe { state.batch_down.as_mut_ptr().add(t * hd) },
+            state.q6k_d_scratch.as_mut_ptr(),
+            hd, ffn_dim, current_chunk, ith, nth,
         );
+        barrier.wait();
     }
-    barrier.wait();
 
     // ── 10. Post-FFN norm + residual + PLE + scale (thread 0) ───
     if ith == 0 {
