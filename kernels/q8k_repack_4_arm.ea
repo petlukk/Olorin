@@ -1,43 +1,25 @@
 // q8k_repack_4_arm.ea — Pack 4 per-row Q8K inputs into block_q8_Kx4 tiles.
 //
-// ARM NEON mirror of q8k_repack_4.ea. Identical logic — the body is
-// arch-agnostic (*i64 pointer subscripts + f32x4 load/store).
-//
-// Target layout: llama.cpp block_q8_Kx4 (repack.h:96-100), consumed by
-// the NEON gemm path kernels/q4k_dot_8x8_gemm_arm.ea (Phase 2 Plan 1 T6).
-//
-// Layout is confirmed in:
-//   docs/superpowers/research/2026-04-11-q4k-8x8-gemm-ea-template.md
-// sections 4 (qs byte interleave) and 5 (bsums byte interleave).
+// ARM NEON mirror of q8k_repack_4.ea. Uses 4-byte-granular interleaving
+// for qs to match vdot_lane_i32 access pattern.
 //
 // Per super-block (1168 bytes):
-//   dst[  0.. 16) — d[4]    : 4 × f32 row deltas
-//   dst[ 16..1040) — qs[1024]: 4-row 8-byte-granular interleave
+//   dst[  0.. 16) — d[4]    : 4 x f32 row deltas
+//   dst[ 16..1040) — qs[1024]: 4-row 4-byte-granular interleave
 //   dst[1040..1168) — bsums[64]: row-group-ordered with granularity 4 i16 per row
 //
-// qs layout: for (row r, sub-block s, quant position p) with r∈0..4, s∈0..8, p∈0..32:
-//   dst_byte_off = 16 + (s/2)*256 + (s%2)*128 + (p/8)*32 + r*8 + (p%8)
-// Eight-byte-granular: inside each 32-byte chunk, row r gets 8 contiguous
-// bytes at offset r*8. Chunks within a sub-block are laid out by qchunk
-// (p/8) and sub-block half (s%2).
+// qs layout (4-byte interleaving):
+//   64 groups of 16 bytes (4 rows x 4 bytes).
+//   Group g: dst[16 + g*16 + r*4 .. 16 + g*16 + r*4 + 3] = row_r_qs[g*4..g*4+3]
+//   A 16-byte load gives [row0 4B][row1 4B][row2 4B][row3 4B] — perfect
+//   for vdot_lane_i32 where each lane selects one row's 4 bytes.
 //
-// bsums layout: for (row r, sub-block s, bsum-half h) with r∈0..4, s∈0..8, h∈0..2:
-//   i16_off = (s/2)*16 + (r/2)*8 + (r%2)*4 + (s%2)*2 + h
-// Rows 0,1 occupy the low 128-bit half of each sb_iter's 16-i16 group;
-// rows 2,3 the high 128-bit half. Each row contributes 4 i16 per sb_iter
-// (2 sub-blocks × 2 halves), contiguous in both source and destination.
+// bsums layout unchanged.
 //
 // SIMD strategy:
 //   - Deltas: one f32x4 load + store per super-block.
-//   - qs: 8-byte-granular interleave via *i64 pointer subscripts — the
-//     same pattern kernels/q4k_repack_arm.ea uses for Q4K weight repacking.
-//     On AArch64, a naturally-aligned 8-byte i64 load/store compiles to a
-//     single LDR/STR X register transfer.
-//   - bsums: same 64-bit pattern, using *i16 subscripts on aligned 4-i16
-//     groups.
-//
-// No arithmetic, no shuffles, no fallbacks. Every transfer is a native
-// load/store that compiles to a single instruction.
+//   - qs: 4-byte-granular interleave via *i32 pointer subscripts.
+//   - bsums: 64-bit pattern via *i64 subscripts.
 
 #[cfg(aarch64)]
 
@@ -70,23 +52,20 @@ export func q8k_repack_4(
 ) {
     // Typed views onto dst for the three output sections.
     let dst_f32: *mut f32 = ptr_as_f32(dst)
+    let dst_i32: *mut i32 = ptr_as_i32(dst)
     let dst_i64: *mut i64 = ptr_as_i64(dst)
     let dst_i16: *mut i16 = ptr_as_i16(dst)
 
-    // Typed views onto the 4 per-row qs inputs as i64* for 8-byte copies.
-    // Each per-row qs buffer is nb*256 bytes. 8-byte slice at byte offset B
-    // corresponds to i64 index B/8. Source stride between sub-blocks is
-    // 32 bytes = 4 i64 elements; between qchunks within a sub-block is
-    // 8 bytes = 1 i64 element.
-    let row0_qs64: *restrict i64 = ptr_as_i64(row0_qs)
-    let row1_qs64: *restrict i64 = ptr_as_i64(row1_qs)
-    let row2_qs64: *restrict i64 = ptr_as_i64(row2_qs)
-    let row3_qs64: *restrict i64 = ptr_as_i64(row3_qs)
+    // Typed views onto the 4 per-row qs inputs as i32* for 4-byte copies.
+    let row0_qs32: *restrict i32 = ptr_as_i32(row0_qs)
+    let row1_qs32: *restrict i32 = ptr_as_i32(row1_qs)
+    let row2_qs32: *restrict i32 = ptr_as_i32(row2_qs)
+    let row3_qs32: *restrict i32 = ptr_as_i32(row3_qs)
 
-    // Super-block strides: 1168 B = 146 i64 = 584 i16 = 292 f32.
-    // Stride/offset constants in i64 units (1168 B per block_q8_Kx4).
-    let super_block_i64: i32 = 146       // 1168 / 8 — full struct stride
-    let qs_i64_off:      i32 = 2         // 16   / 8 — byte offset of qs within block
+    // Super-block strides in various unit sizes.
+    let super_block_i32: i32 = 292       // 1168 / 4
+    let super_block_i64: i32 = 146       // 1168 / 8
+    let qs_i32_off:      i32 = 4         // 16   / 4 — byte offset of qs within block
     let bsums_i64_off:   i32 = 130       // 1040 / 8 — byte offset of bsums within block
 
     let mut b: i32 = 0
@@ -95,30 +74,19 @@ export func q8k_repack_4(
         copy_deltas(row_d, dst_f32, b)
 
         // ── Section 2: qs[1024] 4-row interleave ──
-        // Layout formula (from research note):
-        //   dst[off + (sb/2)*256 + (sb%2)*128 + qc*32 + r*8 + (p%8)] = rowN_qs[sb*32 + qc*8 + (p%8)]
-        // In i64 units (8 bytes per row per qchunk):
-        //   dst_i64[qs_b_dst + sb_iter*32 + half*16 + qc*4 + r]
-        //     = rowN_qs64[b*32 + sb_iter*8 + half*4 + qc]
-        let qs_b_dst: i32 = b * super_block_i64 + qs_i64_off
+        // 4-byte interleaving: 64 groups of 16 bytes (4 rows x 4 bytes).
+        // Group g: dst_i32[base + g*4 + r] = rowN_qs32[b*64 + g]
+        let qs_b_dst: i32 = b * super_block_i32 + qs_i32_off
 
-        let mut sb_iter: i32 = 0
-        while sb_iter < 4 {
-            let mut half: i32 = 0
-            while half < 2 {
-                let s_src_base: i32 = b * 32 + sb_iter * 8 + half * 4
-                let s_dst_base: i32 = qs_b_dst + sb_iter * 32 + half * 16
-                let mut qc: i32 = 0
-                while qc < 4 {
-                    dst_i64[s_dst_base + qc * 4 + 0] = row0_qs64[s_src_base + qc]
-                    dst_i64[s_dst_base + qc * 4 + 1] = row1_qs64[s_src_base + qc]
-                    dst_i64[s_dst_base + qc * 4 + 2] = row2_qs64[s_src_base + qc]
-                    dst_i64[s_dst_base + qc * 4 + 3] = row3_qs64[s_src_base + qc]
-                    qc = qc + 1
-                }
-                half = half + 1
-            }
-            sb_iter = sb_iter + 1
+        let mut g: i32 = 0
+        while g < 64 {
+            let src_idx: i32 = b * 64 + g
+            let dst_base: i32 = qs_b_dst + g * 4
+            dst_i32[dst_base]     = row0_qs32[src_idx]
+            dst_i32[dst_base + 1] = row1_qs32[src_idx]
+            dst_i32[dst_base + 2] = row2_qs32[src_idx]
+            dst_i32[dst_base + 3] = row3_qs32[src_idx]
+            g = g + 1
         }
 
         // ── Section 3: bsums[64] — row-group interleave ──────────────

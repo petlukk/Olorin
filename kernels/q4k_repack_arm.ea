@@ -38,28 +38,28 @@ func copy_d_dmin(
     d16d[d / 2 + 15] = d16s[r7 / 2 + 1]
 }
 
-// Interleave quants from 8 source blocks in 8-byte chunks via i64 load/store.
+// Interleave quants from 8 source blocks in 4-byte chunks via i32 load/store.
 // Source quants: offset 16..143 in each 144-byte block (128 bytes per block).
-// Output: 1024 bytes at dst+d+128, round-robin 8 bytes per row.
+// Output: 1024 bytes at dst+d+128, round-robin 4 bytes per row.
+// 32 groups × 32 bytes (8 rows × 4 bytes) = 1024 bytes total.
 func interleave_quants(
     src: *restrict u8, dst: *mut u8, d: i32,
     r0: i32, r1: i32, r2: i32, r3: i32,
     r4: i32, r5: i32, r6: i32, r7: i32
 ) {
-    let s64: *restrict i64 = ptr_as_i64(ptr_as_i8(src))
-    let d64: *mut i64 = ptr_as_i64(ptr_as_i8(dst))
+    let s32: *restrict i32 = ptr_as_i32(ptr_as_i8(src))
+    let d32: *mut i32 = ptr_as_i32(ptr_as_i8(dst))
     let mut c: i32 = 0
-    while c < 16 {
-        let sq: i32 = (16 + c * 8) / 8  // source offset in i64 units
-        let dq: i32 = (d + 128 + c * 64) / 8  // dest offset in i64 units
-        d64[dq]     = s64[(r0 + 16 + c * 8) / 8]
-        d64[dq + 1] = s64[(r1 + 16 + c * 8) / 8]
-        d64[dq + 2] = s64[(r2 + 16 + c * 8) / 8]
-        d64[dq + 3] = s64[(r3 + 16 + c * 8) / 8]
-        d64[dq + 4] = s64[(r4 + 16 + c * 8) / 8]
-        d64[dq + 5] = s64[(r5 + 16 + c * 8) / 8]
-        d64[dq + 6] = s64[(r6 + 16 + c * 8) / 8]
-        d64[dq + 7] = s64[(r7 + 16 + c * 8) / 8]
+    while c < 32 {
+        let dq: i32 = (d + 128 + c * 32) / 4
+        d32[dq]     = s32[(r0 + 16 + c * 4) / 4]
+        d32[dq + 1] = s32[(r1 + 16 + c * 4) / 4]
+        d32[dq + 2] = s32[(r2 + 16 + c * 4) / 4]
+        d32[dq + 3] = s32[(r3 + 16 + c * 4) / 4]
+        d32[dq + 4] = s32[(r4 + 16 + c * 4) / 4]
+        d32[dq + 5] = s32[(r5 + 16 + c * 4) / 4]
+        d32[dq + 6] = s32[(r6 + 16 + c * 4) / 4]
+        d32[dq + 7] = s32[(r7 + 16 + c * 4) / 4]
         c = c + 1
     }
 }

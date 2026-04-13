@@ -1,7 +1,8 @@
 // q4k_dot_8x8_arm.ea — Q4Kx8 repacked matvec kernel (ARM NEON + dotprod).
 //
-// Line-for-line translation of ggml_gemv_q4_K_8x8_q8_K (arch/arm/repack.cpp:709).
-// Uses vdot_i32 for 4-wide dot products, processes column pairs.
+// Single-token decode path. Q4K weights are 4-byte interleaved (repacked).
+// Q8K input is raw (not repacked). Uses vdot_i32 with dup4 broadcast
+// to match the 4-byte interleaved Q4K layout.
 
 #[cfg(aarch64)]
 
@@ -27,8 +28,8 @@ export func q4k_8x8_q8k_matvec(
     let km2: i32 = 0x0f0f0f0f
     let km3: i32 = 0x03030303
 
-    // Broadcast mask: duplicate low 8 bytes to high 8 bytes
-    let dup8: u8x16 = [0,1,2,3,4,5,6,7, 0,1,2,3,4,5,6,7]
+    // Broadcast mask: duplicate 4 bytes to fill 16 bytes
+    let dup4: u8x16 = [0,1,2,3, 0,1,2,3, 0,1,2,3, 0,1,2,3]
 
     let d16: *restrict i16 = ptr_as_i16(ptr_as_i8(packed))
     let packed_i8: *restrict i8 = ptr_as_i8(packed)
@@ -37,7 +38,6 @@ export func q4k_8x8_q8k_matvec(
 
     let mut x: i32 = 0
     while x < n_rows / 8 {
-        // Accumulators: 2 x f32x4 = 8 rows
         let mut acc0: f32x4 = splat(0.0)
         let mut acc1: f32x4 = splat(0.0)
 
@@ -45,14 +45,12 @@ export func q4k_8x8_q8k_matvec(
         while b < nb {
             let bp: i32 = (x * nb + b) * 1152
 
-            // d[0..3], d[4..7] as f32x4
             let q4d0: f32x4 = cvt_f16_f32(load(d16, bp / 2))
             let q4d1: f32x4 = cvt_f16_f32(load(d16, bp / 2 + 4))
             let q8d: f32x4 = splat(q8_d[b])
             let sb_sc0: f32x4 = q4d0 .* q8d
             let sb_sc1: f32x4 = q4d1 .* q8d
 
-            // dmin[0..3], dmin[4..7]
             let q4dm0: f32x4 = cvt_f16_f32(load(d16, bp / 2 + 8))
             let q4dm1: f32x4 = cvt_f16_f32(load(d16, bp / 2 + 12))
             let sb_mn0: f32x4 = q4dm0 .* q8d
@@ -61,10 +59,7 @@ export func q4k_8x8_q8k_matvec(
             let mut bias0: i32x4 = splat(0)
             let mut bias1: i32x4 = splat(0)
 
-            // bsums: pairwise add 16 → 8 values.
-            // Loads need explicit i16x8 type annotations (Ea load is
-            // type-directed — inferring from the hadd_i16 argument slot
-            // picks the narrowest match, giving i16x4 instead).
+            // Bsums: pairwise add 16 to 8 values
             let bs_lo: i16x8 = load(q8_bsums, b * 16)
             let bs_hi: i16x8 = load(q8_bsums, b * 16 + 8)
             let bsums: i16x8 = addp_i16(bs_lo, bs_hi)
@@ -72,7 +67,7 @@ export func q4k_8x8_q8k_matvec(
 
             let mut sb: i32 = 0
             while sb < 4 {
-                // Decode scales for sub-block pair
+                // Scale decode
                 let sp: *restrict i32 = ptr_as_i32(ptr_as_i8(packed))
                 let sc0: i32 = bp + 32 + 24 * sb
                 let u00: i32 = sp[sc0/4]
@@ -92,134 +87,59 @@ export func q4k_8x8_q8k_matvec(
                 let t11: i32 = (u12 & km2) | (((u10 >> 6) & km3) << 4)
                 let t13: i32 = ((u12 >> 4) & km2) | (((u11 >> 6) & km3) << 4)
 
-                // Scales as i32x4: [s0,s1,s2,s3] and [s4,s5,s6,s7]
                 let sc_lo_0: i32x4 = [t00 & 255, (t00>>8)&255, (t00>>16)&255, (t00>>24)&255]
                 let sc_hi_0: i32x4 = [t01 & 255, (t01>>8)&255, (t01>>16)&255, (t01>>24)&255]
                 let sc_lo_1: i32x4 = [t10 & 255, (t10>>8)&255, (t10>>16)&255, (t10>>24)&255]
                 let sc_hi_1: i32x4 = [t11 & 255, (t11>>8)&255, (t11>>16)&255, (t11>>24)&255]
 
-                // Mins as i16x8: [mn0..mn3, mn4..mn7] per sub-block
-                let mn_0: i16x8 = [
-                    to_i16(t02 & 255), to_i16((t02>>8)&255), to_i16((t02>>16)&255), to_i16((t02>>24)&255),
-                    to_i16(t03 & 255), to_i16((t03>>8)&255), to_i16((t03>>16)&255), to_i16((t03>>24)&255)
-                ]
-                let mn_1: i16x8 = [
-                    to_i16(t12 & 255), to_i16((t12>>8)&255), to_i16((t12>>16)&255), to_i16((t12>>24)&255),
-                    to_i16(t13 & 255), to_i16((t13>>8)&255), to_i16((t13>>16)&255), to_i16((t13>>24)&255)
-                ]
-
                 let q4_base: i32 = bp + 128 + sb * 256
 
-                // Load Q8K: 8 chunks of 8 bytes, each broadcast to 16 bytes.
-                // Ea load is type-directed — explicit i8x16 loads force a
-                // 16-byte load, of which dup8 uses only bytes 0-7 (upper
-                // half is wasted but harmless). Can't use i8x8 loads
-                // because shuffle_bytes requires N=16 or 32.
+                // Raw Q8K: load 4 bytes, broadcast to 16 via dup4
+                // Lo: positions sb*64 + k*4, Hi: positions sb*64 + 32 + k*4
                 let q8b: i32 = b * 256 + sb * 64
-                let q8r_0: i8x16 = load(q8_qs, q8b)
-                let q8r_1: i8x16 = load(q8_qs, q8b + 8)
-                let q8r_2: i8x16 = load(q8_qs, q8b + 16)
-                let q8r_3: i8x16 = load(q8_qs, q8b + 24)
-                let q8r_4: i8x16 = load(q8_qs, q8b + 32)
-                let q8r_5: i8x16 = load(q8_qs, q8b + 40)
-                let q8r_6: i8x16 = load(q8_qs, q8b + 48)
-                let q8r_7: i8x16 = load(q8_qs, q8b + 56)
-                let q8_0: i8x16 = shuffle_bytes(q8r_0, dup8)
-                let q8_1: i8x16 = shuffle_bytes(q8r_1, dup8)
-                let q8_2: i8x16 = shuffle_bytes(q8r_2, dup8)
-                let q8_3: i8x16 = shuffle_bytes(q8r_3, dup8)
-                let q8_4: i8x16 = shuffle_bytes(q8r_4, dup8)
-                let q8_5: i8x16 = shuffle_bytes(q8r_5, dup8)
-                let q8_6: i8x16 = shuffle_bytes(q8r_6, dup8)
-                let q8_7: i8x16 = shuffle_bytes(q8r_7, dup8)
 
-                // Column pairs: 4 pairs (01, 23, 45, 67)
-                // Each 16-byte load covers 2 columns × 8 bytes
-                let mut alo0: i32x4 = splat(0)
-                let mut alo1: i32x4 = splat(0)
-                let mut alo2: i32x4 = splat(0)
-                let mut alo3: i32x4 = splat(0)
-                let mut ahi0: i32x4 = splat(0)
-                let mut ahi1: i32x4 = splat(0)
-                let mut ahi2: i32x4 = splat(0)
-                let mut ahi3: i32x4 = splat(0)
+                let mut alo_03: i32x4 = splat(0)
+                let mut ahi_03: i32x4 = splat(0)
+                let mut alo_47: i32x4 = splat(0)
+                let mut ahi_47: i32x4 = splat(0)
 
-                let mut cp: i32 = 0
-                while cp < 4 {
-                    let qp0: i8x16 = load(packed_i8, q4_base + 16 * cp)
-                    let qp1: i8x16 = load(packed_i8, q4_base + 16 * cp + 64)
-                    let qp2: i8x16 = load(packed_i8, q4_base + 16 * cp + 128)
-                    let qp3: i8x16 = load(packed_i8, q4_base + 16 * cp + 192)
+                let mut k: i32 = 0
+                while k < 8 {
+                    // Q8K: load 4 bytes, broadcast to 16 bytes
+                    let q8r_lo: i8x16 = load(q8_qs, q8b + k * 4)
+                    let q8_lo: i8x16 = shuffle_bytes(q8r_lo, dup4)
+                    let q8r_hi: i8x16 = load(q8_qs, q8b + 32 + k * 4)
+                    let q8_hi: i8x16 = shuffle_bytes(q8r_hi, dup4)
 
-                    // Low nibbles + vdot
-                    let lo0: i8x16 = qp0 .& m4b
-                    let lo1: i8x16 = qp1 .& m4b
-                    let lo2: i8x16 = qp2 .& m4b
-                    let lo3: i8x16 = qp3 .& m4b
+                    // Q4K: 4-byte interleaved, 32B per k
+                    let w03: i8x16 = load(packed_i8, q4_base + k * 32)
+                    let w47: i8x16 = load(packed_i8, q4_base + k * 32 + 16)
+                    let w03_lo: i8x16 = w03 .& m4b
+                    let w03_hi: i8x16 = (w03 .>> shift4) .& m4b
+                    let w47_lo: i8x16 = w47 .& m4b
+                    let w47_hi: i8x16 = (w47 .>> shift4) .& m4b
 
-                    // High nibbles
-                    let hi0: i8x16 = (qp0 .>> shift4) .& m4b
-                    let hi1: i8x16 = (qp1 .>> shift4) .& m4b
-                    let hi2: i8x16 = (qp2 .>> shift4) .& m4b
-                    let hi3: i8x16 = (qp3 .>> shift4) .& m4b
+                    alo_03 = alo_03 .+ vdot_i32(w03_lo, q8_lo)
+                    ahi_03 = ahi_03 .+ vdot_i32(w03_hi, q8_hi)
+                    alo_47 = alo_47 .+ vdot_i32(w47_lo, q8_lo)
+                    ahi_47 = ahi_47 .+ vdot_i32(w47_hi, q8_hi)
 
-                    if cp == 0 {
-                        alo0 = vdot_i32(lo0, q8_0) .+ vdot_i32(lo1, q8_1) .+ vdot_i32(lo2, q8_2) .+ vdot_i32(lo3, q8_3)
-                        ahi0 = vdot_i32(hi0, q8_4) .+ vdot_i32(hi1, q8_5) .+ vdot_i32(hi2, q8_6) .+ vdot_i32(hi3, q8_7)
-                    }
-                    if cp == 1 {
-                        alo1 = vdot_i32(lo0, q8_0) .+ vdot_i32(lo1, q8_1) .+ vdot_i32(lo2, q8_2) .+ vdot_i32(lo3, q8_3)
-                        ahi1 = vdot_i32(hi0, q8_4) .+ vdot_i32(hi1, q8_5) .+ vdot_i32(hi2, q8_6) .+ vdot_i32(hi3, q8_7)
-                    }
-                    if cp == 2 {
-                        alo2 = vdot_i32(lo0, q8_0) .+ vdot_i32(lo1, q8_1) .+ vdot_i32(lo2, q8_2) .+ vdot_i32(lo3, q8_3)
-                        ahi2 = vdot_i32(hi0, q8_4) .+ vdot_i32(hi1, q8_5) .+ vdot_i32(hi2, q8_6) .+ vdot_i32(hi3, q8_7)
-                    }
-                    if cp == 3 {
-                        alo3 = vdot_i32(lo0, q8_0) .+ vdot_i32(lo1, q8_1) .+ vdot_i32(lo2, q8_2) .+ vdot_i32(lo3, q8_3)
-                        ahi3 = vdot_i32(hi0, q8_4) .+ vdot_i32(hi1, q8_5) .+ vdot_i32(hi2, q8_6) .+ vdot_i32(hi3, q8_7)
-                    }
-
-                    cp = cp + 1
+                    k = k + 1
                 }
 
-                // Scale application: pairwise add column pairs, multiply by scales
-                // vpaddq_s32(alo0, alo1) → [r0+r1 from cp0, r2+r3 from cp0, r0+r1 from cp1, r2+r3 from cp1]
-                // Wait — each alo[cp] is i32x4 with [row_pair0_a, row_pair0_b, row_pair1_a, row_pair1_b]
-                // Actually, vdot_i32(i8x16, i8x16) → i32x4 where each lane is dot of 4 bytes
-                // With 16-byte load of 2 columns × 8 bytes:
-                //   lane 0 = col0 bytes 0-3 · q8 bytes 0-3
-                //   lane 1 = col0 bytes 4-7 · q8 bytes 4-7
-                //   lane 2 = col1 bytes 0-3 · q8 bytes 0-3
-                //   lane 3 = col1 bytes 4-7 · q8 bytes 4-7
-                // After summing 4 chunks: full dot for each col
-                // Pairwise add: lane0+lane1 = col0 full, lane2+lane3 = col1 full
-                // vpaddq_s32(alo0, alo1) = [col0_cp0, col1_cp0, col0_cp1, col1_cp1] = rows 0,1,2,3
-
-                // Low nibbles: cols 0-3
-                let plo_03: i32x4 = addp_i32(alo0, alo1)
-                let sumf_lo_03: f32x4 = to_f32(sc_lo_0 .* plo_03)
+                // Scale application — no addp needed, each lane is one weight row
+                let sumf_lo_03: f32x4 = to_f32(sc_lo_0 .* alo_03)
                 acc0 = fma(sb_sc0, sumf_lo_03, acc0)
-                // Low nibbles: cols 4-7 (use sc_hi_0 — high half of sub-block 0 scales)
-                let plo_47: i32x4 = addp_i32(alo2, alo3)
-                let sumf_lo_47: f32x4 = to_f32(sc_hi_0 .* plo_47)
-                acc1 = fma(sb_sc1, sumf_lo_47, acc1)
-
-                // High nibbles: cols 0-3 (use sc_lo_1 — low half of sub-block 1 scales)
-                let phi_03: i32x4 = addp_i32(ahi0, ahi1)
-                let sumf_hi_03: f32x4 = to_f32(sc_lo_1 .* phi_03)
+                let sumf_hi_03: f32x4 = to_f32(sc_lo_1 .* ahi_03)
                 acc0 = fma(sb_sc0, sumf_hi_03, acc0)
-                // High nibbles: cols 4-7 (use sc_hi_1 — high half of sub-block 1 scales)
-                let phi_47: i32x4 = addp_i32(ahi2, ahi3)
-                let sumf_hi_47: f32x4 = to_f32(sc_hi_1 .* phi_47)
+                let sumf_lo_47: f32x4 = to_f32(sc_hi_0 .* alo_47)
+                acc1 = fma(sb_sc1, sumf_lo_47, acc1)
+                let sumf_hi_47: f32x4 = to_f32(sc_hi_1 .* ahi_47)
                 acc1 = fma(sb_sc1, sumf_hi_47, acc1)
 
                 // Mins correction
                 let bs0: i16 = scratch_i16[sb * 2]
                 let bs1: i16 = scratch_i16[sb * 2 + 1]
-                // Build i32x4 deltas via typed intermediates — bare array
-                // literals in a .+ slot have no type context, so Ea refuses
-                // them. The let-binding provides the vector type context.
                 let b0_0: i32 = (t02 & 255) * to_i32(bs0) + (t12 & 255) * to_i32(bs1)
                 let b0_1: i32 = ((t02>>8)&255) * to_i32(bs0) + ((t12>>8)&255) * to_i32(bs1)
                 let b0_2: i32 = ((t02>>16)&255) * to_i32(bs0) + ((t12>>16)&255) * to_i32(bs1)
@@ -237,8 +157,6 @@ export func q4k_8x8_q8k_matvec(
                 sb = sb + 1
             }
 
-            // Subtract mins: acc -= bias * sb_min
-            // vmlsq_f32(a, b, c) = a - b*c
             acc0 = acc0 .- to_f32(bias0) .* sb_mn0
             acc1 = acc1 .- to_f32(bias1) .* sb_mn1
 
