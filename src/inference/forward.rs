@@ -149,6 +149,9 @@ pub struct Gemma4State {
     pub(crate) batch_ffn_q8_qs: Vec<i8>,
     pub(crate) batch_ffn_q8_d: Vec<f32>,
     pub(crate) batch_ffn_q8_bsums: Vec<i16>,
+    // Q8K repacked A-side for GEMM (block_q8_Kx4 tiles, groups of 4 tokens)
+    pub(crate) batch_q8_a: Vec<u8>,
+    pub(crate) batch_ffn_q8_a: Vec<u8>,
     pub(crate) max_batch: usize,
 
     // KV cache
@@ -251,6 +254,15 @@ impl Gemma4State {
             batch_ffn_q8_qs: vec![0; (max_ffn + 12) * max_batch],
             batch_ffn_q8_d: vec![0.0; n_blocks_ffn * max_batch],
             batch_ffn_q8_bsums: vec![0; n_blocks_ffn * 16 * max_batch],
+            batch_q8_a: {
+                let nb_q8_max = max_qkv.max(hd) / 256;
+                let q8_a_groups = (max_batch + 3) / 4;
+                vec![0u8; q8_a_groups * nb_q8_max * 1168]
+            },
+            batch_ffn_q8_a: {
+                let q8_a_groups = (max_batch + 3) / 4;
+                vec![0u8; q8_a_groups * n_blocks_ffn * 1168]
+            },
             max_batch,
 
             cache,
