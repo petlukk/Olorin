@@ -113,7 +113,8 @@ fn olorin_full_bench() {
     let tokenizer = olorin::inference::tokenizer::Tokenizer::from_gguf(&gguf).unwrap();
     olorin::kernels::ffi::init().unwrap();
     let pool = olorin::inference::threadpool::ThreadPool::new();
-    let mut state = olorin::inference::forward::Gemma4State::new(&model, 512, &pool);
+    let graph_pool = olorin::inference::threadpool::GraphPool::new();
+    let mut state = olorin::inference::forward::Gemma4State::new(&model, 2048, &pool);
     let load_ms = t_load.elapsed().as_secs_f64() * 1000.0;
 
     let rss_after_load = rss_mb();
@@ -125,21 +126,13 @@ fn olorin_full_bench() {
     prompt_ids.extend(tokenizer.encode(PROMPT));
     let n_prompt = prompt_ids.len();
 
-    // ── Prefill (prompt eval) ────────────────────────────────────────────
+    // ── Prefill (prompt eval) — batched forward ────────────────────────
     let t_prefill = Instant::now();
-    let mut last_logits_ptr: *const f32 = std::ptr::null();
-    let mut last_logits_len: usize = 0;
-    for &tok in &prompt_ids {
-        let logits = state.forward_one(&model, tok, &pool);
-        last_logits_ptr = logits.as_ptr();
-        last_logits_len = logits.len();
-    }
+    let logits = state.forward_batch(&model, &prompt_ids, &graph_pool);
+    let mut next = argmax(logits);
     let prefill_secs = t_prefill.elapsed().as_secs_f64();
     let prefill_tps = n_prompt as f64 / prefill_secs;
     let prefill_ms_per_tok = prefill_secs * 1000.0 / n_prompt as f64;
-    let last_logits =
-        unsafe { std::slice::from_raw_parts(last_logits_ptr, last_logits_len) };
-    let mut next = argmax(last_logits);
 
     // ── Decode (eval) ────────────────────────────────────────────────────
     let mut step_ms: Vec<f64> = Vec::with_capacity(N_DECODE);
@@ -147,7 +140,7 @@ fn olorin_full_bench() {
     let cpu_before_decode = proc_cpu_seconds();
     let t_ttft = Instant::now();
     {
-        let logits = state.forward_one(&model, next, &pool);
+        let logits = state.forward_one_graph(&model, next, &graph_pool);
         next = argmax(logits);
     }
     let ttft_ms = t_ttft.elapsed().as_secs_f64() * 1000.0;
@@ -156,7 +149,7 @@ fn olorin_full_bench() {
     let t_decode = Instant::now();
     for _ in 1..N_DECODE {
         let t_step = Instant::now();
-        let logits = state.forward_one(&model, next, &pool);
+        let logits = state.forward_one_graph(&model, next, &graph_pool);
         next = argmax(logits);
         step_ms.push(t_step.elapsed().as_secs_f64() * 1000.0);
     }
@@ -168,17 +161,17 @@ fn olorin_full_bench() {
     let cpu_after_decode = proc_cpu_seconds();
     let cpu_decode_secs = cpu_after_decode - cpu_before_decode;
     let cores_busy = if decode_secs > 0.0 { cpu_decode_secs / decode_secs } else { 0.0 };
-    let parallel_eff = cores_busy / pool.thread_count() as f64;
+    let parallel_eff = cores_busy / graph_pool.thread_count() as f64;
 
     let peak_rss = peak_rss_mb();
     let rss_after = rss_mb();
-    let kv_bytes = kv_cache_bytes(&model, 512);
+    let kv_bytes = kv_cache_bytes(&model, 2048);
     let kv_mb = kv_bytes as f64 / (1024.0 * 1024.0);
 
     // ── Report ────────────────────────────────────────────────────────────
     eprintln!();
     eprintln!("=== olorin gemma 4 e2b q4_k_m benchmark ===");
-    eprintln!("threads:                {}", pool.thread_count());
+    eprintln!("threads:                {}", graph_pool.thread_count());
     eprintln!("prompt:                 {:?}", PROMPT);
     eprintln!("prompt tokens:          {} (incl. BOS)", n_prompt);
     eprintln!("decode tokens:          {}", N_DECODE);
@@ -200,14 +193,14 @@ fn olorin_full_bench() {
     eprintln!("  peak rss (VmHWM):     {:>10.1} MB", peak_rss);
     eprintln!("  model resident:       {:>10.1} MB  (rss after load - before)",
         rss_after_load - rss_before);
-    eprintln!("  kv cache (computed):  {:>10.1} MB  (max_seq_len=512, f16, shared layers excluded)",
+    eprintln!("  kv cache (computed):  {:>10.1} MB  (max_seq_len=2048, f16, shared layers excluded)",
         kv_mb);
     eprintln!();
     eprintln!("cpu utilization (decode window):");
     eprintln!("  cpu time used:        {:>10.2} s   (utime + stime)", cpu_decode_secs);
     eprintln!("  wall time:            {:>10.2} s", decode_secs);
     eprintln!("  avg cores busy:       {:>10.2}     ({} threads available)",
-        cores_busy, pool.thread_count());
+        cores_busy, graph_pool.thread_count());
     eprintln!("  parallel efficiency:  {:>10.1} %", parallel_eff * 100.0);
     eprintln!();
     eprintln!("per-step latency curve (decode, ms):");
