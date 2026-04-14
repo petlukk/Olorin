@@ -128,6 +128,7 @@ pub struct Gemma4State {
 
     // Output
     pub(crate) logits: Vec<f32>,
+    pub(crate) logit_rows: usize,
 
     // Q6K d_scratch for output matmul
     pub(crate) q6k_d_scratch: Vec<f32>,
@@ -254,6 +255,7 @@ impl Gemma4State {
             ffn_q8_bsums: vec![0; n_blocks_ffn * 16],
 
             logits: vec![0.0; model.vocab_size],
+            logit_rows: model.vocab_size,
             q6k_d_scratch: vec![0.0; std::cmp::max(n_blocks_out, n_blocks_ffn) * 4 * n_thread_slots],
 
             cos_table: vec![0.0; max_head / 2],
@@ -476,7 +478,7 @@ impl Gemma4State {
             super::forward_graph::forward_one_inner(state, model, token_id, barrier, chunk, tid, nth);
         });
 
-        &self.logits
+        &self.logits[..self.logit_rows]
     }
 
     /// Batched forward pass. Processes N tokens using gemm for all Q4K matmuls.

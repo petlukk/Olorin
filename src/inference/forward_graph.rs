@@ -180,6 +180,13 @@ pub(crate) fn forward_one_inner(
     barrier.wait();
 
     // ── Output matmul (work-stealing, all threads) ───────────────
+    // Hot-vocab: compute logits for first N tokens only (SentencePiece orders by frequency).
+    // Falls back to full vocab if env OLORIN_FULL_VOCAB=1.
+    let logit_rows = if std::env::var("OLORIN_FULL_VOCAB").is_ok() {
+        model.vocab_size
+    } else {
+        model.vocab_size.min(32768)
+    };
     let t_out_start = if timing { Some(std::time::Instant::now()) } else { None };
     current_chunk.store(nth as i32, Ordering::Relaxed);
     barrier.wait();
@@ -188,7 +195,7 @@ pub(crate) fn forward_one_inner(
             q6k_buf.as_ptr(), model.embed_weight,
             state.q8_qs.as_ptr(), state.q8_d.as_ptr(), state.q8_bsums.as_ptr(),
             state.logits.as_mut_ptr(), state.q6k_d_scratch.as_mut_ptr(),
-            model.vocab_size, hd, 1, model.vocab_size,
+            logit_rows, hd, 1, logit_rows,
             current_chunk, ith, nth,
         );
     } else {
@@ -196,7 +203,7 @@ pub(crate) fn forward_one_inner(
             model.embed_dtype, model.embed_weight,
             state.q8_qs.as_ptr(), state.q8_d.as_ptr(), state.q8_bsums.as_ptr(),
             state.logits.as_mut_ptr(), state.q6k_d_scratch.as_mut_ptr(),
-            model.vocab_size, hd,
+            logit_rows, hd,
             current_chunk, ith, nth,
         );
     }
@@ -209,9 +216,10 @@ pub(crate) fn forward_one_inner(
     if ith == 0 {
         if model.logit_softcap > 0.0 {
             ffi_inference::softcap_f32(
-                state.logits.as_mut_ptr(), model.vocab_size as i32, model.logit_softcap,
+                state.logits.as_mut_ptr(), logit_rows as i32, model.logit_softcap,
             );
         }
+        state.logit_rows = logit_rows;
         state.cache.advance();
     }
     barrier.wait();
