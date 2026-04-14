@@ -1,0 +1,124 @@
+// verify_draft_arm.ea — ARM NEON port of verify_draft.ea
+//
+// Fused per-row argmax + first-mismatch for speculative decoding.
+//
+// For each of K logits rows (row-major, vocab f32s per row) compute argmax(row),
+// store it into out_argmax[j], and compare to drafts[j]. On the first row where
+// argmax != drafts[j], return that row index (early exit). If all K-1 drafts
+// are accepted (or K == 1), return k to signal a full accept.
+//
+// SIMD strategy (two-pass per row):
+//   Pass A: f32x4 sweep with `max` to find the row's maximum value, finalized
+//           via reduce_max to scalar.
+//   Pass B: f32x4 sweep comparing each chunk to splat(max). Convert the match
+//           mask to i32x4 lane indices (non-matching lanes held at INT_MAX)
+//           and fold with reduce_min across the row, yielding the lowest
+//           vocab index whose value equals the max. Ties favor the lowest
+//           index, matching a typical "first argmax" convention.
+//
+// Both passes handle the vocab % 4 tail scalar-ly. Gemma 4's vocab is a clean
+// multiple of 4 (262144), but tests may use small vocabs.
+//
+// The x86 and ARM variants are near-identical because every primitive used
+// (`load`, `splat`, `.>`, `.==`, `select`, `reduce_max`, `reduce_min`,
+// `[0,1,2,3]i32x4`) is portable across both backends.
+//
+// Contract:
+//   verify_draft(logits, vocab, drafts, k, out_argmax) -> first_mismatch or k
+//
+//   logits_ptr    : *f32   length k * vocab, row-major
+//   vocab         : i32    logits columns per row
+//   drafts_ptr    : *i32   length k-1 (read only for j < k-1)
+//   k             : i32    number of rows (>= 1)
+//   out_argmax    : *mut i32  length k; written up to and including the
+//                              returned row index
+//
+// Returns the first row index j in 0..k-1 where argmax(row j) != drafts[j],
+// or k if every draft matched (full accept). If k == 1 there are no drafts
+// to check and the function always returns 1 after writing out_argmax[0].
+
+#[cfg(aarch64)]
+
+export func verify_draft(
+    logits_ptr: *f32, vocab: i32,
+    drafts_ptr: *i32,
+    k: i32,
+    out_argmax: *mut i32
+) -> i32 {
+    if k <= 0 {
+        return 0
+    }
+
+    let neg_inf: f32 = -1000000000.0
+    let int_max: i32 = 2147483647
+    let lane_init: i32x4 = [0, 1, 2, 3]i32x4
+    let step4: i32x4 = splat(4)
+
+    let mut j: i32 = 0
+    while j < k {
+        let row_off: i32 = j * vocab
+
+        // Pass A: max-value sweep.
+        let mut v_max: f32x4 = splat(neg_inf)
+        let mut off: i32 = 0
+        while off + 4 <= vocab {
+            let v: f32x4 = load(logits_ptr, row_off + off)
+            v_max = select(v .> v_max, v, v_max)
+            off = off + 4
+        }
+        let mut row_max: f32 = reduce_max(v_max)
+
+        // Scalar tail for vocab % 4.
+        let mut ts: i32 = off
+        while ts < vocab {
+            let x: f32 = logits_ptr[row_off + ts]
+            if x > row_max {
+                row_max = x
+            }
+            ts = ts + 1
+        }
+
+        // Pass B: find lowest index whose value equals row_max.
+        let v_target: f32x4 = splat(row_max)
+        let v_intmax: i32x4 = splat(int_max)
+        let mut v_idx: i32x4 = splat(int_max)
+        let mut lane_idx: i32x4 = lane_init
+        let mut off2: i32 = 0
+        while off2 + 4 <= vocab {
+            let v: f32x4 = load(logits_ptr, row_off + off2)
+            let picked: i32x4 = select(v .== v_target, lane_idx, v_intmax)
+            v_idx = select(picked .< v_idx, picked, v_idx)
+            lane_idx = lane_idx .+ step4
+            off2 = off2 + 4
+        }
+        let mut row_argmax: i32 = reduce_min(v_idx)
+
+        // Scalar tail — check positions [off2, vocab) and keep the lowest
+        // index among those that match row_max. The SIMD pass already covered
+        // indices [0, off2), so any scalar-matched index is strictly larger
+        // than any SIMD-matched index. Only adopt a scalar index if no SIMD
+        // lane matched (row_argmax still INT_MAX).
+        let mut ts2: i32 = off2
+        while ts2 < vocab {
+            if row_argmax == int_max {
+                if logits_ptr[row_off + ts2] == row_max {
+                    row_argmax = ts2
+                }
+            }
+            ts2 = ts2 + 1
+        }
+
+        out_argmax[j] = row_argmax
+
+        // Mismatch check: only for rows 0..k-2 (drafts has k-1 entries).
+        if j < k - 1 {
+            if row_argmax != drafts_ptr[j] {
+                return j
+            }
+        }
+
+        j = j + 1
+    }
+
+    return k
+}
