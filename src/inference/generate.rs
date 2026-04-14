@@ -118,13 +118,14 @@ impl Engine {
         let mut rng = xorshift_seed();
         let mut output = String::new();
         let eos = self.tokenizer.eos_id;
-        let stop_ids = &self.tokenizer.stop_ids;
         let mut n_decode = 0usize;
 
         let mut t_sample_total: u64 = 0;
         let mut t_forward_total: u64 = 0;
         let mut t_copy_total: u64 = 0;
         let mut t_other_total: u64 = 0;
+
+        let mut timing_acc = DecodeTiming::default();
 
         for _ in 0..self.max_tokens {
             let t0 = Instant::now();
@@ -138,29 +139,21 @@ impl Engine {
             );
             t_sample_total += t0.elapsed().as_micros() as u64;
 
-            if token_id == eos || stop_ids.contains(&token_id) {
+            if self.emit_and_advance(
+                token_id,
+                &mut output,
+                on_token,
+                &mut logits_snapshot,
+                &mut n_decode,
+                &mut timing_acc,
+                eos,
+            ) {
                 break;
             }
-
-            n_decode += 1;
-
-            let t0 = Instant::now();
-            if !self.tokenizer.is_control_or_user_defined(token_id) {
-                let text = self.tokenizer.decode(&[token_id]);
-                on_token(&text);
-                output.push_str(&text);
-            }
-            t_other_total += t0.elapsed().as_micros() as u64;
-
-            let t0 = Instant::now();
-            let logits = self.state.forward_one_graph(&self.model, token_id, &self.graph_pool);
-            t_forward_total += t0.elapsed().as_micros() as u64;
-
-            let t0 = Instant::now();
-            logits_snapshot.clear();
-            logits_snapshot.extend_from_slice(logits);
-            t_copy_total += t0.elapsed().as_micros() as u64;
         }
+        t_forward_total += timing_acc.forward_us;
+        t_copy_total += timing_acc.copy_us;
+        t_other_total += timing_acc.other_us;
         let t_decode = t_decode_start.elapsed();
 
         if timing {
@@ -182,6 +175,58 @@ impl Engine {
 
         Ok(output)
     }
+
+    /// Emit a single sampled token and advance the KV state by one step.
+    ///
+    /// Checks stop conditions, streams the token via `on_token` (unless it's
+    /// a control / user-defined piece), runs `forward_one_graph` to get the
+    /// next logits, and copies them into `logits_snapshot`. Timing for the
+    /// forward / copy / other buckets is accumulated into `timing`.
+    ///
+    /// Returns `true` when decoding should stop (EOS or a stop_id was hit).
+    #[inline]
+    fn emit_and_advance(
+        &mut self,
+        token_id: u32,
+        output: &mut String,
+        on_token: &dyn Fn(&str),
+        logits_snapshot: &mut Vec<f32>,
+        n_decode: &mut usize,
+        timing: &mut DecodeTiming,
+        eos: u32,
+    ) -> bool {
+        if token_id == eos || self.tokenizer.stop_ids.contains(&token_id) {
+            return true;
+        }
+
+        *n_decode += 1;
+
+        let t0 = Instant::now();
+        if !self.tokenizer.is_control_or_user_defined(token_id) {
+            let text = self.tokenizer.decode(&[token_id]);
+            on_token(&text);
+            output.push_str(&text);
+        }
+        timing.other_us += t0.elapsed().as_micros() as u64;
+
+        let t0 = Instant::now();
+        let logits = self.state.forward_one_graph(&self.model, token_id, &self.graph_pool);
+        timing.forward_us += t0.elapsed().as_micros() as u64;
+
+        let t0 = Instant::now();
+        logits_snapshot.clear();
+        logits_snapshot.extend_from_slice(logits);
+        timing.copy_us += t0.elapsed().as_micros() as u64;
+
+        false
+    }
+}
+
+#[derive(Default)]
+struct DecodeTiming {
+    forward_us: u64,
+    copy_us: u64,
+    other_us: u64,
 }
 
 // ---------------------------------------------------------------------------
