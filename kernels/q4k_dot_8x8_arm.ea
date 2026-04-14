@@ -1,8 +1,13 @@
-// q4k_dot_8x8_arm.ea — Q4Kx8 repacked matvec kernel (ARM NEON + dotprod).
+// q4k_dot_8x8_lane_arm.ea — Q4Kx8 repacked matvec using vdot_lane_i32.
 //
-// Single-token decode path. Q4K weights are 4-byte interleaved (repacked).
-// Q8K input is raw (not repacked). Uses vdot_i32 with dup4 broadcast
-// to match the 4-byte interleaved Q4K layout.
+// Key change vs baseline: load 16B of Q8 per 4 k-iterations, use lane
+// indexing instead of 4B load + broadcast. Eliminates shuffle_bytes
+// and reduces Q8 loads by 4×.
+//
+// Inner loop: 8 iterations (k=0..7), process 32 Q8 bytes per half.
+// Baseline: 8 × (load 4B + shuffle + 4 vdot) = 8 loads + 8 shuffles + 32 vdots
+// Lane:     2 × (load 16B) + 8 × (4 vdot_lane) = 2 loads + 32 vdot_lanes
+// Saves 8 loads + 8 shuffles per half per sub-block.
 
 #[cfg(aarch64)]
 
@@ -27,9 +32,6 @@ export func q4k_8x8_q8k_matvec(
     let km1: i32 = 0x3f3f3f3f
     let km2: i32 = 0x0f0f0f0f
     let km3: i32 = 0x03030303
-
-    // Broadcast mask: duplicate 4 bytes to fill 16 bytes
-    let dup4: u8x16 = [0,1,2,3, 0,1,2,3, 0,1,2,3, 0,1,2,3]
 
     let d16: *restrict i16 = ptr_as_i16(ptr_as_i8(packed))
     let packed_i8: *restrict i8 = ptr_as_i8(packed)
@@ -59,7 +61,6 @@ export func q4k_8x8_q8k_matvec(
             let mut bias0: i32x4 = splat(0)
             let mut bias1: i32x4 = splat(0)
 
-            // Bsums: pairwise add 16 to 8 values
             let bs_lo: i16x8 = load(q8_bsums, b * 16)
             let bs_hi: i16x8 = load(q8_bsums, b * 16 + 8)
             let bsums: i16x8 = addp_i16(bs_lo, bs_hi)
@@ -67,7 +68,7 @@ export func q4k_8x8_q8k_matvec(
 
             let mut sb: i32 = 0
             while sb < 4 {
-                // Scale decode
+                // Scale decode (identical to baseline)
                 let sp: *restrict i32 = ptr_as_i32(ptr_as_i8(packed))
                 let sc0: i32 = bp + 32 + 24 * sb
                 let u00: i32 = sp[sc0/4]
@@ -93,9 +94,6 @@ export func q4k_8x8_q8k_matvec(
                 let sc_hi_1: i32x4 = [t11 & 255, (t11>>8)&255, (t11>>16)&255, (t11>>24)&255]
 
                 let q4_base: i32 = bp + 128 + sb * 256
-
-                // Raw Q8K: load 4 bytes, broadcast to 16 via dup4
-                // Lo: positions sb*64 + k*4, Hi: positions sb*64 + 32 + k*4
                 let q8b: i32 = b * 256 + sb * 64
 
                 let mut alo_03: i32x4 = splat(0)
@@ -103,31 +101,79 @@ export func q4k_8x8_q8k_matvec(
                 let mut alo_47: i32x4 = splat(0)
                 let mut ahi_47: i32x4 = splat(0)
 
-                let mut k: i32 = 0
-                while k < 8 {
-                    // Q8K: load 4 bytes, broadcast to 16 bytes
-                    let q8r_lo: i8x16 = load(q8_qs, q8b + k * 4)
-                    let q8_lo: i8x16 = shuffle_bytes(q8r_lo, dup4)
-                    let q8r_hi: i8x16 = load(q8_qs, q8b + 32 + k * 4)
-                    let q8_hi: i8x16 = shuffle_bytes(q8r_hi, dup4)
+                // Load 16B of Q8 per 4 k-iterations (lo and hi halves)
+                // k=0..3: q8_lo_chunk covers bytes [q8b..q8b+16]
+                // k=4..7: q8_lo_chunk2 covers bytes [q8b+16..q8b+32]
+                let q8_lo_0: i8x16 = load(q8_qs, q8b)
+                let q8_lo_1: i8x16 = load(q8_qs, q8b + 16)
+                let q8_hi_0: i8x16 = load(q8_qs, q8b + 32)
+                let q8_hi_1: i8x16 = load(q8_qs, q8b + 48)
 
-                    // Q4K: 4-byte interleaved, 32B per k
-                    let w03: i8x16 = load(packed_i8, q4_base + k * 32)
-                    let w47: i8x16 = load(packed_i8, q4_base + k * 32 + 16)
-                    let w03_lo: i8x16 = w03 .& m4b
-                    let w03_hi: i8x16 = (w03 .>> shift4) .& m4b
-                    let w47_lo: i8x16 = w47 .& m4b
-                    let w47_hi: i8x16 = (w47 .>> shift4) .& m4b
+                // k=0: weight at q4_base + 0, q8 lane 0
+                let w03_k0: i8x16 = load(packed_i8, q4_base)
+                let w47_k0: i8x16 = load(packed_i8, q4_base + 16)
+                alo_03 = vdot_lane_i32(alo_03, w03_k0 .& m4b, q8_lo_0, 0)
+                alo_47 = vdot_lane_i32(alo_47, w47_k0 .& m4b, q8_lo_0, 0)
+                ahi_03 = vdot_lane_i32(ahi_03, (w03_k0 .>> shift4) .& m4b, q8_hi_0, 0)
+                ahi_47 = vdot_lane_i32(ahi_47, (w47_k0 .>> shift4) .& m4b, q8_hi_0, 0)
 
-                    alo_03 = alo_03 .+ vdot_i32(w03_lo, q8_lo)
-                    ahi_03 = ahi_03 .+ vdot_i32(w03_hi, q8_hi)
-                    alo_47 = alo_47 .+ vdot_i32(w47_lo, q8_lo)
-                    ahi_47 = ahi_47 .+ vdot_i32(w47_hi, q8_hi)
+                // k=1
+                let w03_k1: i8x16 = load(packed_i8, q4_base + 32)
+                let w47_k1: i8x16 = load(packed_i8, q4_base + 48)
+                alo_03 = vdot_lane_i32(alo_03, w03_k1 .& m4b, q8_lo_0, 1)
+                alo_47 = vdot_lane_i32(alo_47, w47_k1 .& m4b, q8_lo_0, 1)
+                ahi_03 = vdot_lane_i32(ahi_03, (w03_k1 .>> shift4) .& m4b, q8_hi_0, 1)
+                ahi_47 = vdot_lane_i32(ahi_47, (w47_k1 .>> shift4) .& m4b, q8_hi_0, 1)
 
-                    k = k + 1
-                }
+                // k=2
+                let w03_k2: i8x16 = load(packed_i8, q4_base + 64)
+                let w47_k2: i8x16 = load(packed_i8, q4_base + 80)
+                alo_03 = vdot_lane_i32(alo_03, w03_k2 .& m4b, q8_lo_0, 2)
+                alo_47 = vdot_lane_i32(alo_47, w47_k2 .& m4b, q8_lo_0, 2)
+                ahi_03 = vdot_lane_i32(ahi_03, (w03_k2 .>> shift4) .& m4b, q8_hi_0, 2)
+                ahi_47 = vdot_lane_i32(ahi_47, (w47_k2 .>> shift4) .& m4b, q8_hi_0, 2)
 
-                // Scale application — no addp needed, each lane is one weight row
+                // k=3
+                let w03_k3: i8x16 = load(packed_i8, q4_base + 96)
+                let w47_k3: i8x16 = load(packed_i8, q4_base + 112)
+                alo_03 = vdot_lane_i32(alo_03, w03_k3 .& m4b, q8_lo_0, 3)
+                alo_47 = vdot_lane_i32(alo_47, w47_k3 .& m4b, q8_lo_0, 3)
+                ahi_03 = vdot_lane_i32(ahi_03, (w03_k3 .>> shift4) .& m4b, q8_hi_0, 3)
+                ahi_47 = vdot_lane_i32(ahi_47, (w47_k3 .>> shift4) .& m4b, q8_hi_0, 3)
+
+                // k=4
+                let w03_k4: i8x16 = load(packed_i8, q4_base + 128)
+                let w47_k4: i8x16 = load(packed_i8, q4_base + 144)
+                alo_03 = vdot_lane_i32(alo_03, w03_k4 .& m4b, q8_lo_1, 0)
+                alo_47 = vdot_lane_i32(alo_47, w47_k4 .& m4b, q8_lo_1, 0)
+                ahi_03 = vdot_lane_i32(ahi_03, (w03_k4 .>> shift4) .& m4b, q8_hi_1, 0)
+                ahi_47 = vdot_lane_i32(ahi_47, (w47_k4 .>> shift4) .& m4b, q8_hi_1, 0)
+
+                // k=5
+                let w03_k5: i8x16 = load(packed_i8, q4_base + 160)
+                let w47_k5: i8x16 = load(packed_i8, q4_base + 176)
+                alo_03 = vdot_lane_i32(alo_03, w03_k5 .& m4b, q8_lo_1, 1)
+                alo_47 = vdot_lane_i32(alo_47, w47_k5 .& m4b, q8_lo_1, 1)
+                ahi_03 = vdot_lane_i32(ahi_03, (w03_k5 .>> shift4) .& m4b, q8_hi_1, 1)
+                ahi_47 = vdot_lane_i32(ahi_47, (w47_k5 .>> shift4) .& m4b, q8_hi_1, 1)
+
+                // k=6
+                let w03_k6: i8x16 = load(packed_i8, q4_base + 192)
+                let w47_k6: i8x16 = load(packed_i8, q4_base + 208)
+                alo_03 = vdot_lane_i32(alo_03, w03_k6 .& m4b, q8_lo_1, 2)
+                alo_47 = vdot_lane_i32(alo_47, w47_k6 .& m4b, q8_lo_1, 2)
+                ahi_03 = vdot_lane_i32(ahi_03, (w03_k6 .>> shift4) .& m4b, q8_hi_1, 2)
+                ahi_47 = vdot_lane_i32(ahi_47, (w47_k6 .>> shift4) .& m4b, q8_hi_1, 2)
+
+                // k=7
+                let w03_k7: i8x16 = load(packed_i8, q4_base + 224)
+                let w47_k7: i8x16 = load(packed_i8, q4_base + 240)
+                alo_03 = vdot_lane_i32(alo_03, w03_k7 .& m4b, q8_lo_1, 3)
+                alo_47 = vdot_lane_i32(alo_47, w47_k7 .& m4b, q8_lo_1, 3)
+                ahi_03 = vdot_lane_i32(ahi_03, (w03_k7 .>> shift4) .& m4b, q8_hi_1, 3)
+                ahi_47 = vdot_lane_i32(ahi_47, (w47_k7 .>> shift4) .& m4b, q8_hi_1, 3)
+
+                // Scale application (identical to baseline)
                 let sumf_lo_03: f32x4 = to_f32(sc_lo_0 .* alo_03)
                 acc0 = fma(sb_sc0, sumf_lo_03, acc0)
                 let sumf_hi_03: f32x4 = to_f32(sc_lo_1 .* ahi_03)
@@ -137,7 +183,7 @@ export func q4k_8x8_q8k_matvec(
                 let sumf_hi_47: f32x4 = to_f32(sc_hi_1 .* ahi_47)
                 acc1 = fma(sb_sc1, sumf_hi_47, acc1)
 
-                // Mins correction
+                // Mins correction (identical to baseline)
                 let bs0: i16 = scratch_i16[sb * 2]
                 let bs1: i16 = scratch_i16[sb * 2 + 1]
                 let b0_0: i32 = (t02 & 255) * to_i32(bs0) + (t12 & 255) * to_i32(bs1)
