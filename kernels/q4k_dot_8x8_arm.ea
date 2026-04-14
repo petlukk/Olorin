@@ -88,10 +88,20 @@ export func q4k_8x8_q8k_matvec(
                 let t11: i32 = (u12 & km2) | (((u10 >> 6) & km3) << 4)
                 let t13: i32 = ((u12 >> 4) & km2) | (((u11 >> 6) & km3) << 4)
 
-                let sc_lo_0: i32x4 = [t00 & 255, (t00>>8)&255, (t00>>16)&255, (t00>>24)&255]
-                let sc_hi_0: i32x4 = [t01 & 255, (t01>>8)&255, (t01>>16)&255, (t01>>24)&255]
-                let sc_lo_1: i32x4 = [t10 & 255, (t10>>8)&255, (t10>>16)&255, (t10>>24)&255]
-                let sc_hi_1: i32x4 = [t11 & 255, (t11>>8)&255, (t11>>16)&255, (t11>>24)&255]
+                // Pack decoded scales into scratch[64..80], widen to i32x4
+                let sc_scratch: *mut i32 = ptr_as_i32(ptr_as_i8(scratch))
+                sc_scratch[16] = t00
+                sc_scratch[17] = t01
+                sc_scratch[18] = t10
+                sc_scratch[19] = t11
+                let sc_raw: u8x16 = load(scratch, 64)
+                let sc_lo_0: i32x4 = widen_u8_i32x4(sc_raw)
+                let sc_raw2: u8x16 = load(scratch, 68)
+                let sc_hi_0: i32x4 = widen_u8_i32x4(sc_raw2)
+                let sc_raw3: u8x16 = load(scratch, 72)
+                let sc_lo_1: i32x4 = widen_u8_i32x4(sc_raw3)
+                let sc_raw4: u8x16 = load(scratch, 76)
+                let sc_hi_1: i32x4 = widen_u8_i32x4(sc_raw4)
 
                 let q4_base: i32 = bp + 128 + sb * 256
                 let q8b: i32 = b * 256 + sb * 64
