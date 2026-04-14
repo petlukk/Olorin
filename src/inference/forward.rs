@@ -147,6 +147,14 @@ pub struct Gemma4State {
     pub(crate) ple_q8_d: Vec<f32>,
     pub(crate) ple_q8_bsums: Vec<i16>,
 
+    // PLE batch buffers
+    pub(crate) batch_ple_gate_out: Vec<f32>,
+    pub(crate) batch_ple_proj_out: Vec<f32>,
+    pub(crate) batch_ple_q8_qs: Vec<i8>,
+    pub(crate) batch_ple_q8_d: Vec<f32>,
+    pub(crate) batch_ple_q8_bsums: Vec<i16>,
+    pub(crate) batch_ple_q8_a: Vec<u8>,
+
     // Per-thread scratch for parallelized norms/RoPE
     pub(crate) batch_head_scratch: Vec<f32>,   // [max_head_dim * n_threads]
     pub(crate) batch_cos_tables: Vec<f32>,     // [max_rope_half * n_threads]
@@ -199,6 +207,8 @@ impl Gemma4State {
         let n_blocks_out = hd / 256;
 
         let max_batch = 512usize;
+        let ple_dim = model.ple_dim.max(1);
+        let ple_nb = (ple_dim / 256).max(1);
 
         let attn_types: Vec<AttnType> = model.is_swa.iter().map(|&swa| {
             if swa { AttnType::SlidingWindow } else { AttnType::Global }
@@ -261,6 +271,16 @@ impl Gemma4State {
             ple_q8_qs: vec![0; model.ple_dim + 12],
             ple_q8_d: vec![0.0; (model.ple_dim / 256).max(1)],
             ple_q8_bsums: vec![0; ((model.ple_dim / 256).max(1)) * 16],
+
+            batch_ple_gate_out: vec![0.0; ple_dim * max_batch],
+            batch_ple_proj_out: vec![0.0; hd * max_batch],
+            batch_ple_q8_qs: vec![0; (ple_dim + 12) * max_batch],
+            batch_ple_q8_d: vec![0.0; ple_nb * max_batch],
+            batch_ple_q8_bsums: vec![0; ple_nb * 16 * max_batch],
+            batch_ple_q8_a: {
+                let q8_a_groups = (max_batch + 3) / 4;
+                vec![0u8; q8_a_groups * ple_nb * 1168]
+            },
 
             batch_x: vec![0.0; hd * max_batch],
             batch_x_norm: vec![0.0; hd * max_batch],

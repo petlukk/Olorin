@@ -90,7 +90,7 @@ impl BatchLayerTiming {
 
 /// All threads quantize tokens in parallel. Tokens [n..n_pad) get zero-filled Q8K.
 #[inline]
-fn parallel_batch_quant(
+pub(crate) fn parallel_batch_quant(
     src: &[f32], dim: usize, n: usize, n_pad: usize,
     qs: &mut [i8], d: &mut [f32], bsums: &mut [i16],
     ith: usize, nth: usize,
@@ -117,7 +117,7 @@ fn parallel_batch_quant(
 
 /// Repack Q8K → block_q8_Kx4 tiles for GEMM. Thread 0 only.
 #[inline]
-fn repack_q8_for_gemm(
+pub(crate) fn repack_q8_for_gemm(
     qs: &[i8], d: &[f32], bsums: &[i16], q8_a: &mut [u8],
     dim: usize, n_pad: usize,
 ) {
@@ -150,7 +150,7 @@ fn repack_q8_for_gemm(
 
 #[inline]
 #[allow(clippy::too_many_arguments)]
-fn matvec_batch_step(
+pub(crate) fn matvec_batch_step(
     repacked: Option<&[u8]>, dtype: u32, weight: *const u8,
     q8_a: *const u8, q8_qs: *const i8, q8_d: *const f32, q8_bsums: *const i16,
     output: *mut f32, d_scratch: *mut f32,
@@ -607,49 +607,10 @@ pub(crate) fn layer_forward_batch(
     }
     barrier.wait();
 
-    // ── 10b. PLE (thread 0 only) ────────────────────────────────
-    if ith == 0 && model.ple_dim > 0 && !lw.inp_gate.is_null() && !lw.proj.is_null() {
-        let ple_dim = model.ple_dim;
-        let ple_total = ple_dim * model.n_layers;
-        let ple_off = il * ple_dim;
-        for t in 0..n {
-            let off = t * hd;
-            matmul::quant_input(
-                &state.batch_x[off..off + hd],
-                &mut state.q8_qs, &mut state.q8_d, &mut state.q8_bsums,
-            );
-            matmul::matvec(
-                lw.inp_gate_dtype, lw.inp_gate,
-                &state.q8_qs, &state.q8_d, &state.q8_bsums,
-                &mut state.ple_gate, &mut state.q6k_d_scratch, ple_dim, hd,
-            );
-            ffi_inference::gelu_mul(
-                state.ple_gate.as_ptr(),
-                state.batch_ple_signal[t * ple_total + ple_off..].as_ptr(),
-                state.ple_gate.as_mut_ptr(), ple_dim as i32,
-            );
-            matmul::quant_input(
-                &state.ple_gate[..ple_dim],
-                &mut state.ple_q8_qs, &mut state.ple_q8_d, &mut state.ple_q8_bsums,
-            );
-            matmul::matvec(
-                lw.proj_dtype, lw.proj,
-                &state.ple_q8_qs, &state.ple_q8_d, &state.ple_q8_bsums,
-                &mut state.ple_out, &mut state.q6k_d_scratch, hd, ple_dim,
-            );
-            if !lw.post_norm.is_null() {
-                ffi_inference::gemma4_rmsnorm(
-                    state.ple_out.as_ptr(), lw.post_norm,
-                    state.ple_out.as_mut_ptr(), hd as i32, model.rms_eps,
-                );
-            }
-            ffi_inference::vec_add_f32(
-                state.batch_x[off..].as_ptr(), state.ple_out.as_ptr(),
-                state.batch_x[off..].as_mut_ptr(), hd as i32,
-            );
-        }
-    }
-    barrier.wait();
+    // ── 10b. Batched PLE (all threads) ──────────────────────────
+    super::forward_batch_ple::ple_batch(
+        state, model, il, n, barrier, current_chunk, ith, nth,
+    );
 
     // ── 10c. Output scale (all threads, token-strided) ──────────
     {
