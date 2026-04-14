@@ -450,8 +450,8 @@ fn layer_forward_graph(
             let ple_off = il * ple_dim;
 
             matmul::quant_input(&state.x[..hd], &mut state.q8_qs, &mut state.q8_d, &mut state.q8_bsums);
-            matmul::matvec(
-                lw.inp_gate_dtype, lw.inp_gate,
+            matmul::matvec_maybe_repacked(
+                lw.inp_gate_dtype, lw.inp_gate, lw.inp_gate_repacked.as_deref(),
                 &state.q8_qs, &state.q8_d, &state.q8_bsums,
                 &mut state.ple_gate, &mut state.q6k_d_scratch, ple_dim, hd,
             );
@@ -465,8 +465,8 @@ fn layer_forward_graph(
                 &state.ple_gate[..ple_dim],
                 &mut state.ple_q8_qs, &mut state.ple_q8_d, &mut state.ple_q8_bsums,
             );
-            matmul::matvec(
-                lw.proj_dtype, lw.proj,
+            matmul::matvec_maybe_repacked(
+                lw.proj_dtype, lw.proj, lw.proj_repacked.as_deref(),
                 &state.ple_q8_qs, &state.ple_q8_d, &state.ple_q8_bsums,
                 &mut state.ple_out, &mut state.q6k_d_scratch, hd, ple_dim,
             );

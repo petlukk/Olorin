@@ -163,6 +163,36 @@ pub fn matvec(
     }
 }
 
+/// Single-threaded matvec with optional repacked Q4K weights.
+/// When repacked is `Some`, uses the 8x8 kernel; otherwise falls through to dtype dispatch.
+#[allow(clippy::too_many_arguments)]
+pub fn matvec_maybe_repacked(
+    dtype: u32,
+    weight: *const u8,
+    repacked: Option<&[u8]>,
+    input_qs: &[i8],
+    input_d: &[f32],
+    input_bsums: &[i16],
+    output: &mut [f32],
+    d_scratch: &mut [f32],
+    n_rows: usize,
+    n_cols: usize,
+) {
+    if let Some(buf) = repacked {
+        let pow2 = pow2_table();
+        let mut scratch = [0u8; 128];
+        unsafe {
+            ffi_inference::q4k_8x8_q8k_matvec(
+                buf.as_ptr(), input_qs.as_ptr(), input_d.as_ptr(),
+                input_bsums.as_ptr(), pow2.as_ptr(), scratch.as_mut_ptr(),
+                output.as_mut_ptr(), n_rows as i32, n_cols as i32,
+            );
+        }
+    } else {
+        matvec(dtype, weight, input_qs, input_d, input_bsums, output, d_scratch, n_rows, n_cols);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Parallel dtype-dispatching matvec — splits quad loop across ThreadPool workers
 // ---------------------------------------------------------------------------

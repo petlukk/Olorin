@@ -48,9 +48,8 @@ pub(crate) fn ple_batch(
     barrier.wait();
 
     // ── Step 3: GEMM inp_gate: [ple_dim, hd] × Q8K → batch_ple_gate_out ──
-    // No repacked weight variant for PLE, pass None → falls through to matvec_batch_ws.
     matvec_batch_step(
-        None, lw.inp_gate_dtype, lw.inp_gate,
+        lw.inp_gate_repacked.as_deref(), lw.inp_gate_dtype, lw.inp_gate,
         state.batch_q8_a.as_ptr(), state.batch_q8_qs.as_ptr(),
         state.batch_q8_d.as_ptr(), state.batch_q8_bsums.as_ptr(),
         state.batch_ple_gate_out.as_mut_ptr(), state.q6k_d_scratch.as_mut_ptr(),
@@ -97,7 +96,7 @@ pub(crate) fn ple_batch(
 
     // ── Step 7: GEMM proj: [hd, ple_dim] × Q8K → batch_ple_proj_out ──
     matvec_batch_step(
-        None, lw.proj_dtype, lw.proj,
+        lw.proj_repacked.as_deref(), lw.proj_dtype, lw.proj,
         state.batch_ple_q8_a.as_ptr(), state.batch_ple_q8_qs.as_ptr(),
         state.batch_ple_q8_d.as_ptr(), state.batch_ple_q8_bsums.as_ptr(),
         state.batch_ple_proj_out.as_mut_ptr(), state.q6k_d_scratch.as_mut_ptr(),

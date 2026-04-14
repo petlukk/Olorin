@@ -120,6 +120,7 @@ pub(crate) fn populate_q4k_repacked(
     head_dim_v: usize,
     hidden_dim: usize,
     ffn_dim: usize,
+    ple_dim: usize,
 ) {
     // Attention projections. Weight shape = [n_cols, n_rows] in GGUF, but
     // matmul call sites pass n_rows as "output dim" — match those shapes.
@@ -131,4 +132,9 @@ pub(crate) fn populate_q4k_repacked(
     lw.w_gate_repacked = try_repack_q4k(lw.w_gate, lw.w_gate_dtype, ffn_dim, hidden_dim);
     lw.w_up_repacked = try_repack_q4k(lw.w_up, lw.w_up_dtype, ffn_dim, hidden_dim);
     lw.w_down_repacked = try_repack_q4k(lw.w_down, lw.w_down_dtype, hidden_dim, ffn_dim);
+    // PLE projections
+    if ple_dim > 0 {
+        lw.inp_gate_repacked = try_repack_q4k(lw.inp_gate, lw.inp_gate_dtype, ple_dim, hidden_dim);
+        lw.proj_repacked = try_repack_q4k(lw.proj, lw.proj_dtype, hidden_dim, ple_dim);
+    }
 }

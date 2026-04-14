@@ -71,6 +71,8 @@ pub struct LayerWeights {
     pub w_gate_repacked: Option<Vec<u8>>,
     pub w_up_repacked: Option<Vec<u8>>,
     pub w_down_repacked: Option<Vec<u8>>,
+    pub inp_gate_repacked: Option<Vec<u8>>,
+    pub proj_repacked: Option<Vec<u8>>,
 }
 
 impl std::fmt::Debug for LayerWeights {
@@ -433,11 +435,14 @@ impl Gemma4Model {
                 w_gate_repacked: None,
                 w_up_repacked: None,
                 w_down_repacked: None,
+                inp_gate_repacked: None,
+                proj_repacked: None,
             };
             layers.push(lw);
             engine_helpers::populate_q4k_repacked(
                 layers.last_mut().unwrap(),
                 n_heads, n_kv_heads, head_dim_k[i], head_dim_v[i], hidden_dim, ffn_dim[i],
+                ple_dim,
             );
         }
 

@@ -291,8 +291,8 @@ impl Gemma4State {
                 &mut self.q8_d,
                 &mut self.q8_bsums,
             );
-            matmul::par_matvec(pool,
-                lw.inp_gate_dtype, lw.inp_gate,
+            matmul::par_matvec_maybe_repacked(pool,
+                lw.inp_gate_dtype, lw.inp_gate, lw.inp_gate_repacked.as_deref(),
                 &self.q8_qs, &self.q8_d, &self.q8_bsums,
                 &mut self.ple_gate, &mut self.q6k_d_scratch,
                 ple_dim, hd,
@@ -313,8 +313,8 @@ impl Gemma4State {
                 &mut self.ple_q8_d,
                 &mut self.ple_q8_bsums,
             );
-            matmul::par_matvec(pool,
-                lw.proj_dtype, lw.proj,
+            matmul::par_matvec_maybe_repacked(pool,
+                lw.proj_dtype, lw.proj, lw.proj_repacked.as_deref(),
                 &self.ple_q8_qs, &self.ple_q8_d, &self.ple_q8_bsums,
                 &mut self.ple_out, &mut self.q6k_d_scratch,
                 hd, ple_dim,
