@@ -209,6 +209,16 @@ impl KvCache {
         self.seq_len
     }
 
+    /// Rewind sequence length to `n`. Used by speculative decode to discard
+    /// KV slots written for rejected drafts. Does not zero the underlying
+    /// buffers — the abandoned slots will simply be overwritten on the next
+    /// write.
+    #[inline]
+    pub fn rewind_to(&mut self, n: usize) {
+        debug_assert!(n <= self.seq_len);
+        self.seq_len = n;
+    }
+
     /// Reset cache — zero all buffers, seq_len back to 0.
     pub fn reset(&mut self) {
         self.seq_len = 0;

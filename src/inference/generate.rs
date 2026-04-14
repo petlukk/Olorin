@@ -10,6 +10,7 @@ use crate::inference::gguf::GgufFile;
 use crate::inference::engine::Gemma4Model;
 use crate::inference::forward::{timing_enabled, Gemma4State};
 use crate::inference::tokenizer::Tokenizer;
+use crate::inference::sample::{sample, xorshift_seed};
 
 // ---------------------------------------------------------------------------
 // Engine
@@ -127,9 +128,17 @@ impl Engine {
 
         let mut timing_acc = DecodeTiming::default();
 
-        for _ in 0..self.max_tokens {
+        // Live context (prompt + every emitted token) for prompt-lookup drafts.
+        let mut context_tokens: Vec<u32> = tokens.clone();
+        // Scratch for speculative decoding, sized for max draft_k.
+        let draft_k = self.draft_k;
+        let mut draft_buf: Vec<u32> = if draft_k >= 2 { vec![0u32; draft_k - 1] } else { Vec::new() };
+        let vocab_size = self.model.vocab_size;
+        let mut out_argmax: Vec<u32> = if draft_k >= 2 { vec![0u32; draft_k] } else { Vec::new() };
+
+        'outer: for _ in 0..self.max_tokens {
             let t0 = Instant::now();
-            let token_id = sample(
+            let a0 = sample(
                 &mut logits_snapshot,
                 self.temperature,
                 self.top_k,
@@ -139,17 +148,123 @@ impl Engine {
             );
             t_sample_total += t0.elapsed().as_micros() as u64;
 
-            if self.emit_and_advance(
-                token_id,
-                &mut output,
-                on_token,
-                &mut logits_snapshot,
-                &mut n_decode,
-                &mut timing_acc,
-                eos,
-            ) {
-                break;
+            // Plain single-token path — speculation disabled or context too short.
+            if draft_k <= 1 || context_tokens.len() < 3 {
+                if self.emit_and_advance(
+                    a0,
+                    &mut output,
+                    on_token,
+                    &mut logits_snapshot,
+                    &mut n_decode,
+                    &mut timing_acc,
+                    eos,
+                ) {
+                    break;
+                }
+                context_tokens.push(a0);
+                continue;
             }
+
+            // ── Speculative path ──────────────────────────────────────
+            // Build n-gram key from the last 3 tokens *including* A_0, so the
+            // lookup sees the freshly-sampled token as part of the key.
+            context_tokens.push(a0);
+            let ctx_len = context_tokens.len();
+            let key: [u32; 3] = [
+                context_tokens[ctx_len - 3],
+                context_tokens[ctx_len - 2],
+                context_tokens[ctx_len - 1],
+            ];
+            let n = crate::kernels::ffi_inference::ngram_lookup(
+                &context_tokens,
+                &key,
+                draft_k - 1,
+                &mut draft_buf,
+            );
+
+            if n == 0 {
+                // No draft match. Pop A_0 so emit_and_advance owns the push.
+                context_tokens.pop();
+                if self.emit_and_advance(
+                    a0,
+                    &mut output,
+                    on_token,
+                    &mut logits_snapshot,
+                    &mut n_decode,
+                    &mut timing_acc,
+                    eos,
+                ) {
+                    break;
+                }
+                context_tokens.push(a0);
+                continue;
+            }
+
+            // Build batch [A_0, draft_buf[0..n]] of size n+1.
+            let k_rows = n + 1;
+            let mut batch: Vec<u32> = Vec::with_capacity(k_rows);
+            batch.push(a0);
+            batch.extend_from_slice(&draft_buf[..n]);
+
+            let s_anchor = self.state.cache.seq_len();
+            let t_fwd = Instant::now();
+            let logits_all = self
+                .state
+                .forward_batch_all_logits(&self.model, &batch, &self.graph_pool);
+            timing_acc.forward_us += t_fwd.elapsed().as_micros() as u64;
+
+            // verify_draft expects out_argmax.len() == k_rows.
+            let verify_slice = &mut out_argmax[..k_rows];
+            let j = crate::kernels::ffi_inference::verify_draft(
+                &logits_all[..k_rows * vocab_size],
+                vocab_size,
+                &draft_buf[..n],
+                k_rows,
+                verify_slice,
+            );
+
+            let (accepted, correction) = if j == k_rows {
+                (n, verify_slice[n])
+            } else {
+                (j, verify_slice[j])
+            };
+
+            // Rewind KV to keep A_0 + `accepted` drafts' slots.
+            self.state.rewind_to(s_anchor + 1 + accepted);
+
+            // Write correction's KV at the rewound position and get fresh logits.
+            let t_fwd = Instant::now();
+            let corr_logits = self
+                .state
+                .forward_one_graph(&self.model, correction, &self.graph_pool);
+            timing_acc.forward_us += t_fwd.elapsed().as_micros() as u64;
+            let t_cp = Instant::now();
+            logits_snapshot.clear();
+            logits_snapshot.extend_from_slice(corr_logits);
+            timing_acc.copy_us += t_cp.elapsed().as_micros() as u64;
+
+            // Emit in order: A_0 (already pushed), accepted drafts, correction.
+            // Pop A_0 so emit_token can account for it cleanly? No — emit_token
+            // doesn't touch context_tokens. A_0 is already in context_tokens.
+            if self.emit_token(a0, &mut output, on_token, &mut n_decode, &mut timing_acc, eos) {
+                break 'outer;
+            }
+            let mut stopped = false;
+            for i in 0..accepted {
+                let tok = draft_buf[i];
+                if self.emit_token(tok, &mut output, on_token, &mut n_decode, &mut timing_acc, eos) {
+                    stopped = true;
+                    break;
+                }
+                context_tokens.push(tok);
+            }
+            if stopped {
+                break 'outer;
+            }
+            if self.emit_token(correction, &mut output, on_token, &mut n_decode, &mut timing_acc, eos) {
+                break 'outer;
+            }
+            context_tokens.push(correction);
         }
         t_forward_total += timing_acc.forward_us;
         t_copy_total += timing_acc.copy_us;
@@ -176,21 +291,15 @@ impl Engine {
         Ok(output)
     }
 
-    /// Emit a single sampled token and advance the KV state by one step.
-    ///
-    /// Checks stop conditions, streams the token via `on_token` (unless it's
-    /// a control / user-defined piece), runs `forward_one_graph` to get the
-    /// next logits, and copies them into `logits_snapshot`. Timing for the
-    /// forward / copy / other buckets is accumulated into `timing`.
-    ///
-    /// Returns `true` when decoding should stop (EOS or a stop_id was hit).
+    /// Emit a token: stop check, optional on_token streaming, output push.
+    /// Does NOT run the forward pass and does NOT touch context_tokens.
+    /// Returns `true` when decoding should stop (EOS or stop_id).
     #[inline]
-    fn emit_and_advance(
+    fn emit_token(
         &mut self,
         token_id: u32,
         output: &mut String,
         on_token: &dyn Fn(&str),
-        logits_snapshot: &mut Vec<f32>,
         n_decode: &mut usize,
         timing: &mut DecodeTiming,
         eos: u32,
@@ -208,6 +317,28 @@ impl Engine {
             output.push_str(&text);
         }
         timing.other_us += t0.elapsed().as_micros() as u64;
+
+        false
+    }
+
+    /// Emit a single sampled token and advance the KV state by one step.
+    ///
+    /// Composes `emit_token` + `forward_one_graph` + logits copy. Used by the
+    /// non-speculative path.
+    #[inline]
+    fn emit_and_advance(
+        &mut self,
+        token_id: u32,
+        output: &mut String,
+        on_token: &dyn Fn(&str),
+        logits_snapshot: &mut Vec<f32>,
+        n_decode: &mut usize,
+        timing: &mut DecodeTiming,
+        eos: u32,
+    ) -> bool {
+        if self.emit_token(token_id, output, on_token, n_decode, timing, eos) {
+            return true;
+        }
 
         let t0 = Instant::now();
         let logits = self.state.forward_one_graph(&self.model, token_id, &self.graph_pool);
@@ -261,170 +392,6 @@ fn format_chat(user: &str, system: &str) -> String {
     out.push_str("<turn|>\n");
     out.push_str("<|turn>model\n");
     out
-}
-
-// ---------------------------------------------------------------------------
-// Sampling
-// ---------------------------------------------------------------------------
-
-fn sample(
-    logits: &mut [f32],
-    temperature: f32,
-    top_k: usize,
-    top_p: f32,
-    min_p: f32,
-    rng: &mut u64,
-) -> u32 {
-    let n = logits.len();
-
-    // Greedy
-    if temperature < 1e-6 {
-        return argmax(logits);
-    }
-
-    // Sampler order matches llama.cpp default chain:
-    //   top-k -> top-p -> min-p -> temperature -> softmax -> sample
-    // (Olorin previously divided logits by temperature first, which changes
-    // the *ordering* of probabilities at the top-p / min-p cutoffs only when
-    // combined with re-softmax — but it also changes which tokens survive
-    // top-k truncation when ties exist. Match llama.cpp exactly.)
-
-    // 1. Top-k selection: O(n) scan instead of O(n log n) sort.
-    //    Keep a min-heap of the top_k largest logits.
-    let mut candidates: Vec<(u32, f32)> = Vec::with_capacity(top_k + 1);
-    for i in 0..n as u32 {
-        let v = logits[i as usize];
-        if candidates.len() < top_k {
-            candidates.push((i, v));
-            // Sift up to maintain min-heap
-            let mut c = candidates.len() - 1;
-            while c > 0 {
-                let p = (c - 1) / 2;
-                if candidates[c].1 < candidates[p].1 { candidates.swap(c, p); c = p; } else { break; }
-            }
-        } else if v > candidates[0].1 {
-            // Replace min element and sift down
-            candidates[0] = (i, v);
-            let mut p = 0;
-            loop {
-                let l = 2 * p + 1;
-                let r = 2 * p + 2;
-                let mut s = p;
-                if l < candidates.len() && candidates[l].1 < candidates[s].1 { s = l; }
-                if r < candidates.len() && candidates[r].1 < candidates[s].1 { s = r; }
-                if s == p { break; }
-                candidates.swap(p, s);
-                p = s;
-            }
-        }
-    }
-
-    // 2. Sort the top-k candidates (tiny — 64 elements max)
-    candidates.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-
-    // 3. Softmax (for top-p / min-p we need probabilities)
-    let cmax = candidates[0].1;
-    let mut sum = 0.0f32;
-    for c in candidates.iter_mut() {
-        c.1 = (c.1 - cmax).exp();
-        sum += c.1;
-    }
-    let inv_sum = 1.0 / sum;
-    for c in candidates.iter_mut() {
-        c.1 *= inv_sum;
-    }
-
-    // 4. Top-p: accumulate, cut
-    let mut cumulative = 0.0f32;
-    let mut cutoff = candidates.len();
-    for (i, c) in candidates.iter().enumerate() {
-        cumulative += c.1;
-        if cumulative > top_p {
-            cutoff = i + 1;
-            break;
-        }
-    }
-    candidates.truncate(cutoff);
-
-    // 5. Min-p: keep tokens with prob >= min_p * max_prob
-    let pmax = candidates[0].1;
-    let min_thresh = min_p * pmax;
-    candidates.retain(|c| c.1 >= min_thresh);
-    if candidates.is_empty() {
-        return argmax(logits);
-    }
-
-    // 6. Temperature — applied as scaling on log-probs, then re-softmax
-    if (temperature - 1.0).abs() > 1e-6 {
-        for c in candidates.iter_mut() {
-            c.1 = c.1.ln() / temperature;
-        }
-        let cmax2 = candidates.iter().map(|c| c.1).fold(f32::NEG_INFINITY, f32::max);
-        let mut s2 = 0.0f32;
-        for c in candidates.iter_mut() {
-            c.1 = (c.1 - cmax2).exp();
-            s2 += c.1;
-        }
-        let inv2 = 1.0 / s2;
-        for c in candidates.iter_mut() {
-            c.1 *= inv2;
-        }
-    } else {
-        // Re-normalize after min-p truncation
-        let s2: f32 = candidates.iter().map(|c| c.1).sum();
-        let inv2 = 1.0 / s2;
-        for c in candidates.iter_mut() {
-            c.1 *= inv2;
-        }
-    }
-
-    // Sample with xorshift64
-    let r = xorshift64(rng);
-    let threshold = (r as f64) / (u64::MAX as f64);
-    let mut acc = 0.0f64;
-    for c in &candidates {
-        acc += c.1 as f64;
-        if acc >= threshold {
-            return c.0;
-        }
-    }
-
-    // Fallback: last candidate
-    candidates.last().unwrap().0
-}
-
-fn argmax(logits: &[f32]) -> u32 {
-    let mut best_idx = 0u32;
-    let mut best_val = f32::NEG_INFINITY;
-    for (i, &v) in logits.iter().enumerate() {
-        if v > best_val {
-            best_val = v;
-            best_idx = i as u32;
-        }
-    }
-    best_idx
-}
-
-// ---------------------------------------------------------------------------
-// RNG
-// ---------------------------------------------------------------------------
-
-fn xorshift_seed() -> u64 {
-    let mut s = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos() as u64;
-    if s == 0 { s = 0xDEAD_BEEF_CAFE_BABE; }
-    s
-}
-
-fn xorshift64(state: &mut u64) -> u64 {
-    let mut x = *state;
-    x ^= x << 13;
-    x ^= x >> 7;
-    x ^= x << 17;
-    *state = x;
-    x
 }
 
 // ---------------------------------------------------------------------------

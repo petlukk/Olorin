@@ -10,6 +10,7 @@ pub(crate) mod matmul_batch;
 pub mod repack;
 pub mod dequant;
 pub mod generate;
+mod sample;
 pub mod threadpool;
 pub mod forward;
 mod forward_attn;

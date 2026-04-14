@@ -533,4 +533,10 @@ impl Gemma4State {
     pub fn reset(&mut self) {
         self.cache.reset();
     }
+
+    /// Rewind KV cache seq_len to `n` (forwarder to `KvCache::rewind_to`).
+    #[inline]
+    pub fn rewind_to(&mut self, n: usize) {
+        self.cache.rewind_to(n);
+    }
 }
