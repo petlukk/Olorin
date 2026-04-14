@@ -40,6 +40,7 @@ pub struct KernelTableInference {
     pub q6k_gemm:               Q6kGemmFn,
     pub attn_fused_batched:      AttnFusedBatchedFn,
     pub ngram_lookup:            NgramLookupFn,
+    pub verify_draft:            VerifyDraftFn,
 }
 
 // SAFETY: KernelTableInference holds function pointers and library handles.
@@ -115,6 +116,7 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
     let q6k_gemm_lib         = load("q6k_gemm")?;
     let attn_fused_batched_lib = load("attn_fused_batched")?;
     let ngram_lookup_lib       = load("ngram_lookup")?;
+    let verify_draft_lib       = load("verify_draft")?;
 
     unsafe {
         let sym = |lib: &Library, name: &[u8]| -> Result<usize, String> {
@@ -159,7 +161,8 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
             q6k_gemm:               std::mem::transmute(sym(&q6k_gemm_lib, b"q6k_gemm\0")?),
             attn_fused_batched:      std::mem::transmute(sym(&attn_fused_batched_lib, b"attn_fused_batched\0")?),
             ngram_lookup:            std::mem::transmute(sym(&ngram_lookup_lib, b"ngram_lookup\0")?),
-            libs: vec![q4kq, q4kd, q5kd, q6kd, q6k_dot_repacked_lib, f16_conv_lib, softmax_lib, gemma4_rmsnorm_lib, gemma4_gelu_lib, gemma4_rope_lib, bf16_matvec_lib, vec_ops_lib, attn_ops_lib, bare_rmsnorm_lib, softcap_lib, q4k_repack_lib, q4k_dot_8x8_lib, q4k_dot_8x8_dual_lib, q8k_repack_4_lib, q4k_dot_8x8_gemm_lib, q6k_gemm_lib, attn_fused_batched_lib, ngram_lookup_lib],
+            verify_draft:            std::mem::transmute(sym(&verify_draft_lib, b"verify_draft\0")?),
+            libs: vec![q4kq, q4kd, q5kd, q6kd, q6k_dot_repacked_lib, f16_conv_lib, softmax_lib, gemma4_rmsnorm_lib, gemma4_gelu_lib, gemma4_rope_lib, bf16_matvec_lib, vec_ops_lib, attn_ops_lib, bare_rmsnorm_lib, softcap_lib, q4k_repack_lib, q4k_dot_8x8_lib, q4k_dot_8x8_dual_lib, q8k_repack_4_lib, q4k_dot_8x8_gemm_lib, q6k_gemm_lib, attn_fused_batched_lib, ngram_lookup_lib, verify_draft_lib],
         };
         Ok(t)
     }
@@ -426,4 +429,30 @@ pub fn ngram_lookup(ctx: &[u32], key: &[u32; 3], k_draft: usize, out: &mut [u32]
     let out_i32 = out.as_mut_ptr() as *mut i32;
     let n = unsafe { (k().ngram_lookup)(ctx_i32, ctx.len() as i32, key_i32, k_draft as i32, out_i32) };
     n.max(0) as usize
+}
+
+/// Verify K-1 drafts against per-row argmax of K logits rows.
+/// `logits` is row-major K x vocab. `drafts` has K-1 tokens.
+/// `out_argmax` receives K argmax values. Returns the first row index j where
+/// the row's argmax != drafts[j] (j in 0..K-2), or K for full accept.
+pub fn verify_draft(
+    logits: &[f32],
+    vocab: usize,
+    drafts: &[u32],
+    k_rows: usize,
+    out_argmax: &mut [u32],
+) -> usize {
+    assert_eq!(logits.len(), k_rows * vocab);
+    assert_eq!(drafts.len(), k_rows.saturating_sub(1));
+    assert_eq!(out_argmax.len(), k_rows);
+    let j = unsafe {
+        (k().verify_draft)(
+            logits.as_ptr(),
+            vocab as i32,
+            drafts.as_ptr() as *const i32,
+            k_rows as i32,
+            out_argmax.as_mut_ptr() as *mut i32,
+        )
+    };
+    j as usize
 }

@@ -123,6 +123,13 @@ pub type NgramLookupFn = unsafe extern "C" fn(
     i32,         // k
     *mut i32,    // out_ptr
 ) -> i32;
+pub type VerifyDraftFn = unsafe extern "C" fn(
+    *const f32,  // logits_ptr
+    i32,         // vocab
+    *const i32,  // drafts_ptr
+    i32,         // k
+    *mut i32,    // out_argmax
+) -> i32;
 pub type AttnFusedBatchedFn = unsafe extern "C" fn(
     *const f32,  // q
     *const u16,  // k_cache
