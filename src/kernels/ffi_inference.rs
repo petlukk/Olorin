@@ -39,6 +39,7 @@ pub struct KernelTableInference {
     pub q4k_8x8_q8k_gemm:       Q4k8x8GemmFn,
     pub q6k_gemm:               Q6kGemmFn,
     pub attn_fused_batched:      AttnFusedBatchedFn,
+    pub ngram_lookup:            NgramLookupFn,
 }
 
 // SAFETY: KernelTableInference holds function pointers and library handles.
@@ -113,6 +114,7 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
     let q4k_dot_8x8_gemm_lib = load("q4k_dot_8x8_gemm")?;
     let q6k_gemm_lib         = load("q6k_gemm")?;
     let attn_fused_batched_lib = load("attn_fused_batched")?;
+    let ngram_lookup_lib       = load("ngram_lookup")?;
 
     unsafe {
         let sym = |lib: &Library, name: &[u8]| -> Result<usize, String> {
@@ -156,7 +158,8 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
             q4k_8x8_q8k_gemm:       std::mem::transmute(sym(&q4k_dot_8x8_gemm_lib, b"q4k_8x8_q8k_gemm\0")?),
             q6k_gemm:               std::mem::transmute(sym(&q6k_gemm_lib, b"q6k_gemm\0")?),
             attn_fused_batched:      std::mem::transmute(sym(&attn_fused_batched_lib, b"attn_fused_batched\0")?),
-            libs: vec![q4kq, q4kd, q5kd, q6kd, q6k_dot_repacked_lib, f16_conv_lib, softmax_lib, gemma4_rmsnorm_lib, gemma4_gelu_lib, gemma4_rope_lib, bf16_matvec_lib, vec_ops_lib, attn_ops_lib, bare_rmsnorm_lib, softcap_lib, q4k_repack_lib, q4k_dot_8x8_lib, q4k_dot_8x8_dual_lib, q8k_repack_4_lib, q4k_dot_8x8_gemm_lib, q6k_gemm_lib, attn_fused_batched_lib],
+            ngram_lookup:            std::mem::transmute(sym(&ngram_lookup_lib, b"ngram_lookup\0")?),
+            libs: vec![q4kq, q4kd, q5kd, q6kd, q6k_dot_repacked_lib, f16_conv_lib, softmax_lib, gemma4_rmsnorm_lib, gemma4_gelu_lib, gemma4_rope_lib, bf16_matvec_lib, vec_ops_lib, attn_ops_lib, bare_rmsnorm_lib, softcap_lib, q4k_repack_lib, q4k_dot_8x8_lib, q4k_dot_8x8_dual_lib, q8k_repack_4_lib, q4k_dot_8x8_gemm_lib, q6k_gemm_lib, attn_fused_batched_lib, ngram_lookup_lib],
         };
         Ok(t)
     }
@@ -411,4 +414,16 @@ pub unsafe fn attn_fused_batched(
         head_dim, q_stride, out_stride, stride_kv, kv_head_offset,
         n_kv, n_batch, cache_start, attn_scale,
     )
+}
+
+/// Longest-match n-gram lookup over context tokens.
+/// `ctx` is the live sequence (prompt + generated). `key` is the last 3 tokens.
+/// Writes up to `k` draft tokens to `out`. Returns the number written (0 = no match).
+pub fn ngram_lookup(ctx: &[u32], key: &[u32; 3], k_draft: usize, out: &mut [u32]) -> usize {
+    assert!(out.len() >= k_draft);
+    let ctx_i32 = ctx.as_ptr() as *const i32;
+    let key_i32 = key.as_ptr() as *const i32;
+    let out_i32 = out.as_mut_ptr() as *mut i32;
+    let n = unsafe { (k().ngram_lookup)(ctx_i32, ctx.len() as i32, key_i32, k_draft as i32, out_i32) };
+    n.max(0) as usize
 }

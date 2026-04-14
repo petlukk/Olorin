@@ -116,6 +116,13 @@ pub type Q4k8x8GemmFn = unsafe extern "C" fn(
     i32,         // nr (A rows, must be % 4 == 0)
     i32,         // nc (B cols, must be % 8 == 0)
 );
+pub type NgramLookupFn = unsafe extern "C" fn(
+    *const i32,  // ctx_ptr
+    i32,         // ctx_len
+    *const i32,  // key_ptr
+    i32,         // k
+    *mut i32,    // out_ptr
+) -> i32;
 pub type AttnFusedBatchedFn = unsafe extern "C" fn(
     *const f32,  // q
     *const u16,  // k_cache
