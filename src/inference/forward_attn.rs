@@ -446,11 +446,20 @@ impl Gemma4State {
         );
 
         // Down projection: ffn_dim -> hidden_dim
-        matmul::par_matvec_maybe_repacked(pool,
-            lw.w_down_dtype, lw.w_down, lw.w_down_repacked.as_deref(),
-            &self.ffn_q8_qs, &self.ffn_q8_d, &self.ffn_q8_bsums,
-            &mut self.down, &mut self.q6k_d_scratch,
-            hd, ffn_dim,
-        );
+        if let Some(ref q6k_buf) = lw.w_down_q6k_repacked {
+            matmul::par_q6k_matvec_repacked(pool,
+                q6k_buf, lw.w_down,
+                &self.ffn_q8_qs, &self.ffn_q8_d, &self.ffn_q8_bsums,
+                &mut self.down, &mut self.q6k_d_scratch,
+                hd, ffn_dim,
+            );
+        } else {
+            matmul::par_matvec_maybe_repacked(pool,
+                lw.w_down_dtype, lw.w_down, lw.w_down_repacked.as_deref(),
+                &self.ffn_q8_qs, &self.ffn_q8_d, &self.ffn_q8_bsums,
+                &mut self.down, &mut self.q6k_d_scratch,
+                hd, ffn_dim,
+            );
+        }
     }
 }

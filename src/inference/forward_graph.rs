@@ -419,13 +419,23 @@ fn layer_forward_graph(
 
     current_chunk.store(nth as i32, Ordering::Relaxed);
     barrier.wait();
-    matvec_step(
-        lw.w_down_dtype, lw.w_down, lw.w_down_repacked.as_deref(),
-        state.ffn_q8_qs.as_ptr(), state.ffn_q8_d.as_ptr(), state.ffn_q8_bsums.as_ptr(),
-        state.down.as_mut_ptr(), state.q6k_d_scratch.as_mut_ptr(),
-        hd, ffn_dim,
-        current_chunk, ith, nth,
-    );
+    if let Some(ref q6k_buf) = lw.w_down_q6k_repacked {
+        matmul_graph::q6k_repacked_batch_ws(
+            q6k_buf.as_ptr(), lw.w_down,
+            state.ffn_q8_qs.as_ptr(), state.ffn_q8_d.as_ptr(), state.ffn_q8_bsums.as_ptr(),
+            state.down.as_mut_ptr(), state.q6k_d_scratch.as_mut_ptr(),
+            hd, ffn_dim, 1, hd,
+            current_chunk, ith, nth,
+        );
+    } else {
+        matvec_step(
+            lw.w_down_dtype, lw.w_down, lw.w_down_repacked.as_deref(),
+            state.ffn_q8_qs.as_ptr(), state.ffn_q8_d.as_ptr(), state.ffn_q8_bsums.as_ptr(),
+            state.down.as_mut_ptr(), state.q6k_d_scratch.as_mut_ptr(),
+            hd, ffn_dim,
+            current_chunk, ith, nth,
+        );
+    }
     barrier.wait();
 
     // ── 10. Post-FFN norm + residual + PLE + scale (thread 0) ───

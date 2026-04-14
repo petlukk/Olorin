@@ -224,6 +224,56 @@ pub fn par_matvec(
 }
 
 // ---------------------------------------------------------------------------
+// Q6K repacked matvec
+// ---------------------------------------------------------------------------
+
+/// Single-threaded Q6K repacked matvec.
+#[allow(clippy::too_many_arguments)]
+pub fn q6k_matvec_repacked(
+    packed: &[u8], weight: *const u8,
+    input_qs: &[i8], input_d: &[f32], input_bsums: &[i16],
+    output: &mut [f32], d_scratch: &mut [f32],
+    n_rows: usize, n_cols: usize,
+) {
+    let n_blocks = n_cols / Q6K_BLOCK_SIZE;
+    let row_bytes = n_blocks * Q6K_BLOCK_BYTES;
+    let full_quads = n_rows / 4;
+    let tile_bytes = n_blocks * 840;
+
+    for quad in 0..full_quads {
+        let base_row = quad * 4;
+        unsafe {
+            for blk in 0..n_blocks {
+                for r in 0..4usize {
+                    let w = weight.add((base_row + r) * row_bytes + blk * Q6K_BLOCK_BYTES + 208);
+                    let raw = u16::from_le_bytes([*w, *w.add(1)]);
+                    d_scratch[blk * 4 + r] = f16_to_f32_scalar(raw) * input_d[blk];
+                }
+            }
+            ffi_inference::q6k_dot_q8k_4row_repacked(
+                packed.as_ptr().add(quad * tile_bytes),
+                input_qs.as_ptr(), input_bsums.as_ptr(),
+                output[base_row..].as_mut_ptr(),
+                n_blocks as i32, d_scratch.as_ptr(),
+            );
+        }
+    }
+}
+
+/// Parallel Q6K repacked matvec — delegates to single-threaded for now.
+/// The batch path (prefill) is where multi-threading matters.
+#[allow(clippy::too_many_arguments)]
+pub fn par_q6k_matvec_repacked(
+    _pool: &ThreadPool,
+    packed: &[u8], weight: *const u8,
+    input_qs: &[i8], input_d: &[f32], input_bsums: &[i16],
+    output: &mut [f32], d_scratch: &mut [f32],
+    n_rows: usize, n_cols: usize,
+) {
+    q6k_matvec_repacked(packed, weight, input_qs, input_d, input_bsums, output, d_scratch, n_rows, n_cols);
+}
+
+// ---------------------------------------------------------------------------
 // Phase B.1: dispatch wrappers that accept an optional repacked buffer
 // ---------------------------------------------------------------------------
 

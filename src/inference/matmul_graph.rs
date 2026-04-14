@@ -413,6 +413,62 @@ pub fn q4k_gemm_8x8_batch_ws(
     }
 }
 
+/// Q6K repacked batch matvec — work-stealing across row quads × token chunks.
+#[allow(clippy::too_many_arguments)]
+pub fn q6k_repacked_batch_ws(
+    packed: *const u8, weight: *const u8,
+    batch_q8_qs: *const i8, batch_q8_d: *const f32, batch_q8_bsums: *const i16,
+    output: *mut f32, d_scratch: *mut f32,
+    n_rows: usize, n_cols: usize, n_tokens: usize, output_stride: usize,
+    current_chunk: &AtomicI32, ith: usize, _nth: usize,
+) {
+    let n_blocks = n_cols / Q6K_BLOCK_SIZE;
+    let row_bytes = n_blocks * Q6K_BLOCK_BYTES;
+    let qs_stride = n_cols + 12;
+    let full_quads = n_rows / 4;
+    let tile_bytes = n_blocks * 840;
+
+    let scratch_per = n_blocks * 4;
+    let my_scratch = unsafe { d_scratch.add(ith * scratch_per) };
+
+    let tok_chunk_size = 16usize;
+    let n_tok_chunks = (n_tokens + tok_chunk_size - 1) / tok_chunk_size;
+    let total_chunks = full_quads * n_tok_chunks;
+
+    let mut chunk = ith as i32;
+    while (chunk as usize) < total_chunks {
+        let quad = (chunk as usize) % full_quads;
+        let tok_idx = (chunk as usize) / full_quads;
+        let t_start = tok_idx * tok_chunk_size;
+        let t_end = (t_start + tok_chunk_size).min(n_tokens);
+        let base_row = quad * 4;
+
+        for t in t_start..t_end {
+            let q8 = unsafe { batch_q8_qs.add(t * qs_stride) };
+            let q8_d = unsafe { batch_q8_d.add(t * n_blocks) };
+            let bsums = unsafe { batch_q8_bsums.add(t * n_blocks * 16) };
+            let out_ptr = unsafe { output.add(t * output_stride + base_row) };
+
+            unsafe {
+                for blk in 0..n_blocks {
+                    for r in 0..4usize {
+                        let w = weight.add((base_row + r) * row_bytes + blk * Q6K_BLOCK_BYTES + 208);
+                        let raw = u16::from_le_bytes([*w, *w.add(1)]);
+                        *my_scratch.add(blk * 4 + r) = f16_to_f32_scalar(raw) * *q8_d.add(blk);
+                    }
+                }
+                ffi_inference::q6k_dot_q8k_4row_repacked(
+                    packed.add(quad * tile_bytes),
+                    q8, bsums, out_ptr,
+                    n_blocks as i32, my_scratch,
+                );
+            }
+        }
+
+        chunk = current_chunk.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 /// Batch matvec fallback (any dtype): 2D work-stealing across (4-row chunks × token chunks).
 #[allow(clippy::too_many_arguments)]
 pub fn matvec_batch_ws(
