@@ -129,6 +129,9 @@ pub struct Gemma4State {
     // Output
     pub(crate) logits: Vec<f32>,
     pub(crate) logit_rows: usize,
+    /// Per-row logits for speculative verify (max_batch * vocab_size).
+    /// Separate buffer so `logits` semantics for prefill/decode are untouched.
+    pub(crate) batch_logits: Vec<f32>,
 
     // Q6K d_scratch for output matmul
     pub(crate) q6k_d_scratch: Vec<f32>,
@@ -256,6 +259,7 @@ impl Gemma4State {
 
             logits: vec![0.0; model.vocab_size],
             logit_rows: model.vocab_size,
+            batch_logits: vec![0.0; model.vocab_size * max_batch],
             q6k_d_scratch: vec![0.0; std::cmp::max(n_blocks_out, n_blocks_ffn) * 4 * n_thread_slots],
 
             cos_table: vec![0.0; max_head / 2],
@@ -496,6 +500,33 @@ impl Gemma4State {
         });
 
         &self.logits[..self.logit_rows]
+    }
+
+    /// Like `forward_batch`, but computes final RMSNorm + output projection
+    /// for EVERY token in the batch. Returns `tokens.len() * vocab_size`
+    /// f32 logits, row-major (row t is logits for token t).
+    ///
+    /// Used exclusively by speculative verify — prefill should use
+    /// `forward_batch` which skips per-row final projection.
+    pub fn forward_batch_all_logits(
+        &mut self, model: &Gemma4Model, tokens: &[u32],
+        pool: &crate::inference::threadpool::GraphPool,
+    ) -> &[f32] {
+        assert!(!tokens.is_empty());
+        assert!(tokens.len() <= self.max_batch);
+        let state_ptr = self as *mut Gemma4State as usize;
+        let model_ptr = model as *const Gemma4Model as usize;
+
+        pool.run_graph(&|tid, nth, barrier, chunk| {
+            let state = unsafe { &mut *(state_ptr as *mut Gemma4State) };
+            let model = unsafe { &*(model_ptr as *const Gemma4Model) };
+            super::forward_batch::forward_batch_all_logits_inner(
+                state, model, tokens, barrier, chunk, tid, nth,
+            );
+        });
+
+        let n = tokens.len();
+        &self.batch_logits[..n * model.vocab_size]
     }
 
     /// Reset state for a new sequence.
