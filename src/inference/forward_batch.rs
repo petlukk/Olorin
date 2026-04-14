@@ -91,16 +91,26 @@ pub(crate) fn forward_batch_inner(
     }
     barrier.wait();
 
-    // ── Output matmul (Q6K work-stealing, last token only) ───────
+    // ── Output matmul (work-stealing, last token only) ────────────
     current_chunk.store(nth as i32, Ordering::Relaxed);
     barrier.wait();
-    matmul_graph::matvec_ws(
-        model.embed_dtype, model.embed_weight,
-        state.q8_qs.as_ptr(), state.q8_d.as_ptr(), state.q8_bsums.as_ptr(),
-        state.logits.as_mut_ptr(), state.q6k_d_scratch.as_mut_ptr(),
-        model.vocab_size, hd,
-        current_chunk, ith, nth,
-    );
+    if let Some(ref q6k_buf) = model.embed_q6k_repacked {
+        matmul_graph::q6k_repacked_batch_ws(
+            q6k_buf.as_ptr(), model.embed_weight,
+            state.q8_qs.as_ptr(), state.q8_d.as_ptr(), state.q8_bsums.as_ptr(),
+            state.logits.as_mut_ptr(), state.q6k_d_scratch.as_mut_ptr(),
+            model.vocab_size, hd, 1, model.vocab_size,
+            current_chunk, ith, nth,
+        );
+    } else {
+        matmul_graph::matvec_ws(
+            model.embed_dtype, model.embed_weight,
+            state.q8_qs.as_ptr(), state.q8_d.as_ptr(), state.q8_bsums.as_ptr(),
+            state.logits.as_mut_ptr(), state.q6k_d_scratch.as_mut_ptr(),
+            model.vocab_size, hd,
+            current_chunk, ith, nth,
+        );
+    }
     barrier.wait();
 
     // ── Softcap + advance cache by N (thread 0) ─────────────────

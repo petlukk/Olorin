@@ -115,6 +115,7 @@ pub struct Gemma4Model {
     // Global tensors
     pub embed_weight: *const u8,
     pub embed_dtype: u32,
+    pub embed_q6k_repacked: Option<Vec<u8>>,
     pub norm_weight: *const f32,
 
     // PLE global tensors
@@ -494,6 +495,7 @@ impl Gemma4Model {
             rope_freqs,
             layers,
             embed_weight,
+            embed_q6k_repacked: None, // repacking hurts for large vocab (d_arr extraction overhead)
             embed_dtype,
             norm_weight,
             ple_token_embd,
