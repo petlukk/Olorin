@@ -1,0 +1,165 @@
+// ngram_lookup.ea — Prompt-lookup speculative decoding: longest-match draft extraction
+//
+// Scans the context token buffer right-to-left for the most recent occurrence of
+// a 3-gram key. If found, copies up to k following tokens into the output buffer.
+// If no 3-gram match exists, falls back to a 2-gram match (key[1], key[2]).
+//
+// SIMD strategy: load 4 tokens at a time and broadcast-compare against key[0]
+// (or key[1] for pass 2). A `reduce_add` on the selected mask acts as a
+// cheap "any lane equal" gate — windows with no possible first-token match
+// are skipped entirely. When the gate fires, scalar verification confirms
+// the full n-gram and preserves right-to-left (most-recent-wins) priority.
+//
+// Contract:
+//   ngram_lookup(ctx, ctx_len, key, k, out) -> tokens_written
+//   key is exactly 3 i32 tokens; out_ptr must hold >= k i32s.
+
+#[cfg(x86_64)]
+
+export func ngram_lookup(
+    ctx_ptr: *i32, ctx_len: i32,
+    key_ptr: *i32,
+    k: i32,
+    out_ptr: *mut i32
+) -> i32 {
+    if k <= 0 {
+        return 0
+    }
+
+    // Pass 1: N=3 lookup. Needs ctx_len >= 3 to fit a 3-gram.
+    if ctx_len >= 3 {
+        let k0: i32 = key_ptr[0]
+        let k1: i32 = key_ptr[1]
+        let k2: i32 = key_ptr[2]
+        let k0_vec: i32x4 = splat(k0)
+
+        // Highest legal 3-gram start position is ctx_len - 3.
+        // We want to scan right-to-left. SIMD windows each cover 4 token
+        // positions [win, win+1, win+2, win+3] as potential start positions
+        // for the first key token. The highest window start that stays in
+        // bounds for loading 4 i32s is win = ctx_len - 4.
+        let mut win: i32 = ctx_len - 4
+
+        while win >= 0 {
+            let w: i32x4 = load(ctx_ptr, win)
+            let ones: i32x4 = select(w .== k0_vec, splat(1), splat(0))
+            let any: i32 = reduce_add(ones)
+
+            if any > 0 {
+                // Inspect lanes right-to-left: lane 3 = win+3, lane 0 = win.
+                let mut lane: i32 = 3
+                while lane >= 0 {
+                    let i: i32 = win + lane
+                    // A start position i is only valid if i+2 < ctx_len.
+                    if i + 3 <= ctx_len {
+                        if ctx_ptr[i] == k0 {
+                            if ctx_ptr[i + 1] == k1 {
+                                if ctx_ptr[i + 2] == k2 {
+                                    return copy_tail(ctx_ptr, ctx_len, i + 3, k, out_ptr)
+                                }
+                            }
+                        }
+                    }
+                    lane = lane - 1
+                }
+            }
+
+            win = win - 4
+        }
+
+        // Tail: SIMD windows only covered positions >= 0 when win stepped
+        // from (ctx_len - 4) down by 4. Positions not covered are those
+        // with win < 0 but (win + 3) >= 0, i.e. start positions in
+        // [0, (ctx_len - 4) mod 4 - 1 + 3] = positions missed by the last
+        // partial window. Handle with a scalar right-to-left sweep over
+        // the low end. The exact uncovered range is [0, last_win + 3]
+        // where last_win is the final win value (< 0) shifted back.
+        // Simpler + robust: scalar-verify positions [0, low_bound) where
+        // low_bound is the lowest position the SIMD loop already checked.
+        let last_win_plus_4: i32 = win + 4  // first non-checked window start from above
+        let low_bound: i32 = last_win_plus_4  // positions [low_bound, ctx_len-3] already done by SIMD
+        let mut i3: i32 = low_bound - 1
+        while i3 >= 0 {
+            if i3 + 3 <= ctx_len {
+                if ctx_ptr[i3] == k0 {
+                    if ctx_ptr[i3 + 1] == k1 {
+                        if ctx_ptr[i3 + 2] == k2 {
+                            return copy_tail(ctx_ptr, ctx_len, i3 + 3, k, out_ptr)
+                        }
+                    }
+                }
+            }
+            i3 = i3 - 1
+        }
+    }
+
+    // Pass 2: N=2 fallback. Needs ctx_len >= 2.
+    if ctx_len >= 2 {
+        let k1b: i32 = key_ptr[1]
+        let k2b: i32 = key_ptr[2]
+        let k1_vec: i32x4 = splat(k1b)
+
+        let mut win2: i32 = ctx_len - 4
+        while win2 >= 0 {
+            let w: i32x4 = load(ctx_ptr, win2)
+            let ones: i32x4 = select(w .== k1_vec, splat(1), splat(0))
+            let any: i32 = reduce_add(ones)
+
+            if any > 0 {
+                let mut lane: i32 = 3
+                while lane >= 0 {
+                    let i: i32 = win2 + lane
+                    if i + 2 <= ctx_len {
+                        if ctx_ptr[i] == k1b {
+                            if ctx_ptr[i + 1] == k2b {
+                                return copy_tail(ctx_ptr, ctx_len, i + 2, k, out_ptr)
+                            }
+                        }
+                    }
+                    lane = lane - 1
+                }
+            }
+
+            win2 = win2 - 4
+        }
+
+        let low_bound2: i32 = win2 + 4
+        let mut i2: i32 = low_bound2 - 1
+        while i2 >= 0 {
+            if i2 + 2 <= ctx_len {
+                if ctx_ptr[i2] == k1b {
+                    if ctx_ptr[i2 + 1] == k2b {
+                        return copy_tail(ctx_ptr, ctx_len, i2 + 2, k, out_ptr)
+                    }
+                }
+            }
+            i2 = i2 - 1
+        }
+    }
+
+    return 0
+}
+
+// Copy up to k tokens from ctx[start..] into out, returning the count written.
+// Bounded by (ctx_len - start) and k; never reads past ctx_len.
+#[cfg(x86_64)]
+func copy_tail(
+    ctx_ptr: *i32, ctx_len: i32,
+    start: i32, k: i32,
+    out_ptr: *mut i32
+) -> i32 {
+    let available: i32 = ctx_len - start
+    let mut n: i32 = k
+    if available < n {
+        n = available
+    }
+    if n <= 0 {
+        return 0
+    }
+    let mut j: i32 = 0
+    while j < n {
+        out_ptr[j] = ctx_ptr[start + j]
+        j = j + 1
+    }
+    return n
+}
