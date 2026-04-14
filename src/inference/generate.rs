@@ -128,6 +128,9 @@ impl Engine {
 
         let mut timing_acc = DecodeTiming::default();
 
+        let mut n_spec_steps: usize = 0;
+        let mut n_spec_accepted: usize = 0;
+
         // Live context (prompt + every emitted token) for prompt-lookup drafts.
         let mut context_tokens: Vec<u32> = tokens.clone();
         // Scratch for speculative decoding, sized for max draft_k.
@@ -212,6 +215,7 @@ impl Engine {
                 .state
                 .forward_batch_all_logits(&self.model, &batch, &self.graph_pool);
             timing_acc.forward_us += t_fwd.elapsed().as_micros() as u64;
+            n_spec_steps += 1;
 
             // verify_draft expects out_argmax.len() == k_rows.
             let verify_slice = &mut out_argmax[..k_rows];
@@ -228,6 +232,8 @@ impl Engine {
             } else {
                 (j, verify_slice[j])
             };
+
+            n_spec_accepted += accepted;
 
             // Rewind KV to keep A_0 + `accepted` drafts' slots.
             self.state.rewind_to(s_anchor + 1 + accepted);
@@ -285,6 +291,14 @@ impl Engine {
                     per(t_forward_total), per(t_sample_total), per(t_copy_total), per(t_other_total));
                 eprintln!("[decode-breakdown] total: forward={:.1}ms sample={:.1}ms copy={:.1}ms other={:.1}ms",
                     ms(t_forward_total), ms(t_sample_total), ms(t_copy_total), ms(t_other_total));
+            }
+            if self.draft_k > 0 && n_spec_steps > 0 {
+                let attempted = n_spec_steps * (self.draft_k.saturating_sub(1));
+                let rate = if attempted > 0 { n_spec_accepted as f64 / attempted as f64 } else { 0.0 };
+                eprintln!(
+                    "[timing] speculative: K={} steps={} accepted={} accept_rate={:.2}",
+                    self.draft_k, n_spec_steps, n_spec_accepted, rate
+                );
             }
         }
 
