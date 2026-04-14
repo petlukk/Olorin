@@ -34,7 +34,9 @@ pub(crate) struct BatchLayerTiming {
     pub quant_down: u64,
     pub repack_down: u64,
     pub gemm_down: u64,
-    pub post_ffn_ple: u64,
+    pub post_ffn_residual: u64,
+    pub ple_total: u64,
+    pub output_scale: u64,
 }
 
 impl BatchLayerTiming {
@@ -47,7 +49,9 @@ impl BatchLayerTiming {
             post_attn_ffn_norm: 0, quant_ffn: 0, repack_ffn: 0,
             gemm_gate: 0, gemm_up: 0,
             gelu_mul: 0, quant_down: 0, repack_down: 0, gemm_down: 0,
-            post_ffn_ple: 0,
+            post_ffn_residual: 0,
+            ple_total: 0,
+            output_scale: 0,
         }
     }
 
@@ -59,7 +63,7 @@ impl BatchLayerTiming {
             + self.post_attn_ffn_norm + self.quant_ffn + self.repack_ffn
             + self.gemm_gate + self.gemm_up
             + self.gelu_mul + self.quant_down + self.repack_down + self.gemm_down
-            + self.post_ffn_ple;
+            + self.post_ffn_residual + self.ple_total + self.output_scale;
         let ms = |us: u64| us as f64 / 1000.0;
         let pct = |us: u64| if total > 0 { us as f64 / total as f64 * 100.0 } else { 0.0 };
         eprintln!("[batch-timing] {n_layers} layers × {n_tokens} tokens, total {:.1}ms", ms(total));
@@ -84,7 +88,9 @@ impl BatchLayerTiming {
         eprintln!("  quant_down      {:7.1}ms  ({:4.1}%)", ms(self.quant_down), pct(self.quant_down));
         eprintln!("  repack_down     {:7.1}ms  ({:4.1}%)", ms(self.repack_down), pct(self.repack_down));
         eprintln!("  gemm_down       {:7.1}ms  ({:4.1}%)", ms(self.gemm_down), pct(self.gemm_down));
-        eprintln!("  post_ffn+ple    {:7.1}ms  ({:4.1}%)", ms(self.post_ffn_ple), pct(self.post_ffn_ple));
+        eprintln!("  post_ffn_res    {:7.1}ms  ({:4.1}%)", ms(self.post_ffn_residual), pct(self.post_ffn_residual));
+        eprintln!("  ple             {:7.1}ms  ({:4.1}%)", ms(self.ple_total), pct(self.ple_total));
+        eprintln!("  output_scale    {:7.1}ms  ({:4.1}%)", ms(self.output_scale), pct(self.output_scale));
     }
 }
 
@@ -606,13 +612,17 @@ pub(crate) fn layer_forward_batch(
         }
     }
     barrier.wait();
+    if ith == 0 { t_accum!(t0, post_ffn_residual, tm!()); }
 
     // ── 10b. Batched PLE (all threads) ──────────────────────────
+    let t0 = t_start!();
     super::forward_batch_ple::ple_batch(
         state, model, il, n, barrier, current_chunk, ith, nth,
     );
+    if ith == 0 { t_accum!(t0, ple_total, tm!()); }
 
     // ── 10c. Output scale (all threads, token-strided) ──────────
+    let t0 = t_start!();
     {
         let out_scale = lw.layer_output_scale;
         if out_scale != 1.0 {
@@ -628,5 +638,5 @@ pub(crate) fn layer_forward_batch(
         }
     }
     barrier.wait(); // B25
-    if ith == 0 { t_accum!(t0, post_ffn_ple, tm!()); }
+    if ith == 0 { t_accum!(t0, output_scale, tm!()); }
 }
