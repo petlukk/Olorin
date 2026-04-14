@@ -121,7 +121,13 @@ impl Engine {
         let stop_ids = &self.tokenizer.stop_ids;
         let mut n_decode = 0usize;
 
+        let mut t_sample_total: u64 = 0;
+        let mut t_forward_total: u64 = 0;
+        let mut t_copy_total: u64 = 0;
+        let mut t_other_total: u64 = 0;
+
         for _ in 0..self.max_tokens {
+            let t0 = Instant::now();
             let token_id = sample(
                 &mut logits_snapshot,
                 self.temperature,
@@ -130,6 +136,7 @@ impl Engine {
                 self.min_p,
                 &mut rng,
             );
+            t_sample_total += t0.elapsed().as_micros() as u64;
 
             if token_id == eos || stop_ids.contains(&token_id) {
                 break;
@@ -137,15 +144,22 @@ impl Engine {
 
             n_decode += 1;
 
+            let t0 = Instant::now();
             if !self.tokenizer.is_control_or_user_defined(token_id) {
                 let text = self.tokenizer.decode(&[token_id]);
                 on_token(&text);
                 output.push_str(&text);
             }
+            t_other_total += t0.elapsed().as_micros() as u64;
 
+            let t0 = Instant::now();
             let logits = self.state.forward_one_graph(&self.model, token_id, &self.graph_pool);
+            t_forward_total += t0.elapsed().as_micros() as u64;
+
+            let t0 = Instant::now();
             logits_snapshot.clear();
             logits_snapshot.extend_from_slice(logits);
+            t_copy_total += t0.elapsed().as_micros() as u64;
         }
         let t_decode = t_decode_start.elapsed();
 
@@ -156,6 +170,14 @@ impl Engine {
             let tg_tps = if tg_ms > 0.0 { n_decode as f64 / (tg_ms / 1000.0) } else { 0.0 };
             eprintln!("[timing] prefill: {n_prompt} tokens in {pp_ms:.1}ms ({pp_tps:.1} t/s)");
             eprintln!("[timing] decode:  {n_decode} tokens in {tg_ms:.1}ms ({tg_tps:.1} t/s)");
+            if n_decode > 0 {
+                let ms = |us: u64| us as f64 / 1000.0;
+                let per = |us: u64| ms(us) / n_decode as f64;
+                eprintln!("[decode-breakdown] per token: forward={:.1}ms sample={:.1}ms copy={:.1}ms other={:.1}ms",
+                    per(t_forward_total), per(t_sample_total), per(t_copy_total), per(t_other_total));
+                eprintln!("[decode-breakdown] total: forward={:.1}ms sample={:.1}ms copy={:.1}ms other={:.1}ms",
+                    ms(t_forward_total), ms(t_sample_total), ms(t_copy_total), ms(t_other_total));
+            }
         }
 
         Ok(output)
@@ -222,16 +244,38 @@ fn sample(
     // combined with re-softmax — but it also changes which tokens survive
     // top-k truncation when ties exist. Match llama.cpp exactly.)
 
-    // 1. Build raw (index, logit) candidates
-    let mut candidates: Vec<(u32, f32)> = (0..n as u32)
-        .map(|i| (i, logits[i as usize]))
-        .collect();
-
-    // 2. Top-k: partial sort, truncate
-    candidates.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-    if candidates.len() > top_k {
-        candidates.truncate(top_k);
+    // 1. Top-k selection: O(n) scan instead of O(n log n) sort.
+    //    Keep a min-heap of the top_k largest logits.
+    let mut candidates: Vec<(u32, f32)> = Vec::with_capacity(top_k + 1);
+    for i in 0..n as u32 {
+        let v = logits[i as usize];
+        if candidates.len() < top_k {
+            candidates.push((i, v));
+            // Sift up to maintain min-heap
+            let mut c = candidates.len() - 1;
+            while c > 0 {
+                let p = (c - 1) / 2;
+                if candidates[c].1 < candidates[p].1 { candidates.swap(c, p); c = p; } else { break; }
+            }
+        } else if v > candidates[0].1 {
+            // Replace min element and sift down
+            candidates[0] = (i, v);
+            let mut p = 0;
+            loop {
+                let l = 2 * p + 1;
+                let r = 2 * p + 2;
+                let mut s = p;
+                if l < candidates.len() && candidates[l].1 < candidates[s].1 { s = l; }
+                if r < candidates.len() && candidates[r].1 < candidates[s].1 { s = r; }
+                if s == p { break; }
+                candidates.swap(p, s);
+                p = s;
+            }
+        }
     }
+
+    // 2. Sort the top-k candidates (tiny — 64 elements max)
+    candidates.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
 
     // 3. Softmax (for top-p / min-p we need probabilities)
     let cmax = candidates[0].1;
