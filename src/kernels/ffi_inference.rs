@@ -14,8 +14,9 @@ pub struct KernelTableInference {
     pub q5k_dot_q8k:           Q5kDotQ8kFn,
     pub q5k_dot_q8k_4row:      Q5kDot4RowFn,
     pub q6k_dot_q8k:           Q6kDotQ8kFn,
-    pub q6k_dot_q8k_4row:      Q6kDot4RowFn,
-    pub f32_to_f16:            F32ToF16Fn,
+    pub q6k_dot_q8k_4row:          Q6kDot4RowFn,
+    pub q6k_dot_q8k_4row_repacked: Q6kDot4RowRepackedFn,
+    pub f32_to_f16:                F32ToF16Fn,
     pub f16_to_f32:            F16ToF32Fn,
     pub softmax_f32:           SoftmaxF32Fn,
     pub gemma4_rmsnorm:        Gemma4RmsnormFn,
@@ -93,6 +94,7 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
     let q4kd = load_best("q4k_dot")?;
     let q5kd = load("q5k_dot")?;
     let q6kd = load("q6k_dot")?;
+    let q6k_dot_repacked_lib = load("q6k_dot_repacked")?;
     let f16_conv_lib = load("f16_convert")?;
     let softmax_lib  = load("softmax")?;
     let gemma4_rmsnorm_lib = load("gemma4_rmsnorm")?;
@@ -126,8 +128,9 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
             q4k_dot_q8k_4row_dual: std::mem::transmute(sym(&q4kd, b"q4k_dot_q8k_4row_dual\0")?),
             q5k_dot_q8k:           std::mem::transmute(sym(&q5kd, b"q5k_dot_q8k\0")?),
             q5k_dot_q8k_4row:      std::mem::transmute(sym(&q5kd, b"q5k_dot_q8k_4row\0")?),
-            q6k_dot_q8k:           std::mem::transmute(sym(&q6kd, b"q6k_dot_q8k\0")?),
-            q6k_dot_q8k_4row:      std::mem::transmute(sym(&q6kd, b"q6k_dot_q8k_4row\0")?),
+            q6k_dot_q8k:               std::mem::transmute(sym(&q6kd, b"q6k_dot_q8k\0")?),
+            q6k_dot_q8k_4row:          std::mem::transmute(sym(&q6kd, b"q6k_dot_q8k_4row\0")?),
+            q6k_dot_q8k_4row_repacked: std::mem::transmute(sym(&q6k_dot_repacked_lib, b"q6k_dot_q8k_4row_repacked\0")?),
             f32_to_f16:     std::mem::transmute(sym(&f16_conv_lib, b"f32_to_f16\0")?),
             f16_to_f32:     std::mem::transmute(sym(&f16_conv_lib, b"f16_to_f32\0")?),
             softmax_f32:    std::mem::transmute(sym(&softmax_lib, b"softmax_f32\0")?),
@@ -150,7 +153,7 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
             q8k_repack_4:            std::mem::transmute(sym(&q8k_repack_4_lib,     b"q8k_repack_4\0")?),
             q4k_8x8_q8k_gemm:       std::mem::transmute(sym(&q4k_dot_8x8_gemm_lib, b"q4k_8x8_q8k_gemm\0")?),
             attn_fused_batched:      std::mem::transmute(sym(&attn_fused_batched_lib, b"attn_fused_batched\0")?),
-            libs: vec![q4kq, q4kd, q5kd, q6kd, f16_conv_lib, softmax_lib, gemma4_rmsnorm_lib, gemma4_gelu_lib, gemma4_rope_lib, bf16_matvec_lib, vec_ops_lib, attn_ops_lib, bare_rmsnorm_lib, softcap_lib, q4k_repack_lib, q4k_dot_8x8_lib, q4k_dot_8x8_dual_lib, q8k_repack_4_lib, q4k_dot_8x8_gemm_lib, attn_fused_batched_lib],
+            libs: vec![q4kq, q4kd, q5kd, q6kd, q6k_dot_repacked_lib, f16_conv_lib, softmax_lib, gemma4_rmsnorm_lib, gemma4_gelu_lib, gemma4_rope_lib, bf16_matvec_lib, vec_ops_lib, attn_ops_lib, bare_rmsnorm_lib, softcap_lib, q4k_repack_lib, q4k_dot_8x8_lib, q4k_dot_8x8_dual_lib, q8k_repack_4_lib, q4k_dot_8x8_gemm_lib, attn_fused_batched_lib],
         };
         Ok(t)
     }
@@ -223,6 +226,14 @@ pub unsafe fn q6k_dot_q8k_4row(
 ) {
     (k().q6k_dot_q8k_4row)(
         w0, w1, w2, w3, q8, bsums, scores, n_blocks, d0, d1, d2, d3)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn q6k_dot_q8k_4row_repacked(
+    packed: *const u8, q8: *const i8, bsums: *const i16,
+    scores: *mut f32, n_blocks: i32, d_arr: *const f32,
+) {
+    (k().q6k_dot_q8k_4row_repacked)(packed, q8, bsums, scores, n_blocks, d_arr)
 }
 
 pub unsafe fn f16_to_f32(src: *const u16, dst: *mut f32, n: i32) {

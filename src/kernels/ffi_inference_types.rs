@@ -27,6 +27,14 @@ pub type Q6kDot4RowFn = unsafe extern "C" fn(
     *const u8, *const u8, *const u8, *const u8,
     *const i8, *const i16, *mut f32, i32,
     *const f32, *const f32, *const f32, *const f32);
+pub type Q6kDot4RowRepackedFn = unsafe extern "C" fn(
+    *const u8,   // packed (4 × Q6K blocks per tile, 840 bytes)
+    *const i8,   // q8_qs
+    *const i16,  // q8_bsums
+    *mut f32,    // scores [4]
+    i32,         // n_blocks
+    *const f32,  // d_arr (interleaved: d_arr[blk*4+row])
+);
 pub type F32ToF16Fn = unsafe extern "C" fn(*const f32, *mut u16, i32);
 pub type F16ToF32Fn = unsafe extern "C" fn(*const u16, *mut f32, i32);
 pub type SoftmaxF32Fn = unsafe extern "C" fn(*mut f32, i32, f32);
