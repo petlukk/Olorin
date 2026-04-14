@@ -37,6 +37,7 @@ pub struct KernelTableInference {
     pub q4k_8x8_q8k_matvec_dual: Q4k8x8MatvecDualFn,
     pub q8k_repack_4:            Q8kRepack4Fn,
     pub q4k_8x8_q8k_gemm:       Q4k8x8GemmFn,
+    pub q6k_gemm:               Q6kGemmFn,
     pub attn_fused_batched:      AttnFusedBatchedFn,
 }
 
@@ -110,6 +111,7 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
     let q4k_dot_8x8_dual_lib = load("q4k_dot_8x8_dual")?;
     let q8k_repack_4_lib     = load("q8k_repack_4")?;
     let q4k_dot_8x8_gemm_lib = load("q4k_dot_8x8_gemm")?;
+    let q6k_gemm_lib         = load("q6k_gemm")?;
     let attn_fused_batched_lib = load("attn_fused_batched")?;
 
     unsafe {
@@ -152,8 +154,9 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
             q4k_8x8_q8k_matvec_dual: std::mem::transmute(sym(&q4k_dot_8x8_dual_lib, b"q4k_8x8_q8k_matvec_dual\0")?),
             q8k_repack_4:            std::mem::transmute(sym(&q8k_repack_4_lib,     b"q8k_repack_4\0")?),
             q4k_8x8_q8k_gemm:       std::mem::transmute(sym(&q4k_dot_8x8_gemm_lib, b"q4k_8x8_q8k_gemm\0")?),
+            q6k_gemm:               std::mem::transmute(sym(&q6k_gemm_lib, b"q6k_gemm\0")?),
             attn_fused_batched:      std::mem::transmute(sym(&attn_fused_batched_lib, b"attn_fused_batched\0")?),
-            libs: vec![q4kq, q4kd, q5kd, q6kd, q6k_dot_repacked_lib, f16_conv_lib, softmax_lib, gemma4_rmsnorm_lib, gemma4_gelu_lib, gemma4_rope_lib, bf16_matvec_lib, vec_ops_lib, attn_ops_lib, bare_rmsnorm_lib, softcap_lib, q4k_repack_lib, q4k_dot_8x8_lib, q4k_dot_8x8_dual_lib, q8k_repack_4_lib, q4k_dot_8x8_gemm_lib, attn_fused_batched_lib],
+            libs: vec![q4kq, q4kd, q5kd, q6kd, q6k_dot_repacked_lib, f16_conv_lib, softmax_lib, gemma4_rmsnorm_lib, gemma4_gelu_lib, gemma4_rope_lib, bf16_matvec_lib, vec_ops_lib, attn_ops_lib, bare_rmsnorm_lib, softcap_lib, q4k_repack_lib, q4k_dot_8x8_lib, q4k_dot_8x8_dual_lib, q8k_repack_4_lib, q4k_dot_8x8_gemm_lib, q6k_gemm_lib, attn_fused_batched_lib],
         };
         Ok(t)
     }
@@ -234,6 +237,14 @@ pub unsafe fn q6k_dot_q8k_4row_repacked(
     scores: *mut f32, n_blocks: i32, d_arr: *const f32,
 ) {
     (k().q6k_dot_q8k_4row_repacked)(packed, q8, bsums, scores, n_blocks, d_arr)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn q6k_gemm(
+    weight: *const u8, q8_a: *const u8, scratch: *mut u8,
+    out: *mut f32, output_stride: i32, n_inner: i32, nr: i32, nc: i32,
+) {
+    (k().q6k_gemm)(weight, q8_a, scratch, out, output_stride, n_inner, nr, nc)
 }
 
 pub unsafe fn f16_to_f32(src: *const u16, dst: *mut f32, n: i32) {

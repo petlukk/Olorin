@@ -35,6 +35,16 @@ pub type Q6kDot4RowRepackedFn = unsafe extern "C" fn(
     i32,         // n_blocks
     *const f32,  // d_arr (interleaved: d_arr[blk*4+row])
 );
+pub type Q6kGemmFn = unsafe extern "C" fn(
+    *const u8,   // weight (raw Q6K blocks)
+    *const u8,   // q8_a (block_q8_Kx4 tiles)
+    *mut u8,     // scratch
+    *mut f32,    // out
+    i32,         // output_stride
+    i32,         // n_inner
+    i32,         // nr (tokens, must be %4==0)
+    i32,         // nc (weight rows)
+);
 pub type F32ToF16Fn = unsafe extern "C" fn(*const f32, *mut u16, i32);
 pub type F16ToF32Fn = unsafe extern "C" fn(*const u16, *mut f32, i32);
 pub type SoftmaxF32Fn = unsafe extern "C" fn(*mut f32, i32, f32);

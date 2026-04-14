@@ -495,7 +495,7 @@ impl Gemma4State {
             super::forward_batch::forward_batch_inner(state, model, tokens, barrier, chunk, tid, nth);
         });
 
-        &self.logits
+        &self.logits[..self.logit_rows]
     }
 
     /// Reset state for a new sequence.

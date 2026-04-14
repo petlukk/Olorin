@@ -576,14 +576,13 @@ pub(crate) fn layer_forward_batch(
     barrier.wait(); // B23
     if ith == 0 { t_accum!(t0, repack_down, tm!()); }
     let t0 = t_start!();
-    if let Some(ref q6k_buf) = lw.w_down_q6k_repacked {
+    if lw.w_down_dtype == matmul::GGML_TYPE_Q6_K && cfg!(target_arch = "aarch64") {
+        // Q6K GEMM: processes all tokens × weight rows using block_q8_Kx4 input
         current_chunk.store(nth as i32, Ordering::Relaxed);
-        matmul_graph::q6k_repacked_batch_ws(
-            q6k_buf.as_ptr(), lw.w_down,
-            state.batch_ffn_q8_qs.as_ptr(), state.batch_ffn_q8_d.as_ptr(),
-            state.batch_ffn_q8_bsums.as_ptr(),
-            state.batch_down.as_mut_ptr(), state.q6k_d_scratch.as_mut_ptr(),
-            hd, ffn_dim, n, hd,
+        matmul_graph::q6k_gemm_batch_ws(
+            lw.w_down, state.batch_ffn_q8_a.as_ptr(),
+            state.batch_down.as_mut_ptr(),
+            ffn_dim, hd, n_pad, hd,
             current_chunk, ith, nth,
         );
     } else {

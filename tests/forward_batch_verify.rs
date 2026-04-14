@@ -27,6 +27,8 @@ fn forward_batch_n1_matches_forward_one_graph() {
 }
 
 fn run_comparison(mp: &str) {
+    // Force full vocab so both paths produce the same number of logits
+    std::env::set_var("OLORIN_FULL_VOCAB", "1");
     olorin::kernels::ffi::init().unwrap();
 
     let gguf = olorin::inference::gguf::GgufFile::open(Path::new(mp)).unwrap();

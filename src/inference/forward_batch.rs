@@ -92,6 +92,9 @@ pub(crate) fn forward_batch_inner(
     barrier.wait();
 
     // ── Output matmul (work-stealing, last token only) ────────────
+    // Prefill always uses full vocab (no hot-vocab optimization)
+    let logit_rows = model.vocab_size;
+    if ith == 0 { state.logit_rows = logit_rows; }
     current_chunk.store(nth as i32, Ordering::Relaxed);
     barrier.wait();
     if let Some(ref q6k_buf) = model.embed_q6k_repacked {
