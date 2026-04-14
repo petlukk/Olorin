@@ -30,6 +30,27 @@ struct FwdCtx<'a> {
 unsafe impl<'a> Send for FwdCtx<'a> {}
 unsafe impl<'a> Sync for FwdCtx<'a> {}
 
+/// Parallel Q8K quantization across threads, split by 256-element blocks.
+#[inline]
+fn parallel_quant_decode(
+    src: *const f32, qs: *mut i8, d: *mut f32, bsums: *mut i16,
+    dim: usize, ith: usize, nth: usize,
+) {
+    let nb = dim / 256;
+    let per = (nb + nth - 1) / nth;
+    let start = ith * per;
+    let end = (start + per).min(nb);
+    if start < nb {
+        let n = (end - start) * 256;
+        unsafe {
+            ffi_inference::quant_f32_q8k(
+                src.add(start * 256), qs.add(start * 256),
+                d.add(start), bsums.add(start * 16), n as i32,
+            );
+        }
+    }
+}
+
 /// Dispatch a single matvec_ws call through either the repacked 8x8 path
 /// or the standard 4-row matvec_ws fallback, depending on whether the
 /// weight has been repacked at model load time.
@@ -93,8 +114,51 @@ pub(crate) fn forward_one_inner(
     barrier.wait();
 
     // ── Per-layer transformer blocks ─────────────────────────────
+    let timing = crate::inference::forward::timing_enabled() && ith == 0;
+    let mut t_norm_quant: u64 = 0;
+    let mut t_q: u64 = 0;
+    let mut t_q_norm_rope: u64 = 0;
+    let mut t_kv: u64 = 0;
+    let mut t_kv_norm_cache: u64 = 0;
+    let mut t_attn: u64 = 0;
+    let mut t_wo_quant: u64 = 0;
+    let mut t_wo: u64 = 0;
+    let mut t_post_attn: u64 = 0;
+    let mut t_gate_up: u64 = 0;
+    let mut t_gelu_quant: u64 = 0;
+    let mut t_down: u64 = 0;
+    let mut t_post_ffn_ple: u64 = 0;
     for il in 0..model.n_layers {
-        layer_forward_graph(state, model, il, pos, barrier, current_chunk, ith, nth);
+        layer_forward_graph_timed(
+            state, model, il, pos, barrier, current_chunk, ith, nth,
+            timing,
+            &mut t_norm_quant, &mut t_q, &mut t_q_norm_rope,
+            &mut t_kv, &mut t_kv_norm_cache,
+            &mut t_attn, &mut t_wo_quant, &mut t_wo,
+            &mut t_post_attn, &mut t_gate_up, &mut t_gelu_quant,
+            &mut t_down, &mut t_post_ffn_ple,
+        );
+    }
+    if timing {
+        let ms = |us: u64| us as f64 / 1000.0;
+        let total = t_norm_quant + t_q + t_q_norm_rope + t_kv + t_kv_norm_cache
+            + t_attn + t_wo_quant + t_wo + t_post_attn + t_gate_up + t_gelu_quant
+            + t_down + t_post_ffn_ple;
+        let pct = |us: u64| if total > 0 { us as f64 / total as f64 * 100.0 } else { 0.0 };
+        eprintln!("[decode-timing] {n} layers, total {:.1}ms", ms(total), n = model.n_layers);
+        eprintln!("  norm+quant      {:7.1}ms  ({:4.1}%)", ms(t_norm_quant), pct(t_norm_quant));
+        eprintln!("  gemv_q          {:7.1}ms  ({:4.1}%)", ms(t_q), pct(t_q));
+        eprintln!("  q_norm+rope     {:7.1}ms  ({:4.1}%)", ms(t_q_norm_rope), pct(t_q_norm_rope));
+        eprintln!("  gemv_kv         {:7.1}ms  ({:4.1}%)", ms(t_kv), pct(t_kv));
+        eprintln!("  kv_norm+cache   {:7.1}ms  ({:4.1}%)", ms(t_kv_norm_cache), pct(t_kv_norm_cache));
+        eprintln!("  attention       {:7.1}ms  ({:4.1}%)", ms(t_attn), pct(t_attn));
+        eprintln!("  wo_quant        {:7.1}ms  ({:4.1}%)", ms(t_wo_quant), pct(t_wo_quant));
+        eprintln!("  gemv_wo         {:7.1}ms  ({:4.1}%)", ms(t_wo), pct(t_wo));
+        eprintln!("  post_attn       {:7.1}ms  ({:4.1}%)", ms(t_post_attn), pct(t_post_attn));
+        eprintln!("  gemv_gate+up    {:7.1}ms  ({:4.1}%)", ms(t_gate_up), pct(t_gate_up));
+        eprintln!("  gelu+quant      {:7.1}ms  ({:4.1}%)", ms(t_gelu_quant), pct(t_gelu_quant));
+        eprintln!("  gemv_down       {:7.1}ms  ({:4.1}%)", ms(t_down), pct(t_down));
+        eprintln!("  post_ffn+ple    {:7.1}ms  ({:4.1}%)", ms(t_post_ffn_ple), pct(t_post_ffn_ple));
     }
 
     // ── Post-loop: final norm (thread 0) ─────────────────────────
@@ -116,6 +180,7 @@ pub(crate) fn forward_one_inner(
     barrier.wait();
 
     // ── Output matmul (work-stealing, all threads) ───────────────
+    let t_out_start = if timing { Some(std::time::Instant::now()) } else { None };
     current_chunk.store(nth as i32, Ordering::Relaxed);
     barrier.wait();
     matmul_graph::matvec_ws(
@@ -126,6 +191,9 @@ pub(crate) fn forward_one_inner(
         current_chunk, ith, nth,
     );
     barrier.wait();
+    if let Some(s) = t_out_start {
+        eprintln!("  output_logits   {:7.1}ms", s.elapsed().as_micros() as f64 / 1000.0);
+    }
 
     // ── Softcap (thread 0) ───────────────────────────────────────
     if ith == 0 {
@@ -139,8 +207,9 @@ pub(crate) fn forward_one_inner(
     barrier.wait();
 }
 
-/// Per-layer forward matching layer_forward exactly, but with ith/nth + barriers.
-fn layer_forward_graph(
+/// Per-layer forward with optional per-op timing (thread 0 only).
+#[allow(clippy::too_many_arguments)]
+fn layer_forward_graph_timed(
     state: &mut Gemma4State,
     model: &Gemma4Model,
     il: usize,
@@ -149,7 +218,16 @@ fn layer_forward_graph(
     current_chunk: &AtomicI32,
     ith: usize,
     nth: usize,
+    timing: bool,
+    t_norm_quant: &mut u64, t_q: &mut u64, t_q_norm_rope: &mut u64,
+    t_kv: &mut u64, t_kv_norm_cache: &mut u64,
+    t_attn: &mut u64, t_wo_quant: &mut u64, t_wo: &mut u64,
+    t_post_attn: &mut u64, t_gate_up: &mut u64, t_gelu_quant: &mut u64,
+    t_down: &mut u64, t_post_ffn_ple: &mut u64,
 ) {
+    use std::time::Instant;
+    macro_rules! t { () => { if timing { Some(Instant::now()) } else { None } }; }
+    macro_rules! acc { ($s:expr, $f:expr) => { if let Some(s) = $s { *$f += s.elapsed().as_micros() as u64; } }; }
     let hd = model.hidden_dim;
     let n_heads = model.n_heads;
     let n_kv_heads = model.n_kv_heads;
@@ -159,7 +237,8 @@ fn layer_forward_graph(
     let head_dim_v = model.head_dim_v[il];
     let has_kv = model.kv_shared_source[il].is_none();
 
-    // ── 1. RoPE tables + attn_norm + quant (thread 0) ────────────
+    // ── 1. RoPE tables + attn_norm (thread 0) + parallel quant ───
+    let t0 = t!();
     if ith == 0 {
         let n_rot = if model.is_swa[il] { model.rope_dim_swa } else { model.rope_dim_global };
         let rope_theta = if model.is_swa[il] { model.rope_theta_swa } else { model.rope_theta_global };
@@ -169,11 +248,18 @@ fn layer_forward_graph(
         ffi_inference::gemma4_rmsnorm(
             state.x.as_ptr(), lw.attn_norm, state.x_norm.as_mut_ptr(), hd as i32, model.rms_eps,
         );
-        matmul::quant_input(&state.x_norm, &mut state.q8_qs, &mut state.q8_d, &mut state.q8_bsums);
     }
+    barrier.wait(); // x_norm ready
+    parallel_quant_decode(
+        state.x_norm.as_ptr(), state.q8_qs.as_mut_ptr(),
+        state.q8_d.as_mut_ptr(), state.q8_bsums.as_mut_ptr(),
+        hd, ith, nth,
+    );
     barrier.wait();
 
+    acc!(t0, t_norm_quant);
     // ── 2. Q projection (work-stealing) ──────────────────────────
+    let t0 = t!();
     current_chunk.store(nth as i32, Ordering::Relaxed);
     barrier.wait();
     matvec_step(
@@ -185,7 +271,9 @@ fn layer_forward_graph(
     );
     barrier.wait();
 
+    acc!(t0, t_q);
     // ── 3. Q norm + RoPE (thread 0) ──────────────────────────────
+    let t0 = t!();
     if ith == 0 {
         // Q norm per-head
         if !lw.q_norm.is_null() {
@@ -207,7 +295,9 @@ fn layer_forward_graph(
     }
     barrier.wait();
 
+    acc!(t0, t_q_norm_rope);
     // ── 4. K/V + norms + RoPE + cache (thread 0 for small ops, WS for matmul) ──
+    let t0 = t!();
     if has_kv {
         let kv_dim = n_kv_heads * head_dim;
         let kv_dim_v = n_kv_heads * head_dim_v;
@@ -236,7 +326,9 @@ fn layer_forward_graph(
         );
         barrier.wait();
 
+        acc!(t0, t_kv);
         // K norm + V bare norm + K rope + cache store (thread 0)
+        let t0 = t!();
         if ith == 0 {
             if !lw.k_norm.is_null() {
                 for h in 0..n_kv_heads {
@@ -262,7 +354,9 @@ fn layer_forward_graph(
         barrier.wait();
     }
 
+    acc!(t0, t_kv_norm_cache);
     // ── 5. Attention (split by heads across threads) ─────────────
+    let t0 = t!();
     {
         let attn_scale = 1.0f32;
         let attn_len = state.cache.attn_len(il);
@@ -309,16 +403,21 @@ fn layer_forward_graph(
     }
     barrier.wait();
 
-    // ── 6. Wo matmul (work-stealing) ─────────────────────────────
-    if ith == 0 {
+    acc!(t0, t_attn);
+    // ── 6. Wo: parallel quant + matmul (work-stealing) ───────────
+    let t0 = t!();
+    {
         let attn_out_dim = n_heads * head_dim;
-        matmul::quant_input(
-            &state.attn_out[..attn_out_dim],
-            &mut state.q8_qs, &mut state.q8_d, &mut state.q8_bsums,
+        parallel_quant_decode(
+            state.attn_out.as_ptr(), state.q8_qs.as_mut_ptr(),
+            state.q8_d.as_mut_ptr(), state.q8_bsums.as_mut_ptr(),
+            attn_out_dim, ith, nth,
         );
     }
     barrier.wait();
 
+    acc!(t0, t_wo_quant);
+    let t0 = t!();
     current_chunk.store(nth as i32, Ordering::Relaxed);
     barrier.wait();
     matvec_step(
@@ -330,7 +429,9 @@ fn layer_forward_graph(
     );
     barrier.wait();
 
-    // ── 7. Post-attn norm + residual (thread 0) ─────────────────
+    acc!(t0, t_wo);
+    // ── 7. Post-attn norm + residual + FFN norm (T0) + parallel quant
+    let t0 = t!();
     if ith == 0 {
         if !lw.post_attn_norm.is_null() {
             ffi_inference::gemma4_rmsnorm(
@@ -345,17 +446,22 @@ fn layer_forward_graph(
                 state.wo_out.as_ptr(), state.x.as_ptr(), state.attn_res.as_mut_ptr(), hd as i32,
             );
         }
-
-        // FFN norm
         ffi_inference::gemma4_rmsnorm(
             state.attn_res.as_ptr(), lw.ffn_norm, state.x_norm.as_mut_ptr(),
             hd as i32, model.rms_eps,
         );
-        matmul::quant_input(&state.x_norm, &mut state.q8_qs, &mut state.q8_d, &mut state.q8_bsums);
     }
+    barrier.wait(); // x_norm ready
+    parallel_quant_decode(
+        state.x_norm.as_ptr(), state.q8_qs.as_mut_ptr(),
+        state.q8_d.as_mut_ptr(), state.q8_bsums.as_mut_ptr(),
+        hd, ith, nth,
+    );
     barrier.wait();
 
+    acc!(t0, t_post_attn);
     // ── 8. FFN gate+up (work-stealing) ───────────────────────────
+    let t0 = t!();
     let ffn_dim = model.ffn_dim[il];
     if lw.w_gate_dtype == matmul::GGML_TYPE_Q4_K && lw.w_up_dtype == matmul::GGML_TYPE_Q4_K {
         // ffn_gate / ffn_up always repack together on Gemma-family models
@@ -405,18 +511,40 @@ fn layer_forward_graph(
         barrier.wait();
     }
 
-    // ── 9. GELU + quant + down matmul ────────────────────────────
-    if ith == 0 {
-        ffi_inference::gelu_mul(
-            state.gate.as_ptr(), state.up.as_ptr(), state.gate.as_mut_ptr(), ffn_dim as i32,
-        );
-        matmul::quant_input(
-            &state.gate[..ffn_dim],
-            &mut state.ffn_q8_qs, &mut state.ffn_q8_d, &mut state.ffn_q8_bsums,
-        );
+    acc!(t0, t_gate_up);
+    // ── 9. Fused parallel GELU + quant ──────────────────────────
+    let t0 = t!();
+    {
+        // Split ffn_dim across threads by 256-element blocks.
+        // Each thread does gelu_mul + quant on its slice — data stays in L1.
+        let nb = ffn_dim / 256;
+        let per = (nb + nth - 1) / nth;
+        let blk_start = ith * per;
+        let blk_end = (blk_start + per).min(nb);
+        if blk_start < nb {
+            let elem_start = blk_start * 256;
+            let n_elem = (blk_end - blk_start) * 256;
+            unsafe {
+                ffi_inference::gelu_mul(
+                    state.gate.as_ptr().add(elem_start),
+                    state.up.as_ptr().add(elem_start),
+                    state.gate.as_mut_ptr().add(elem_start),
+                    n_elem as i32,
+                );
+                ffi_inference::quant_f32_q8k(
+                    state.gate.as_ptr().add(elem_start),
+                    state.ffn_q8_qs.as_mut_ptr().add(elem_start),
+                    state.ffn_q8_d.as_mut_ptr().add(blk_start),
+                    state.ffn_q8_bsums.as_mut_ptr().add(blk_start * 16),
+                    n_elem as i32,
+                );
+            }
+        }
     }
     barrier.wait();
 
+    acc!(t0, t_gelu_quant);
+    let t0 = t!();
     current_chunk.store(nth as i32, Ordering::Relaxed);
     barrier.wait();
     if let Some(ref q6k_buf) = lw.w_down_q6k_repacked {
@@ -438,7 +566,9 @@ fn layer_forward_graph(
     }
     barrier.wait();
 
+    acc!(t0, t_down);
     // ── 10. Post-FFN norm + residual + PLE + scale (thread 0) ───
+    let t0 = t!();
     if ith == 0 {
         if !lw.post_ffn_norm.is_null() {
             ffi_inference::gemma4_rmsnorm(
@@ -501,4 +631,5 @@ fn layer_forward_graph(
         }
     }
     barrier.wait();
+    acc!(t0, t_post_ffn_ple);
 }
