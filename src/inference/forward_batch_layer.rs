@@ -4,7 +4,7 @@
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::Instant;
 use crate::inference::engine::Gemma4Model;
-use crate::inference::forward::{compute_rope_tables, Gemma4State};
+use crate::inference::forward::{compute_rope_tables_into, Gemma4State};
 use crate::inference::matmul;
 use crate::inference::matmul_graph;
 use crate::inference::threadpool::SpinBarrier;
@@ -209,14 +209,16 @@ pub(crate) fn layer_forward_batch(
     let rope_theta = if model.is_swa[il] { model.rope_theta_swa } else { model.rope_theta_global };
     let freq_factors = if !model.is_swa[il] { model.rope_freqs.as_deref() } else { None };
 
-    // ── 1a. Attn norm (thread 0) ────────────────────────────────
+    // ── 1a. Attn norm (all threads, token-strided) ────────────────
     let t0 = t_start!();
-    if ith == 0 {
-        for t in 0..n {
+    {
+        let mut t = ith;
+        while t < n {
             ffi_inference::gemma4_rmsnorm(
                 state.batch_x[t * hd..].as_ptr(), lw.attn_norm,
                 state.batch_x_norm[t * hd..].as_mut_ptr(), hd as i32, model.rms_eps,
             );
+            t += nth;
         }
     }
     barrier.wait(); // B1
@@ -254,29 +256,39 @@ pub(crate) fn layer_forward_batch(
     );
     barrier.wait(); // B4
     if ith == 0 { t_accum!(t0, gemm_q, tm!()); }
-    // ── 3. Q norm + RoPE (thread 0) ─────────────────────────────
+    // ── 3. Q norm + RoPE (all threads, token-strided) ─────────────
+    let rope_half = n_rot / 2;
     let t0 = t_start!();
-    if ith == 0 {
-        for t in 0..n {
-            compute_rope_tables(
-                &mut state.cos_table, &mut state.sin_table,
+    {
+        let mut t = ith;
+        while t < n {
+            let cos_off = ith * rope_half;
+            let sin_off = ith * rope_half;
+            compute_rope_tables_into(
+                &mut state.batch_cos_tables[cos_off..cos_off + rope_half],
+                &mut state.batch_sin_tables[sin_off..sin_off + rope_half],
                 seq_len + t, n_rot, rope_theta, freq_factors,
             );
             if !lw.q_norm.is_null() {
+                let scratch_off = ith * head_dim;
                 for h in 0..n_heads {
                     let off = t * qkv_dim + h * head_dim;
                     ffi_inference::gemma4_rmsnorm(
                         unsafe { state.batch_q.as_ptr().add(off) }, lw.q_norm,
-                        state.x_norm.as_mut_ptr(), head_dim as i32, model.rms_eps,
+                        state.batch_head_scratch[scratch_off..scratch_off + head_dim].as_mut_ptr(),
+                        head_dim as i32, model.rms_eps,
                     );
-                    state.batch_q[off..off + head_dim].copy_from_slice(&state.x_norm[..head_dim]);
+                    state.batch_q[off..off + head_dim]
+                        .copy_from_slice(&state.batch_head_scratch[scratch_off..scratch_off + head_dim]);
                 }
             }
             ffi_inference::gemma4_rope(
                 unsafe { state.batch_q.as_mut_ptr().add(t * qkv_dim) },
-                state.cos_table.as_ptr(), state.sin_table.as_ptr(),
+                state.batch_cos_tables[cos_off..].as_ptr(),
+                state.batch_sin_tables[sin_off..].as_ptr(),
                 head_dim as i32, n_heads as i32,
             );
+            t += nth;
         }
     }
     barrier.wait(); // B5
@@ -318,23 +330,29 @@ pub(crate) fn layer_forward_batch(
         barrier.wait(); // B9
         if ith == 0 { t_accum!(t0, gemm_v, tm!()); }
 
-        // K/V norms + RoPE + cache store (thread 0)
+        // K/V norms + RoPE (all threads, token-strided)
         let t0 = t_start!();
-        if ith == 0 {
-            for t in 0..n {
-                compute_rope_tables(
-                    &mut state.cos_table, &mut state.sin_table,
+        {
+            let mut t = ith;
+            while t < n {
+                let cos_off = ith * rope_half;
+                let sin_off = ith * rope_half;
+                compute_rope_tables_into(
+                    &mut state.batch_cos_tables[cos_off..cos_off + rope_half],
+                    &mut state.batch_sin_tables[sin_off..sin_off + rope_half],
                     seq_len + t, n_rot, rope_theta, freq_factors,
                 );
                 if !lw.k_norm.is_null() {
+                    let scratch_off = ith * head_dim;
                     for h in 0..n_kv_heads {
                         let off = t * kv_dim + h * head_dim;
                         ffi_inference::gemma4_rmsnorm(
                             unsafe { state.batch_k.as_ptr().add(off) }, lw.k_norm,
-                            state.x_norm.as_mut_ptr(), head_dim as i32, model.rms_eps,
+                            state.batch_head_scratch[scratch_off..scratch_off + head_dim].as_mut_ptr(),
+                            head_dim as i32, model.rms_eps,
                         );
                         state.batch_k[off..off + head_dim]
-                            .copy_from_slice(&state.x_norm[..head_dim]);
+                            .copy_from_slice(&state.batch_head_scratch[scratch_off..scratch_off + head_dim]);
                     }
                 }
                 for h in 0..n_kv_heads {
@@ -345,10 +363,15 @@ pub(crate) fn layer_forward_batch(
                 }
                 ffi_inference::gemma4_rope(
                     unsafe { state.batch_k.as_mut_ptr().add(t * kv_dim) },
-                    state.cos_table.as_ptr(), state.sin_table.as_ptr(),
+                    state.batch_cos_tables[cos_off..].as_ptr(),
+                    state.batch_sin_tables[sin_off..].as_ptr(),
                     head_dim as i32, n_kv_heads as i32,
                 );
+                t += nth;
             }
+        }
+        barrier.wait(); // sync before cache store
+        if ith == 0 {
             state.cache.store_batch(
                 il, &state.batch_k[..kv_dim * n], &state.batch_v[..kv_dim_v * n], n,
             );
@@ -434,18 +457,19 @@ pub(crate) fn layer_forward_batch(
     );
     barrier.wait(); // B14
     if ith == 0 { t_accum!(t0, gemm_wo, tm!()); }
-    // ── 7. Post-attn residual + FFN norm (thread 0) ─────────────
+    // ── 7. Post-attn residual + FFN norm (all threads, token-strided) ──
     let t0 = t_start!();
-    if ith == 0 {
-        for t in 0..n {
+    {
+        let mut t = ith;
+        while t < n {
             let off = t * hd;
             if !lw.post_attn_norm.is_null() {
                 ffi_inference::gemma4_rmsnorm(
                     state.batch_wo_out[off..].as_ptr(), lw.post_attn_norm,
-                    state.x_norm.as_mut_ptr(), hd as i32, model.rms_eps,
+                    state.batch_x_norm[off..].as_mut_ptr(), hd as i32, model.rms_eps,
                 );
                 ffi_inference::vec_add_f32(
-                    state.x_norm.as_ptr(), state.batch_x[off..].as_ptr(),
+                    state.batch_x_norm[off..].as_ptr(), state.batch_x[off..].as_ptr(),
                     state.batch_attn_res[off..].as_mut_ptr(), hd as i32,
                 );
             } else {
@@ -458,6 +482,7 @@ pub(crate) fn layer_forward_batch(
                 state.batch_attn_res[off..].as_ptr(), lw.ffn_norm,
                 state.batch_x_norm[off..].as_mut_ptr(), hd as i32, model.rms_eps,
             );
+            t += nth;
         }
     }
     barrier.wait(); // B15
@@ -556,18 +581,19 @@ pub(crate) fn layer_forward_batch(
     );
     barrier.wait(); // B24
     if ith == 0 { t_accum!(t0, gemm_down, tm!()); }
-    // ── 10. Post-FFN residual + PLE + scale (thread 0) ──────────
+    // ── 10a. Post-FFN residual (all threads, token-strided) ─────
     let t0 = t_start!();
-    if ith == 0 {
-        for t in 0..n {
+    {
+        let mut t = ith;
+        while t < n {
             let off = t * hd;
             if !lw.post_ffn_norm.is_null() {
                 ffi_inference::gemma4_rmsnorm(
                     state.batch_down[off..].as_ptr(), lw.post_ffn_norm,
-                    state.x_norm.as_mut_ptr(), hd as i32, model.rms_eps,
+                    state.batch_x_norm[off..].as_mut_ptr(), hd as i32, model.rms_eps,
                 );
                 ffi_inference::vec_add_f32(
-                    state.x_norm.as_ptr(), state.batch_attn_res[off..].as_ptr(),
+                    state.batch_x_norm[off..].as_ptr(), state.batch_attn_res[off..].as_ptr(),
                     state.batch_x[off..].as_mut_ptr(), hd as i32,
                 );
             } else {
@@ -576,54 +602,67 @@ pub(crate) fn layer_forward_batch(
                     state.batch_x[off..].as_mut_ptr(), hd as i32,
                 );
             }
+            t += nth;
+        }
+    }
+    barrier.wait();
 
-            // PLE
-            if model.ple_dim > 0 && !lw.inp_gate.is_null() && !lw.proj.is_null() {
-                let ple_dim = model.ple_dim;
-                let ple_total = ple_dim * model.n_layers;
-                let ple_off = il * ple_dim;
-
-                matmul::quant_input(
-                    &state.batch_x[off..off + hd],
-                    &mut state.q8_qs, &mut state.q8_d, &mut state.q8_bsums,
-                );
-                matmul::matvec(
-                    lw.inp_gate_dtype, lw.inp_gate,
-                    &state.q8_qs, &state.q8_d, &state.q8_bsums,
-                    &mut state.ple_gate, &mut state.q6k_d_scratch, ple_dim, hd,
-                );
-                ffi_inference::gelu_mul(
-                    state.ple_gate.as_ptr(),
-                    state.batch_ple_signal[t * ple_total + ple_off..].as_ptr(),
-                    state.ple_gate.as_mut_ptr(), ple_dim as i32,
-                );
-                matmul::quant_input(
-                    &state.ple_gate[..ple_dim],
-                    &mut state.ple_q8_qs, &mut state.ple_q8_d, &mut state.ple_q8_bsums,
-                );
-                matmul::matvec(
-                    lw.proj_dtype, lw.proj,
-                    &state.ple_q8_qs, &state.ple_q8_d, &state.ple_q8_bsums,
-                    &mut state.ple_out, &mut state.q6k_d_scratch, hd, ple_dim,
-                );
-                if !lw.post_norm.is_null() {
-                    ffi_inference::gemma4_rmsnorm(
-                        state.ple_out.as_ptr(), lw.post_norm,
-                        state.ple_out.as_mut_ptr(), hd as i32, model.rms_eps,
-                    );
-                }
-                ffi_inference::vec_add_f32(
-                    state.batch_x[off..].as_ptr(), state.ple_out.as_ptr(),
-                    state.batch_x[off..].as_mut_ptr(), hd as i32,
+    // ── 10b. PLE (thread 0 only) ────────────────────────────────
+    if ith == 0 && model.ple_dim > 0 && !lw.inp_gate.is_null() && !lw.proj.is_null() {
+        let ple_dim = model.ple_dim;
+        let ple_total = ple_dim * model.n_layers;
+        let ple_off = il * ple_dim;
+        for t in 0..n {
+            let off = t * hd;
+            matmul::quant_input(
+                &state.batch_x[off..off + hd],
+                &mut state.q8_qs, &mut state.q8_d, &mut state.q8_bsums,
+            );
+            matmul::matvec(
+                lw.inp_gate_dtype, lw.inp_gate,
+                &state.q8_qs, &state.q8_d, &state.q8_bsums,
+                &mut state.ple_gate, &mut state.q6k_d_scratch, ple_dim, hd,
+            );
+            ffi_inference::gelu_mul(
+                state.ple_gate.as_ptr(),
+                state.batch_ple_signal[t * ple_total + ple_off..].as_ptr(),
+                state.ple_gate.as_mut_ptr(), ple_dim as i32,
+            );
+            matmul::quant_input(
+                &state.ple_gate[..ple_dim],
+                &mut state.ple_q8_qs, &mut state.ple_q8_d, &mut state.ple_q8_bsums,
+            );
+            matmul::matvec(
+                lw.proj_dtype, lw.proj,
+                &state.ple_q8_qs, &state.ple_q8_d, &state.ple_q8_bsums,
+                &mut state.ple_out, &mut state.q6k_d_scratch, hd, ple_dim,
+            );
+            if !lw.post_norm.is_null() {
+                ffi_inference::gemma4_rmsnorm(
+                    state.ple_out.as_ptr(), lw.post_norm,
+                    state.ple_out.as_mut_ptr(), hd as i32, model.rms_eps,
                 );
             }
+            ffi_inference::vec_add_f32(
+                state.batch_x[off..].as_ptr(), state.ple_out.as_ptr(),
+                state.batch_x[off..].as_mut_ptr(), hd as i32,
+            );
+        }
+    }
+    barrier.wait();
 
-            let out_scale = lw.layer_output_scale;
-            if out_scale != 1.0 {
+    // ── 10c. Output scale (all threads, token-strided) ──────────
+    {
+        let out_scale = lw.layer_output_scale;
+        if out_scale != 1.0 {
+            let mut t = ith;
+            while t < n {
+                let off = t * hd;
                 ffi_inference::vec_scale_f32(
                     state.batch_x[off..].as_ptr(), state.batch_x[off..].as_mut_ptr(),
                     out_scale, hd as i32,
                 );
+                t += nth;
             }
         }
     }

@@ -59,6 +59,24 @@ pub(crate) fn compute_rope_tables(
     }
 }
 
+/// Standalone RoPE table computation into arbitrary slices (for per-thread scratch).
+pub(crate) fn compute_rope_tables_into(
+    cos: &mut [f32], sin: &mut [f32],
+    pos: usize, n_rot: usize, theta: f32, freq_factors: Option<&[f32]>,
+) {
+    let half = n_rot / 2;
+    for d in 0..half {
+        let base_freq = 1.0 / theta.powf(2.0 * d as f32 / n_rot as f32);
+        let freq = match freq_factors {
+            Some(ff) => base_freq / ff[d],
+            None => base_freq,
+        };
+        let angle = pos as f32 * freq;
+        cos[d] = angle.cos();
+        sin[d] = angle.sin();
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Bare RMSNorm (no weight multiplication)
 // ---------------------------------------------------------------------------
@@ -128,6 +146,11 @@ pub struct Gemma4State {
     pub(crate) ple_q8_qs: Vec<i8>,
     pub(crate) ple_q8_d: Vec<f32>,
     pub(crate) ple_q8_bsums: Vec<i16>,
+
+    // Per-thread scratch for parallelized norms/RoPE
+    pub(crate) batch_head_scratch: Vec<f32>,   // [max_head_dim * n_threads]
+    pub(crate) batch_cos_tables: Vec<f32>,     // [max_rope_half * n_threads]
+    pub(crate) batch_sin_tables: Vec<f32>,     // [max_rope_half * n_threads]
 
     // ── Batched forward buffers (column-major [dim, max_batch]) ──
     pub(crate) batch_x: Vec<f32>,
@@ -225,6 +248,10 @@ impl Gemma4State {
 
             cos_table: vec![0.0; max_head / 2],
             sin_table: vec![0.0; max_head / 2],
+
+            batch_head_scratch: vec![0.0; max_head_k * n_thread_slots],
+            batch_cos_tables: vec![0.0; (max_head / 2) * n_thread_slots],
+            batch_sin_tables: vec![0.0; (max_head / 2) * n_thread_slots],
 
             attn_res: vec![0.0; hd],
 
