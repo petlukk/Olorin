@@ -71,6 +71,7 @@ pub struct LayerWeights {
     pub w_gate_repacked: Option<Vec<u8>>,
     pub w_up_repacked: Option<Vec<u8>>,
     pub w_down_repacked: Option<Vec<u8>>,
+    pub w_down_q6k_repacked: Option<Vec<u8>>,
     pub inp_gate_repacked: Option<Vec<u8>>,
     pub proj_repacked: Option<Vec<u8>>,
 }
@@ -435,6 +436,7 @@ impl Gemma4Model {
                 w_gate_repacked: None,
                 w_up_repacked: None,
                 w_down_repacked: None,
+                w_down_q6k_repacked: None,
                 inp_gate_repacked: None,
                 proj_repacked: None,
             };

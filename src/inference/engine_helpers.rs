@@ -96,6 +96,23 @@ pub(crate) fn try_repack_q4k(
     Some(crate::inference::repack::q4k_repack_8x8(weight, n_rows, n_cols))
 }
 
+/// Attempt to repack a Q6K weight matrix into the 4-row interleaved layout.
+/// Returns `None` if the weight is not eligible:
+/// - `dtype` is not Q6K
+/// - `n_rows` is not a multiple of 4
+/// - `n_cols` is not a multiple of 256 (Q6K superblock size)
+pub(crate) fn try_repack_q6k(
+    weight: *const u8,
+    dtype: u32,
+    n_rows: usize,
+    n_cols: usize,
+) -> Option<Vec<u8>> {
+    if dtype != crate::inference::matmul::GGML_TYPE_Q6_K { return None; }
+    if n_rows % 4 != 0 { return None; }
+    if n_cols % 256 != 0 { return None; }
+    Some(crate::inference::repack::q6k_repack_4row(weight, n_rows, n_cols))
+}
+
 /// Populate all 7 Q4K _repacked fields on a LayerWeights instance.
 ///
 /// Called by `Gemma4Model::from_gguf` once per layer, after the layer has
@@ -132,6 +149,8 @@ pub(crate) fn populate_q4k_repacked(
     lw.w_gate_repacked = try_repack_q4k(lw.w_gate, lw.w_gate_dtype, ffn_dim, hidden_dim);
     lw.w_up_repacked = try_repack_q4k(lw.w_up, lw.w_up_dtype, ffn_dim, hidden_dim);
     lw.w_down_repacked = try_repack_q4k(lw.w_down, lw.w_down_dtype, hidden_dim, ffn_dim);
+    // Q6K ffn_down repack (4-row tiles)
+    lw.w_down_q6k_repacked = try_repack_q6k(lw.w_down, lw.w_down_dtype, hidden_dim, ffn_dim);
     // PLE projections
     if ple_dim > 0 {
         lw.inp_gate_repacked = try_repack_q4k(lw.inp_gate, lw.inp_gate_dtype, ple_dim, hidden_dim);
