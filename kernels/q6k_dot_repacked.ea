@@ -1,0 +1,158 @@
+// q6k_dot_repacked.ea — Q6_K × Q8_K 4-row dot product, repacked tile layout (x86 SSE/AVX2)
+//
+// Tile layout per superblock: 4 × 210 bytes = 840 bytes
+//   row0[210] | row1[210] | row2[210] | row3[210]
+//
+// d_arr: interleaved d_arr[blk*4 + row]
+
+#[cfg(x86_64)]
+
+// Read scale byte (signed i8) from u8 pointer
+func sbyte(p: *restrict u8, off: i32) -> i32 {
+    let v: i32 = to_i32(p[off])
+    if v > 127 { return v - 256 }
+    return v
+}
+
+export func q6k_dot_q8k_4row_repacked(
+    packed: *restrict u8,
+    q8: *restrict i8,
+    bsums: *restrict i16,
+    out scores: *mut f32 [cap: 4],
+    n_blocks: i32,
+    d_arr: *restrict f32
+) {
+    let mask_lo: u8x16 = splat(15)
+    let mask_2: u8x16 = splat(3)
+    let shift2: u8x16 = splat(2)
+    let shift4: u8x16 = splat(4)
+    let shift6: u8x16 = splat(6)
+    let ones: i16x8 = splat(1)
+    let mut res0: f32 = 0.0
+    let mut res1: f32 = 0.0
+    let mut res2: f32 = 0.0
+    let mut res3: f32 = 0.0
+
+    let mut blk: i32 = 0
+    while blk < n_blocks {
+        let tile: i32 = blk * 840
+        let q8_base: i32 = blk * 256
+        let bs_base: i32 = blk * 16
+        let mut s0: i32 = 0
+        let mut s1: i32 = 0
+        let mut s2: i32 = 0
+        let mut s3: i32 = 0
+
+        // Row base offsets within tile (fixed stride)
+        let b0: i32 = tile
+        let b1: i32 = tile + 210
+        let b2: i32 = tile + 420
+        let b3: i32 = tile + 630
+
+        let mut h: i32 = 0
+        while h < 2 {
+            let ql_h: i32 = h * 64
+            let qh_h: i32 = 128 + h * 32
+            let sc_h: i32 = 192 + h * 8
+            let q8_off: i32 = q8_base + h * 128
+            let bi: i32 = bs_base + h * 8
+
+            let qh0a: u8x16 = load(packed, b0 + qh_h)
+            let qh0b: u8x16 = load(packed, b0 + qh_h + 16)
+            let qh1a: u8x16 = load(packed, b1 + qh_h)
+            let qh1b: u8x16 = load(packed, b1 + qh_h + 16)
+            let qh2a: u8x16 = load(packed, b2 + qh_h)
+            let qh2b: u8x16 = load(packed, b2 + qh_h + 16)
+            let qh3a: u8x16 = load(packed, b3 + qh_h)
+            let qh3b: u8x16 = load(packed, b3 + qh_h + 16)
+
+            // Load both ql halves for all 4 rows
+            let r0a: u8x16 = load(packed, b0 + ql_h)
+            let r0b: u8x16 = load(packed, b0 + ql_h + 16)
+            let r0c: u8x16 = load(packed, b0 + ql_h + 32)
+            let r0d: u8x16 = load(packed, b0 + ql_h + 48)
+            let r1a: u8x16 = load(packed, b1 + ql_h)
+            let r1b: u8x16 = load(packed, b1 + ql_h + 16)
+            let r1c: u8x16 = load(packed, b1 + ql_h + 32)
+            let r1d: u8x16 = load(packed, b1 + ql_h + 48)
+            let r2a: u8x16 = load(packed, b2 + ql_h)
+            let r2b: u8x16 = load(packed, b2 + ql_h + 16)
+            let r2c: u8x16 = load(packed, b2 + ql_h + 32)
+            let r2d: u8x16 = load(packed, b2 + ql_h + 48)
+            let r3a: u8x16 = load(packed, b3 + ql_h)
+            let r3b: u8x16 = load(packed, b3 + ql_h + 16)
+            let r3c: u8x16 = load(packed, b3 + ql_h + 32)
+            let r3d: u8x16 = load(packed, b3 + ql_h + 48)
+
+            // Group 0: ql[0..31] low nibble + qh bits 0-1
+            let q8_a: i8x16 = load(q8, q8_off)
+            let q8_b: i8x16 = load(q8, q8_off + 16)
+            let bc0: i32 = 32 * to_i32(bsums[bi])
+            let bc1: i32 = 32 * to_i32(bsums[bi + 1])
+            s0 = s0 + sbyte(packed, b0 + sc_h) * (reduce_add(madd_i16(ones, maddubs_i16((r0a .& mask_lo) .+ ((qh0a .& mask_2) .<< shift4), q8_a))) - bc0)
+            s0 = s0 + sbyte(packed, b0 + sc_h+1) * (reduce_add(madd_i16(ones, maddubs_i16((r0b .& mask_lo) .+ ((qh0b .& mask_2) .<< shift4), q8_b))) - bc1)
+            s1 = s1 + sbyte(packed, b1 + sc_h) * (reduce_add(madd_i16(ones, maddubs_i16((r1a .& mask_lo) .+ ((qh1a .& mask_2) .<< shift4), q8_a))) - bc0)
+            s1 = s1 + sbyte(packed, b1 + sc_h+1) * (reduce_add(madd_i16(ones, maddubs_i16((r1b .& mask_lo) .+ ((qh1b .& mask_2) .<< shift4), q8_b))) - bc1)
+            s2 = s2 + sbyte(packed, b2 + sc_h) * (reduce_add(madd_i16(ones, maddubs_i16((r2a .& mask_lo) .+ ((qh2a .& mask_2) .<< shift4), q8_a))) - bc0)
+            s2 = s2 + sbyte(packed, b2 + sc_h+1) * (reduce_add(madd_i16(ones, maddubs_i16((r2b .& mask_lo) .+ ((qh2b .& mask_2) .<< shift4), q8_b))) - bc1)
+            s3 = s3 + sbyte(packed, b3 + sc_h) * (reduce_add(madd_i16(ones, maddubs_i16((r3a .& mask_lo) .+ ((qh3a .& mask_2) .<< shift4), q8_a))) - bc0)
+            s3 = s3 + sbyte(packed, b3 + sc_h+1) * (reduce_add(madd_i16(ones, maddubs_i16((r3b .& mask_lo) .+ ((qh3b .& mask_2) .<< shift4), q8_b))) - bc1)
+
+            // Group 1: ql[32..63] LOW nibble + qh bits 2-3
+            let q8_c: i8x16 = load(q8, q8_off + 32)
+            let q8_d: i8x16 = load(q8, q8_off + 48)
+            let bc2: i32 = 32 * to_i32(bsums[bi + 2])
+            let bc3: i32 = 32 * to_i32(bsums[bi + 3])
+            s0 = s0 + sbyte(packed, b0 + sc_h+2) * (reduce_add(madd_i16(ones, maddubs_i16((r0c .& mask_lo) .+ (((qh0a .>> shift2) .& mask_2) .<< shift4), q8_c))) - bc2)
+            s0 = s0 + sbyte(packed, b0 + sc_h+3) * (reduce_add(madd_i16(ones, maddubs_i16((r0d .& mask_lo) .+ (((qh0b .>> shift2) .& mask_2) .<< shift4), q8_d))) - bc3)
+            s1 = s1 + sbyte(packed, b1 + sc_h+2) * (reduce_add(madd_i16(ones, maddubs_i16((r1c .& mask_lo) .+ (((qh1a .>> shift2) .& mask_2) .<< shift4), q8_c))) - bc2)
+            s1 = s1 + sbyte(packed, b1 + sc_h+3) * (reduce_add(madd_i16(ones, maddubs_i16((r1d .& mask_lo) .+ (((qh1b .>> shift2) .& mask_2) .<< shift4), q8_d))) - bc3)
+            s2 = s2 + sbyte(packed, b2 + sc_h+2) * (reduce_add(madd_i16(ones, maddubs_i16((r2c .& mask_lo) .+ (((qh2a .>> shift2) .& mask_2) .<< shift4), q8_c))) - bc2)
+            s2 = s2 + sbyte(packed, b2 + sc_h+3) * (reduce_add(madd_i16(ones, maddubs_i16((r2d .& mask_lo) .+ (((qh2b .>> shift2) .& mask_2) .<< shift4), q8_d))) - bc3)
+            s3 = s3 + sbyte(packed, b3 + sc_h+2) * (reduce_add(madd_i16(ones, maddubs_i16((r3c .& mask_lo) .+ (((qh3a .>> shift2) .& mask_2) .<< shift4), q8_c))) - bc2)
+            s3 = s3 + sbyte(packed, b3 + sc_h+3) * (reduce_add(madd_i16(ones, maddubs_i16((r3d .& mask_lo) .+ (((qh3b .>> shift2) .& mask_2) .<< shift4), q8_d))) - bc3)
+
+            // Group 2: ql[0..31] HIGH nibble + qh bits 4-5
+            let q8_e: i8x16 = load(q8, q8_off + 64)
+            let q8_f: i8x16 = load(q8, q8_off + 80)
+            let bc4: i32 = 32 * to_i32(bsums[bi + 4])
+            let bc5: i32 = 32 * to_i32(bsums[bi + 5])
+            s0 = s0 + sbyte(packed, b0 + sc_h+4) * (reduce_add(madd_i16(ones, maddubs_i16((r0a .>> shift4) .+ (((qh0a .>> shift4) .& mask_2) .<< shift4), q8_e))) - bc4)
+            s0 = s0 + sbyte(packed, b0 + sc_h+5) * (reduce_add(madd_i16(ones, maddubs_i16((r0b .>> shift4) .+ (((qh0b .>> shift4) .& mask_2) .<< shift4), q8_f))) - bc5)
+            s1 = s1 + sbyte(packed, b1 + sc_h+4) * (reduce_add(madd_i16(ones, maddubs_i16((r1a .>> shift4) .+ (((qh1a .>> shift4) .& mask_2) .<< shift4), q8_e))) - bc4)
+            s1 = s1 + sbyte(packed, b1 + sc_h+5) * (reduce_add(madd_i16(ones, maddubs_i16((r1b .>> shift4) .+ (((qh1b .>> shift4) .& mask_2) .<< shift4), q8_f))) - bc5)
+            s2 = s2 + sbyte(packed, b2 + sc_h+4) * (reduce_add(madd_i16(ones, maddubs_i16((r2a .>> shift4) .+ (((qh2a .>> shift4) .& mask_2) .<< shift4), q8_e))) - bc4)
+            s2 = s2 + sbyte(packed, b2 + sc_h+5) * (reduce_add(madd_i16(ones, maddubs_i16((r2b .>> shift4) .+ (((qh2b .>> shift4) .& mask_2) .<< shift4), q8_f))) - bc5)
+            s3 = s3 + sbyte(packed, b3 + sc_h+4) * (reduce_add(madd_i16(ones, maddubs_i16((r3a .>> shift4) .+ (((qh3a .>> shift4) .& mask_2) .<< shift4), q8_e))) - bc4)
+            s3 = s3 + sbyte(packed, b3 + sc_h+5) * (reduce_add(madd_i16(ones, maddubs_i16((r3b .>> shift4) .+ (((qh3b .>> shift4) .& mask_2) .<< shift4), q8_f))) - bc5)
+
+            // Group 3: ql[32..63] HIGH nibble + qh bits 6-7
+            let q8_g: i8x16 = load(q8, q8_off + 96)
+            let q8_h: i8x16 = load(q8, q8_off + 112)
+            let bc6: i32 = 32 * to_i32(bsums[bi + 6])
+            let bc7: i32 = 32 * to_i32(bsums[bi + 7])
+            s0 = s0 + sbyte(packed, b0 + sc_h+6) * (reduce_add(madd_i16(ones, maddubs_i16((r0c .>> shift4) .+ (((qh0a .>> shift6) .& mask_2) .<< shift4), q8_g))) - bc6)
+            s0 = s0 + sbyte(packed, b0 + sc_h+7) * (reduce_add(madd_i16(ones, maddubs_i16((r0d .>> shift4) .+ (((qh0b .>> shift6) .& mask_2) .<< shift4), q8_h))) - bc7)
+            s1 = s1 + sbyte(packed, b1 + sc_h+6) * (reduce_add(madd_i16(ones, maddubs_i16((r1c .>> shift4) .+ (((qh1a .>> shift6) .& mask_2) .<< shift4), q8_g))) - bc6)
+            s1 = s1 + sbyte(packed, b1 + sc_h+7) * (reduce_add(madd_i16(ones, maddubs_i16((r1d .>> shift4) .+ (((qh1b .>> shift6) .& mask_2) .<< shift4), q8_h))) - bc7)
+            s2 = s2 + sbyte(packed, b2 + sc_h+6) * (reduce_add(madd_i16(ones, maddubs_i16((r2c .>> shift4) .+ (((qh2a .>> shift6) .& mask_2) .<< shift4), q8_g))) - bc6)
+            s2 = s2 + sbyte(packed, b2 + sc_h+7) * (reduce_add(madd_i16(ones, maddubs_i16((r2d .>> shift4) .+ (((qh2b .>> shift6) .& mask_2) .<< shift4), q8_h))) - bc7)
+            s3 = s3 + sbyte(packed, b3 + sc_h+6) * (reduce_add(madd_i16(ones, maddubs_i16((r3c .>> shift4) .+ (((qh3a .>> shift6) .& mask_2) .<< shift4), q8_g))) - bc6)
+            s3 = s3 + sbyte(packed, b3 + sc_h+7) * (reduce_add(madd_i16(ones, maddubs_i16((r3d .>> shift4) .+ (((qh3b .>> shift6) .& mask_2) .<< shift4), q8_h))) - bc7)
+
+            h = h + 1
+        }
+
+        let di: i32 = blk * 4
+        res0 = res0 + d_arr[di] * to_f32(s0)
+        res1 = res1 + d_arr[di + 1] * to_f32(s1)
+        res2 = res2 + d_arr[di + 2] * to_f32(s2)
+        res3 = res3 + d_arr[di + 3] * to_f32(s3)
+        blk = blk + 1
+    }
+
+    scores[0] = res0
+    scores[1] = res1
+    scores[2] = res2
+    scores[3] = res3
+}
