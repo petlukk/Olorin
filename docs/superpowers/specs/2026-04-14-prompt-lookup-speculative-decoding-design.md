@@ -213,3 +213,22 @@ timing must show nonzero accept rate on the code prompt.
   rewind. Could be eliminated by padding `forward_batch` with an extra
   position for the correction — but complicates the kernel contract. Leave
   as follow-up if `forward_one` overhead dominates.
+
+## Rollout outcome (2026-04-14)
+
+Benchmark results at `temperature=0, max_tokens=128` on Gemma 4 E2B Q4K (16-thread pool, x86 SSE2):
+
+| Workload | K=0 (ms) | K=4 (ms) | K=4 speedup | K=8 (ms) | K=8 speedup |
+|----------|---------:|---------:|------------:|---------:|------------:|
+| code     |   18870  |   17061  |       1.11x |   12445  |       1.52x |
+| chat     |   14582  |   15253  |       0.96x |   13070  |       1.12x |
+| json     |   12006  |   11400  |       1.05x |   10790  |       1.11x |
+
+Speedups are real but fall short of the spec's thresholds (code ≥1.8×, json ≥1.5×, chat ≥0.95×). Decision: keep the default `draft_k = 0`. Opt in explicitly via `--draft-k 4` or `--draft-k 8`.
+
+Greedy parity is verified by `tests/speculative_parity.rs` across code, prose, and JSON prompts — speculation never changes output under deterministic decoding, so users who opt in see pure speedup, not behavioral drift.
+
+Future work that could close the gap (not in scope for this rollout):
+- Adaptive K based on running accept rate
+- Longer lookup window or prefix-tree indexing of generated tokens
+- Early-exit self-speculative decoding (first-N-layers draft) as a hybrid fallback when prompt-lookup misses
