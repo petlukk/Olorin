@@ -30,11 +30,17 @@ pub(crate) fn forward_batch_inner(
 ) {
     let n = tokens.len();
     let hd = model.hidden_dim;
+    let timing = timing_enabled();
+    let print = timing && ith == 0;
 
     // ── Pre-loop: embed all N tokens, prepare PLE per token (thread 0) ──
+    let t_pre = if print { Some(std::time::Instant::now()) } else { None };
+    let mut t_embed_us: u64 = 0;
+    let mut t_ple_us: u64 = 0;
     if ith == 0 {
         let embed_scale = (hd as f32).sqrt();
         for t in 0..n {
+            let t0 = if print { Some(std::time::Instant::now()) } else { None };
             dequant::q6k_embed_lookup(
                 model.embed_weight, tokens[t] as usize, &mut state.x, hd,
             );
@@ -42,21 +48,26 @@ pub(crate) fn forward_batch_inner(
                 state.x.as_ptr(), state.x.as_mut_ptr(), embed_scale, hd as i32,
             );
             state.batch_x[t * hd..(t + 1) * hd].copy_from_slice(&state.x[..hd]);
+            if let Some(s) = t0 { t_embed_us += s.elapsed().as_micros() as u64; }
 
             // PLE: prepare_ple writes into ple_signal, copy to batch_ple_signal
+            let t1 = if print { Some(std::time::Instant::now()) } else { None };
             state.prepare_ple(model, tokens[t]);
             let ple_total = model.ple_dim * model.n_layers;
             if ple_total > 0 {
                 state.batch_ple_signal[t * ple_total..(t + 1) * ple_total]
                     .copy_from_slice(&state.ple_signal[..ple_total]);
             }
+            if let Some(s) = t1 { t_ple_us += s.elapsed().as_micros() as u64; }
         }
     }
+    let t_pre_elapsed = t_pre.map(|s| s.elapsed().as_micros() as u64).unwrap_or(0);
     barrier.wait();
+    let t_barrier_pre = if print { Some(std::time::Instant::now()) } else { None };
 
     // ── Per-layer transformer blocks ─────────────────────────────
     let seq_len = state.cache.seq_len();
-    let timing = timing_enabled();
+    let t_layers_start = if print { Some(std::time::Instant::now()) } else { None };
     let mut layer_timing = if timing && ith == 0 {
         Some(BatchLayerTiming::new())
     } else {
@@ -71,8 +82,10 @@ pub(crate) fn forward_batch_inner(
     if let Some(ref t) = layer_timing {
         t.print_summary(model.n_layers, n);
     }
+    let t_layers_us = t_layers_start.map(|s| s.elapsed().as_micros() as u64).unwrap_or(0);
 
     // ── Post-loop: final norm on last token only (thread 0) ──────
+    let t_final_norm_start = if print { Some(std::time::Instant::now()) } else { None };
     if ith == 0 {
         let last = n - 1;
         ffi_inference::gemma4_rmsnorm(
@@ -89,20 +102,27 @@ pub(crate) fn forward_batch_inner(
             &mut state.q8_bsums,
         );
     }
+    let t_final_norm_us = t_final_norm_start.map(|s| s.elapsed().as_micros() as u64).unwrap_or(0);
     barrier.wait();
 
     // ── Output matmul (work-stealing, last token only) ────────────
-    // Prefill always uses full vocab (no hot-vocab optimization)
-    let logit_rows = model.vocab_size;
+    // Hot-vocab: we only sample one token after prefill, so top-k over
+    // SentencePiece's 32K most-frequent tokens is enough. Matches decode.
+    let logit_rows = if std::env::var("OLORIN_FULL_VOCAB").is_ok() {
+        model.vocab_size
+    } else {
+        model.vocab_size.min(32768)
+    };
     if ith == 0 { state.logit_rows = logit_rows; }
     current_chunk.store(nth as i32, Ordering::Relaxed);
     barrier.wait();
+    let t_logits_start = if print { Some(std::time::Instant::now()) } else { None };
     if let Some(ref q6k_buf) = model.embed_q6k_repacked {
         matmul_graph::q6k_repacked_batch_ws(
             q6k_buf.as_ptr(), model.embed_weight,
             state.q8_qs.as_ptr(), state.q8_d.as_ptr(), state.q8_bsums.as_ptr(),
             state.logits.as_mut_ptr(), state.q6k_d_scratch.as_mut_ptr(),
-            model.vocab_size, hd, 1, model.vocab_size,
+            logit_rows, hd, 1, logit_rows,
             current_chunk, ith, nth,
         );
     } else {
@@ -110,20 +130,36 @@ pub(crate) fn forward_batch_inner(
             model.embed_dtype, model.embed_weight,
             state.q8_qs.as_ptr(), state.q8_d.as_ptr(), state.q8_bsums.as_ptr(),
             state.logits.as_mut_ptr(), state.q6k_d_scratch.as_mut_ptr(),
-            model.vocab_size, hd,
+            logit_rows, hd,
             current_chunk, ith, nth,
         );
     }
     barrier.wait();
+    let t_logits_us = t_logits_start.map(|s| s.elapsed().as_micros() as u64).unwrap_or(0);
 
     // ── Softcap + advance cache by N (thread 0) ─────────────────
+    let t_softcap_start = if print { Some(std::time::Instant::now()) } else { None };
     if ith == 0 {
         if model.logit_softcap > 0.0 {
             ffi_inference::softcap_f32(
-                state.logits.as_mut_ptr(), model.vocab_size as i32, model.logit_softcap,
+                state.logits.as_mut_ptr(), logit_rows as i32, model.logit_softcap,
             );
         }
         state.cache.advance_n(n);
     }
+    let t_softcap_us = t_softcap_start.map(|s| s.elapsed().as_micros() as u64).unwrap_or(0);
     barrier.wait();
+
+    if print {
+        let ms = |us: u64| us as f64 / 1000.0;
+        let _ = t_barrier_pre; // silence unused
+        eprintln!("[prefill-stages] n_tokens={n}");
+        eprintln!("  embed           {:7.1}ms", ms(t_embed_us));
+        eprintln!("  ple             {:7.1}ms", ms(t_ple_us));
+        eprintln!("  pre_total       {:7.1}ms  (includes any idle before barrier)", ms(t_pre_elapsed));
+        eprintln!("  layer_loop      {:7.1}ms", ms(t_layers_us));
+        eprintln!("  final_norm      {:7.1}ms", ms(t_final_norm_us));
+        eprintln!("  output_logits   {:7.1}ms  (vocab={})", ms(t_logits_us), model.vocab_size);
+        eprintln!("  softcap+advance {:7.1}ms", ms(t_softcap_us));
+    }
 }
