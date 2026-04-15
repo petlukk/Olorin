@@ -218,17 +218,13 @@ impl DispatchContext {
             let full_text = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
             let full_ref = full_text.clone();
             let tx_ref = tx.clone();
-            let stopped = std::sync::Arc::new(
-                std::sync::atomic::AtomicBool::new(false),
-            );
-            let stopped_ref = stopped.clone();
 
             let on_token = move |token_text: &str| {
-                if stopped_ref.load(std::sync::atomic::Ordering::Relaxed) {
-                    return;
-                }
                 if safety::is_chatml_hallucination(token_text) {
-                    stopped_ref.store(true, std::sync::atomic::Ordering::Relaxed);
+                    let _ = tx_ref.send(StreamEvent::Error(format!(
+                        "[safety: dropped prompt-header token '{}']",
+                        token_text.escape_debug()
+                    )));
                     return;
                 }
                 full_ref.lock().unwrap().push_str(token_text);

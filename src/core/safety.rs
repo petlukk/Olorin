@@ -263,7 +263,6 @@ const CHATML_PATTERNS: &[&[u8]] = &[
     b"<|end_header_id|>",
     b"<|start_header_id|>",
     b"<|eot_id|>",
-    b"<|turn>",
     b"[INST]",
     b"[/INST]",
 ];
