@@ -33,12 +33,15 @@ pub(crate) fn forward_batch_inner(
     let timing = timing_enabled();
     let print = timing && ith == 0;
 
-    // ── Pre-loop: embed + PLE per token, split across threads ──────
-    // Each thread handles a disjoint slice of tokens, using its own
-    // stack-free scratch for the PLE projection. Writes into
-    // state.batch_x and state.batch_ple_signal go to disjoint ranges
-    // per token, matching the aliasing pattern used elsewhere in the
-    // graph-loop path.
+    // ── Pre-loop: embed + PLE, fully parallel ──────────────────────
+    // Phase 1 (token-parallel): embed + scale each token's x vector.
+    // Phase 2 (row-parallel, inside prepare_ple_batch): BF16 matvec
+    //   against ple_model_proj — each weight row reused across all
+    //   n_tokens inputs in one kernel call, so the 27.5 MB weight
+    //   matrix streams through DRAM once per prefill instead of
+    //   n_tokens times.
+    // Phase 3 (token-parallel, inside prepare_ple_batch): scale +
+    //   RMSNorm + FMA combine.
     let t_pre = if print { Some(std::time::Instant::now()) } else { None };
     let embed_scale = (hd as f32).sqrt();
     let ple_total = model.ple_dim * model.n_layers;
@@ -46,23 +49,27 @@ pub(crate) fn forward_batch_inner(
     let t_start = ith * per;
     let t_end = (t_start + per).min(n);
 
-    let mut proj_scratch = vec![0.0f32; ple_total.max(1)];
     for t in t_start..t_end {
-        {
-            let slot = &mut state.batch_x[t * hd..(t + 1) * hd];
-            dequant::q6k_embed_lookup(model.embed_weight, tokens[t] as usize, slot, hd);
-            ffi_inference::vec_scale_f32(
-                slot.as_ptr(), slot.as_mut_ptr(), embed_scale, hd as i32,
-            );
-        }
-        if ple_total > 0 {
-            let x_slot_ptr = state.batch_x[t * hd..].as_ptr();
-            let x_slot = unsafe { std::slice::from_raw_parts(x_slot_ptr, hd) };
-            let ple_slot = &mut state.batch_ple_signal[t * ple_total..(t + 1) * ple_total];
-            super::forward::prepare_ple_into(
-                model, tokens[t], x_slot, ple_slot, &mut proj_scratch,
-            );
-        }
+        let slot = &mut state.batch_x[t * hd..(t + 1) * hd];
+        dequant::q6k_embed_lookup(model.embed_weight, tokens[t] as usize, slot, hd);
+        ffi_inference::vec_scale_f32(
+            slot.as_ptr(), slot.as_mut_ptr(), embed_scale, hd as i32,
+        );
+    }
+    barrier.wait();
+
+    if ple_total > 0 {
+        // Borrow state's buffers via disjoint split_at so Rust is satisfied
+        // with the multiple &mut required by prepare_ple_batch.
+        let batch_x_ptr = state.batch_x.as_ptr();
+        let x_view = unsafe { std::slice::from_raw_parts(batch_x_ptr, n * hd) };
+        super::forward::prepare_ple_batch(
+            model, tokens,
+            x_view,
+            &mut state.batch_ple_signal[..n * ple_total],
+            &mut state.batch_ple_proj_scratch[..n * ple_total],
+            barrier, ith, nth,
+        );
     }
     let t_pre_elapsed = t_pre.map(|s| s.elapsed().as_micros() as u64).unwrap_or(0);
     barrier.wait();

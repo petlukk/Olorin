@@ -56,3 +56,129 @@ export func bf16_dot_f32_4row(
     scores[2] = bf16_dot_f32(w2, input, scratch, n_cols)
     scores[3] = bf16_dot_f32(w3, input, scratch, n_cols)
 }
+
+// Dot one BF16 weight row against N f32 input vectors, writing N scalar
+// results strided by `output_stride` (floats). 4-token register tile:
+// each 8-element BF16 chunk is decoded once and reused against 4 token
+// inputs, cutting weight-load work ~4×. Bit-exact with calling
+// bf16_dot_f32 once per token (same FMA order per token: acc0 over cols
+// [0..4), acc1 over [4..8), final reduce).
+export func bf16_dot_multi_input(
+    w_row: *restrict u16,
+    inputs: *restrict f32,
+    out_scores: *mut f32,
+    scratch: *mut i32,
+    n_tokens: i32,
+    n_cols: i32,
+    input_stride: i32,
+    output_stride: i32
+) {
+    let fp: *mut f32 = ptr_as_f32(scratch)
+    let mut t: i32 = 0
+
+    while t + 4 <= n_tokens {
+        let b0: i32 = (t + 0) * input_stride
+        let b1: i32 = (t + 1) * input_stride
+        let b2: i32 = (t + 2) * input_stride
+        let b3: i32 = (t + 3) * input_stride
+
+        let mut a0_t0: f32x4 = splat(0.0)
+        let mut a1_t0: f32x4 = splat(0.0)
+        let mut a0_t1: f32x4 = splat(0.0)
+        let mut a1_t1: f32x4 = splat(0.0)
+        let mut a0_t2: f32x4 = splat(0.0)
+        let mut a1_t2: f32x4 = splat(0.0)
+        let mut a0_t3: f32x4 = splat(0.0)
+        let mut a1_t3: f32x4 = splat(0.0)
+
+        let mut i: i32 = 0
+        while i + 8 <= n_cols {
+            scratch[0] = to_i32(w_row[i]) << 16
+            scratch[1] = to_i32(w_row[i+1]) << 16
+            scratch[2] = to_i32(w_row[i+2]) << 16
+            scratch[3] = to_i32(w_row[i+3]) << 16
+            scratch[4] = to_i32(w_row[i+4]) << 16
+            scratch[5] = to_i32(w_row[i+5]) << 16
+            scratch[6] = to_i32(w_row[i+6]) << 16
+            scratch[7] = to_i32(w_row[i+7]) << 16
+            let w0: f32x4 = load(fp, 0)
+            let w1: f32x4 = load(fp, 4)
+
+            let in0_t0: f32x4 = load(inputs, b0 + i)
+            let in1_t0: f32x4 = load(inputs, b0 + i + 4)
+            a0_t0 = fma(w0, in0_t0, a0_t0)
+            a1_t0 = fma(w1, in1_t0, a1_t0)
+
+            let in0_t1: f32x4 = load(inputs, b1 + i)
+            let in1_t1: f32x4 = load(inputs, b1 + i + 4)
+            a0_t1 = fma(w0, in0_t1, a0_t1)
+            a1_t1 = fma(w1, in1_t1, a1_t1)
+
+            let in0_t2: f32x4 = load(inputs, b2 + i)
+            let in1_t2: f32x4 = load(inputs, b2 + i + 4)
+            a0_t2 = fma(w0, in0_t2, a0_t2)
+            a1_t2 = fma(w1, in1_t2, a1_t2)
+
+            let in0_t3: f32x4 = load(inputs, b3 + i)
+            let in1_t3: f32x4 = load(inputs, b3 + i + 4)
+            a0_t3 = fma(w0, in0_t3, a0_t3)
+            a1_t3 = fma(w1, in1_t3, a1_t3)
+
+            i = i + 8
+        }
+
+        let mut r0: f32 = reduce_add(a0_t0) + reduce_add(a1_t0)
+        let mut r1: f32 = reduce_add(a0_t1) + reduce_add(a1_t1)
+        let mut r2: f32 = reduce_add(a0_t2) + reduce_add(a1_t2)
+        let mut r3: f32 = reduce_add(a0_t3) + reduce_add(a1_t3)
+
+        while i < n_cols {
+            scratch[0] = to_i32(w_row[i]) << 16
+            let wv: f32 = fp[0]
+            r0 = r0 + wv * inputs[b0 + i]
+            r1 = r1 + wv * inputs[b1 + i]
+            r2 = r2 + wv * inputs[b2 + i]
+            r3 = r3 + wv * inputs[b3 + i]
+            i = i + 1
+        }
+
+        out_scores[(t + 0) * output_stride] = r0
+        out_scores[(t + 1) * output_stride] = r1
+        out_scores[(t + 2) * output_stride] = r2
+        out_scores[(t + 3) * output_stride] = r3
+        t = t + 4
+    }
+
+    // Tail: call single-token path for remaining tokens (keeps bit-exact).
+    while t < n_tokens {
+        let in_base: i32 = t * input_stride
+        let mut acc0: f32x4 = splat(0.0)
+        let mut acc1: f32x4 = splat(0.0)
+        let mut i: i32 = 0
+        while i + 8 <= n_cols {
+            scratch[0] = to_i32(w_row[i]) << 16
+            scratch[1] = to_i32(w_row[i+1]) << 16
+            scratch[2] = to_i32(w_row[i+2]) << 16
+            scratch[3] = to_i32(w_row[i+3]) << 16
+            scratch[4] = to_i32(w_row[i+4]) << 16
+            scratch[5] = to_i32(w_row[i+5]) << 16
+            scratch[6] = to_i32(w_row[i+6]) << 16
+            scratch[7] = to_i32(w_row[i+7]) << 16
+            let w0: f32x4 = load(fp, 0)
+            let w1: f32x4 = load(fp, 4)
+            let in0: f32x4 = load(inputs, in_base + i)
+            let in1: f32x4 = load(inputs, in_base + i + 4)
+            acc0 = fma(w0, in0, acc0)
+            acc1 = fma(w1, in1, acc1)
+            i = i + 8
+        }
+        let mut result: f32 = reduce_add(acc0) + reduce_add(acc1)
+        while i < n_cols {
+            scratch[0] = to_i32(w_row[i]) << 16
+            result = result + fp[0] * inputs[in_base + i]
+            i = i + 1
+        }
+        out_scores[t * output_stride] = result
+        t = t + 1
+    }
+}

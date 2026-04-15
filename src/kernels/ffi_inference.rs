@@ -24,6 +24,7 @@ pub struct KernelTableInference {
     pub gemma4_rope:           Gemma4RopeFn,
     pub bf16_dot_f32:          Bf16DotF32Fn,
     pub bf16_dot_f32_4row:     Bf16Dot4RowFn,
+    pub bf16_dot_multi_input:  Bf16DotMultiInputFn,
     pub vec_add_f32:           VecAddF32Fn,
     pub vec_scale_f32:         VecScaleF32Fn,
     pub vec_fma_f32:           VecFmaF32Fn,
@@ -141,6 +142,7 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
             gemma4_rope:    std::mem::transmute(sym(&gemma4_rope_lib, b"gemma4_rope\0")?),
             bf16_dot_f32:      std::mem::transmute(sym(&bf16_matvec_lib, b"bf16_dot_f32\0")?),
             bf16_dot_f32_4row: std::mem::transmute(sym(&bf16_matvec_lib, b"bf16_dot_f32_4row\0")?),
+            bf16_dot_multi_input: std::mem::transmute(sym(&bf16_matvec_lib, b"bf16_dot_multi_input\0")?),
             vec_add_f32:       std::mem::transmute(sym(&vec_ops_lib, b"vec_add_f32\0")?),
             vec_scale_f32:     std::mem::transmute(sym(&vec_ops_lib, b"vec_scale_f32\0")?),
             vec_fma_f32:       std::mem::transmute(sym(&vec_ops_lib, b"vec_fma_f32\0")?),
@@ -274,6 +276,17 @@ pub unsafe fn bf16_dot_f32(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub unsafe fn bf16_dot_multi_input(
+    w_row: *const u16, inputs: *const f32, out_scores: *mut f32,
+    scratch: *mut i32, n_tokens: i32, n_cols: i32,
+    input_stride: i32, output_stride: i32,
+) {
+    (k().bf16_dot_multi_input)(
+        w_row, inputs, out_scores, scratch,
+        n_tokens, n_cols, input_stride, output_stride,
+    )
+}
+
 pub unsafe fn bf16_dot_f32_4row(
     w0: *const u16, w1: *const u16, w2: *const u16, w3: *const u16,
     input: *const f32, scores: *mut f32, scratch: *mut i32, n_cols: i32,

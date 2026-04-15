@@ -55,6 +55,8 @@ pub type Bf16DotF32Fn = unsafe extern "C" fn(*const u16, *const f32, *mut i32, i
 pub type Bf16Dot4RowFn = unsafe extern "C" fn(
     *const u16, *const u16, *const u16, *const u16,
     *const f32, *mut f32, *mut i32, i32);
+pub type Bf16DotMultiInputFn = unsafe extern "C" fn(
+    *const u16, *const f32, *mut f32, *mut i32, i32, i32, i32, i32);
 pub type VecAddF32Fn   = unsafe extern "C" fn(*const f32, *const f32, *mut f32, i32);
 pub type VecScaleF32Fn = unsafe extern "C" fn(*const f32, *mut f32, f32, i32);
 pub type VecFmaF32Fn   = unsafe extern "C" fn(*const f32, *const f32, *mut f32, f32, i32);
