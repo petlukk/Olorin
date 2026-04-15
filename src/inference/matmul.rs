@@ -2,29 +2,20 @@
 //!
 //! Actual dtype kernels live in sibling modules:
 //! - `matmul_seq.rs` — single-threaded Q4K/Q5K/Q6K/BF16 kernels
-//! - `matmul_par.rs` — ThreadPool-based parallel wrappers
-//! - `matmul_graph.rs` — graph-threaded work-stealing variant
+//! - `matmul_graph.rs` — graph-threaded work-stealing variant used by the
+//!   live decode and prefill forward paths
 //!
 //! All dot-product compute goes through Ea SIMD kernels via FFI. This
-//! module holds the shared constants, dtype-dispatch entry points
-//! (`matvec`, `par_matvec`), and numeric helpers (`pow2_table`,
-//! `f16_to_f32_scalar`, `quant_input`) used across the other variants.
+//! module holds shared constants, scalar dispatch entry points (`matvec`,
+//! `matvec_maybe_repacked`), and numeric helpers (`pow2_table`,
+//! `f16_to_f32_scalar`, `quant_input`).
 
 use crate::kernels::ffi_inference;
-use crate::inference::threadpool::ThreadPool;
 
-// Re-export kernel functions so external callers keep the existing paths
-// (`olorin::inference::matmul::q4k_matvec`, etc.). Nothing outside this
-// module should care which file the implementation actually lives in.
-pub use super::matmul_seq::{
-    q4k_matvec, q4k_matvec_dual,
-    q5k_matvec, q6k_matvec,
-    bf16_matvec,
-};
-pub use super::matmul_par::par_q4k_matvec_dual;
-
-// Private imports for the dispatchers below.
-use super::matmul_par::{par_q4k_matvec, par_q5k_matvec, par_q6k_matvec, par_q4k_8x8_matvec, par_q4k_8x8_matvec_dual};
+// Re-exports: q4k_matvec used by tests/repack_q4k.rs; q5k/q6k used by
+// `matvec` below (exercised by tests/gemma4_verify.rs); bf16_matvec used
+// by PLE phase-A decode.
+pub use super::matmul_seq::{q4k_matvec, q5k_matvec, q6k_matvec, bf16_matvec};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -193,159 +184,3 @@ pub fn matvec_maybe_repacked(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Parallel dtype-dispatching matvec — splits quad loop across ThreadPool workers
-// ---------------------------------------------------------------------------
-
-/// Parallel dtype-dispatching matvec.
-pub fn par_matvec(
-    pool: &ThreadPool,
-    dtype: u32,
-    weight: *const u8,
-    input_qs: &[i8],
-    input_d: &[f32],
-    input_bsums: &[i16],
-    output: &mut [f32],
-    d_scratch: &mut [f32],
-    n_rows: usize,
-    n_cols: usize,
-) {
-    let n_threads = pool.thread_count();
-    if n_threads <= 1 {
-        matvec(dtype, weight, input_qs, input_d, input_bsums, output, d_scratch, n_rows, n_cols);
-        return;
-    }
-    match dtype {
-        GGML_TYPE_Q4_K => par_q4k_matvec(pool, weight, input_qs, input_d, input_bsums, output, n_rows, n_cols),
-        GGML_TYPE_Q5_K => par_q5k_matvec(pool, weight, input_qs, input_d, input_bsums, output, n_rows, n_cols),
-        GGML_TYPE_Q6_K => par_q6k_matvec(pool, weight, input_qs, input_d, input_bsums, output, d_scratch, n_rows, n_cols),
-        _ => panic!("unsupported weight dtype {dtype}"),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Q6K repacked matvec
-// ---------------------------------------------------------------------------
-
-/// Single-threaded Q6K repacked matvec.
-#[allow(clippy::too_many_arguments)]
-pub fn q6k_matvec_repacked(
-    packed: &[u8], weight: *const u8,
-    input_qs: &[i8], input_d: &[f32], input_bsums: &[i16],
-    output: &mut [f32], d_scratch: &mut [f32],
-    n_rows: usize, n_cols: usize,
-) {
-    let n_blocks = n_cols / Q6K_BLOCK_SIZE;
-    let row_bytes = n_blocks * Q6K_BLOCK_BYTES;
-    let full_quads = n_rows / 4;
-    let tile_bytes = n_blocks * 840;
-
-    for quad in 0..full_quads {
-        let base_row = quad * 4;
-        unsafe {
-            for blk in 0..n_blocks {
-                for r in 0..4usize {
-                    let w = weight.add((base_row + r) * row_bytes + blk * Q6K_BLOCK_BYTES + 208);
-                    let raw = u16::from_le_bytes([*w, *w.add(1)]);
-                    d_scratch[blk * 4 + r] = f16_to_f32_scalar(raw) * input_d[blk];
-                }
-            }
-            ffi_inference::q6k_dot_q8k_4row_repacked(
-                packed.as_ptr().add(quad * tile_bytes),
-                input_qs.as_ptr(), input_bsums.as_ptr(),
-                output[base_row..].as_mut_ptr(),
-                n_blocks as i32, d_scratch.as_ptr(),
-            );
-        }
-    }
-}
-
-/// Parallel Q6K repacked matvec — delegates to single-threaded for now.
-/// The batch path (prefill) is where multi-threading matters.
-#[allow(clippy::too_many_arguments)]
-pub fn par_q6k_matvec_repacked(
-    _pool: &ThreadPool,
-    packed: &[u8], weight: *const u8,
-    input_qs: &[i8], input_d: &[f32], input_bsums: &[i16],
-    output: &mut [f32], d_scratch: &mut [f32],
-    n_rows: usize, n_cols: usize,
-) {
-    q6k_matvec_repacked(packed, weight, input_qs, input_d, input_bsums, output, d_scratch, n_rows, n_cols);
-}
-
-// ---------------------------------------------------------------------------
-// Phase B.1: dispatch wrappers that accept an optional repacked buffer
-// ---------------------------------------------------------------------------
-
-/// Parallel matvec with an optional pre-repacked `block_q4_Kx8` buffer.
-///
-/// When `repacked` is `Some(buf)`, dispatches to `par_q4k_8x8_matvec` which
-/// uses the 8x8 kernel (8 rows per SIMD pass). When `None`, falls through
-/// to the standard `par_matvec` which uses the 4-row kernel via dtype
-/// dispatch.
-#[allow(clippy::too_many_arguments)]
-pub fn par_matvec_maybe_repacked(
-    pool: &ThreadPool,
-    dtype: u32,
-    weight: *const u8,
-    repacked: Option<&[u8]>,
-    input_qs: &[i8],
-    input_d: &[f32],
-    input_bsums: &[i16],
-    output: &mut [f32],
-    d_scratch: &mut [f32],
-    n_rows: usize,
-    n_cols: usize,
-) {
-    if let Some(buf) = repacked {
-        par_q4k_8x8_matvec(pool, buf.as_ptr(), input_qs, input_d, input_bsums, output, n_rows, n_cols);
-    } else {
-        par_matvec(pool, dtype, weight, input_qs, input_d, input_bsums, output, d_scratch, n_rows, n_cols);
-    }
-}
-
-/// Parallel Q4K dual (gate+up) matvec with optional repacked buffers.
-///
-/// Phase B.2: when both gate and up are repacked, routes through the fused
-/// `par_q4k_8x8_matvec_dual`, which shares Q8 input loads + v00..v11
-/// broadcasts across both weight streams. When neither is repacked, falls
-/// through to the existing `par_q4k_matvec_dual` (4-row kernel).
-///
-/// The (Some, None) / (None, Some) "hybrid dual" cases are unreachable on
-/// Gemma-family models: `populate_q4k_repacked` in `engine_helpers.rs`
-/// repacks `ffn_gate` and `ffn_up` with the same `(ffn_dim, hidden_dim)`
-/// dims and dtype gate, so they're always both repacked or both not. A
-/// `debug_assert!` catches future models that break the invariant.
-#[allow(clippy::too_many_arguments)]
-pub fn par_q4k_matvec_dual_maybe_repacked(
-    pool: &ThreadPool,
-    gate_weight: *const u8,
-    up_weight: *const u8,
-    gate_repacked: Option<&[u8]>,
-    up_repacked: Option<&[u8]>,
-    input_qs: &[i8],
-    input_d: &[f32],
-    input_bsums: &[i16],
-    gate_output: &mut [f32],
-    up_output: &mut [f32],
-    n_rows: usize,
-    n_cols: usize,
-) {
-    debug_assert!(
-        gate_repacked.is_some() == up_repacked.is_some(),
-        "ffn_gate and ffn_up always repack together on Gemma-family models; \
-         hybrid repacking is unreachable and unsupported"
-    );
-    match (gate_repacked, up_repacked) {
-        (Some(g), Some(u)) => par_q4k_8x8_matvec_dual(
-            pool, g.as_ptr(), u.as_ptr(),
-            input_qs, input_d, input_bsums,
-            gate_output, up_output, n_rows, n_cols,
-        ),
-        _ => par_q4k_matvec_dual(
-            pool, gate_weight, up_weight,
-            input_qs, input_d, input_bsums,
-            gate_output, up_output, n_rows, n_cols,
-        ),
-    }
-}

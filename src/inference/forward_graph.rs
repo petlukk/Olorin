@@ -13,23 +13,6 @@ use crate::inference::dequant;
 use crate::kernels::ffi_inference;
 use crate::inference::threadpool::SpinBarrier;
 
-/// Shared context for graph-threaded forward pass.
-/// All pointers remain valid for the duration of forward_one_graph.
-struct FwdCtx<'a> {
-    state: &'a mut Gemma4State,
-    model: &'a Gemma4Model,
-    token_id: u32,
-    pos: usize,
-    barrier: &'a SpinBarrier,
-    current_chunk: &'a AtomicI32,
-}
-
-// FwdCtx contains raw pointers via model/state. We guarantee disjoint access
-// by ith/nth splitting within each op. Each thread accesses different output
-// ranges, and shared reads (weights, input) are immutable.
-unsafe impl<'a> Send for FwdCtx<'a> {}
-unsafe impl<'a> Sync for FwdCtx<'a> {}
-
 /// Parallel Q8K quantization across threads, split by 256-element blocks.
 #[inline]
 fn parallel_quant_decode(
@@ -300,7 +283,7 @@ fn layer_forward_graph_timed(
                 ffi_inference::gemma4_rmsnorm(
                     unsafe { state.q.as_ptr().add(off) },
                     lw.q_norm,
-                    unsafe { state.x_norm.as_mut_ptr() }, // scratch
+                    state.x_norm.as_mut_ptr(), // scratch
                     head_dim as i32, model.rms_eps,
                 );
                 state.q[off..off + head_dim].copy_from_slice(&state.x_norm[..head_dim]);
@@ -345,15 +328,16 @@ fn layer_forward_graph_timed(
         barrier.wait();
 
         acc!(t0, t_kv);
-        // K norm + V bare norm + K rope + cache store (thread 0)
-        let t0 = t!();
+        // K norm + V bare norm + K rope + cache store (thread 0).
+        // Intentionally no nested t0: the scope closes before acc!'s next
+        // read, so the outer t0 binding is what gets accumulated next.
         if ith == 0 {
             if !lw.k_norm.is_null() {
                 for h in 0..n_kv_heads {
                     let off = h * head_dim;
                     ffi_inference::gemma4_rmsnorm(
                         unsafe { state.k.as_ptr().add(off) }, lw.k_norm,
-                        unsafe { state.x_norm.as_mut_ptr() }, head_dim as i32, model.rms_eps,
+                        state.x_norm.as_mut_ptr(), head_dim as i32, model.rms_eps,
                     );
                     state.k[off..off + head_dim].copy_from_slice(&state.x_norm[..head_dim]);
                 }

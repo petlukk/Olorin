@@ -12,7 +12,7 @@ use super::matmul::*;
 pub fn q4k_matvec_ws(
     weight: *const u8, q8: *const i8, q8_d: *const f32, bsums: *const i16,
     output: *mut f32, n_rows: usize, n_cols: usize,
-    current_chunk: &AtomicI32, ith: usize, nth: usize,
+    current_chunk: &AtomicI32, ith: usize, _nth: usize,
 ) {
     let n_blocks = n_cols / Q4K_BLOCK_SIZE;
     let row_bytes = n_blocks * Q4K_BLOCK_BYTES;
@@ -57,7 +57,7 @@ pub fn q4k_matvec_dual_ws(
     q8: *const i8, q8_d: *const f32, bsums: *const i16,
     gate_out: *mut f32, up_out: *mut f32,
     n_rows: usize, n_cols: usize,
-    current_chunk: &AtomicI32, ith: usize, nth: usize,
+    current_chunk: &AtomicI32, ith: usize, _nth: usize,
 ) {
     let n_blocks = n_cols / Q4K_BLOCK_SIZE;
     let row_bytes = n_blocks * Q4K_BLOCK_BYTES;
@@ -109,7 +109,7 @@ pub fn q4k_matvec_dual_ws(
 pub fn q5k_matvec_ws(
     weight: *const u8, q8: *const i8, q8_d: *const f32, bsums: *const i16,
     output: *mut f32, n_rows: usize, n_cols: usize,
-    current_chunk: &AtomicI32, ith: usize, nth: usize,
+    current_chunk: &AtomicI32, ith: usize, _nth: usize,
 ) {
     let n_blocks = n_cols / Q5K_BLOCK_SIZE;
     let row_bytes = n_blocks * Q5K_BLOCK_BYTES;
@@ -152,7 +152,7 @@ pub fn q6k_matvec_ws(
     weight: *const u8, q8: *const i8, q8_d: *const f32, bsums: *const i16,
     output: *mut f32, d_scratch: *mut f32,
     n_rows: usize, n_cols: usize,
-    current_chunk: &AtomicI32, ith: usize, nth: usize,
+    current_chunk: &AtomicI32, ith: usize, _nth: usize,
 ) {
     let n_blocks = n_cols / Q6K_BLOCK_SIZE;
     let row_bytes = n_blocks * Q6K_BLOCK_BYTES;

@@ -1,8 +1,8 @@
 //! Batched forward pass — processes N tokens through all layers using gemm.
 //!
 //! Replaces both forward_one (Path A) and forward_one_graph (Path B) for
-//! prompt evaluation. Uses gemm_q4k_8x8 for all Q4K weight projections and
-//! the fused attention kernel for multi-token causal attention.
+//! prompt evaluation. Uses work-stealing Q4K 8x8 GEMM for all Q4K weight
+//! projections and the fused attention kernel for multi-token causal attention.
 //!
 //! Supporting ops (rmsnorm, rope, quant) loop N times over existing
 //! single-token kernels.

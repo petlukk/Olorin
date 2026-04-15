@@ -20,7 +20,6 @@ pub struct Engine {
     model: Gemma4Model,
     tokenizer: Tokenizer,
     state: Gemma4State,
-    pool: crate::inference::threadpool::ThreadPool,
     graph_pool: crate::inference::threadpool::GraphPool,
     pub max_tokens: usize,
     pub temperature: f32,
@@ -50,7 +49,6 @@ impl Engine {
             model,
             tokenizer,
             state,
-            pool,
             graph_pool,
             // Defaults match llama.cpp + GGUF metadata for this model:
             //   general.sampling.top_k = 64

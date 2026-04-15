@@ -13,21 +13,12 @@ use crate::inference::dequant;
 use crate::kernels::ffi_inference;
 
 // ---------------------------------------------------------------------------
-// Diagnostic helper
+// Diagnostic helpers
 // ---------------------------------------------------------------------------
-
-pub(crate) fn diag_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("GEMMA4_DIAG").is_ok())
-}
 
 pub(crate) fn timing_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var("GEMMA4_TIMING").is_ok())
-}
-
-pub(crate) fn l2_norm(v: &[f32]) -> f32 {
-    v.iter().map(|x| x * x).sum::<f32>().sqrt()
 }
 
 // ---------------------------------------------------------------------------
@@ -501,88 +492,6 @@ impl Gemma4State {
     }
 
 
-
-    /// Run one decode step. Returns logits slice.
-    pub fn forward_one(&mut self, model: &Gemma4Model, token_id: u32, pool: &crate::inference::threadpool::ThreadPool) -> &[f32] {
-        let hd = model.hidden_dim;
-        let pos = self.cache.seq_len();
-        let diag = diag_enabled();
-        let timing = timing_enabled();
-
-        let t0 = std::time::Instant::now();
-
-        // ── Pre-loop: embed + scale ──────────────────────────────────
-        dequant::q6k_embed_lookup(model.embed_weight, token_id as usize, &mut self.x, hd);
-        let embed_scale = (hd as f32).sqrt();
-        ffi_inference::vec_scale_f32(
-            self.x.as_ptr(), self.x.as_mut_ptr(), embed_scale, hd as i32,
-        );
-
-        if diag {
-            eprintln!("[gemma4] pos={pos} embed L2={:.4}", l2_norm(&self.x));
-        }
-
-        // PLE Phase A: compute per-layer signal
-        self.prepare_ple(model, token_id);
-
-        let t_embed = t0.elapsed();
-
-        // ── Per-layer transformer blocks ─────────────────────────────
-        let t1 = std::time::Instant::now();
-        for il in 0..model.n_layers {
-            self.layer_forward(model, il, pos, diag, pool);
-        }
-        let t_layers = t1.elapsed();
-
-        // ── Post-loop: final norm + output matmul + softcap ─────────
-        let t2 = std::time::Instant::now();
-        ffi_inference::gemma4_rmsnorm(
-            self.x.as_ptr(),
-            model.norm_weight,
-            self.x_norm.as_mut_ptr(),
-            hd as i32,
-            model.rms_eps,
-        );
-
-        if diag {
-            eprintln!("[gemma4] result_norm L2={:.4} first4=[{:.4},{:.4},{:.4},{:.4}]",
-                l2_norm(&self.x_norm[..hd]),
-                self.x_norm[0], self.x_norm[1], self.x_norm[2], self.x_norm[3]);
-        }
-
-        matmul::quant_input(
-            &self.x_norm,
-            &mut self.q8_qs,
-            &mut self.q8_d,
-            &mut self.q8_bsums,
-        );
-
-        matmul::par_matvec(
-            pool, model.embed_dtype, model.embed_weight,
-            &self.q8_qs, &self.q8_d, &self.q8_bsums,
-            &mut self.logits, &mut self.q6k_d_scratch,
-            model.vocab_size, hd,
-        );
-
-        if model.logit_softcap > 0.0 {
-            ffi_inference::softcap_f32(
-                self.logits.as_mut_ptr(), model.vocab_size as i32, model.logit_softcap,
-            );
-        }
-        let t_output = t2.elapsed();
-
-        if timing {
-            let total = t0.elapsed();
-            eprintln!("[timing] pos={pos} embed+ple={:.1}ms layers={:.1}ms output={:.1}ms total={:.1}ms",
-                t_embed.as_secs_f64() * 1000.0,
-                t_layers.as_secs_f64() * 1000.0,
-                t_output.as_secs_f64() * 1000.0,
-                total.as_secs_f64() * 1000.0);
-        }
-
-        self.cache.advance();
-        &self.logits
-    }
 
     /// Run one decode step using graph-loop threading.
     /// Main thread participates as ith=0, workers 1..N-1 spin-barrier.
