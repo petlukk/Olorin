@@ -119,11 +119,38 @@ export func q4k_8x8_q8k_matvec_dual(
                 let sc_lo_1_mat_a: i32x4 = [t10_mat_a & 255, (t10_mat_a>>8)&255, (t10_mat_a>>16)&255, (t10_mat_a>>24)&255]
                 let sc_hi_1_mat_a: i32x4 = [t11_mat_a & 255, (t11_mat_a>>8)&255, (t11_mat_a>>16)&255, (t11_mat_a>>24)&255]
 
-                // A-side vdot loop
+                // B-side scale decode (moved up so we can fuse the vdot loops)
+                let sp_mat_b: *restrict i32 = ptr_as_i32(ptr_as_i8(packed_b))
+                let u00_mat_b: i32 = sp_mat_b[sc0/4]
+                let u01_mat_b: i32 = sp_mat_b[sc0/4+1]
+                let u02_mat_b: i32 = sp_mat_b[sc0/4+2]
+                let t00_mat_b: i32 = u00_mat_b & km1
+                let t02_mat_b: i32 = u01_mat_b & km1
+                let t01_mat_b: i32 = (u02_mat_b & km2) | (((u00_mat_b >> 6) & km3) << 4)
+                let t03_mat_b: i32 = ((u02_mat_b >> 4) & km2) | (((u01_mat_b >> 6) & km3) << 4)
+
+                let u10_mat_b: i32 = sp_mat_b[sc1/4]
+                let u11_mat_b: i32 = sp_mat_b[sc1/4+1]
+                let u12_mat_b: i32 = sp_mat_b[sc1/4+2]
+                let t10_mat_b: i32 = u10_mat_b & km1
+                let t12_mat_b: i32 = u11_mat_b & km1
+                let t11_mat_b: i32 = (u12_mat_b & km2) | (((u10_mat_b >> 6) & km3) << 4)
+                let t13_mat_b: i32 = ((u12_mat_b >> 4) & km2) | (((u11_mat_b >> 6) & km3) << 4)
+
+                let sc_lo_0_mat_b: i32x4 = [t00_mat_b & 255, (t00_mat_b>>8)&255, (t00_mat_b>>16)&255, (t00_mat_b>>24)&255]
+                let sc_hi_0_mat_b: i32x4 = [t01_mat_b & 255, (t01_mat_b>>8)&255, (t01_mat_b>>16)&255, (t01_mat_b>>24)&255]
+                let sc_lo_1_mat_b: i32x4 = [t10_mat_b & 255, (t10_mat_b>>8)&255, (t10_mat_b>>16)&255, (t10_mat_b>>24)&255]
+                let sc_hi_1_mat_b: i32x4 = [t11_mat_b & 255, (t11_mat_b>>8)&255, (t11_mat_b>>16)&255, (t11_mat_b>>24)&255]
+
+                // Fused A+B vdot loop — each k iteration loads Q8K once and feeds both A and B vdots
                 let mut alo_03_mat_a: i32x4 = splat(0)
                 let mut ahi_03_mat_a: i32x4 = splat(0)
                 let mut alo_47_mat_a: i32x4 = splat(0)
                 let mut ahi_47_mat_a: i32x4 = splat(0)
+                let mut alo_03_mat_b: i32x4 = splat(0)
+                let mut ahi_03_mat_b: i32x4 = splat(0)
+                let mut alo_47_mat_b: i32x4 = splat(0)
+                let mut ahi_47_mat_b: i32x4 = splat(0)
 
                 let mut k: i32 = 0
                 while k < 8 {
@@ -138,11 +165,21 @@ export func q4k_8x8_q8k_matvec_dual(
                     let wa03_hi: i8x16 = (wa03 .>> shift4) .& m4b
                     let wa47_lo: i8x16 = wa47 .& m4b
                     let wa47_hi: i8x16 = (wa47 .>> shift4) .& m4b
-
                     alo_03_mat_a = alo_03_mat_a .+ vdot_i32(wa03_lo, q8_lo)
                     ahi_03_mat_a = ahi_03_mat_a .+ vdot_i32(wa03_hi, q8_hi)
                     alo_47_mat_a = alo_47_mat_a .+ vdot_i32(wa47_lo, q8_lo)
                     ahi_47_mat_a = ahi_47_mat_a .+ vdot_i32(wa47_hi, q8_hi)
+
+                    let wb03: i8x16 = load(packed_b_i8, q4_base + k * 32)
+                    let wb47: i8x16 = load(packed_b_i8, q4_base + k * 32 + 16)
+                    let wb03_lo: i8x16 = wb03 .& m4b
+                    let wb03_hi: i8x16 = (wb03 .>> shift4) .& m4b
+                    let wb47_lo: i8x16 = wb47 .& m4b
+                    let wb47_hi: i8x16 = (wb47 .>> shift4) .& m4b
+                    alo_03_mat_b = alo_03_mat_b .+ vdot_i32(wb03_lo, q8_lo)
+                    ahi_03_mat_b = ahi_03_mat_b .+ vdot_i32(wb03_hi, q8_hi)
+                    alo_47_mat_b = alo_47_mat_b .+ vdot_i32(wb47_lo, q8_lo)
+                    ahi_47_mat_b = ahi_47_mat_b .+ vdot_i32(wb47_hi, q8_hi)
 
                     k = k + 1
                 }
@@ -172,58 +209,7 @@ export func q4k_8x8_q8k_matvec_dual(
                 let bias_delta1_mat_a: i32x4 = [b1_0_mat_a, b1_1_mat_a, b1_2_mat_a, b1_3_mat_a]
                 bias1_mat_a = bias1_mat_a .+ bias_delta1_mat_a
 
-                // B-side scale decode
-                let sp_mat_b: *restrict i32 = ptr_as_i32(ptr_as_i8(packed_b))
-                let u00_mat_b: i32 = sp_mat_b[sc0/4]
-                let u01_mat_b: i32 = sp_mat_b[sc0/4+1]
-                let u02_mat_b: i32 = sp_mat_b[sc0/4+2]
-                let t00_mat_b: i32 = u00_mat_b & km1
-                let t02_mat_b: i32 = u01_mat_b & km1
-                let t01_mat_b: i32 = (u02_mat_b & km2) | (((u00_mat_b >> 6) & km3) << 4)
-                let t03_mat_b: i32 = ((u02_mat_b >> 4) & km2) | (((u01_mat_b >> 6) & km3) << 4)
-
-                let u10_mat_b: i32 = sp_mat_b[sc1/4]
-                let u11_mat_b: i32 = sp_mat_b[sc1/4+1]
-                let u12_mat_b: i32 = sp_mat_b[sc1/4+2]
-                let t10_mat_b: i32 = u10_mat_b & km1
-                let t12_mat_b: i32 = u11_mat_b & km1
-                let t11_mat_b: i32 = (u12_mat_b & km2) | (((u10_mat_b >> 6) & km3) << 4)
-                let t13_mat_b: i32 = ((u12_mat_b >> 4) & km2) | (((u11_mat_b >> 6) & km3) << 4)
-
-                let sc_lo_0_mat_b: i32x4 = [t00_mat_b & 255, (t00_mat_b>>8)&255, (t00_mat_b>>16)&255, (t00_mat_b>>24)&255]
-                let sc_hi_0_mat_b: i32x4 = [t01_mat_b & 255, (t01_mat_b>>8)&255, (t01_mat_b>>16)&255, (t01_mat_b>>24)&255]
-                let sc_lo_1_mat_b: i32x4 = [t10_mat_b & 255, (t10_mat_b>>8)&255, (t10_mat_b>>16)&255, (t10_mat_b>>24)&255]
-                let sc_hi_1_mat_b: i32x4 = [t11_mat_b & 255, (t11_mat_b>>8)&255, (t11_mat_b>>16)&255, (t11_mat_b>>24)&255]
-
-                // B-side vdot loop (reuses shared Q8K broadcasts from A-side k loop)
-                let mut alo_03_mat_b: i32x4 = splat(0)
-                let mut ahi_03_mat_b: i32x4 = splat(0)
-                let mut alo_47_mat_b: i32x4 = splat(0)
-                let mut ahi_47_mat_b: i32x4 = splat(0)
-
-                k = 0
-                while k < 8 {
-                    let q8r_lo: i8x16 = load(q8_qs, q8b + k * 4)
-                    let q8_lo: i8x16 = shuffle_bytes(q8r_lo, dup4)
-                    let q8r_hi: i8x16 = load(q8_qs, q8b + 32 + k * 4)
-                    let q8_hi: i8x16 = shuffle_bytes(q8r_hi, dup4)
-
-                    let wb03: i8x16 = load(packed_b_i8, q4_base + k * 32)
-                    let wb47: i8x16 = load(packed_b_i8, q4_base + k * 32 + 16)
-                    let wb03_lo: i8x16 = wb03 .& m4b
-                    let wb03_hi: i8x16 = (wb03 .>> shift4) .& m4b
-                    let wb47_lo: i8x16 = wb47 .& m4b
-                    let wb47_hi: i8x16 = (wb47 .>> shift4) .& m4b
-
-                    alo_03_mat_b = alo_03_mat_b .+ vdot_i32(wb03_lo, q8_lo)
-                    ahi_03_mat_b = ahi_03_mat_b .+ vdot_i32(wb03_hi, q8_hi)
-                    alo_47_mat_b = alo_47_mat_b .+ vdot_i32(wb47_lo, q8_lo)
-                    ahi_47_mat_b = ahi_47_mat_b .+ vdot_i32(wb47_hi, q8_hi)
-
-                    k = k + 1
-                }
-
-                // B-side scale application
+                // B-side scale application (vdots already computed in fused A+B loop)
                 let sumf_lo_03_mat_b: f32x4 = to_f32(sc_lo_0_mat_b .* alo_03_mat_b)
                 acc0_mat_b = fma(sb_sc0_mat_b, sumf_lo_03_mat_b, acc0_mat_b)
                 let sumf_hi_03_mat_b: f32x4 = to_f32(sc_lo_1_mat_b .* ahi_03_mat_b)
