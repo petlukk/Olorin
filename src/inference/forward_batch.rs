@@ -33,37 +33,39 @@ pub(crate) fn forward_batch_inner(
     let timing = timing_enabled();
     let print = timing && ith == 0;
 
-    // ── Pre-loop: embed all N tokens, prepare PLE per token (thread 0) ──
+    // ── Pre-loop: embed + PLE per token, split across threads ──────
+    // Each thread handles a disjoint slice of tokens, using its own
+    // stack-free scratch for the PLE projection. Writes into
+    // state.batch_x and state.batch_ple_signal go to disjoint ranges
+    // per token, matching the aliasing pattern used elsewhere in the
+    // graph-loop path.
     let t_pre = if print { Some(std::time::Instant::now()) } else { None };
-    let mut t_embed_us: u64 = 0;
-    let mut t_ple_us: u64 = 0;
-    if ith == 0 {
-        let embed_scale = (hd as f32).sqrt();
-        for t in 0..n {
-            let t0 = if print { Some(std::time::Instant::now()) } else { None };
-            dequant::q6k_embed_lookup(
-                model.embed_weight, tokens[t] as usize, &mut state.x, hd,
-            );
-            ffi_inference::vec_scale_f32(
-                state.x.as_ptr(), state.x.as_mut_ptr(), embed_scale, hd as i32,
-            );
-            state.batch_x[t * hd..(t + 1) * hd].copy_from_slice(&state.x[..hd]);
-            if let Some(s) = t0 { t_embed_us += s.elapsed().as_micros() as u64; }
+    let embed_scale = (hd as f32).sqrt();
+    let ple_total = model.ple_dim * model.n_layers;
+    let per = (n + nth - 1) / nth;
+    let t_start = ith * per;
+    let t_end = (t_start + per).min(n);
 
-            // PLE: prepare_ple writes into ple_signal, copy to batch_ple_signal
-            let t1 = if print { Some(std::time::Instant::now()) } else { None };
-            state.prepare_ple(model, tokens[t]);
-            let ple_total = model.ple_dim * model.n_layers;
-            if ple_total > 0 {
-                state.batch_ple_signal[t * ple_total..(t + 1) * ple_total]
-                    .copy_from_slice(&state.ple_signal[..ple_total]);
-            }
-            if let Some(s) = t1 { t_ple_us += s.elapsed().as_micros() as u64; }
+    let mut proj_scratch = vec![0.0f32; ple_total.max(1)];
+    for t in t_start..t_end {
+        {
+            let slot = &mut state.batch_x[t * hd..(t + 1) * hd];
+            dequant::q6k_embed_lookup(model.embed_weight, tokens[t] as usize, slot, hd);
+            ffi_inference::vec_scale_f32(
+                slot.as_ptr(), slot.as_mut_ptr(), embed_scale, hd as i32,
+            );
+        }
+        if ple_total > 0 {
+            let x_slot_ptr = state.batch_x[t * hd..].as_ptr();
+            let x_slot = unsafe { std::slice::from_raw_parts(x_slot_ptr, hd) };
+            let ple_slot = &mut state.batch_ple_signal[t * ple_total..(t + 1) * ple_total];
+            super::forward::prepare_ple_into(
+                model, tokens[t], x_slot, ple_slot, &mut proj_scratch,
+            );
         }
     }
     let t_pre_elapsed = t_pre.map(|s| s.elapsed().as_micros() as u64).unwrap_or(0);
     barrier.wait();
-    let t_barrier_pre = if print { Some(std::time::Instant::now()) } else { None };
 
     // ── Per-layer transformer blocks ─────────────────────────────
     let seq_len = state.cache.seq_len();
@@ -152,14 +154,11 @@ pub(crate) fn forward_batch_inner(
 
     if print {
         let ms = |us: u64| us as f64 / 1000.0;
-        let _ = t_barrier_pre; // silence unused
-        eprintln!("[prefill-stages] n_tokens={n}");
-        eprintln!("  embed           {:7.1}ms", ms(t_embed_us));
-        eprintln!("  ple             {:7.1}ms", ms(t_ple_us));
-        eprintln!("  pre_total       {:7.1}ms  (includes any idle before barrier)", ms(t_pre_elapsed));
+        eprintln!("[prefill-stages] n_tokens={n} (pre_total is thread-0 slice time)");
+        eprintln!("  pre_total       {:7.1}ms  (embed + ple, per-thread {} tokens)", ms(t_pre_elapsed), per);
         eprintln!("  layer_loop      {:7.1}ms", ms(t_layers_us));
         eprintln!("  final_norm      {:7.1}ms", ms(t_final_norm_us));
-        eprintln!("  output_logits   {:7.1}ms  (vocab={})", ms(t_logits_us), model.vocab_size);
+        eprintln!("  output_logits   {:7.1}ms  (vocab={})", ms(t_logits_us), logit_rows);
         eprintln!("  softcap+advance {:7.1}ms", ms(t_softcap_us));
     }
 }
