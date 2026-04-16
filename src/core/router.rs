@@ -64,6 +64,7 @@ pub struct DispatchContext {
     pub(crate) recall_level:  usize,
     pub(crate) _max_turns:    usize,
     pub teleported:            bool,
+    pub(crate) server_teleported: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl DispatchContext {
@@ -98,7 +99,8 @@ impl DispatchContext {
             system_prompt: llm::SYSTEM_PROMPT.to_string(),
             recall_level:  0,
             _max_turns:    8,
-            teleported:    false,
+            teleported:        false,
+            server_teleported: None,
         };
         ctx.load_api_key_from_vault();
         ctx
