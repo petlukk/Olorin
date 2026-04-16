@@ -56,3 +56,46 @@ fn trigger_teleport_command() {
 fn trigger_just_olorin_no_space() {
     assert_eq!(strip_trigger("olorin"), None);
 }
+
+#[test]
+fn teleport_flag_cleared_after_bridge_not_found() {
+    ffi::init().unwrap();
+    std::env::set_var("OLORIN_BRIDGE", "/nonexistent/wa-bridge");
+    let mut ctx = DispatchContext::new(None, None, None, None);
+    assert!(!ctx.teleported);
+    let resp = ctx.dispatch("/teleport");
+    // Bridge not found — should return error and NOT leave teleported=true
+    assert!(!ctx.teleported, "teleported should be false after bridge failure");
+    assert!(resp.text.contains("not found") || resp.text.contains("Build"),
+        "unexpected: {}", resp.text);
+}
+
+#[test]
+fn normal_dispatch_unaffected() {
+    ffi::init().unwrap();
+    let mut ctx = DispatchContext::new(None, None, None, None);
+    // /help should work normally when not teleported
+    let resp = ctx.dispatch("/help");
+    assert!(resp.text.contains("/teleport"), "help should mention /teleport");
+    assert!(!ctx.teleported);
+}
+
+#[test]
+fn dispatch_streaming_while_teleported_sends_dormant() {
+    ffi::init().unwrap();
+    let mut ctx = DispatchContext::new(None, None, None, None);
+    ctx.teleported = true;
+    let (tx, rx) = std::sync::mpsc::channel();
+    ctx.dispatch_streaming("hello", tx);
+    let mut got_dormant = false;
+    for event in rx {
+        match event {
+            olorin::core::router::StreamEvent::Token(t) => {
+                if t.contains("WhatsApp") { got_dormant = true; }
+            }
+            olorin::core::router::StreamEvent::Done { .. } => break,
+            _ => {}
+        }
+    }
+    assert!(got_dormant, "streaming should return dormant message");
+}
