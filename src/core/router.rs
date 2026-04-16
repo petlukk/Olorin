@@ -215,8 +215,6 @@ impl DispatchContext {
         };
 
         if let Some(engine) = &mut self.engine {
-            let full_text = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
-            let full_ref = full_text.clone();
             let tx_ref = tx.clone();
 
             let on_token = move |token_text: &str| {
@@ -227,13 +225,11 @@ impl DispatchContext {
                     )));
                     return;
                 }
-                full_ref.lock().unwrap().push_str(token_text);
                 let _ = tx_ref.send(StreamEvent::Token(token_text.to_string()));
             };
 
             match engine.generate(&prompt, &system, &on_token) {
-                Ok(_) => {
-                    let text = full_text.lock().unwrap().clone();
+                Ok(text) => {
                     if safety::scan_outbound(text.as_bytes()).blocked {
                         let _ = tx.send(StreamEvent::Error(
                             "Response blocked: potential secret leak.".to_string(),

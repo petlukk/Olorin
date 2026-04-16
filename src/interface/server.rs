@@ -4,6 +4,7 @@
 //! and spawns the WhatsApp bridge as a subprocess communicating via JSONL.
 
 use std::io::{Read, Write};
+use std::fmt::Write as FmtWrite;
 use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 use crate::core::router::DispatchContext;
@@ -44,6 +45,7 @@ pub fn run(port: u16, model_arg: Option<&str>, draft_arg: Option<&str>, draft_k:
             Err(_) => continue,
         };
         let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+        let _ = stream.set_nodelay(true);
         let ctx = ctx.clone();
 
         std::thread::spawn(move || {
@@ -229,6 +231,7 @@ fn handle_generate(
 
     let mut token_count: u64 = 0;
     let mut decode_start: Option<std::time::Instant> = None;
+    let mut sse_buf = String::with_capacity(256);
 
     for event in rx {
         match event {
@@ -241,20 +244,26 @@ fn handle_generate(
                 } else {
                     0.0
                 };
-                let escaped = escape_json(&tok);
-                let _ = write!(stream, "data: {{\"token\":\"{escaped}\",\"tps\":{tps:.1}}}\n\n");
+                sse_buf.clear();
+                sse_buf.push_str("data: {\"token\":\"");
+                escape_json_into(&tok, &mut sse_buf);
+                let _ = write!(sse_buf, "\",\"tps\":{tps:.1}}}\n\n");
+                let _ = stream.write_all(sse_buf.as_bytes());
                 let _ = stream.flush();
             }
             crate::core::router::StreamEvent::Error(msg) => {
-                let escaped = escape_json(&msg);
-                let _ = write!(stream, "data: {{\"error\":\"{escaped}\"}}\n\n");
+                sse_buf.clear();
+                sse_buf.push_str("data: {\"error\":\"");
+                escape_json_into(&msg, &mut sse_buf);
+                sse_buf.push_str("\"}\n\n");
+                let _ = stream.write_all(sse_buf.as_bytes());
                 let _ = stream.flush();
             }
             crate::core::router::StreamEvent::Done { .. } => break,
         }
     }
 
-    let _ = write!(stream, "data: [DONE]\n\n");
+    let _ = stream.write_all(b"data: [DONE]\n\n");
     let _ = stream.flush();
     let _ = sender.join();
 }
@@ -395,6 +404,11 @@ pub fn extract_json_string(json: &str, key: &str) -> Option<String> {
 
 pub(crate) fn escape_json(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
+    escape_json_into(s, &mut out);
+    out
+}
+
+fn escape_json_into(s: &str, out: &mut String) {
     for c in s.chars() {
         match c {
             '\\' => out.push_str("\\\\"),
@@ -405,7 +419,6 @@ pub(crate) fn escape_json(s: &str) -> String {
             _    => out.push(c),
         }
     }
-    out
 }
 
 // ── Config handlers ──────────────────────────────────────────────────────────
