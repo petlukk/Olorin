@@ -196,7 +196,7 @@ fn handle_generate(
     if teleported.load(Ordering::Relaxed) {
         let _ = write!(
             stream,
-            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\n\
              Cache-Control: no-cache\r\nAccess-Control-Allow-Origin: *\r\n\
              Connection: close\r\n\r\n"
         );
@@ -236,7 +236,7 @@ fn handle_generate(
     // SSE headers
     let _ = write!(
         stream,
-        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\n\
          Cache-Control: no-cache\r\nAccess-Control-Allow-Origin: *\r\n\
          Connection: close\r\n\r\n"
     );
