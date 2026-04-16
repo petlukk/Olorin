@@ -77,7 +77,10 @@ fn handle_wa_message(
             true
         }
         Some(stripped) => {
+            // Temporarily clear teleported so dispatch doesn't return dormant msg
+            ctx.teleported = false;
             let response = ctx.dispatch(stripped);
+            ctx.teleported = true;
             let reply = format!(
                 "{{\"type\":\"send\",\"jid\":\"{}\",\"text\":\"{}\"}}",
                 escape_json(jid),
