@@ -306,6 +306,10 @@ pub fn vec_fma_f32(a: *const f32, b: *const f32, out: *mut f32, s: f32, n: i32) 
     unsafe { (k().vec_fma_f32)(a, b, out, s, n) }
 }
 
+pub fn vec_acc_f32(out: *mut f32, a: *const f32, s: f32, n: i32) {
+    unsafe { (k().vec_acc_f32)(out, a, s, n) }
+}
+
 pub fn f32_dot(a: *const f32, b: *const f32, n: i32) -> f32 {
     unsafe { (k().f32_dot)(a, b, n) }
 }

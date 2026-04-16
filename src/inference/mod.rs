@@ -10,7 +10,6 @@ pub mod dequant;
 pub mod generate;
 pub mod threadpool;
 pub mod forward;
-pub mod graph;
 pub mod matmul_graph;
 mod forward_graph;
 pub(crate) mod forward_batch;

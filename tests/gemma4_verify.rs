@@ -454,44 +454,10 @@ fn step3_qkv_projection() {
     eprintln!("PASS: step3 QKV projections computed");
 }
 
-#[test]
-fn step3b_single_layer() {
-    if !has_model() { eprintln!("SKIP: no model"); return; }
-
-    let gguf = olorin::inference::gguf::GgufFile::open(std::path::Path::new(&model_path())).unwrap();
-    let model = olorin::inference::engine::Gemma4Model::from_gguf(&gguf).unwrap();
-    olorin::kernels::ffi::init().unwrap();
-
-    // Run full layer 0 with BOS token via Gemma4State
-    let pool = olorin::inference::threadpool::ThreadPool::new();
-    let mut state = olorin::inference::forward::Gemma4State::new(&model, 512, &pool);
-
-    // Embed BOS + scale, then run PLE Phase A (matches production forward_one)
-    let hd = model.hidden_dim;
-    olorin::inference::dequant::q6k_embed_lookup(model.embed_weight, 2, &mut state.x, hd);
-    let scale = (hd as f32).sqrt();
-    for v in state.x[..hd].iter_mut() { *v *= scale; }
-    state.prepare_ple(&model, 2);
-
-    // Run layer 0
-    state.layer_forward(&model, 0, 0, false, &pool);
-
-    eprintln!("=== Step 3b: Single layer forward (L0, BOS, pos=0) ===");
-    eprintln!("l_out L2={:.4}  first4=[{:.4},{:.4},{:.4},{:.4}]",
-        l2(&state.x[..hd]), state.x[0], state.x[1], state.x[2], state.x[3]);
-    eprintln!("  (llama.cpp: L2=40.3056 first4=[-0.2106, -0.0050, 0.0073, -0.3651])");
-
-    // Also check attention output — at pos=0 it should equal V_normed
-    // kqv_out is in attn_out buffer
-    let n_heads = model.n_heads;
-    let head_dim = model.head_dim_k[0];
-    eprintln!("attn_out L2={:.4}  first4=[{:.4},{:.4},{:.4},{:.4}]",
-        l2(&state.attn_out[..n_heads * head_dim]),
-        state.attn_out[0], state.attn_out[1], state.attn_out[2], state.attn_out[3]);
-    eprintln!("  (llama.cpp kqv_out: L2=45.2570 first4=[0.0263, 0.1174, 0.0296, -0.1724])");
-
-    eprintln!("PASS: step3b single layer forward");
-}
+// step3b_single_layer removed — depended on the deleted forward_attn
+// layer_forward path. Single-layer parity with llama.cpp was proven at
+// original bring-up and is now validated end-to-end by step5_logits and
+// gemma4_parallel_regression.
 
 #[test]
 fn step4_ple() {
@@ -544,10 +510,11 @@ fn step5_logits() {
     olorin::kernels::ffi::init().unwrap();
 
     let pool = olorin::inference::threadpool::ThreadPool::new();
+    let graph_pool = olorin::inference::threadpool::GraphPool::new();
     let mut state = olorin::inference::forward::Gemma4State::new(&model, 512, &pool);
 
     // Forward pass with BOS token (id=2)
-    let logits_vec = state.forward_one(&model, 2, &pool).to_vec();
+    let logits_vec = state.forward_one_graph(&model, 2, &graph_pool).to_vec();
     let logits = &logits_vec;
 
     let hd = model.hidden_dim;
@@ -594,13 +561,14 @@ fn step6_two_token_vs_llama_eval_callback() {
     olorin::kernels::ffi::init().unwrap();
 
     let pool = olorin::inference::threadpool::ThreadPool::new();
+    let graph_pool = olorin::inference::threadpool::GraphPool::new();
     let mut state = olorin::inference::forward::Gemma4State::new(&model, 512, &pool);
 
     // Forward BOS at pos=0
-    let _ = state.forward_one(&model, 2, &pool);
+    let _ = state.forward_one_graph(&model, 2, &graph_pool);
 
     // Forward 'a' (token 236746) at pos=1
-    let logits_vec = state.forward_one(&model, 236746, &pool).to_vec();
+    let logits_vec = state.forward_one_graph(&model, 236746, &graph_pool).to_vec();
 
     let hd = model.hidden_dim;
     let l34_sum = sum(&state.x[..hd]);
@@ -1825,38 +1793,6 @@ fn olorin_f32_to_f16(x: f32) -> u16 {
     (sign | result + half) as u16
 }
 
-#[test]
-fn step17_graph_forward_vs_legacy() {
-    // Compare forward_one_graph (GraphPool) vs forward_one (ThreadPool).
-    // BOS token — logits should be identical.
-    if !has_model() { eprintln!("SKIP: no model"); return; }
-    olorin::kernels::ffi::init().unwrap();
-
-    let gguf = olorin::inference::gguf::GgufFile::open(std::path::Path::new(&model_path())).unwrap();
-    let model = olorin::inference::engine::Gemma4Model::from_gguf(&gguf).unwrap();
-
-    // Legacy path
-    let legacy_pool = olorin::inference::threadpool::ThreadPool::new();
-    let mut legacy_state = olorin::inference::forward::Gemma4State::new(&model, 512, &legacy_pool);
-    let legacy_logits = legacy_state.forward_one(&model, 2, &legacy_pool).to_vec();
-
-    // Graph path
-    let graph_pool = olorin::inference::threadpool::GraphPool::new();
-    let mut graph_state = olorin::inference::forward::Gemma4State::new(&model, 512, &legacy_pool);
-    let graph_logits = graph_state.forward_one_graph(&model, 2, &graph_pool).to_vec();
-
-    eprintln!("=== Step 17: graph forward vs legacy forward (BOS) ===");
-    eprintln!("  legacy logits L2={:.4}", l2(&legacy_logits));
-    eprintln!("  graph  logits L2={:.4}", l2(&graph_logits));
-
-    let mut max_abs = 0.0f32;
-    for i in 0..legacy_logits.len() {
-        let err = (legacy_logits[i] - graph_logits[i]).abs();
-        if err > max_abs { max_abs = err; }
-    }
-    eprintln!("  max_abs_err={max_abs:.8}");
-
-    // Should be bit-exact or near-exact (same ops, same order)
-    assert!(max_abs < 0.001, "graph forward diverges from legacy: {max_abs}");
-    eprintln!("PASS: graph forward matches legacy");
-}
+// step17_graph_forward_vs_legacy removed — legacy forward_one path deleted
+// in the matmul_par cleanup. The graph path is the only decode path now,
+// so there is nothing to compare against.

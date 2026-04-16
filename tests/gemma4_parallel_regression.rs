@@ -34,10 +34,11 @@ fn forward_one_bos_logits_bit_exact() {
     olorin::kernels::ffi::init().unwrap();
 
     let pool = olorin::inference::threadpool::ThreadPool::new();
+    let graph_pool = olorin::inference::threadpool::GraphPool::new();
     let mut state = olorin::inference::forward::Gemma4State::new(&model, 512, &pool);
 
     // BOS token id = 2 (matches gemma4_verify::step5_logits)
-    let logits = state.forward_one(&model, 2, &pool).to_vec();
+    let logits = state.forward_one_graph(&model, 2, &graph_pool).to_vec();
 
     // Serialize as raw little-endian f32 bytes.
     let mut bytes = Vec::with_capacity(logits.len() * 4);

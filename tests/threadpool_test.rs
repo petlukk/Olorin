@@ -1,9 +1,7 @@
-//! Tests for SpinBarrier and GraphPool.
+//! Tests for SpinBarrier.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use olorin::inference::graph::{GraphCtx, OpList};
-use olorin::inference::threadpool::GraphPool;
 
 #[test]
 fn spin_barrier_4_threads_1000_rounds() {
@@ -64,56 +62,6 @@ fn spin_barrier_correctness() {
     assert_eq!(errors.load(Ordering::Relaxed), 0, "barrier failed to synchronize");
 }
 
-#[test]
-fn graph_pool_3_ops() {
-    let pool = GraphPool::new();
-    let nt = pool.thread_count();
-
-    // 3 ops: each increments a counter. After execute(), counter should be 3 * n_threads.
-    let counter: &'static AtomicUsize = Box::leak(Box::new(AtomicUsize::new(0)));
-
-    let mut ops = OpList::new();
-    ops.push(move |_ith, _nth, _ctx| { counter.fetch_add(1, Ordering::Relaxed); });
-    ops.push(move |_ith, _nth, _ctx| { counter.fetch_add(1, Ordering::Relaxed); });
-    ops.push(move |_ith, _nth, _ctx| { counter.fetch_add(1, Ordering::Relaxed); });
-
-    pool.execute(&ops);
-    assert_eq!(counter.load(Ordering::Relaxed), 3 * nt);
-}
-
-#[test]
-fn graph_pool_barrier_ordering() {
-    // Op1: thread 0 writes value. Op2: all threads read it.
-    // Barrier between ops ensures op1 completes before op2 starts.
-    let pool = GraphPool::new();
-    let val: &'static AtomicUsize = Box::leak(Box::new(AtomicUsize::new(0)));
-    let errors: &'static AtomicUsize = Box::leak(Box::new(AtomicUsize::new(0)));
-
-    let mut ops = OpList::new();
-    ops.push(move |ith, _nth, _ctx| {
-        if ith == 0 { val.store(42, Ordering::Relaxed); }
-    });
-    ops.push(move |_ith, _nth, _ctx| {
-        if val.load(Ordering::Relaxed) != 42 {
-            errors.fetch_add(1, Ordering::Relaxed);
-        }
-    });
-
-    pool.execute(&ops);
-    assert_eq!(errors.load(Ordering::Relaxed), 0, "barrier didn't sync between ops");
-}
-
-#[test]
-fn graph_pool_multiple_executions() {
-    // Execute 10 times — tests that pool resets correctly between graphs.
-    let pool = GraphPool::new();
-    let nt = pool.thread_count();
-    let counter: &'static AtomicUsize = Box::leak(Box::new(AtomicUsize::new(0)));
-
-    for _ in 0..10 {
-        let mut ops = OpList::new();
-        ops.push(move |_ith, _nth, _ctx| { counter.fetch_add(1, Ordering::Relaxed); });
-        pool.execute(&ops);
-    }
-    assert_eq!(counter.load(Ordering::Relaxed), 10 * nt);
-}
+// GraphPool execute/OpList tests removed — the OpList/GraphCtx API was
+// replaced by GraphPool::run_graph with an inline closure. GraphPool is
+// exercised end-to-end by gemma4_parallel_regression.
