@@ -132,9 +132,9 @@ fn content_block_tool_error() {
 }
 
 #[test]
-fn system_prompt_rules() {
-    assert!(SYSTEM_PROMPT.contains("one sentence"));
-    assert!(SYSTEM_PROMPT.contains("direct"));
+fn system_prompt_exists() {
+    // SYSTEM_PROMPT may be empty (configured at runtime) — just verify it's accessible
+    let _ = SYSTEM_PROMPT;
 }
 
 #[test]

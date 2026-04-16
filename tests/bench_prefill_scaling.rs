@@ -14,6 +14,15 @@ fn model_path() -> String {
 
 #[test]
 fn prefill_scaling() {
+    // Forward pass at large batch sizes needs more stack than the default 8MB
+    let handle = std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(prefill_scaling_inner)
+        .expect("spawn bench thread");
+    handle.join().unwrap();
+}
+
+fn prefill_scaling_inner() {
     if !Path::new(&model_path()).exists() {
         eprintln!("SKIP: model not present");
         return;
