@@ -44,7 +44,7 @@ impl DispatchContext {
     // ── Teleport handling ────────────────────────────────────────────────────
 
     pub(crate) fn handle_teleport(&mut self) -> Response {
-        Response::text("WhatsApp bridge not available. Build the Go bridge first.")
+        crate::interface::whatsapp::teleport_loop(self)
     }
 
     // ── Tool command handling ────────────────────────────────────────────────
@@ -135,7 +135,7 @@ Tools:
   /ls [path]  /json <action> <input>  /tokens <text>  /bench <target>
   /weather <city>  /translate <lang> <text>  /define <word>  /summarize <url>
   /grep <pattern> [path]  /git <subcommand> [args]  /remind <time> <message>
-  /recall <query>
+  /recall <query>  /teleport
 
 Agent: Olorin".to_string()
     }
