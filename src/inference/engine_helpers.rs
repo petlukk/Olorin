@@ -1,6 +1,118 @@
 //! GGUF tensor helper functions for model loading.
 
-use crate::inference::gguf::GgufFile;
+use crate::inference::gguf::{GgufFile, MetaValue};
+
+// Metadata helpers
+
+pub(super) fn get_meta_u32(gguf: &GgufFile, key: &str) -> Option<u32> {
+    match gguf.metadata.get(key)? {
+        MetaValue::U32(v) => Some(*v),
+        MetaValue::I32(v) => Some(*v as u32),
+        MetaValue::U64(v) => Some(*v as u32),
+        MetaValue::I64(v) => Some(*v as u32),
+        MetaValue::U16(v) => Some(*v as u32),
+        MetaValue::U8(v) => Some(*v as u32),
+        _ => None,
+    }
+}
+
+pub(super) fn get_meta_f32(gguf: &GgufFile, key: &str) -> Option<f32> {
+    match gguf.metadata.get(key)? {
+        MetaValue::F32(v) => Some(*v),
+        MetaValue::F64(v) => Some(*v as f32),
+        MetaValue::U32(v) => Some(*v as f32),
+        _ => None,
+    }
+}
+
+/// Extract a u32/i32 array from metadata.
+pub(super) fn get_meta_u32_array(gguf: &GgufFile, key: &str) -> Option<Vec<u32>> {
+    match gguf.metadata.get(key)? {
+        MetaValue::Array(arr) => {
+            let mut out = Vec::with_capacity(arr.len());
+            for v in arr {
+                match v {
+                    MetaValue::U32(x) => out.push(*x),
+                    MetaValue::I32(x) => out.push(*x as u32),
+                    MetaValue::U64(x) => out.push(*x as u32),
+                    MetaValue::I64(x) => out.push(*x as u32),
+                    MetaValue::Bool(b) => out.push(if *b { 1 } else { 0 }),
+                    MetaValue::U8(x) => out.push(*x as u32),
+                    MetaValue::I8(x) => out.push(*x as u32),
+                    _ => return None,
+                }
+            }
+            Some(out)
+        }
+        // Scalar fallback — single value, replicate not needed at call site
+        MetaValue::U32(v) => Some(vec![*v]),
+        MetaValue::I32(v) => Some(vec![*v as u32]),
+        _ => None,
+    }
+}
+
+pub(super) fn tensor_ptr<T>(gguf: &GgufFile, name: &str) -> Result<*const T, String> {
+    let data = gguf
+        .tensor_data(name)
+        .ok_or_else(|| format!("missing tensor: {name}"))?;
+    Ok(data.as_ptr() as *const T)
+}
+
+pub(super) fn tensor_dtype(gguf: &GgufFile, name: &str) -> u32 {
+    match gguf.tensor_map.get(name) {
+        Some(&idx) => gguf.tensors[idx].dtype,
+        None => 0,
+    }
+}
+
+pub(super) fn tensor_ptr_opt<T>(gguf: &GgufFile, name: &str) -> *const T {
+    gguf.tensor_data(name)
+        .map(|d| d.as_ptr() as *const T)
+        .unwrap_or(std::ptr::null())
+}
+
+/// Read a single f32 scalar from a [1]-shaped tensor (dtype F32).
+pub(super) fn read_f32_scalar(gguf: &GgufFile, name: &str) -> f32 {
+    match gguf.tensor_data(name) {
+        Some(data) if data.len() >= 4 => {
+            f32::from_le_bytes([data[0], data[1], data[2], data[3]])
+        }
+        _ => 1.0,
+    }
+}
+
+// Shared KV source mapping
+
+/// Compute kv_shared_source. Layers that share KV walk back to find the
+/// nearest earlier layer of the same attention type that owns its own KV.
+pub(super) fn compute_kv_shared(
+    n_layers: usize,
+    shared_suffix_len: usize,
+    is_swa: &[bool],
+) -> Vec<Option<usize>> {
+    if shared_suffix_len == 0 {
+        return vec![None; n_layers];
+    }
+    let first_shared = n_layers.saturating_sub(shared_suffix_len);
+    (0..n_layers)
+        .map(|i| {
+            if i >= first_shared {
+                // Walk back to find last non-shared layer of same type
+                let want_swa = is_swa[i];
+                let mut src = None;
+                for j in (0..first_shared).rev() {
+                    if is_swa[j] == want_swa {
+                        src = Some(j);
+                        break;
+                    }
+                }
+                src
+            } else {
+                None
+            }
+        })
+        .collect()
+}
 
 /// Convert BF16 tensor data to a new Vec<f32>. Returns the vec.
 pub(crate) fn bf16_to_f32_vec(data: &[u8]) -> Vec<f32> {

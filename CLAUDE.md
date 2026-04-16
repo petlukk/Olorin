@@ -17,7 +17,7 @@ PATH="/mnt/c/Users/Peter.lukka/Desktop/DEV/eacompute/target/release:$PATH" cargo
 
 ## Hard Rules
 
-- **No file exceeds 500 lines.** Split before you hit the limit.
+- **No file exceeds 500 lines.** Split before you hit the limit. Exception: `chacha20_search_v2.ea` / `_arm.ea` — Ea has no module system so the fused decrypt+search kernel must be monolithic.
 - **Every feature proven by end-to-end test.** If it's not tested, it doesn't exist.
 - **No fake functions.** No silent fallbacks.
 - **No premature features.** Don't build what isn't needed yet.
