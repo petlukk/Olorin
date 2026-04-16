@@ -87,7 +87,9 @@ The trigger prefix is stripped before passing to `dispatch()`. Non-matching mess
 
 ### QR Code Handling
 
-On first login, the bridge emits `{"type":"qr","data":"..."}`. The Rust side captures this and renders ASCII art QR in the response text, which appears in the chat bubble (monospace `pre-wrap` rendering).
+On first login, the Go bridge emits `{"type":"qr","data":"...","ascii":"..."}` where `ascii` contains a pre-rendered Unicode half-block QR code. The streaming teleport loop sends this as a `StreamEvent::Token` into the SSE connection, rendering it directly in the chat bubble (monospace `pre-wrap` rendering).
+
+The Go bridge renders the QR using the same half-block technique it uses for stderr, but returns it as a string field in the JSON event. This avoids needing a QR library in Rust (zero-deps rule).
 
 Subsequent connections reuse the stored session in `~/.olorin/wa_session/device.db` and skip QR.
 
@@ -104,12 +106,13 @@ On exit: `teleported` is set to `false`, bridge process is killed, mutex is rele
 
 | File | Change |
 |------|--------|
-| `src/core/router.rs` | Add `teleported: bool` field. Intercept `CMD_TELEPORT` in `pre_inference()`. Add `handle_teleport()` method |
-| `src/interface/whatsapp.rs` | Refactor to expose `teleport_loop()` taking `&mut DispatchContext` + `Arc<AtomicBool>`. Trigger matching. QR capture |
+| `bridge/main.go` | Add `renderQRToString()`, emit `"ascii"` field in QR JSON event |
+| `src/core/router.rs` | Add `teleported: bool` + `server_teleported` fields. `dispatch_streaming` handles CMD_TELEPORT specially for QR streaming |
+| `src/interface/whatsapp.rs` | `teleport_loop()` for non-streaming, `teleport_loop_streaming()` for SSE with QR in chat bubble. Trigger matching |
 | `src/interface/server.rs` | Add `Arc<AtomicBool>` teleported flag. Check in `handle_generate` and `handle_command` before mutex lock |
-| `src/interface/mod.rs` | Export new whatsapp items if needed |
+| `src/core/router_tools.rs` | `/help` text updated, `handle_teleport()` wired |
 
-No changes to: Go bridge (`bridge/main.go`), command registration (`dispatch.rs`), frontend (`chat.html`), build system (`build.rs`, `Cargo.toml`).
+No changes to: command registration (`dispatch.rs`), frontend (`chat.html`), build system (`build.rs`, `Cargo.toml`).
 
 ## Testing
 
