@@ -7,6 +7,7 @@ use std::io::{Read, Write};
 use std::fmt::Write as FmtWrite;
 use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use crate::core::router::DispatchContext;
 use crate::interface::term_stream;
 
@@ -30,6 +31,10 @@ pub fn get_chat_html() -> String {
 pub fn run(port: u16, model_arg: Option<&str>, draft_arg: Option<&str>, draft_k: Option<usize>) {
     let api_key = std::env::var("ANTHROPIC_API_KEY").ok();
     let ctx = Arc::new(Mutex::new(DispatchContext::new(api_key, model_arg, draft_arg, draft_k)));
+    let teleported = Arc::new(AtomicBool::new(false));
+
+    // Wire the server's AtomicBool into DispatchContext so whatsapp.rs can set it
+    ctx.lock().unwrap().server_teleported = Some(teleported.clone());
 
     let bind_host = std::env::var("OLORIN_BIND").unwrap_or_else(|_| "127.0.0.1".to_string());
     let addr = format!("{bind_host}:{port}");
@@ -47,14 +52,15 @@ pub fn run(port: u16, model_arg: Option<&str>, draft_arg: Option<&str>, draft_k:
         let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
         let _ = stream.set_nodelay(true);
         let ctx = ctx.clone();
+        let teleported = teleported.clone();
 
         std::thread::spawn(move || {
-            handle_connection(&mut stream, ctx);
+            handle_connection(&mut stream, ctx, &teleported);
         });
     }
 }
 
-fn handle_connection(stream: &mut std::net::TcpStream, ctx: Arc<Mutex<DispatchContext>>) {
+fn handle_connection(stream: &mut std::net::TcpStream, ctx: Arc<Mutex<DispatchContext>>, teleported: &AtomicBool) {
     // Read until \r\n\r\n
     let mut buf = [0u8; 8192];
     let mut n = 0;
@@ -99,10 +105,10 @@ fn handle_connection(stream: &mut std::net::TcpStream, ctx: Arc<Mutex<DispatchCo
             serve_json(stream, &body);
         }
         ("POST", "/api/generate") => {
-            handle_generate(stream, req, &buf[..n], n, ctx);
+            handle_generate(stream, req, &buf[..n], n, ctx, teleported);
         }
         ("POST", "/api/command") => {
-            handle_command(stream, req, &buf[..n], n, ctx);
+            handle_command(stream, req, &buf[..n], n, ctx, teleported);
         }
         ("POST", "/api/term/open") => {
             term_stream::handle_term_open(stream);
@@ -185,7 +191,22 @@ fn handle_generate(
     buf: &[u8],
     n: usize,
     ctx: Arc<Mutex<DispatchContext>>,
+    teleported: &AtomicBool,
 ) {
+    if teleported.load(Ordering::Relaxed) {
+        let _ = write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
+             Cache-Control: no-cache\r\nAccess-Control-Allow-Origin: *\r\n\
+             Connection: close\r\n\r\n"
+        );
+        let _ = stream.flush();
+        let msg = "Olorin is on WhatsApp. Send /teleport there to return.";
+        let _ = write!(stream, "data: {{\"token\":\"{msg}\"}}\n\ndata: [DONE]\n\n");
+        let _ = stream.flush();
+        return;
+    }
+
     let body_bytes = read_body(stream, req, buf, n);
     let body_str   = std::str::from_utf8(&body_bytes).unwrap_or("");
     let prompt     = extract_json_string(body_str, "prompt").unwrap_or_default();
@@ -287,7 +308,15 @@ fn handle_command(
     buf: &[u8],
     n: usize,
     ctx: Arc<Mutex<DispatchContext>>,
+    teleported: &AtomicBool,
 ) {
+    if teleported.load(Ordering::Relaxed) {
+        let msg = "Olorin is on WhatsApp. Send /teleport there to return.";
+        let body = format!("{{\"output\":\"{msg}\",\"success\":false}}");
+        serve_json(stream, &body);
+        return;
+    }
+
     let body_bytes = read_body(stream, req, buf, n);
     let body_str   = std::str::from_utf8(&body_bytes).unwrap_or("");
     let command    = extract_json_string(body_str, "command").unwrap_or_default();
