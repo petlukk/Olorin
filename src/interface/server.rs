@@ -197,6 +197,12 @@ fn handle_generate(
             if let Some(v) = crate::storage::json::extract_json_float(body_str, "temperature") {
                 engine.temperature = v;
             }
+            if let Some(v) = crate::storage::json::extract_json_int(body_str, "top_k") {
+                engine.top_k = v as usize;
+            }
+            if let Some(v) = crate::storage::json::extract_json_float(body_str, "top_p") {
+                engine.top_p = v;
+            }
             if let Some(v) = crate::storage::json::extract_json_int(body_str, "max_tokens") {
                 engine.max_tokens = v as usize;
             }
