@@ -171,7 +171,7 @@ pub fn teleport_loop_streaming(
     ));
 
     let mut line_buf = String::new();
-    let mut connected = false;
+    let connected = false;
 
     // Phase 1: Wait for QR / connected events, stream them to chat bubble
     loop {
@@ -202,11 +202,9 @@ pub fn teleport_loop_streaming(
                     "Connected! Olorin is now on WhatsApp.\n\
                      Send /teleport there to return.\n".to_string()
                 ));
-                connected = true;
                 break;
             }
             "message" if !connected => {
-                connected = true;
                 let _ = tx.send(StreamEvent::Token(
                     "Connected! Olorin is now on WhatsApp.\n\
                      Send /teleport there to return.\n".to_string()
