@@ -37,7 +37,9 @@ body{background:var(--crust);color:var(--text);font-family:'Inter',system-ui,san
 .chat-input{flex:1;background:transparent;border:none;color:var(--text);font:14px 'Inter',system-ui,sans-serif;outline:none}
 .chat-send{background:var(--lavender);color:var(--crust);border:none;border-radius:8px;width:32px;height:32px;cursor:pointer;font-size:16px}
 .cursor-blink{display:inline-block;width:2px;height:16px;background:var(--teal);vertical-align:text-bottom;animation:blink 1s step-end infinite}
+.cursor-thinking{display:inline-block;color:var(--overlay0);font-size:12px;font-style:italic;margin-left:6px;animation:pulse 1.5s ease-in-out infinite}
 @keyframes blink{50%{opacity:0}}
+@keyframes pulse{0%,100%{opacity:0.4}50%{opacity:1}}
 .repl-body{flex:1;overflow-y:auto;padding:12px;font:13px/1.6 'JetBrains Mono',monospace;min-height:0}
 .repl-line{margin-bottom:4px}
 .repl-prompt{color:var(--mauve)}
@@ -144,8 +146,10 @@ async function sendChat(id,body,input){
       for(const line of lines){
         if(!line.startsWith('data: ')||line==='data: [DONE]')continue;
         try{const ev=JSON.parse(line.slice(6));
-          if(ev.error){bubble.textContent+=ev.error;}
-          else if(ev.token!=null){bubble.textContent+=ev.token;}
+          if(ev.thinking===true){cursor.textContent=' thinking\u2026';cursor.className='cursor-thinking';}
+          else if(ev.thinking===false){cursor.textContent='';cursor.className='cursor-blink';}
+          else if(ev.error){bubble.textContent+=ev.error;}
+          else if(ev.token!=null){bubble.textContent+=ev.token;cursor.textContent='';cursor.className='cursor-blink';}
           if(ev.tps)document.getElementById('hb-tps').textContent=ev.tps.toFixed(1);
           body.scrollTop=body.scrollHeight;
         }catch(_){}

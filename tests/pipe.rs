@@ -97,6 +97,7 @@ fn test_streaming_help_command() {
     for event in rx {
         match event {
             StreamEvent::Token(t) => tokens.push(t),
+            StreamEvent::Thinking(_) => {}
             StreamEvent::Done { .. } => { done = true; break; }
             StreamEvent::Error(_) => {}
         }

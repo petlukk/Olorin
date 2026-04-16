@@ -202,9 +202,7 @@ fn format_chat(user: &str, system: &str) -> String {
     //   <|turn>model\n
     let mut out = String::with_capacity(system.len() + user.len() + 96);
     let sys_trim = system.trim();
-    // Always emit a system turn — llama.cpp defaults enable_thinking=1.
     out.push_str("<|turn>system\n");
-    out.push_str("<|think|>");
     if !sys_trim.is_empty() {
         out.push_str(sys_trim);
     }

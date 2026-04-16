@@ -251,6 +251,13 @@ fn handle_generate(
                 let _ = stream.write_all(sse_buf.as_bytes());
                 let _ = stream.flush();
             }
+            crate::core::router::StreamEvent::Thinking(active) => {
+                let val = if active { "true" } else { "false" };
+                let _ = stream.write_all(
+                    format!("data: {{\"thinking\":{val}}}\n\n").as_bytes()
+                );
+                let _ = stream.flush();
+            }
             crate::core::router::StreamEvent::Error(msg) => {
                 sse_buf.clear();
                 sse_buf.push_str("data: {\"error\":\"");

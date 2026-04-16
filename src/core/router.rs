@@ -34,6 +34,8 @@ pub struct Response {
 pub enum StreamEvent {
     /// A single token of output text.
     Token(String),
+    /// Model entered or exited a `<think>` block.
+    Thinking(bool),
     /// Generation complete. Full text for vault/recall bookkeeping.
     Done { full_text: String },
     /// Error during generation.
