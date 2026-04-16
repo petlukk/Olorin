@@ -135,8 +135,7 @@ pub fn teleport_loop(ctx: &mut DispatchContext) -> Response {
             "message" => {
                 let text = extract_json_string(&line_buf, "text").unwrap_or_default();
                 let jid = extract_json_string(&line_buf, "jid").unwrap_or_default();
-                let is_from_me = line_buf.contains("\"is_from_me\":true");
-                if text.is_empty() || jid.is_empty() || is_from_me { continue; }
+                if text.is_empty() || jid.is_empty() { continue; }
                 if handle_wa_message(&child, &text, &jid, ctx) { break; }
             }
             _ => {}
