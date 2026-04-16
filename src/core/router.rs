@@ -196,6 +196,21 @@ impl DispatchContext {
             return;
         }
 
+        // ── Teleport: handle specially for streaming QR + status ─────
+        let (cmd_id, _) = crate::core::dispatch::match_command(input.as_bytes());
+        if cmd_id == crate::core::dispatch::CMD_TELEPORT {
+            crate::interface::whatsapp::teleport_loop_streaming(self, tx);
+            return;
+        }
+
+        // ── Dormant check (teleported to WhatsApp) ──────────────────
+        if self.teleported {
+            let msg = "Olorin is on WhatsApp. Send /teleport there to return.".to_string();
+            let _ = tx.send(StreamEvent::Token(msg.clone()));
+            let _ = tx.send(StreamEvent::Done { full_text: msg });
+            return;
+        }
+
         let recall_context = match self.pre_inference(input) {
             Err(resp) => {
                 if resp.blocked {
@@ -290,6 +305,13 @@ impl DispatchContext {
     /// Returns Ok(recall_context) to continue to inference,
     /// or Err(Response) for early exit (command, tool, blocked).
     fn pre_inference(&mut self, input: &str) -> Result<Option<String>, Response> {
+        // ── Dormant check (teleported to WhatsApp) ──────────────────
+        if self.teleported {
+            return Err(Response::text(
+                "Olorin is on WhatsApp. Send /teleport there to return."
+            ));
+        }
+
         // ── Step 1: Safety Scan ──────────────────────────────────────
         let scan = safety::scan(input.as_bytes());
         if scan.blocked {
@@ -319,6 +341,9 @@ impl DispatchContext {
                 return Err(Response::text(format!("Recall level set to {level}.")));
             }
             return Err(Response::text(self.recall.recall_formatted(arg, 5)));
+        }
+        if cmd_id == dispatch::CMD_TELEPORT {
+            return Err(self.handle_teleport());
         }
         if cmd_id >= dispatch::CMD_TOOL_FIRST && cmd_id <= dispatch::CMD_TOOL_LAST {
             return Err(self.handle_tool_command(cmd_id, cmd_arg));

@@ -41,6 +41,12 @@ impl DispatchContext {
         }
     }
 
+    // ── Teleport handling ────────────────────────────────────────────────────
+
+    pub(crate) fn handle_teleport(&mut self) -> Response {
+        Response::text("WhatsApp bridge not available. Build the Go bridge first.")
+    }
+
     // ── Tool command handling ────────────────────────────────────────────────
 
     pub(crate) fn handle_tool_command(&mut self, cmd_id: i32, cmd_arg: &[u8]) -> Response {

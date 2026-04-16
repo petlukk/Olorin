@@ -103,6 +103,17 @@ fn wa_message_loop(
     }
 }
 
+/// Placeholder for streaming teleport flow (QR display + bridge lifecycle).
+/// Task 4 will replace this with the real implementation.
+pub fn teleport_loop_streaming(
+    _ctx: &mut crate::core::router::DispatchContext,
+    tx: std::sync::mpsc::Sender<crate::core::router::StreamEvent>,
+) {
+    let msg = "WhatsApp bridge not available.".to_string();
+    let _ = tx.send(crate::core::router::StreamEvent::Token(msg.clone()));
+    let _ = tx.send(crate::core::router::StreamEvent::Done { full_text: msg });
+}
+
 fn find_bridge() -> String {
     if let Ok(p) = std::env::var("OLORIN_BRIDGE") {
         return p;
