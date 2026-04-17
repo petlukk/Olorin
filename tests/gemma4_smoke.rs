@@ -16,7 +16,17 @@ fn smoke_hi_greedy() {
         return;
     }
 
-    let mut engine = Engine::load(&path, 512).expect("load");
+    // forward_batch needs more than the default 2 MB test thread stack.
+    let path2 = path.clone();
+    let handle = std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(move || run_smoke(&path2))
+        .unwrap();
+    handle.join().unwrap();
+}
+
+fn run_smoke(path: &Path) {
+    let mut engine = Box::new(Engine::load(path, 512).expect("load"));
     engine.temperature = 0.0;
     engine.max_tokens = 8;
 
@@ -27,10 +37,6 @@ fn smoke_hi_greedy() {
     let got = got.into_inner();
 
     eprintln!("got: {got:?}");
-    // llama.cpp greedy on Hi prompt produces:
-    //   <|channel> thought \n Thinking  Process : \n\n 1
-    // Olorin hides USER_DEFINED/CONTROL tokens, so visible output is
-    // "thought\nThinking Process:\n\n1" (approximately).
     assert!(got.contains("Thinking"), "expected 'Thinking' in output, got: {got:?}");
     assert!(got.contains("Process"), "expected 'Process' in output, got: {got:?}");
 }

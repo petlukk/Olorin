@@ -41,6 +41,12 @@ impl DispatchContext {
         }
     }
 
+    // ── Teleport handling ────────────────────────────────────────────────────
+
+    pub(crate) fn handle_teleport(&mut self) -> Response {
+        crate::interface::whatsapp::teleport_loop(self)
+    }
+
     // ── Tool command handling ────────────────────────────────────────────────
 
     pub(crate) fn handle_tool_command(&mut self, cmd_id: i32, cmd_arg: &[u8]) -> Response {
@@ -129,7 +135,7 @@ Tools:
   /ls [path]  /json <action> <input>  /tokens <text>  /bench <target>
   /weather <city>  /translate <lang> <text>  /define <word>  /summarize <url>
   /grep <pattern> [path]  /git <subcommand> [args]  /remind <time> <message>
-  /recall <query>
+  /recall <query>  /teleport
 
 Agent: Olorin".to_string()
     }

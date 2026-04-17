@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"go.mau.fi/whatsmeow"
@@ -90,6 +91,43 @@ func renderQR(data string) {
 		fmt.Fprintln(os.Stderr)
 	}
 	fmt.Fprintln(os.Stderr, "")
+}
+
+// renderQRToString returns a scannable QR code as a Unicode half-block string.
+func renderQRToString(data string) string {
+	qr, err := qrcode.New(data, qrcode.Medium)
+	if err != nil {
+		return ""
+	}
+	qr.DisableBorder = false
+	bitmap := qr.Bitmap()
+	rows := len(bitmap)
+
+	var sb strings.Builder
+	sb.WriteString("\nScan this QR code with WhatsApp:\n\n")
+
+	for y := 0; y < rows; y += 2 {
+		for x := 0; x < len(bitmap[y]); x++ {
+			top := bitmap[y][x]
+			bot := false
+			if y+1 < rows {
+				bot = bitmap[y+1][x]
+			}
+			switch {
+			case top && bot:
+				sb.WriteRune('█')
+			case top && !bot:
+				sb.WriteRune('▀')
+			case !top && bot:
+				sb.WriteRune('▄')
+			default:
+				sb.WriteRune(' ')
+			}
+		}
+		sb.WriteRune('\n')
+	}
+	sb.WriteRune('\n')
+	return sb.String()
 }
 
 func main() {
@@ -169,8 +207,9 @@ func main() {
 			if evt.Event == "code" {
 				// Emit raw data for the Rust agent
 				emit(map[string]string{
-					"type": "qr",
-					"data": evt.Code,
+					"type":  "qr",
+					"data":  evt.Code,
+					"ascii": renderQRToString(evt.Code),
 				})
 				// Render scannable QR code to stderr
 				renderQR(evt.Code)

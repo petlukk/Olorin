@@ -125,14 +125,18 @@ impl GraphPool {
         }));
 
         // Spawn N-1 workers (ith=1..N-1). Main thread is ith=0.
+        // 8 MB stack: batched_matmul_step's call chain needs more than the 2 MB default.
         // Ref: ggml-cpu.c:3212
         let mut workers = Vec::with_capacity(n_threads.saturating_sub(1));
         for tid in 1..n_threads {
             let s = shared as usize;
-            let handle = thread::spawn(move || {
-                let shared = unsafe { &*(s as *const GraphPoolShared) };
-                graph_worker_loop(shared, tid);
-            });
+            let handle = thread::Builder::new()
+                .stack_size(32 * 1024 * 1024)
+                .spawn(move || {
+                    let shared = unsafe { &*(s as *const GraphPoolShared) };
+                    graph_worker_loop(shared, tid);
+                })
+                .expect("spawn graph worker");
             workers.push(handle);
         }
 
@@ -309,7 +313,9 @@ impl ThreadPool {
             let shared = Arc::clone(&shared);
             let done = Arc::clone(&done);
             let done_signal = Arc::clone(&done_signal);
-            let handle = thread::spawn(move || {
+            let handle = thread::Builder::new()
+                .stack_size(32 * 1024 * 1024)
+                .spawn(move || {
                 let mut last_gen: u64 = 0;
                 loop {
                     let (funcs, bounds, n_groups);
@@ -347,7 +353,7 @@ impl ThreadPool {
                         cvar.notify_one();
                     }
                 }
-            });
+            }).expect("spawn pool worker");
             workers.push(handle);
         }
 

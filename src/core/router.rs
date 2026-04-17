@@ -63,6 +63,8 @@ pub struct DispatchContext {
     pub(crate) system_prompt: String,
     pub(crate) recall_level:  usize,
     pub(crate) _max_turns:    usize,
+    pub teleported:            bool,
+    pub(crate) server_teleported: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl DispatchContext {
@@ -97,6 +99,8 @@ impl DispatchContext {
             system_prompt: llm::SYSTEM_PROMPT.to_string(),
             recall_level:  0,
             _max_turns:    8,
+            teleported:        false,
+            server_teleported: None,
         };
         ctx.load_api_key_from_vault();
         ctx
@@ -191,6 +195,13 @@ impl DispatchContext {
         let input = input.trim();
         if input.is_empty() {
             let _ = tx.send(StreamEvent::Done { full_text: String::new() });
+            return;
+        }
+
+        // ── Teleport: handle specially for streaming QR + status ─────
+        let (cmd_id, _) = crate::core::dispatch::match_command(input.as_bytes());
+        if cmd_id == crate::core::dispatch::CMD_TELEPORT {
+            crate::interface::whatsapp::teleport_loop_streaming(self, tx);
             return;
         }
 
@@ -317,6 +328,9 @@ impl DispatchContext {
                 return Err(Response::text(format!("Recall level set to {level}.")));
             }
             return Err(Response::text(self.recall.recall_formatted(arg, 5)));
+        }
+        if cmd_id == dispatch::CMD_TELEPORT {
+            return Err(self.handle_teleport());
         }
         if cmd_id >= dispatch::CMD_TOOL_FIRST && cmd_id <= dispatch::CMD_TOOL_LAST {
             return Err(self.handle_tool_command(cmd_id, cmd_arg));

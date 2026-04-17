@@ -108,8 +108,8 @@ impl Child {
     /// Read one line (up to newline or EOF) from child stdout.
     pub fn read_line(&self, buf: &mut String) -> io::Result<usize> {
         buf.clear();
+        let mut raw = Vec::with_capacity(512);
         let mut byte = [0u8; 1];
-        let mut count = 0;
         loop {
             let n = unsafe {
                 libc::read(self.stdout_fd, byte.as_mut_ptr() as *mut libc::c_void, 1)
@@ -117,12 +117,13 @@ impl Child {
             if n <= 0 {
                 break;
             }
-            count += 1;
             if byte[0] == b'\n' {
                 break;
             }
-            buf.push(byte[0] as char);
+            raw.push(byte[0]);
         }
+        let count = raw.len();
+        buf.push_str(&String::from_utf8_lossy(&raw));
         Ok(count)
     }
 
