@@ -26,6 +26,17 @@ User-workflow driven, not kernel-driven:
 
 ## Architecture
 
+### Why a new trait instead of extending `tools/`
+
+`src/tools/` today is **not** trait-based — each tool is a free `pub fn run(args: &str) -> ToolResult` dispatched via a hand-maintained `match` in `mod.rs`. There's no registry, no `OutputSafety` concept, no timing measurement, no auto-discovery. Some tools use Eä kernels (`calc`), others shell out (`grep`).
+
+Runes deliberately raise the ceremony bar: trait + auto-discovery + per-output safety classification + always-on timing. Two reasons:
+
+1. **The threat model is different.** Tools run short, self-contained actions. Runes expose file-derived content to the LLM — so the rune must *self-declare* whether its output is attacker-controllable. That self-declaration is load-bearing for the WhatsApp restriction and the delimiter-wrap decision.
+2. **The value-prop is measurement.** "500MB in 200ms" is the flex; `timing_us` must be a first-class field, not an afterthought.
+
+MVP keeps the two modules separate. Tools retain their simpler shape. A future migration could fold tools into the Rune pattern (adding `OutputSafety::Trusted` to all existing tools), but that's out of scope — the point here is to build one good abstraction and prove it, not refactor a working system on the way in.
+
 ### The Rune contract
 
 ```rust
@@ -98,7 +109,7 @@ This mirrors how Olorin's existing inference kernels are auto-discovered. Zero n
 
 ### Per-rune file layout
 
-Each `src/runes/<name>.rs` is self-contained:
+Each `src/runes/<name>.rs` is self-contained — **this is a conscious deviation from the project convention** (`CLAUDE.md`: "All FFI wrappers in `ffi.rs` and `ffi_inference.rs`"). For Runes, co-locating FFI with the impl + description + safety classification + timing is the point: one file is the complete, reviewable security surface for a rune. Shared FFI utilities (histogram counters, match iteration helpers) go in `runes/common.rs`; only rune-specific `extern "C"` declarations stay in the per-rune file.
 
 ```rust
 //! eastat — CSV column statistics via SIMD.
@@ -136,23 +147,64 @@ impl Rune for Eastat {
 }
 ```
 
-## Kernel Sourcing
+## Hard Rules
 
-Rune kernels are copied (not referenced) into Olorin's flat `kernels/` directory:
+Non-negotiable, inherited from `CLAUDE.md` and Rune-specific:
 
-| Kernel source (eacompute) | Olorin destination |
-|---------------------------|--------------------|
-| `demo/eastat/kernels/csv_parse.ea`, `csv_stats.ea` | `kernels/csv_parse.ea`, `kernels/csv_stats.ea` |
-| `demo/1brc/kernels/scan.ea`, `scan_arm.ea`, `aggregate.ea`, `parse_temp.ea` | `kernels/log_scan.ea`, `kernels/log_scan_arm.ea`, `kernels/log_aggregate.ea`, `kernels/log_parse_num.ea` |
-| `autoresearch/kernels/histogram/best_kernel.ea` | `kernels/byte_histogram.ea` |
-| `autoresearch/kernels/text_prepass/best_kernel.ea` | `kernels/text_grep.ea` |
-| *(already present)* | `kernels/chacha20*.ea`, xxhash |
+**Project-wide:**
+- No rune file exceeds 500 lines. `common.rs` exists specifically to keep individual runes small.
+- Every rune has at least one E2E test in `tests/runes/`. Unshipped without it.
+- No fake functions, no silent fallbacks. If a kernel path fails, the rune returns `success: false` with a reason.
+- No premature features. The six MVP runes only. Extensions (`easim`, vision runes) live in their own specs.
+- Delete, don't comment. Dead rune code is removed.
 
-Rationale for copy-not-submodule: Olorin is a zero-deps single binary. Eacompute is Peter's development playground; copying at integration time keeps Olorin's kernel set deterministic and self-contained. Upstream kernel improvements require a manual re-copy — an acceptable cost for a solo-dev project.
+**Rune-specific:**
+- **SIMD-only compute.** Every numeric/text-scan operation is an Eä kernel. Scalar Rust is allowed only for arg parsing, path handling, and formatting the `answer` string.
+- **Check eacompute before claiming an intrinsic is missing.** Per `CLAUDE.md`, triple-check `typeck/intrinsics*.rs`, `codegen/simd*.rs`, `CHANGELOG.md`, `README.md`, and `tests/`. Do not add scalar shims.
+- **Every rune measures.** `timing_us` is populated on every path including refusals and errors. This is the flex; no exceptions.
+- **OutputSafety is declared, not inferred.** Every rune hard-codes its `output_safety()` return value — never computed at runtime from input.
+
+## Kernel Authoring
+
+Rune kernels are **authored natively** in Olorin's `kernels/` directory, not copied from eacompute's demo or autoresearch trees. Those trees are frozen against older snapshots of eacompute's intrinsic set — conclusions like "scalar wins for histogram" were made against a smaller intrinsic surface than what exists today. Writing native keeps each kernel shaped for its rune's actual workload (mmap-streaming, specific output layout) and avoids silent divergence as eacompute evolves.
+
+### Authoring workflow (per kernel)
+
+1. **Check current intrinsic surface** before writing. Run `eabrain ref <intrinsic>` and/or grep `/home/peter/projects/eacompute/src/typeck/intrinsics*.rs` and `/home/peter/projects/eacompute/src/codegen/simd*.rs`. Per `CLAUDE.md`, do not assume an intrinsic is missing without checking.
+2. **Write the kernel** in `kernels/<name>.ea`. `build.rs` auto-discovers and compiles; nothing else to wire.
+3. **If SIMD loses for the problem** (histogram-style scatter/gather conflicts may still lose even with today's richer intrinsics), the kernel stays an Ea kernel but written scalar. Decision is documented in a one-line comment at the top of the file with the benchmark numbers that justified it.
+4. **Bench via the rune's E2E test** — each rune-kernel pair has a fixture-based timing assertion so regressions are visible.
+
+### Per-rune kernel map (authoring effort)
+
+| Rune | Kernels (author in `kernels/`) | Effort |
+|------|--------------------------------|--------|
+| **eahist** | `byte_histogram.ea` (+ scalar entropy inline in rune, 256-bin) | Small — ~15–30 lines Ea |
+| **eahash** | `xxhash64_simd.ea` (or scalar Ea fallback if SIMD loses; requires checking current intrinsics for xxhash's finalize pipeline) | Medium — new kernel, no prior in eacompute |
+| **eagrep** | `text_scan.ea` (Boyer-Moore or shift-or variant over mmap) | Medium |
+| **eacount** | `line_scan.ea`, `key_extract.ea`, `key_aggregate.ea` (hash-count into open-addressed table) | Medium-to-large |
+| **eastat** | `csv_parse.ea`, `col_stats.ea` (streaming mean/var, reservoir or t-digest for percentiles) | Large — percentiles are the hard part |
+| **eacrypt** | Existing `chacha20*.ea` — no new kernel | Zero |
+
+This table replaces the previous "copy from eacompute" shortcut. Effort is honest: Runes are not free tool-wrappers, each one is a kernel design task.
 
 ## LLM Tool-Call Integration
 
-Runes plug into Olorin's existing `<tool_call>` XML protocol. No new parser, no new streaming detector.
+### Prerequisite: wire the existing detector
+
+Olorin has `src/core/tool_parse.rs` with a `ToolCallDetector` state machine that recognizes `<tool_call>…</tool_call>` in streaming output. **It is not currently connected to anything** — no call site invokes `tools::run_tool` from detector output; LLM-initiated tool calls do not actually work today. Slash-command (`/calc 2+3`) and natural-language intent (`what time is it`) paths are the only live dispatch routes.
+
+Wiring the detector is a prerequisite for Runes, not an afterthought. Concretely, in the streaming path:
+
+1. Feed each decoded token to the `ToolCallDetector`.
+2. On `DetectResult::ToolCall(json_body)`: parse name + args, dispatch first to `tools::run_tool`, fall through to `runes::run_rune`.
+3. Pass the result back into the generation loop as a tool-result turn (same pattern the cloud path uses).
+
+This wiring is new work scoped to this MVP — call it out in implementation planning, don't treat it as existing infrastructure.
+
+### Protocol shape
+
+Runes share the `<tool_call>` XML protocol. No new parser, no new streaming detector.
 
 ### System prompt injection
 
@@ -186,7 +238,9 @@ if let Some(result) = runes::run_rune(name, args) {
 `wrap_rune_result`:
 1. If `output_safety == Trusted`: pass `answer` through unchanged.
 2. If `output_safety == UntrustedQuoted`: wrap in `<rune_output rune="<name>" untrusted="true">...</rune_output>`.
-3. In both cases, pipe through `safety::scan` — inherits Olorin's existing 16-pattern injection guard and leak detection.
+3. In both cases, pipe through `safety::scan` (the **inbound** variant, `src/core/safety.rs:36`) before the result is folded into the LLM's next turn. This checks both injection patterns and secret-leak patterns in file-derived content.
+
+**Note on the scan direction:** Olorin has two scan entry points. `safety::scan` (inbound) checks injection + leaks. `safety::scan_outbound` (on LLM responses) checks *only* leaks — it deliberately skips injection patterns because ChatML headers in LLM output would false-positive. This means: if a rune returns attacker-controlled text and the LLM obediently echoes it in its response, the outbound scan will not catch the injection. The load-bearing defense against that is structural — delimiter wrapping + the always-present `untrusted="true"` prompt guidance — not the pattern scan.
 
 ### Slash-command bonus
 
@@ -205,10 +259,28 @@ Three layers, each handled:
 | Layer | Attack | Defense |
 |-------|--------|---------|
 | **1.** System-prompt Rune descriptions | N/A — static `&'static str` from our source | None needed |
-| **2.** User input mentioning a Rune | "ignore previous" in user message | Existing `safety::scan` on inbound |
-| **3.** File content surfaced via Rune output | Malicious CSV cell / grep match with injection text | `OutputSafety` classification + delimiter wrapping + inherited tool-output `safety::scan` |
+| **2.** User input mentioning a Rune | "ignore previous" in user message | Existing `safety::scan` on inbound (applied pre-dispatch in `router.rs`) |
+| **3.** File content surfaced via Rune output | Malicious CSV cell / grep match with injection text | `OutputSafety` classification + delimiter wrapping + explicit `safety::scan` (inbound variant) on rune output before it re-enters the LLM turn |
 
-**The real defense is structural:** most Runes (eahash, eahist, eacrypt) output numbers only → impossible to prompt-inject. For the three Runes that echo file bytes (eastat column names, eacount keys, eagrep lines), the `<rune_output untrusted="true">` wrapper + the system-prompt guidance raise the bar. The existing 16-pattern scan catches low-effort attackers; we accept that a targeted adversary with paraphrasing can still evade pattern matching — structural safety is the load-bearing layer.
+**The real defense is structural:** three of six Runes (eahash, eahist, eacrypt) return only aggregate numbers or file paths — no attacker-controllable bytes reach the LLM. The other three (eastat, eacount, eagrep) echo file-derived bytes; for those the `<rune_output untrusted="true">` wrapper + the system-prompt guidance + the inbound pattern scan raise the bar. We accept that a targeted adversary with paraphrasing can still evade pattern matching — structural safety is the load-bearing layer.
+
+### Consistency note: intent-path tools
+
+The existing `execute_intent` path in `src/core/router_tools.rs` (triggered when the dispatcher auto-routes natural-language queries like "what time is it" to a tool) runs the tool and returns the output **without** a safety scan — only the slash-command path scans. Runes do not inherit this hole: every rune invocation, regardless of originating path, goes through `wrap_rune_result` which applies the scan. The existing intent-path inconsistency for tools is outside this spec but should be tracked as a separate hardening item and brought to parity.
+
+## Resource Limits
+
+A rune that reads a file is inherently DoS-shaped: LLM asks for `eagrep` on `/dev/zero` and the process hangs. Defense-in-depth at MVP:
+
+| Limit | Value | Enforcement point |
+|-------|-------|-------------------|
+| **Max file size** | 4 GB | Stat the file before mapping; refuse if larger with a short explanation the LLM can retell the user |
+| **Path allowlist** | canonicalized path must resolve within one of: user home, `/tmp`, an explicit allowlist from config | `runes/common.rs::resolve_path` — rejects symlinks pointing outside the allowlist, rejects `..` traversal after canonicalization |
+| **Wall-clock timeout** | 10 s hard | Per-rune — enforced by running the FFI call on a worker and timing out the join (sacrifice the thread if needed; accept the leak at MVP) |
+| **Output size** | 32 KB `answer`, 1 MB `details` | Truncate with explicit `[...truncated N bytes]` marker |
+| **Concurrency** | 1 rune at a time per `DispatchContext` | Mutex on a `Cell<bool>` in the context — return a refusal if a rune is already running |
+
+Limits apply regardless of invocation path (slash `/rune`, LLM tool call, intent). A rune refusal is a `RuneResult { success: false, answer: "<reason>", .. }` — the LLM sees the reason and composes a natural reply, same as any other tool failure.
 
 **WhatsApp restriction:** Runes classified as `UntrustedQuoted` are **disabled** when the tool call originates from a WhatsApp message. Rationale: on WA, an attacker-as-contact could trick Olorin into scanning an attacker-planted file and feeding itself the output. The REPL/web user is the attacker-victim-operator in one; the WA user is not. `OutputSafety::Trusted` Runes remain available on WA.
 
@@ -230,17 +302,16 @@ src/runes/
   eahist.rs
   eacrypt.rs
 
-kernels/
-  csv_parse.ea         — new, for eastat
-  csv_stats.ea         — new
-  log_scan.ea          — new, for eacount
-  log_scan_arm.ea      — new
-  log_aggregate.ea     — new
-  log_parse_num.ea     — new
-  byte_histogram.ea    — new, for eahist
-  text_grep.ea         — new, for eagrep
-  chacha20*.ea         — existing (eacrypt reuses)
-  (xxhash for eahash uses existing storage/key.rs primitive)
+kernels/                   (all authored native to olorin; see Kernel Authoring)
+  byte_histogram.ea        — new, for eahist
+  xxhash64_simd.ea         — new, for eahash (or scalar Ea if SIMD loses)
+  text_scan.ea             — new, for eagrep
+  line_scan.ea             — new, for eacount
+  key_extract.ea           — new
+  key_aggregate.ea         — new
+  csv_parse.ea             — new, for eastat
+  col_stats.ea             — new
+  chacha20*.ea             — existing (eacrypt reuses)
 
 build.rs         — existing kernel discovery + new rune registry generator
 ```
