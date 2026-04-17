@@ -205,14 +205,6 @@ impl DispatchContext {
             return;
         }
 
-        // ── Dormant check (teleported to WhatsApp) ──────────────────
-        if self.teleported {
-            let msg = "Olorin is on WhatsApp. Send /teleport there to return.".to_string();
-            let _ = tx.send(StreamEvent::Token(msg.clone()));
-            let _ = tx.send(StreamEvent::Done { full_text: msg });
-            return;
-        }
-
         let recall_context = match self.pre_inference(input) {
             Err(resp) => {
                 if resp.blocked {
@@ -307,13 +299,6 @@ impl DispatchContext {
     /// Returns Ok(recall_context) to continue to inference,
     /// or Err(Response) for early exit (command, tool, blocked).
     fn pre_inference(&mut self, input: &str) -> Result<Option<String>, Response> {
-        // ── Dormant check (teleported to WhatsApp) ──────────────────
-        if self.teleported {
-            return Err(Response::text(
-                "Olorin is on WhatsApp. Send /teleport there to return."
-            ));
-        }
-
         // ── Step 1: Safety Scan ──────────────────────────────────────
         let scan = safety::scan(input.as_bytes());
         if scan.blocked {

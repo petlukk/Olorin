@@ -77,10 +77,7 @@ fn handle_wa_message(
             true
         }
         Some(stripped) => {
-            // Temporarily clear teleported so dispatch doesn't return dormant msg
-            ctx.teleported = false;
             let response = ctx.dispatch(stripped);
-            ctx.teleported = true;
             let reply = format!(
                 "{{\"type\":\"send\",\"jid\":\"{}\",\"text\":\"{}\"}}",
                 escape_json(jid),
@@ -113,6 +110,11 @@ fn set_teleported(ctx: &mut DispatchContext) {
 /// Spawns bridge, processes messages, returns when /teleport is received
 /// from WhatsApp or the bridge dies.
 pub fn teleport_loop(ctx: &mut DispatchContext) -> Response {
+    if ctx.teleported {
+        return Response::text(
+            "Olorin is already on WhatsApp. Send /teleport there to return."
+        );
+    }
     let child = match spawn_bridge() {
         Ok(c) => c,
         Err(msg) => return Response::text(msg),
@@ -156,6 +158,13 @@ pub fn teleport_loop_streaming(
     ctx: &mut DispatchContext,
     tx: std::sync::mpsc::Sender<StreamEvent>,
 ) {
+    if ctx.teleported {
+        let msg = "Olorin is already on WhatsApp. Send /teleport there to return."
+            .to_string();
+        let _ = tx.send(StreamEvent::Token(msg.clone()));
+        let _ = tx.send(StreamEvent::Done { full_text: msg });
+        return;
+    }
     let child = match spawn_bridge() {
         Ok(c) => c,
         Err(msg) => {
