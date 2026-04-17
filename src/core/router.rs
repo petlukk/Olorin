@@ -355,29 +355,53 @@ impl DispatchContext {
         }
 
         // ── Step 4: Recall ───────────────────────────────────────────
+        // Search PRIOR entries, then add the current turn. Adding before
+        // searching causes the current query to self-match and crowd out
+        // the actual recalled context — fatal at recall_level=1.
         let top_k = self.recall_level;
-        self.recall.add(input);
 
         if top_k == 0 {
+            self.recall.add(input);
             return Ok(None);
         }
 
         let session_recall = self.recall.synthesize_context(input, top_k);
+        self.recall.add(input);
         let mut recall_text = session_recall.unwrap_or_default();
 
         if let Some(ref mut vault) = self.vault {
             if let Ok(vault_hits) = vault.search(input, top_k) {
+                let input_norm = normalize_for_dedup(input);
                 for hit in &vault_hits {
                     for line in &hit.lines {
                         let trimmed = line.trim();
-                        if trimmed.is_empty() || trimmed.starts_with("assistant:") {
+                        // Only user-stated facts are trusted context — assistant
+                        // outputs can be hallucinations that would feed back in.
+                        let Some(content) = trimmed.strip_prefix("user:") else {
+                            continue;
+                        };
+                        let content = content.trim();
+                        if content.is_empty() {
                             continue;
                         }
-                        recall_text.push_str("\n");
-                        recall_text.push_str(trimmed);
+                        let content_norm = normalize_for_dedup(content);
+                        // Skip self-matches (prior asks of this same query) and
+                        // duplicates against what session recall already added.
+                        if content_norm == input_norm {
+                            continue;
+                        }
+                        if recall_text.lines().any(|l| normalize_for_dedup(l) == content_norm) {
+                            continue;
+                        }
+                        recall_text.push('\n');
+                        recall_text.push_str(content);
                     }
                 }
             }
+        }
+
+        if std::env::var("OLORIN_DEBUG_RECALL").is_ok() {
+            eprintln!("[recall] level={} context=\n---\n{}\n---", top_k, recall_text);
         }
 
         Ok(if recall_text.is_empty() { None } else { Some(recall_text) })
@@ -478,4 +502,13 @@ impl DispatchContext {
         Err("No LLM backend available. Load a model or set ANTHROPIC_API_KEY.".to_string())
     }
 
+}
+
+/// Normalize a line for recall dedup: lowercase ASCII, strip trailing
+/// punctuation/whitespace so "What is my name?" and "what is my name"
+/// compare equal.
+fn normalize_for_dedup(s: &str) -> String {
+    s.trim()
+        .trim_end_matches(|c: char| c.is_ascii_punctuation() || c.is_whitespace())
+        .to_ascii_lowercase()
 }

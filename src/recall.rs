@@ -216,9 +216,17 @@ impl VectorStore {
         out
     }
 
-    /// Synthesize a compact context block for LLM injection.
+    /// Synthesize a compact context block for LLM injection. Skips entries
+    /// that are near-duplicates of the query itself (prior copies of the
+    /// same question would self-match at score 1.0 and crowd out real facts).
     pub fn synthesize_context(&mut self, query: &str, k: usize) -> Option<String> {
-        let results = self.search_dedup(query, k);
+        // Oversearch so filtering still leaves k usable entries.
+        let raw = self.search_dedup(query, k.saturating_mul(2).saturating_add(1));
+        let query_norm = normalize_context_line(query);
+        let results: Vec<_> = raw.into_iter()
+            .filter(|r| normalize_context_line(&r.text) != query_norm)
+            .take(k)
+            .collect();
         if results.is_empty() { return None; }
         let mut ctx = String::from("Earlier in this conversation:\n");
         for r in &results {
@@ -297,4 +305,12 @@ fn f32_slice(bytes: &[u8]) -> &[f32] {
 
 fn l2_norm(v: &[f32]) -> f32 {
     v.iter().map(|x| x * x).sum::<f32>().sqrt()
+}
+
+/// Normalize a line for self-match detection: lowercase + strip trailing
+/// punctuation/whitespace so "What is my name?" == "what is my name".
+fn normalize_context_line(s: &str) -> String {
+    s.trim()
+        .trim_end_matches(|c: char| c.is_ascii_punctuation() || c.is_whitespace())
+        .to_ascii_lowercase()
 }

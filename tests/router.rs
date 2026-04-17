@@ -218,3 +218,46 @@ fn test_dispatch_profile_no_timing() {
     let resp = ctx.dispatch("/profile");
     assert!(resp.text.contains("No timing data yet"));
 }
+
+/// Regression: with recall_level=1, a user question must surface the *prior*
+/// fact from the session, not the current query echoed back. Previously
+/// pre_inference added the current input to the recall store BEFORE searching,
+/// so the query self-matched and consumed the k=1 slot.
+#[test]
+fn test_recall_level_1_does_not_echo_current_query() {
+    ffi::init().unwrap();
+    let mut ctx = olorin::core::router::DispatchContext::new(None, None, None, None);
+    ctx.dispatch("/recall 1");
+    // No LLM backend — inference fails but recall state is still updated.
+    let _ = ctx.dispatch("My name is Peter");
+    // Probe the recall store directly via the search form of /recall.
+    let resp = ctx.dispatch("/recall what is my name?");
+    assert!(
+        resp.text.contains("My name is Peter"),
+        "recall search must surface the prior fact, got: {}", resp.text
+    );
+}
+
+/// Regression for second-ask scenario: after the user has asked a question
+/// once (it's now stored), asking it again must still surface the *fact*,
+/// not the prior identical question. `synthesize_context` filters out
+/// near-duplicates of the query.
+#[test]
+fn test_synthesize_context_skips_prior_identical_query() {
+    use olorin::recall::VectorStore;
+    ffi::init().unwrap();
+    let mut store = VectorStore::new(1024);
+    store.add("My name is Peter");
+    store.add("What is my name?"); // prior ask stored
+    store.add("My name is Peter the king");
+    let ctx = store.synthesize_context("What is my name?", 1)
+        .expect("should surface a fact");
+    assert!(
+        !ctx.lines().any(|l| l.trim().eq_ignore_ascii_case("what is my name?")),
+        "must not echo prior identical query, got: {ctx}"
+    );
+    assert!(
+        ctx.contains("Peter"),
+        "must surface a name-stating fact, got: {ctx}"
+    );
+}
