@@ -38,7 +38,6 @@ pub(super) fn matvec_step(
     dtype: u32,
     weight: *const u8,
     repacked: Option<&[u8]>,
-    q5k_repacked: Option<&[u8]>,
     q8: *const i8,
     q8_d: *const f32,
     bsums: *const i16,
@@ -50,21 +49,15 @@ pub(super) fn matvec_step(
     ith: usize,
     nth: usize,
 ) {
-    if let Some(p) = repacked {
-        matmul_graph::q4k_matvec_8x8_ws(
+    match repacked {
+        Some(p) => matmul_graph::q4k_matvec_8x8_ws(
             p.as_ptr(), q8, q8_d, bsums, output,
             n_rows, n_cols, current_chunk, ith, nth,
-        );
-    } else if let Some(p) = q5k_repacked {
-        matmul_graph::q5k_matvec_repacked_ws(
-            p.as_ptr(), q8, q8_d, bsums, output,
-            n_rows, n_cols, current_chunk, ith, nth,
-        );
-    } else {
-        matmul_graph::matvec_ws(
+        ),
+        None => matmul_graph::matvec_ws(
             dtype, weight, q8, q8_d, bsums, output, d_scratch,
             n_rows, n_cols, current_chunk, ith, nth,
-        );
+        ),
     }
 }
 
@@ -124,7 +117,7 @@ pub(super) fn layer_forward_graph_timed(
     current_chunk.store(nth as i32, Ordering::Relaxed);
     barrier.wait();
     matvec_step(
-        lw.wq_dtype, lw.wq, lw.wq_repacked.as_deref(), None,
+        lw.wq_dtype, lw.wq, lw.wq_repacked.as_deref(),
         state.q8_qs.as_ptr(), state.q8_d.as_ptr(), state.q8_bsums.as_ptr(),
         state.q.as_mut_ptr(), state.q6k_d_scratch.as_mut_ptr(),
         n_heads * head_dim, hd,
@@ -167,7 +160,7 @@ pub(super) fn layer_forward_graph_timed(
         current_chunk.store(nth as i32, Ordering::Relaxed);
         barrier.wait();
         matvec_step(
-            lw.wk_dtype, lw.wk, lw.wk_repacked.as_deref(), lw.wk_q5k_repacked.as_deref(),
+            lw.wk_dtype, lw.wk, lw.wk_repacked.as_deref(),
             state.q8_qs.as_ptr(), state.q8_d.as_ptr(), state.q8_bsums.as_ptr(),
             state.k.as_mut_ptr(), state.q6k_d_scratch.as_mut_ptr(),
             kv_dim, hd,
@@ -179,7 +172,7 @@ pub(super) fn layer_forward_graph_timed(
         current_chunk.store(nth as i32, Ordering::Relaxed);
         barrier.wait();
         matvec_step(
-            lw.wv_dtype, lw.wv, lw.wv_repacked.as_deref(), None,
+            lw.wv_dtype, lw.wv, lw.wv_repacked.as_deref(),
             state.q8_qs.as_ptr(), state.q8_d.as_ptr(), state.q8_bsums.as_ptr(),
             state.v.as_mut_ptr(), state.q6k_d_scratch.as_mut_ptr(),
             kv_dim_v, hd,
@@ -281,7 +274,7 @@ pub(super) fn layer_forward_graph_timed(
     current_chunk.store(nth as i32, Ordering::Relaxed);
     barrier.wait();
     matvec_step(
-        lw.wo_dtype, lw.wo, lw.wo_repacked.as_deref(), lw.wo_q5k_repacked.as_deref(),
+        lw.wo_dtype, lw.wo, lw.wo_repacked.as_deref(),
         state.q8_qs.as_ptr(), state.q8_d.as_ptr(), state.q8_bsums.as_ptr(),
         state.wo_out.as_mut_ptr(), state.q6k_d_scratch.as_mut_ptr(),
         hd, n_heads * head_dim,
@@ -351,7 +344,7 @@ pub(super) fn layer_forward_graph_timed(
         current_chunk.store(nth as i32, Ordering::Relaxed);
         barrier.wait();
         matvec_step(
-            lw.w_gate_dtype, lw.w_gate, lw.w_gate_repacked.as_deref(), None,
+            lw.w_gate_dtype, lw.w_gate, lw.w_gate_repacked.as_deref(),
             state.q8_qs.as_ptr(), state.q8_d.as_ptr(), state.q8_bsums.as_ptr(),
             state.gate.as_mut_ptr(), state.q6k_d_scratch.as_mut_ptr(),
             ffn_dim, hd, current_chunk, ith, nth,
@@ -360,7 +353,7 @@ pub(super) fn layer_forward_graph_timed(
         current_chunk.store(nth as i32, Ordering::Relaxed);
         barrier.wait();
         matvec_step(
-            lw.w_up_dtype, lw.w_up, lw.w_up_repacked.as_deref(), None,
+            lw.w_up_dtype, lw.w_up, lw.w_up_repacked.as_deref(),
             state.q8_qs.as_ptr(), state.q8_d.as_ptr(), state.q8_bsums.as_ptr(),
             state.up.as_mut_ptr(), state.q6k_d_scratch.as_mut_ptr(),
             ffn_dim, hd, current_chunk, ith, nth,
@@ -412,7 +405,7 @@ pub(super) fn layer_forward_graph_timed(
         );
     } else {
         matvec_step(
-            lw.w_down_dtype, lw.w_down, lw.w_down_repacked.as_deref(), None,
+            lw.w_down_dtype, lw.w_down, lw.w_down_repacked.as_deref(),
             state.ffn_q8_qs.as_ptr(), state.ffn_q8_d.as_ptr(), state.ffn_q8_bsums.as_ptr(),
             state.down.as_mut_ptr(), state.q6k_d_scratch.as_mut_ptr(),
             hd, ffn_dim,
