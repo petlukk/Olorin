@@ -214,4 +214,26 @@ fn olorin_full_bench() {
     eprintln!("  min / max:                 {:>7.2} / {:>7.2} ms", min_step, max_step);
     eprintln!();
     eprintln!("last sampled token id:  {next}");
+
+    // ── Regression floor (opt-in, non-portable) ─────────────────────
+    // Set OLORIN_DECODE_FLOOR_TPS=<N> to make this test fail if sustained
+    // decode t/s drops below N. Values are hardware-specific — on Ryzen
+    // 7 1700 with 8 physical cores we sustain ~12.9 t/s post-commit 5e3b922
+    // (Q6K pre-d + SMT fix + ubatch), so a floor around 12.0 leaves a
+    // ~7% headroom for noise before a true regression fires. Intended
+    // for local perf gating, not for running unconditionally (would be
+    // flaky on slower machines and on first-commit noise).
+    if let Some(floor) = std::env::var("OLORIN_DECODE_FLOOR_TPS")
+        .ok()
+        .and_then(|s| s.trim().parse::<f64>().ok())
+    {
+        assert!(
+            sustained_tps >= floor,
+            "decode regressed: sustained {sustained_tps:.2} t/s < floor {floor:.2} t/s \
+             (prefill {prefill_tps:.2} t/s, parallel eff {:.1}% — check if a recent \
+             change hurt decode, or lower the floor if hardware changed)",
+            parallel_eff * 100.0,
+        );
+        eprintln!("decode floor OK: {sustained_tps:.2} ≥ {floor:.2}");
+    }
 }

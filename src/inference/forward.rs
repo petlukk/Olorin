@@ -363,11 +363,8 @@ impl Gemma4State {
         assert!(!tokens.is_empty());
         assert!(tokens.len() <= self.max_batch);
 
-        let ubatch = std::env::var("OLORIN_PREFILL_UBATCH")
-            .ok()
-            .and_then(|s| s.trim().parse::<usize>().ok())
-            .filter(|&k| k >= 1)
-            .unwrap_or(tokens.len());
+        let ubatch = crate::inference::threadpool::detect_prefill_ubatch()
+            .min(tokens.len());
 
         let state_ptr = self as *mut Gemma4State as usize;
         let model_ptr = model as *const Gemma4Model as usize;
