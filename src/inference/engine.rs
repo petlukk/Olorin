@@ -77,11 +77,6 @@ pub struct LayerWeights {
     pub w_up_repacked: Option<Vec<u8>>,
     pub w_down_repacked: Option<Vec<u8>>,
     pub w_down_q6k_repacked: Option<Vec<u8>>,
-    // Q5K 4-row tiles. In Gemma 4 E2B Q4_K_M, attn_k and attn_output are
-    // Q5K on every layer; ffn_down is Q4K/Q6K never Q5K. Populated only when
-    // the observed weight is Q5K.
-    pub wk_q5k_repacked: Option<Vec<u8>>,
-    pub wo_q5k_repacked: Option<Vec<u8>>,
     pub inp_gate_repacked: Option<Vec<u8>>,
     pub proj_repacked: Option<Vec<u8>>,
 }
@@ -341,8 +336,6 @@ impl Gemma4Model {
                 w_up_repacked: None,
                 w_down_repacked: None,
                 w_down_q6k_repacked: None,
-                wk_q5k_repacked: None,
-                wo_q5k_repacked: None,
                 inp_gate_repacked: None,
                 proj_repacked: None,
             };
