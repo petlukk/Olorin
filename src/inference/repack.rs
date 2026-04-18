@@ -79,6 +79,45 @@ pub fn q6k_repack_4row(src: *const u8, n_rows: usize, n_cols: usize) -> Vec<u8> 
     dst
 }
 
+/// Repack Q5K weights: interleave 4 consecutive rows into contiguous tiles.
+/// Each tile = 4 × 176 = 704 bytes per superblock column.
+///
+/// Mirrors `q6k_repack_4row`. Q5K is 8% of decode cycles on Gemma 4 E2B Q4_K_M
+/// (some `ffn_down` layers quantize to Q5K per llama.cpp's Q4_K_M strategy),
+/// and is the only quant in the hot path without a repacked variant.
+///
+/// # Requirements
+/// - `n_rows` must be a multiple of 4.
+/// - `n_cols` must be a multiple of 256 (Q5K superblock size).
+/// - `src` must point to at least `n_rows * (n_cols/256) * 176` bytes of Q5K.
+pub fn q5k_repack_4row(src: *const u8, n_rows: usize, n_cols: usize) -> Vec<u8> {
+    debug_assert!(n_rows % 4 == 0, "q5k_repack_4row: n_rows ({n_rows}) must be a multiple of 4");
+    debug_assert!(n_cols % 256 == 0, "q5k_repack_4row: n_cols ({n_cols}) must be a multiple of 256");
+
+    let n_blocks = n_cols / 256;
+    let row_bytes = n_blocks * 176;
+    let tile_bytes = 4 * 176;
+    let n_quads = n_rows / 4;
+    let mut dst = vec![0u8; n_quads * n_blocks * tile_bytes];
+
+    for quad in 0..n_quads {
+        for blk in 0..n_blocks {
+            for r in 0..4usize {
+                let src_off = (quad * 4 + r) * row_bytes + blk * 176;
+                let dst_off = (quad * n_blocks + blk) * tile_bytes + r * 176;
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        src.add(src_off),
+                        dst.as_mut_ptr().add(dst_off),
+                        176,
+                    );
+                }
+            }
+        }
+    }
+    dst
+}
+
 /// Pre-compute `f16_to_f32(d)` for every (quad, block, row) of a Q6K weight.
 ///
 /// The live `q6k_repacked_batch_ws` kernel pays a scattered f16 load + convert
