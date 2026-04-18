@@ -19,10 +19,15 @@ use crate::inference::threadpool::SpinBarrier;
 
 /// Run a batched forward pass for `tokens.len()` tokens.
 /// All n_threads execute this together via SpinBarrier.
+///
+/// When `compute_logits` is false, the final_norm + output_matmul + softcap
+/// stage is skipped — used for intermediate ubatch chunks whose logits will
+/// be overwritten by a later chunk.
 pub(crate) fn forward_batch_inner(
     state: &mut Gemma4State,
     model: &Gemma4Model,
     tokens: &[u32],
+    compute_logits: bool,
     barrier: &SpinBarrier,
     current_chunk: &AtomicI32,
     ith: usize,
@@ -93,80 +98,92 @@ pub(crate) fn forward_batch_inner(
     }
     let t_layers_us = t_layers_start.map(|s| s.elapsed().as_micros() as u64).unwrap_or(0);
 
-    // ── Post-loop: final norm on last token only (thread 0) ──────
-    let t_final_norm_start = if print { Some(std::time::Instant::now()) } else { None };
-    if ith == 0 {
-        let last = n - 1;
-        ffi_inference::gemma4_rmsnorm(
-            state.batch_x[last * hd..].as_ptr(),
-            model.norm_weight,
-            state.x_norm.as_mut_ptr(),
-            hd as i32,
-            model.rms_eps,
-        );
-        matmul::quant_input(
-            &state.x_norm[..hd],
-            &mut state.q8_qs,
-            &mut state.q8_d,
-            &mut state.q8_bsums,
-        );
-    }
-    let t_final_norm_us = t_final_norm_start.map(|s| s.elapsed().as_micros() as u64).unwrap_or(0);
-    barrier.wait();
+    // ── Post-loop: final norm + output logits + softcap ──
+    // Intermediate ubatch chunks skip this entire block; only the final
+    // chunk needs logits for the last token. Cache advance is handled
+    // separately below so KV positions stay correct in either case.
+    let t_final_norm_us;
+    let t_logits_us;
+    let t_softcap_us;
+    if compute_logits {
+        let t_final_norm_start = if print { Some(std::time::Instant::now()) } else { None };
+        if ith == 0 {
+            let last = n - 1;
+            ffi_inference::gemma4_rmsnorm(
+                state.batch_x[last * hd..].as_ptr(),
+                model.norm_weight,
+                state.x_norm.as_mut_ptr(),
+                hd as i32,
+                model.rms_eps,
+            );
+            matmul::quant_input(
+                &state.x_norm[..hd],
+                &mut state.q8_qs,
+                &mut state.q8_d,
+                &mut state.q8_bsums,
+            );
+        }
+        t_final_norm_us = t_final_norm_start.map(|s| s.elapsed().as_micros() as u64).unwrap_or(0);
+        barrier.wait();
 
-    // ── Output matmul (work-stealing, last token only) ────────────
-    // Full 262K vocab by default. See forward_graph.rs for the rationale
-    // — Gemma 4's vocab isn't low-ID frequency-ordered and the 32K cutoff
-    // drops roughly half of the tokens llama.cpp argmaxes. Mirrors decode.
-    let logit_rows = if std::env::var("OLORIN_HOT_VOCAB").is_ok() {
-        model.vocab_size.min(32768)
-    } else {
-        model.vocab_size
-    };
-    if ith == 0 { state.logit_rows = logit_rows; }
-    current_chunk.store(nth as i32, Ordering::Relaxed);
-    barrier.wait();
-    let t_logits_start = if print { Some(std::time::Instant::now()) } else { None };
-    if let Some(ref q6k_buf) = model.embed_q6k_repacked {
-        matmul_graph::q6k_repacked_batch_ws(
-            q6k_buf.as_ptr(), model.embed_weight,
-            state.q8_qs.as_ptr(), state.q8_d.as_ptr(), state.q8_bsums.as_ptr(),
-            state.logits.as_mut_ptr(), state.q6k_d_scratch.as_mut_ptr(),
-            logit_rows, hd, 1, logit_rows,
-            current_chunk, ith, nth,
-        );
-    } else {
-        matmul_graph::matvec_ws(
-            model.embed_dtype, model.embed_weight,
-            state.q8_qs.as_ptr(), state.q8_d.as_ptr(), state.q8_bsums.as_ptr(),
-            state.logits.as_mut_ptr(), state.q6k_d_scratch.as_mut_ptr(),
-            logit_rows, hd,
-            current_chunk, ith, nth,
-        );
-    }
-    barrier.wait();
-    let t_logits_us = t_logits_start.map(|s| s.elapsed().as_micros() as u64).unwrap_or(0);
+        // Output matmul (work-stealing, last token only).
+        // Full 262K vocab by default. See forward_graph.rs for the rationale
+        // — Gemma 4's vocab isn't low-ID frequency-ordered and the 32K cutoff
+        // drops roughly half of the tokens llama.cpp argmaxes.
+        let logit_rows = if std::env::var("OLORIN_HOT_VOCAB").is_ok() {
+            model.vocab_size.min(32768)
+        } else {
+            model.vocab_size
+        };
+        if ith == 0 { state.logit_rows = logit_rows; }
+        current_chunk.store(nth as i32, Ordering::Relaxed);
+        barrier.wait();
+        let t_logits_start = if print { Some(std::time::Instant::now()) } else { None };
+        if let Some(ref q6k_buf) = model.embed_q6k_repacked {
+            matmul_graph::q6k_repacked_batch_ws(
+                q6k_buf.as_ptr(), model.embed_weight,
+                state.q8_qs.as_ptr(), state.q8_d.as_ptr(), state.q8_bsums.as_ptr(),
+                state.logits.as_mut_ptr(), state.q6k_d_scratch.as_mut_ptr(),
+                logit_rows, hd, 1, logit_rows,
+                current_chunk, ith, nth,
+            );
+        } else {
+            matmul_graph::matvec_ws(
+                model.embed_dtype, model.embed_weight,
+                state.q8_qs.as_ptr(), state.q8_d.as_ptr(), state.q8_bsums.as_ptr(),
+                state.logits.as_mut_ptr(), state.q6k_d_scratch.as_mut_ptr(),
+                logit_rows, hd,
+                current_chunk, ith, nth,
+            );
+        }
+        barrier.wait();
+        t_logits_us = t_logits_start.map(|s| s.elapsed().as_micros() as u64).unwrap_or(0);
 
-    // ── Softcap + advance cache by N (thread 0) ─────────────────
-    let t_softcap_start = if print { Some(std::time::Instant::now()) } else { None };
-    if ith == 0 {
-        if model.logit_softcap > 0.0 {
+        // Softcap (thread 0).
+        let t_softcap_start = if print { Some(std::time::Instant::now()) } else { None };
+        if ith == 0 && model.logit_softcap > 0.0 {
             ffi_inference::softcap_f32(
                 state.logits.as_mut_ptr(), logit_rows as i32, model.logit_softcap,
             );
         }
-        state.cache.advance_n(n);
+        t_softcap_us = t_softcap_start.map(|s| s.elapsed().as_micros() as u64).unwrap_or(0);
+    } else {
+        t_final_norm_us = 0;
+        t_logits_us = 0;
+        t_softcap_us = 0;
     }
-    let t_softcap_us = t_softcap_start.map(|s| s.elapsed().as_micros() as u64).unwrap_or(0);
+
+    // Advance cache — always, so the next chunk picks up at the right position.
+    if ith == 0 { state.cache.advance_n(n); }
     barrier.wait();
 
     if print {
         let ms = |us: u64| us as f64 / 1000.0;
-        eprintln!("[prefill-stages] n_tokens={n} (pre_total is thread-0 slice time)");
+        eprintln!("[prefill-stages] n_tokens={n} (pre_total is thread-0 slice time, compute_logits={compute_logits})");
         eprintln!("  pre_total       {:7.1}ms  (embed + ple, per-thread {} tokens)", ms(t_pre_elapsed), per);
         eprintln!("  layer_loop      {:7.1}ms", ms(t_layers_us));
         eprintln!("  final_norm      {:7.1}ms", ms(t_final_norm_us));
-        eprintln!("  output_logits   {:7.1}ms  (vocab={})", ms(t_logits_us), logit_rows);
+        eprintln!("  output_logits   {:7.1}ms", ms(t_logits_us));
         eprintln!("  softcap+advance {:7.1}ms", ms(t_softcap_us));
     }
 }

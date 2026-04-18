@@ -351,17 +351,44 @@ impl Gemma4State {
 
     /// Batched forward pass. Processes N tokens using gemm for all Q4K matmuls.
     /// Returns logits for the last token.
+    ///
+    /// When `OLORIN_PREFILL_UBATCH=K` is set (positive integer), prompts longer
+    /// than K are split into K-token ubatch chunks, each run through the full
+    /// layer stack in sequence. KV-cache accumulates across chunks so attention
+    /// in later chunks sees all prior tokens. Intermediate chunks skip the
+    /// last-token logit compute. Goal: keep each chunk's working set
+    /// (weight + activation) within L3, preventing the large-N FFN-down
+    /// cache-spill degradation.
     pub fn forward_batch(&mut self, model: &Gemma4Model, tokens: &[u32], pool: &crate::inference::threadpool::GraphPool) -> &[f32] {
         assert!(!tokens.is_empty());
         assert!(tokens.len() <= self.max_batch);
+
+        let ubatch = std::env::var("OLORIN_PREFILL_UBATCH")
+            .ok()
+            .and_then(|s| s.trim().parse::<usize>().ok())
+            .filter(|&k| k >= 1)
+            .unwrap_or(tokens.len());
+
         let state_ptr = self as *mut Gemma4State as usize;
         let model_ptr = model as *const Gemma4Model as usize;
 
-        pool.run_graph(&|tid, nth, barrier, chunk| {
-            let state = unsafe { &mut *(state_ptr as *mut Gemma4State) };
-            let model = unsafe { &*(model_ptr as *const Gemma4Model) };
-            super::forward_batch::forward_batch_inner(state, model, tokens, barrier, chunk, tid, nth);
-        });
+        let mut start = 0usize;
+        while start < tokens.len() {
+            let end = (start + ubatch).min(tokens.len());
+            let chunk_tokens: &[u32] = &tokens[start..end];
+            let is_last = end == tokens.len();
+
+            pool.run_graph(&|tid, nth, barrier, chunk| {
+                let state = unsafe { &mut *(state_ptr as *mut Gemma4State) };
+                let model = unsafe { &*(model_ptr as *const Gemma4Model) };
+                super::forward_batch::forward_batch_inner(
+                    state, model, chunk_tokens, is_last,
+                    barrier, chunk, tid, nth,
+                );
+            });
+
+            start = end;
+        }
 
         &self.logits[..self.logit_rows]
     }
