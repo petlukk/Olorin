@@ -2,6 +2,7 @@ pub mod engine;
 mod engine_helpers;
 pub mod gguf;
 pub mod tokenizer;
+mod tokenizer_gemma4;
 pub mod cache;
 pub mod matmul;
 mod matmul_seq;

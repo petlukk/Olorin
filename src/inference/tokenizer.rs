@@ -9,8 +9,8 @@ use crate::error::{Error, Result};
 use crate::inference::gguf::{GgufFile, MetaValue};
 
 pub struct Tokenizer {
-    vocab: Vec<Vec<u8>>,
-    token_to_id: HashMap<Vec<u8>, u32>,
+    pub(crate) vocab: Vec<Vec<u8>>,
+    pub(crate) token_to_id: HashMap<Vec<u8>, u32>,
     scores: Vec<f32>,
     /// Per-token type from tokenizer.ggml.token_type. Values:
     ///   1 = NORMAL, 2 = UNKNOWN, 3 = CONTROL, 4 = USER_DEFINED,
@@ -24,9 +24,16 @@ pub struct Tokenizer {
     /// SentencePiece (Unigram) tokenizers do not pre-tokenize on word
     /// boundaries — encoding runs Viterbi over the whole input segment.
     is_sentencepiece: bool,
+    /// Gemma 4 uses SPM-style BPE with merges list priority — a different
+    /// algorithm from SPM Unigram. When true, encode_segment routes to the
+    /// Gemma 4 BPE path in tokenizer_gemma4.
+    is_gemma4_bpe: bool,
+    /// (left_bytes, right_bytes) -> merge rank for Gemma 4 BPE. Lower rank
+    /// wins. Empty for non-BPE tokenizers.
+    pub(crate) merges_rank: HashMap<(Vec<u8>, Vec<u8>), u32>,
     /// Byte-fallback table: byte value -> token id, for sentencepiece
     /// fallback when a character isn't in the vocab.
-    byte_fallback: [u32; 256],
+    pub(crate) byte_fallback: [u32; 256],
 }
 
 /// Parse a byte-fallback token like "<0x41>" into the byte value 0x41.
@@ -86,7 +93,14 @@ impl Tokenizer {
         // Detect tokenizer model: gemma4 uses SentencePiece (raw vocab bytes,
         // ▁ for space prefix). Llama 3 / tiktoken use GPT-2 byte-level encoding.
         let tok_model = gguf.get_str("tokenizer.ggml.model").unwrap_or("").to_string();
-        let is_sentencepiece = tok_model == "gemma4" || tok_model == "llama";
+        // Gemma 4's GGUF stores both scores (unigram log-probs, used for special
+        // token priorities) and merges (the actual BPE merge table). llama.cpp
+        // treats vocab type as BPE and uses the merges list. We must do the same:
+        // treating Gemma 4 as SentencePiece Unigram produces different token
+        // sequences on rare words (see tests/gemma4_tokenizer_match.rs).
+        let is_gemma4_bpe = tok_model == "gemma4";
+        // Keep the Unigram-Viterbi path for plain SentencePiece ("llama" legacy).
+        let is_sentencepiece = tok_model == "llama";
 
         let token_strs = match tokens_arr {
             MetaValue::Array(arr) => {
@@ -145,9 +159,9 @@ impl Tokenizer {
             // contains bytes that aren't in vocab. The raw byte tokens (e.g.
             // token 107 = '\n') must own the [0x0A] hashmap key, not be
             // overwritten by token 248 = '<0x0A>'.
-            let bytes = if !is_sentencepiece && parse_byte_token(tok_str).is_some() {
+            let bytes = if !is_sentencepiece && !is_gemma4_bpe && parse_byte_token(tok_str).is_some() {
                 vec![parse_byte_token(tok_str).unwrap()]
-            } else if is_sentencepiece {
+            } else if is_sentencepiece || is_gemma4_bpe {
                 // SentencePiece: vocab strings are raw UTF-8. ▁ (U+2581) marks
                 // space prefix, but we keep it as-is in the vocab map and let
                 // the encoder translate spaces to ▁ before lookup.
@@ -177,7 +191,7 @@ impl Tokenizer {
         // any vocab entry. For sentencepiece, lookup by the literal "<0xNN>"
         // string in the vocab map (we stored them that way above).
         let mut byte_fallback = [u32::MAX; 256];
-        if is_sentencepiece {
+        if is_sentencepiece || is_gemma4_bpe {
             for b in 0u8..=255 {
                 let key = format!("<0x{:02X}>", b);
                 if let Some(&id) = token_to_id.get(key.as_bytes()) {
@@ -186,11 +200,36 @@ impl Tokenizer {
             }
         }
 
+        // Parse tokenizer.ggml.merges for Gemma 4 BPE. Each entry is
+        // "<left_piece> <right_piece>" with ASCII 0x20 as the separator.
+        // Pieces never contain ASCII space (SPM replaces it with ▁ beforehand),
+        // so split on first space is unambiguous. Rank = index in the list.
+        let mut merges_rank: HashMap<(Vec<u8>, Vec<u8>), u32> = HashMap::new();
+        if is_gemma4_bpe {
+            if let Some(MetaValue::Array(arr)) = gguf.metadata.get("tokenizer.ggml.merges") {
+                merges_rank.reserve(arr.len());
+                for (rank, v) in arr.iter().enumerate() {
+                    let s = match v {
+                        MetaValue::Str(s) => s.as_bytes(),
+                        _ => continue,
+                    };
+                    if let Some(sep) = s.iter().position(|&b| b == b' ') {
+                        let left = s[..sep].to_vec();
+                        let right = s[sep + 1..].to_vec();
+                        merges_rank.insert((left, right), rank as u32);
+                    }
+                }
+            }
+        }
+
         // Pad token_types to match vocab length if missing/short.
         let mut token_types = token_types;
         token_types.resize(vocab.len(), 1);
 
-        Ok(Tokenizer { vocab, token_to_id, scores, token_types, bos_id, eos_id, stop_ids, is_sentencepiece, byte_fallback })
+        Ok(Tokenizer {
+            vocab, token_to_id, scores, token_types, bos_id, eos_id, stop_ids,
+            is_sentencepiece, is_gemma4_bpe, merges_rank, byte_fallback,
+        })
     }
 
     /// Returns true if a token is CONTROL (3) or USER_DEFINED (4) — these
@@ -252,6 +291,9 @@ impl Tokenizer {
     fn encode_segment(&self, bytes: &[u8]) -> Vec<u32> {
         if bytes.is_empty() {
             return Vec::new();
+        }
+        if self.is_gemma4_bpe {
+            return super::tokenizer_gemma4::encode_gemma4_bpe(self, bytes);
         }
         if self.is_sentencepiece {
             return self.encode_sentencepiece(bytes);
