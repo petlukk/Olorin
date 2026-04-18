@@ -108,12 +108,18 @@ pub(crate) fn forward_one_inner(
     barrier.wait();
 
     // ── Output matmul (work-stealing, all threads) ───────────────
-    // Hot-vocab: compute logits for first N tokens only (SentencePiece orders by frequency).
-    // Falls back to full vocab if env OLORIN_FULL_VOCAB=1.
-    let logit_rows = if std::env::var("OLORIN_FULL_VOCAB").is_ok() {
-        model.vocab_size
-    } else {
+    // Full 262K vocab by default. Gemma 4's vocab is NOT low-ID frequency-
+    // ordered the way the old comment assumed — common punctuation pieces
+    // like "?" (236881) and many word-piece suffixes live above 32K, and
+    // so do roughly half the tokens llama.cpp argmaxes on typical prompts.
+    // A 32K cutoff drops them silently, producing the classic "coherent
+    // first sentence, then repetition loop" failure on structured prompts
+    // (e.g. narrating a rune/tool JSON result).
+    // Opt-in to the experiment with OLORIN_HOT_VOCAB=1 for perf benchmarking.
+    let logit_rows = if std::env::var("OLORIN_HOT_VOCAB").is_ok() {
         model.vocab_size.min(32768)
+    } else {
+        model.vocab_size
     };
     let t_out_start = if timing { Some(std::time::Instant::now()) } else { None };
     current_chunk.store(nth as i32, Ordering::Relaxed);

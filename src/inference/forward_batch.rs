@@ -115,12 +115,13 @@ pub(crate) fn forward_batch_inner(
     barrier.wait();
 
     // ── Output matmul (work-stealing, last token only) ────────────
-    // Hot-vocab: we only sample one token after prefill, so top-k over
-    // SentencePiece's 32K most-frequent tokens is enough. Matches decode.
-    let logit_rows = if std::env::var("OLORIN_FULL_VOCAB").is_ok() {
-        model.vocab_size
-    } else {
+    // Full 262K vocab by default. See forward_graph.rs for the rationale
+    // — Gemma 4's vocab isn't low-ID frequency-ordered and the 32K cutoff
+    // drops roughly half of the tokens llama.cpp argmaxes. Mirrors decode.
+    let logit_rows = if std::env::var("OLORIN_HOT_VOCAB").is_ok() {
         model.vocab_size.min(32768)
+    } else {
+        model.vocab_size
     };
     if ith == 0 { state.logit_rows = logit_rows; }
     current_chunk.store(nth as i32, Ordering::Relaxed);
