@@ -78,3 +78,48 @@ pub fn q6k_repack_4row(src: *const u8, n_rows: usize, n_cols: usize) -> Vec<u8> 
     }
     dst
 }
+
+/// Pre-compute `f16_to_f32(d)` for every (quad, block, row) of a Q6K weight.
+///
+/// The live `q6k_repacked_batch_ws` kernel pays a scattered f16 load + convert
+/// on every token × every block × every row (4 per quad) in the hot path.
+/// For the Gemma 4 output head (m=262144, k=1536) this is ~15 ms/decode-step
+/// of arithmetic that only depends on the weight — invariant across tokens.
+///
+/// Moving it to load-time removes it from the hot path. Output layout is
+/// indexed as `d_arr[(quad * n_blocks + blk) * 4 + r]` so the inference
+/// kernel can read four contiguous floats per `(quad, blk)` and just
+/// multiply by `q8_d[blk]` (the only token-specific scale).
+///
+/// # Requirements
+/// - `n_rows` must be a multiple of 4.
+/// - `n_cols` must be a multiple of 256.
+/// - `src` must point to at least `n_rows * (n_cols/256) * 210` bytes of Q6K.
+///
+/// Memory cost: `(n_rows/4) * (n_cols/256) * 4 * sizeof(f32)` — e.g. 6.3 MB
+/// for Gemma 4 output head vs 330 MB of weight. Negligible.
+pub fn q6k_precompute_d_arr(src: *const u8, n_rows: usize, n_cols: usize) -> Vec<f32> {
+    debug_assert!(n_rows % 4 == 0, "q6k_precompute_d_arr: n_rows ({n_rows}) must be a multiple of 4");
+    debug_assert!(n_cols % 256 == 0, "q6k_precompute_d_arr: n_cols ({n_cols}) must be a multiple of 256");
+
+    let n_blocks = n_cols / 256;
+    let row_bytes = n_blocks * 210;
+    let n_quads = n_rows / 4;
+    let mut d_arr = vec![0.0f32; n_quads * n_blocks * 4];
+
+    for quad in 0..n_quads {
+        for blk in 0..n_blocks {
+            for r in 0..4usize {
+                // d lives at byte 208 of each Q6K block (f16)
+                let byte_off = (quad * 4 + r) * row_bytes + blk * 210 + 208;
+                let raw = unsafe {
+                    let p = src.add(byte_off);
+                    u16::from_le_bytes([*p, *p.add(1)])
+                };
+                d_arr[(quad * n_blocks + blk) * 4 + r] =
+                    crate::inference::matmul::f16_to_f32_scalar(raw);
+            }
+        }
+    }
+    d_arr
+}

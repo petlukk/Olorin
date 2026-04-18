@@ -159,6 +159,79 @@ pub fn q6k_gemm_batch_ws(
     }
 }
 
+/// Q6K repacked batch matvec with pre-computed d_arr — work-stealing variant
+/// intended for the output head (Gemma 4's 262K × 1536 Q6K weight).
+///
+/// Unlike `q6k_repacked_batch_ws`, this takes a `d_arr_base` pointer into a
+/// Vec<f32> pre-computed at model load by `repack::q6k_precompute_d_arr`.
+/// That moves the per-(quad, blk, row) `f16_to_f32(d)` conversion out of the
+/// hot path — which was previously ~15 ms/decode-step on Gemma 4's output
+/// head. Here we just multiply the pre-computed f32 `d` by the token's
+/// `q8_d[blk]` and feed the resulting 4-row scale array into the tile kernel.
+///
+/// Layout contract: `d_arr_base[(quad * n_blocks + blk) * 4 + r]` — contiguous
+/// in `r`, so four f32 multiplies share one cache line per block.
+#[allow(clippy::too_many_arguments)]
+pub fn q6k_repacked_batch_ws_pre_d(
+    packed: *const u8, d_arr_base: *const f32,
+    batch_q8_qs: *const i8, batch_q8_d: *const f32, batch_q8_bsums: *const i16,
+    output: *mut f32, d_scratch: *mut f32,
+    n_rows: usize, n_cols: usize, n_tokens: usize, output_stride: usize,
+    current_chunk: &AtomicI32, ith: usize, _nth: usize,
+) {
+    let n_blocks = n_cols / Q6K_BLOCK_SIZE;
+    let qs_stride = n_cols + 12;
+    let full_quads = n_rows / 4;
+    let tile_bytes = n_blocks * 840;
+
+    let scratch_per = n_blocks * 4;
+    let my_scratch = unsafe { d_scratch.add(ith * scratch_per) };
+
+    let tok_chunk_size = 16usize;
+    let n_tok_chunks = (n_tokens + tok_chunk_size - 1) / tok_chunk_size;
+    let total_chunks = full_quads * n_tok_chunks;
+
+    let mut chunk = ith as i32;
+    while (chunk as usize) < total_chunks {
+        let quad = (chunk as usize) % full_quads;
+        let tok_idx = (chunk as usize) / full_quads;
+        let t_start = tok_idx * tok_chunk_size;
+        let t_end = (t_start + tok_chunk_size).min(n_tokens);
+        let base_row = quad * 4;
+
+        // Pre-computed d row for this quad: 4 f32s per block, laid out contiguously.
+        let quad_d = unsafe { d_arr_base.add(quad * n_blocks * 4) };
+
+        for t in t_start..t_end {
+            let q8 = unsafe { batch_q8_qs.add(t * qs_stride) };
+            let q8_d = unsafe { batch_q8_d.add(t * n_blocks) };
+            let bsums = unsafe { batch_q8_bsums.add(t * n_blocks * 16) };
+            let out_ptr = unsafe { output.add(t * output_stride + base_row) };
+
+            unsafe {
+                // Hot inner loop: just 4 f32 multiplies per block, no
+                // scattered loads and no f16 conversion.
+                for blk in 0..n_blocks {
+                    let qd = *q8_d.add(blk);
+                    let src = quad_d.add(blk * 4);
+                    let dst = my_scratch.add(blk * 4);
+                    *dst.add(0) = *src.add(0) * qd;
+                    *dst.add(1) = *src.add(1) * qd;
+                    *dst.add(2) = *src.add(2) * qd;
+                    *dst.add(3) = *src.add(3) * qd;
+                }
+                ffi_inference::q6k_dot_q8k_4row_repacked(
+                    packed.add(quad * tile_bytes),
+                    q8, bsums, out_ptr,
+                    n_blocks as i32, my_scratch,
+                );
+            }
+        }
+
+        chunk = current_chunk.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 /// Q6K repacked batch matvec — work-stealing across row quads × token chunks.
 #[allow(clippy::too_many_arguments)]
 pub fn q6k_repacked_batch_ws(

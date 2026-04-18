@@ -121,6 +121,11 @@ pub struct Gemma4Model {
     pub embed_weight: *const u8,
     pub embed_dtype: u32,
     pub embed_q6k_repacked: Option<Vec<u8>>,
+    /// Pre-computed `f16_to_f32(d)` for the Q6K output head. Layout:
+    /// `d_arr[(quad * n_blocks + blk) * 4 + r]`. Present iff
+    /// `embed_q6k_repacked` is Some. Built at model load by
+    /// `repack::q6k_precompute_d_arr`.
+    pub embed_q6k_d_arr: Option<Vec<f32>>,
     pub norm_weight: *const f32,
 
     // PLE global tensors
@@ -388,7 +393,24 @@ impl Gemma4Model {
             rope_freqs,
             layers,
             embed_weight,
-            embed_q6k_repacked: None, // repacking hurts for large vocab (d_arr extraction overhead)
+            // Pre-computed d_arr removes the hot-path f16-extraction cost,
+            // so the repacked output head is now a net win (~15 ms/decode).
+            embed_q6k_repacked: if embed_dtype == crate::inference::matmul::GGML_TYPE_Q6_K
+                && vocab_size % 4 == 0
+                && hidden_dim % 256 == 0
+            {
+                Some(crate::inference::repack::q6k_repack_4row(embed_weight, vocab_size, hidden_dim))
+            } else {
+                None
+            },
+            embed_q6k_d_arr: if embed_dtype == crate::inference::matmul::GGML_TYPE_Q6_K
+                && vocab_size % 4 == 0
+                && hidden_dim % 256 == 0
+            {
+                Some(crate::inference::repack::q6k_precompute_d_arr(embed_weight, vocab_size, hidden_dim))
+            } else {
+                None
+            },
             embed_dtype,
             norm_weight,
             ple_token_embd,

@@ -124,9 +124,11 @@ pub(crate) fn forward_one_inner(
     let t_out_start = if timing { Some(std::time::Instant::now()) } else { None };
     current_chunk.store(nth as i32, Ordering::Relaxed);
     barrier.wait();
-    if let Some(ref q6k_buf) = model.embed_q6k_repacked {
-        matmul_graph::q6k_repacked_batch_ws(
-            q6k_buf.as_ptr(), model.embed_weight,
+    if let (Some(ref q6k_buf), Some(ref d_arr)) =
+        (&model.embed_q6k_repacked, &model.embed_q6k_d_arr)
+    {
+        matmul_graph::q6k_repacked_batch_ws_pre_d(
+            q6k_buf.as_ptr(), d_arr.as_ptr(),
             state.q8_qs.as_ptr(), state.q8_d.as_ptr(), state.q8_bsums.as_ptr(),
             state.logits.as_mut_ptr(), state.q6k_d_scratch.as_mut_ptr(),
             logit_rows, hd, 1, logit_rows,
