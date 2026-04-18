@@ -148,6 +148,42 @@ pub fn q5k_matvec_ws(
     }
 }
 
+/// Q5K matvec on the repacked 4-row tile layout produced by
+/// `repack::q5k_repack_4row`. Reads one 704-byte tile per block (4 × 176).
+/// Mirrors `q5k_matvec_ws` but hands a single packed pointer to the kernel
+/// — the tile layout removes the scattered 4-row cache loads the old
+/// per-row path forced.
+pub fn q5k_matvec_repacked_ws(
+    packed: *const u8, q8: *const i8, q8_d: *const f32, bsums: *const i16,
+    output: *mut f32, n_rows: usize, n_cols: usize,
+    current_chunk: &AtomicI32, ith: usize, _nth: usize,
+) {
+    let n_blocks = n_cols / Q5K_BLOCK_SIZE;
+    let tile_bytes = 4 * Q5K_BLOCK_BYTES * n_blocks;
+    let full_quads = n_rows / 4;
+    let pow2 = pow2_table();
+
+    let mut chunk = ith as i32;
+    while (chunk as usize) < full_quads {
+        let quad = chunk as usize;
+        unsafe {
+            ffi_inference::q5k_dot_q8k_4row_repacked(
+                packed.add(quad * tile_bytes),
+                q8, bsums,
+                output.add(quad * 4),
+                n_blocks as i32, q8_d, pow2.as_ptr(),
+            );
+        }
+        chunk = current_chunk.fetch_add(1, Ordering::Relaxed);
+    }
+
+    // Tail: rows not in a full quad fall back to the per-row kernel, reading
+    // the ORIGINAL (non-repacked) weight layout. Callers must ensure the raw
+    // weight pointer is available for tail rows if any; Gemma 4 E2B Q5K
+    // tensors (attn_k, attn_output) have n_rows % 4 == 0 so this path is
+    // currently unreachable in production.
+}
+
 pub fn q6k_matvec_ws(
     weight: *const u8, q8: *const i8, q8_d: *const f32, bsums: *const i16,
     output: *mut f32, d_scratch: *mut f32,

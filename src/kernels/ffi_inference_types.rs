@@ -20,6 +20,15 @@ pub type Q5kDot4RowFn = unsafe extern "C" fn(
     *const u8, *const u8, *const u8, *const u8,
     *const i8, *const i16,
     *mut f32, i32, *const f32, *const f32);
+pub type Q5kDot4RowRepackedFn = unsafe extern "C" fn(
+    *const u8,   // packed (4 × Q5K blocks per tile, 704 bytes)
+    *const i8,   // q8_qs
+    *const i16,  // q8_bsums
+    *mut f32,    // scores [4]
+    i32,         // n_blocks
+    *const f32,  // q8_d (per-block activation scale)
+    *const f32,  // pow2 lookup table
+);
 pub type Q6kDotQ8kFn = unsafe extern "C" fn(
     *const u8, *const i8, *const i16,
     i32, *const f32) -> f32;

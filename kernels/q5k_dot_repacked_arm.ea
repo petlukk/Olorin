@@ -1,0 +1,194 @@
+// q5k_dot_repacked_arm.ea — ARM NEON Q5_K × Q8_K dot, reads interleaved tile
+//
+// Tile layout per superblock: 4 × 176 = 704 bytes
+//   row0[176] | row1[176] | row2[176] | row3[176]
+//
+// Each 176-byte row block: d(f16)@0 dmin(f16)@2 scales[12]@4 qh[32]@16 qs[128]@48
+//
+// Structurally identical to q5k_dot_arm.ea: the dot_row / mins_corr_bp / f16_d_dm
+// helpers are reused by passing the tile pointer and per-row base offsets.
+
+#[cfg(aarch64)]
+
+func read_u32(p: *restrict i8, off: i32) -> i32 {
+    let p32: *restrict i32 = ptr_as_i32(p)
+    return p32[off / 4]
+}
+
+func f16_d_dm(p: *restrict i8, bp: i32) -> f32x4 {
+    let ph: *restrict i16 = ptr_as_i16(p)
+    let raw: i16x4 = load(ph, bp / 2)
+    return cvt_f16_f32(raw)
+}
+
+func mins_corr_bp(rw: *restrict i8, sp: i32, paired: i16x8) -> i32 {
+    let u1: i32 = read_u32(rw, sp + 4)
+    let u2: i32 = read_u32(rw, sp + 8)
+    let mn0: i32 = u1 & 0x3f3f3f3f
+    let mn1: i32 = ((u2 >> 4) & 0x0f0f0f0f) | (((u1 >> 6) & 0x03030303) << 4)
+
+    let mut corr: i32 = 0
+    corr = corr + (mn0 & 255) * to_i32(paired[0])
+    corr = corr + ((mn0 >> 8) & 255) * to_i32(paired[1])
+    corr = corr + ((mn0 >> 16) & 255) * to_i32(paired[2])
+    corr = corr + ((mn0 >> 24) & 255) * to_i32(paired[3])
+    corr = corr + (mn1 & 255) * to_i32(paired[4])
+    corr = corr + ((mn1 >> 8) & 255) * to_i32(paired[5])
+    corr = corr + ((mn1 >> 16) & 255) * to_i32(paired[6])
+    corr = corr + ((mn1 >> 24) & 255) * to_i32(paired[7])
+    return corr
+}
+
+// Q5K dot for one row, reads 176-byte row block starting at `rw[base]`.
+// Identical math to q5k_dot_arm.ea:dot_row — offsets are relative to the
+// (tile_base + row_offset) absolute address passed by the caller.
+func dot_row(
+    rw: *restrict i8, qs_off: i32, qh_off: i32, sp: i32,
+    q8: *restrict i8, q8_off: i32,
+    mask_lo: i8x16, shift4: i8x16
+) -> i32 {
+    let u0: i32 = read_u32(rw, sp)
+    let u2: i32 = read_u32(rw, sp + 8)
+    let sc03: i32 = u0 & 0x3f3f3f3f
+    let sc47: i32 = (u2 & 0x0f0f0f0f) | (((u0 >> 6) & 0x03030303) << 4)
+
+    let one: i8x16 = splat(1)
+    let sh1: i8x16 = splat(1)
+    let sh2: i8x16 = splat(2)
+    let sh3: i8x16 = splat(3)
+    let sh4_h: i8x16 = splat(4)
+    let sh5: i8x16 = splat(5)
+    let sh6: i8x16 = splat(6)
+    let sh7: i8x16 = splat(7)
+
+    let qh_a: i8x16 = load(rw, qh_off)
+    let qh_b: i8x16 = load(rw, qh_off + 16)
+
+    let mut sumi: i32 = 0
+
+    // Group 0
+    let pa0: i8x16 = load(rw, qs_off)
+    let pb0: i8x16 = load(rw, qs_off + 16)
+    let h0_lo_a: i8x16 = (qh_a .& one) .<< sh4_h
+    let h0_lo_b: i8x16 = (qh_b .& one) .<< sh4_h
+    let h0_hi_a: i8x16 = ((qh_a .>> sh1) .& one) .<< sh4_h
+    let h0_hi_b: i8x16 = ((qh_b .>> sh1) .& one) .<< sh4_h
+    let q0_lo_a: i8x16 = (pa0 .& mask_lo) .| h0_lo_a
+    let q0_lo_b: i8x16 = (pb0 .& mask_lo) .| h0_lo_b
+    let q0_hi_a: i8x16 = ((pa0 .>> shift4) .& mask_lo) .| h0_hi_a
+    let q0_hi_b: i8x16 = ((pb0 .>> shift4) .& mask_lo) .| h0_hi_b
+    let q8_00: i8x16 = load(q8, q8_off)
+    let q8_01: i8x16 = load(q8, q8_off + 16)
+    let q8_02: i8x16 = load(q8, q8_off + 32)
+    let q8_03: i8x16 = load(q8, q8_off + 48)
+    sumi = sumi + reduce_add(vdot_i32(q0_lo_a, q8_00) .+ vdot_i32(q0_lo_b, q8_01)) * (sc03 & 255)
+    sumi = sumi + reduce_add(vdot_i32(q0_hi_a, q8_02) .+ vdot_i32(q0_hi_b, q8_03)) * ((sc03 >> 8) & 255)
+
+    // Group 1
+    let pa1: i8x16 = load(rw, qs_off + 32)
+    let pb1: i8x16 = load(rw, qs_off + 48)
+    let h1_lo_a: i8x16 = ((qh_a .>> sh2) .& one) .<< sh4_h
+    let h1_lo_b: i8x16 = ((qh_b .>> sh2) .& one) .<< sh4_h
+    let h1_hi_a: i8x16 = ((qh_a .>> sh3) .& one) .<< sh4_h
+    let h1_hi_b: i8x16 = ((qh_b .>> sh3) .& one) .<< sh4_h
+    let q1_lo_a: i8x16 = (pa1 .& mask_lo) .| h1_lo_a
+    let q1_lo_b: i8x16 = (pb1 .& mask_lo) .| h1_lo_b
+    let q1_hi_a: i8x16 = ((pa1 .>> shift4) .& mask_lo) .| h1_hi_a
+    let q1_hi_b: i8x16 = ((pb1 .>> shift4) .& mask_lo) .| h1_hi_b
+    let q8_10: i8x16 = load(q8, q8_off + 64)
+    let q8_11: i8x16 = load(q8, q8_off + 80)
+    let q8_12: i8x16 = load(q8, q8_off + 96)
+    let q8_13: i8x16 = load(q8, q8_off + 112)
+    sumi = sumi + reduce_add(vdot_i32(q1_lo_a, q8_10) .+ vdot_i32(q1_lo_b, q8_11)) * ((sc03 >> 16) & 255)
+    sumi = sumi + reduce_add(vdot_i32(q1_hi_a, q8_12) .+ vdot_i32(q1_hi_b, q8_13)) * ((sc03 >> 24) & 255)
+
+    // Group 2
+    let pa2: i8x16 = load(rw, qs_off + 64)
+    let pb2: i8x16 = load(rw, qs_off + 80)
+    let h2_lo_a: i8x16 = ((qh_a .>> sh4_h) .& one) .<< sh4_h
+    let h2_lo_b: i8x16 = ((qh_b .>> sh4_h) .& one) .<< sh4_h
+    let h2_hi_a: i8x16 = ((qh_a .>> sh5) .& one) .<< sh4_h
+    let h2_hi_b: i8x16 = ((qh_b .>> sh5) .& one) .<< sh4_h
+    let q2_lo_a: i8x16 = (pa2 .& mask_lo) .| h2_lo_a
+    let q2_lo_b: i8x16 = (pb2 .& mask_lo) .| h2_lo_b
+    let q2_hi_a: i8x16 = ((pa2 .>> shift4) .& mask_lo) .| h2_hi_a
+    let q2_hi_b: i8x16 = ((pb2 .>> shift4) .& mask_lo) .| h2_hi_b
+    let q8_20: i8x16 = load(q8, q8_off + 128)
+    let q8_21: i8x16 = load(q8, q8_off + 144)
+    let q8_22: i8x16 = load(q8, q8_off + 160)
+    let q8_23: i8x16 = load(q8, q8_off + 176)
+    sumi = sumi + reduce_add(vdot_i32(q2_lo_a, q8_20) .+ vdot_i32(q2_lo_b, q8_21)) * (sc47 & 255)
+    sumi = sumi + reduce_add(vdot_i32(q2_hi_a, q8_22) .+ vdot_i32(q2_hi_b, q8_23)) * ((sc47 >> 8) & 255)
+
+    // Group 3
+    let pa3: i8x16 = load(rw, qs_off + 96)
+    let pb3: i8x16 = load(rw, qs_off + 112)
+    let h3_lo_a: i8x16 = ((qh_a .>> sh6) .& one) .<< sh4_h
+    let h3_lo_b: i8x16 = ((qh_b .>> sh6) .& one) .<< sh4_h
+    let h3_hi_a: i8x16 = ((qh_a .>> sh7) .& one) .<< sh4_h
+    let h3_hi_b: i8x16 = ((qh_b .>> sh7) .& one) .<< sh4_h
+    let q3_lo_a: i8x16 = (pa3 .& mask_lo) .| h3_lo_a
+    let q3_lo_b: i8x16 = (pb3 .& mask_lo) .| h3_lo_b
+    let q3_hi_a: i8x16 = ((pa3 .>> shift4) .& mask_lo) .| h3_hi_a
+    let q3_hi_b: i8x16 = ((pb3 .>> shift4) .& mask_lo) .| h3_hi_b
+    let q8_30: i8x16 = load(q8, q8_off + 192)
+    let q8_31: i8x16 = load(q8, q8_off + 208)
+    let q8_32: i8x16 = load(q8, q8_off + 224)
+    let q8_33: i8x16 = load(q8, q8_off + 240)
+    sumi = sumi + reduce_add(vdot_i32(q3_lo_a, q8_30) .+ vdot_i32(q3_lo_b, q8_31)) * ((sc47 >> 16) & 255)
+    sumi = sumi + reduce_add(vdot_i32(q3_hi_a, q8_32) .+ vdot_i32(q3_hi_b, q8_33)) * ((sc47 >> 24) & 255)
+
+    return sumi
+}
+
+// 4-row dot product on repacked tile layout.
+// `packed` points at tile_base for the first block; advance by 704 per block.
+// Per block, the 4 rows live at tile+0, tile+176, tile+352, tile+528.
+export func q5k_dot_q8k_4row_repacked(
+    packed: *restrict i8,
+    q8: *restrict i8, bsums: *restrict i16,
+    out scores: *mut f32,
+    n_blocks: i32, q8_d: *restrict f32, pow2: *restrict f32
+) {
+    let mask_lo: i8x16 = splat(15)
+    let shift4: i8x16 = splat(4)
+    let mut res0: f32 = 0.0
+    let mut res1: f32 = 0.0
+    let mut res2: f32 = 0.0
+    let mut res3: f32 = 0.0
+
+    let mut blk: i32 = 0
+    while blk < n_blocks {
+        let tile: i32 = blk * 704
+        let b0: i32 = tile
+        let b1: i32 = tile + 176
+        let b2: i32 = tile + 352
+        let b3: i32 = tile + 528
+        let q8o: i32 = blk * 256
+
+        let s0: i32 = dot_row(packed, b0 + 48, b0 + 16, b0 + 4, q8, q8o, mask_lo, shift4)
+        let s1: i32 = dot_row(packed, b1 + 48, b1 + 16, b1 + 4, q8, q8o, mask_lo, shift4)
+        let s2: i32 = dot_row(packed, b2 + 48, b2 + 16, b2 + 4, q8, q8o, mask_lo, shift4)
+        let s3: i32 = dot_row(packed, b3 + 48, b3 + 16, b3 + 4, q8, q8o, mask_lo, shift4)
+
+        let blo: i16x8 = load(bsums, blk * 16)
+        let bhi: i16x8 = load(bsums, blk * 16 + 8)
+        let paired: i16x8 = addp_i16(blo, bhi)
+
+        let qd: f32 = q8_d[blk]
+        let dd0: f32x4 = f16_d_dm(packed, b0)
+        let dd1: f32x4 = f16_d_dm(packed, b1)
+        let dd2: f32x4 = f16_d_dm(packed, b2)
+        let dd3: f32x4 = f16_d_dm(packed, b3)
+        res0 = res0 + dd0[0]*qd*to_f32(s0) - dd0[1]*qd*to_f32(mins_corr_bp(packed, b0 + 4, paired))
+        res1 = res1 + dd1[0]*qd*to_f32(s1) - dd1[1]*qd*to_f32(mins_corr_bp(packed, b1 + 4, paired))
+        res2 = res2 + dd2[0]*qd*to_f32(s2) - dd2[1]*qd*to_f32(mins_corr_bp(packed, b2 + 4, paired))
+        res3 = res3 + dd3[0]*qd*to_f32(s3) - dd3[1]*qd*to_f32(mins_corr_bp(packed, b3 + 4, paired))
+
+        blk = blk + 1
+    }
+    scores[0] = res0
+    scores[1] = res1
+    scores[2] = res2
+    scores[3] = res3
+}
