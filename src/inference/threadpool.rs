@@ -4,9 +4,58 @@
 //! - `ThreadPool`: legacy mutex/condvar dispatch (used during migration)
 //! - `SpinBarrier`: atomic barrier matching llama.cpp ggml_barrier()
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering, fence};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
+
+// ---------------------------------------------------------------------------
+// Thread-count detection
+// ---------------------------------------------------------------------------
+
+/// Count physical (non-SMT) CPU cores via Linux sysfs.
+/// Returns None if the sysfs interface isn't available or unreadable
+/// (e.g. non-Linux, sandboxed containers).
+fn physical_core_count_sysfs() -> Option<usize> {
+    let entries = std::fs::read_dir("/sys/devices/system/cpu").ok()?;
+    let mut siblings_first: HashSet<u32> = HashSet::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with("cpu") || !name[3..].chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        let path = entry.path().join("topology/thread_siblings_list");
+        let Ok(txt) = std::fs::read_to_string(&path) else { continue };
+        // Format: "0,8" or "0-1" or "0". First sibling ID = physical core representative.
+        let first = txt
+            .trim()
+            .split(|c: char| c == ',' || c == '-')
+            .next()?
+            .parse::<u32>()
+            .ok()?;
+        siblings_first.insert(first);
+    }
+    if siblings_first.is_empty() { None } else { Some(siblings_first.len()) }
+}
+
+/// Decide worker thread count. Priority:
+/// 1. `OLORIN_THREADS` env var (positive integer).
+/// 2. Physical-core count from sysfs — ignores SMT siblings on x86,
+///    equals logical count on ARM (no SMT on Cortex-A76 / Pi 5).
+/// 3. `std::thread::available_parallelism()` fallback.
+/// 4. `1` last-resort.
+pub fn detect_thread_count() -> usize {
+    if let Ok(s) = std::env::var("OLORIN_THREADS") {
+        if let Ok(n) = s.trim().parse::<usize>() {
+            if n >= 1 { return n; }
+        }
+    }
+    if let Some(n) = physical_core_count_sysfs() {
+        return n;
+    }
+    thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
+}
 
 // ---------------------------------------------------------------------------
 // SpinBarrier — matches llama.cpp ggml_barrier() exactly
@@ -108,9 +157,7 @@ struct GraphPoolShared {
 
 impl GraphPool {
     pub fn new() -> Self {
-        let n_threads = thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1);
+        let n_threads = detect_thread_count();
 
         let shared = Box::into_raw(Box::new(GraphPoolShared {
             mutex: Mutex::new(()),
@@ -290,9 +337,7 @@ pub struct ThreadPool {
 
 impl ThreadPool {
     pub fn new() -> Self {
-        let n_threads = thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1);
+        let n_threads = detect_thread_count();
 
         let noop_ptr = NOOP_FN as *const dyn Fn(usize, usize);
         let shared = Arc::new((
