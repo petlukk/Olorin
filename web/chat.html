@@ -146,7 +146,7 @@ async function sendChat(id,body,input){
       for(const line of lines){
         if(!line.startsWith('data: ')||line==='data: [DONE]')continue;
         try{const ev=JSON.parse(line.slice(6));
-          if(ev.thinking===true){cursor.textContent=' thinking\u2026';cursor.className='cursor-thinking';}
+          if(ev.thinking===true){cursor.textContent=' \u2026pondering';cursor.className='cursor-thinking';}
           else if(ev.thinking===false){cursor.textContent='';cursor.className='cursor-blink';}
           else if(ev.error){bubble.textContent+=ev.error;}
           else if(ev.token!=null){bubble.textContent+=ev.token;cursor.textContent='';cursor.className='cursor-blink';}
