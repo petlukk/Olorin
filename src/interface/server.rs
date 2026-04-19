@@ -34,7 +34,7 @@ pub fn run(port: u16, model_arg: Option<&str>, draft_arg: Option<&str>, draft_k:
     let teleported = Arc::new(AtomicBool::new(false));
 
     // Wire the server's AtomicBool into DispatchContext so whatsapp.rs can set it
-    ctx.lock().unwrap().server_teleported = Some(teleported.clone());
+    ctx.lock().unwrap_or_else(|e| e.into_inner()).server_teleported = Some(teleported.clone());
 
     let bind_host = std::env::var("OLORIN_BIND").unwrap_or_else(|_| "127.0.0.1".to_string());
     let addr = format!("{bind_host}:{port}");
@@ -97,7 +97,7 @@ fn handle_connection(stream: &mut std::net::TcpStream, ctx: Arc<Mutex<DispatchCo
             serve_json(stream, r#"{"name":"olorin","backend":"pipe"}"#);
         }
         ("GET", "/api/system") => {
-            let c = ctx.lock().unwrap();
+            let c = ctx.lock().unwrap_or_else(|e| e.into_inner());
             let recall_level = c.recall_level();
             let config_json = c.get_config();
             drop(c);
@@ -130,7 +130,7 @@ fn handle_connection(stream: &mut std::net::TcpStream, ctx: Arc<Mutex<DispatchCo
             term_stream::handle_term_stream(stream, id);
         }
         ("GET", "/api/config") => {
-            let body = ctx.lock().unwrap().get_config();
+            let body = ctx.lock().unwrap_or_else(|e| e.into_inner()).get_config();
             serve_json(stream, &body);
         }
         ("POST", "/api/config") => {
@@ -213,7 +213,7 @@ fn handle_generate(
 
     // Apply per-request inference params
     {
-        let mut c = ctx.lock().unwrap();
+        let mut c = ctx.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(engine) = &mut c.engine {
             if let Some(v) = crate::storage::json::extract_json_float(body_str, "temperature") {
                 engine.temperature = v;
@@ -252,7 +252,7 @@ fn handle_generate(
     let ctx_clone = ctx.clone();
     let prompt_owned = prompt.to_string();
     let sender = std::thread::spawn(move || {
-        let mut guard = ctx_clone.lock().unwrap();
+        let mut guard = ctx_clone.lock().unwrap_or_else(|e| e.into_inner());
         guard.dispatch_streaming(&prompt_owned, tx);
     });
 
@@ -324,7 +324,7 @@ fn handle_command(
     let (output, success) = if command.is_empty() {
         ("missing command".to_string(), false)
     } else {
-        let mut guard = ctx.lock().unwrap();
+        let mut guard = ctx.lock().unwrap_or_else(|e| e.into_inner());
         let resp      = guard.dispatch(&command);
         let ok        = !resp.blocked;
         (resp.text, ok)
@@ -474,8 +474,8 @@ fn handle_config_update(
 ) {
     let body_bytes = read_body(stream, req, buf, n);
     let body_str = std::str::from_utf8(&body_bytes).unwrap_or("");
-    ctx.lock().unwrap().update_config(body_str);
-    let config = ctx.lock().unwrap().get_config();
+    ctx.lock().unwrap_or_else(|e| e.into_inner()).update_config(body_str);
+    let config = ctx.lock().unwrap_or_else(|e| e.into_inner()).get_config();
     serve_json(stream, &config);
 }
 
@@ -492,6 +492,6 @@ fn handle_config_apikey(
         serve_json(stream, r#"{"ok":false,"error":"empty key"}"#);
         return;
     }
-    ctx.lock().unwrap().store_api_key(key);
+    ctx.lock().unwrap_or_else(|e| e.into_inner()).store_api_key(key);
     serve_json(stream, r#"{"ok":true}"#);
 }

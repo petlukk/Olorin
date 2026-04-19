@@ -335,7 +335,7 @@ fn wa_message_loop(
                 if text.is_empty() || jid.is_empty() { continue; }
 
                 let response = {
-                    let mut guard = ctx.lock().unwrap();
+                    let mut guard = ctx.lock().unwrap_or_else(|e| e.into_inner());
                     guard.dispatch(&text)
                 };
 
