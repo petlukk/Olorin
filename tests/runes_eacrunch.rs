@@ -95,3 +95,19 @@ fn open_capped_rejects_symlink_outside_allowlist() {
     );
     let _ = std::fs::remove_file(&link);
 }
+
+#[test]
+fn slash_rune_dispatches() {
+    olorin::kernels::ffi::init().unwrap();
+    let (cmd, arg) = olorin::core::dispatch::match_command(b"/rune eacrunch /tmp/x.csv");
+    assert_eq!(cmd, olorin::core::dispatch::CMD_RUNE);
+    assert_eq!(std::str::from_utf8(arg).unwrap(), "eacrunch /tmp/x.csv");
+}
+
+#[test]
+fn slash_rune_unknown_returns_message() {
+    olorin::kernels::ffi::init().unwrap();
+    // Simulate dispatching to an unknown rune — should give a friendly message.
+    let result = olorin::runes::run_rune("nonexistent_rune_xyz", "");
+    assert!(result.is_none());
+}

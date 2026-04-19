@@ -47,6 +47,33 @@ impl DispatchContext {
         crate::interface::whatsapp::teleport_loop(self)
     }
 
+    // ── Rune handling ────────────────────────────────────────────────────────
+
+    pub(crate) fn handle_rune(&mut self, cmd_arg: &[u8]) -> Response {
+        let full = std::str::from_utf8(cmd_arg).unwrap_or("").trim();
+        let (name, args) = match full.split_once(char::is_whitespace) {
+            Some((n, a)) => (n, a.trim()),
+            None => (full, ""),
+        };
+        if name.is_empty() {
+            return Response::text(
+                "usage: /rune <name> [args] — try `/rune eacrunch <path.csv>`"
+            );
+        }
+        match crate::runes::run_rune(name, args) {
+            Some(result) => {
+                let mut body = result.answer;
+                if let Some(d) = result.details {
+                    body.push_str("\n\n---\n");
+                    body.push_str(&d);
+                }
+                body.push_str(&format!("\n[timing: {}µs]", result.timing_us));
+                Response::text(body)
+            }
+            None => Response::text(format!("unknown rune: {name}")),
+        }
+    }
+
     // ── Tool command handling ────────────────────────────────────────────────
 
     pub(crate) fn handle_tool_command(&mut self, cmd_id: i32, cmd_arg: &[u8]) -> Response {
@@ -136,6 +163,9 @@ Tools:
   /weather <city>  /translate <lang> <text>  /define <word>  /summarize <url>
   /grep <pattern> [path]  /git <subcommand> [args]  /remind <time> <message>
   /recall <query>  /teleport
+
+Runes (SIMD tool calls):
+  /rune eacrunch <csv>   — summarize a CSV via SIMD
 
 Agent: Olorin".to_string()
     }

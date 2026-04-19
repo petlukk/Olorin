@@ -6,6 +6,7 @@ pub mod common;
 
 /// Output safety classification for a rune's `answer` field.
 /// Declared per-rune, never computed at runtime.
+#[derive(Debug, PartialEq)]
 pub enum OutputSafety {
     /// Numeric/aggregate only; safe to inline in LLM context as-is.
     Trusted,

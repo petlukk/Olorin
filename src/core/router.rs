@@ -337,6 +337,9 @@ impl DispatchContext {
         if cmd_id == dispatch::CMD_TELEPORT {
             return Err(self.handle_teleport());
         }
+        if cmd_id == dispatch::CMD_RUNE {
+            return Err(self.handle_rune(cmd_arg));
+        }
         if cmd_id >= dispatch::CMD_TOOL_FIRST && cmd_id <= dispatch::CMD_TOOL_LAST {
             return Err(self.handle_tool_command(cmd_id, cmd_arg));
         }
