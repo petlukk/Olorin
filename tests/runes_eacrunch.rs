@@ -111,3 +111,24 @@ fn slash_rune_unknown_returns_message() {
     let result = olorin::runes::run_rune("nonexistent_rune_xyz", "");
     assert!(result.is_none());
 }
+
+#[test]
+fn csv_scan_finds_delimiters() {
+    olorin::kernels::ffi::init().unwrap();
+    let input = b"a,b,c\nd,e,f\n";
+    let mut commas  = vec![0i32; input.len()];
+    let mut nlines  = vec![0i32; input.len()];
+    let mut n_comma = 0i32;
+    let mut n_nline = 0i32;
+    unsafe {
+        olorin::kernels::ffi::csv_scan(
+            input.as_ptr(), input.len() as i32,
+            commas.as_mut_ptr(), nlines.as_mut_ptr(),
+            &mut n_comma, &mut n_nline,
+        );
+    }
+    assert_eq!(n_comma, 4);
+    assert_eq!(n_nline, 2);
+    assert_eq!(&commas[..4], &[1, 3, 7, 9]);
+    assert_eq!(&nlines[..2], &[5, 11]);
+}

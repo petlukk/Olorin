@@ -22,6 +22,11 @@ type ScanPrefixesFn     = unsafe extern "C" fn(*const u8, i32, *mut i32, *mut i3
 type MatchCommandFn     = unsafe extern "C" fn(*const u8, i32, *mut i32);
 type FusedSafetyFn      = unsafe extern "C" fn(*const u8, i32, *mut i32, *mut i32, *mut i32);
 type ClassifyIntentFn   = unsafe extern "C" fn(*const u8, i32, *mut i32, *mut i32, *mut i32);
+pub type CsvScanFn      = unsafe extern "C" fn(
+    *const u8, i32,
+    *mut i32, *mut i32,
+    *mut i32, *mut i32,
+);
 type EvalExprFn         = unsafe extern "C" fn(*const u8, i32, *mut i64, *mut i32, *mut i64, *mut i32);
 type ZeroizeFn          = unsafe extern "C" fn(*mut u8, i32);
 type AnsiClassifyFn     = unsafe extern "C" fn(*const u8, *mut u8, i32);
@@ -66,6 +71,7 @@ pub struct KernelTable {
     pub match_command:            MatchCommandFn,
     pub scan_safety_fused:        FusedSafetyFn,
     pub classify_intent:          ClassifyIntentFn,
+    pub csv_scan:                 CsvScanFn,
     pub eval_expr:                EvalExprFn,
     pub zeroize:                  ZeroizeFn,
     pub batch_dot:                BatchDotFn,
@@ -163,6 +169,7 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
     let command_router  = load("command_router")?;
     let fused_safety    = load("fused_safety")?;
     let intent_router   = load("intent_router")?;
+    let csv_scan_lib    = load("csv_scan")?;
     let expr_eval       = load("expr_eval")?;
     let zeroize_lib     = load("zeroize")?;
     let jl_project_lib  = load("jl_project")?;
@@ -209,6 +216,8 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
                 sym(&fused_safety, b"scan_safety_fused\0")?),
             classify_intent: std::mem::transmute(
                 sym(&intent_router, b"classify_intent\0")?),
+            csv_scan: std::mem::transmute(
+                sym(&csv_scan_lib, b"csv_scan\0")?),
             eval_expr: std::mem::transmute(
                 sym(&expr_eval, b"eval_expr\0")?),
             zeroize: std::mem::transmute(
@@ -245,6 +254,7 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
                 zeroize_lib, search, jl_project_lib,
                 chacha20_lib, chacha20_sv2, pretokenize_lib,
                 ansi_parser_lib, terminal_diff_lib,
+                csv_scan_lib,
             ],
         };
         Ok(table)
@@ -402,6 +412,14 @@ pub unsafe fn chacha20_search_v2(
         max_matches, max_line_len, window_size,
         match_count, lines_written,
     );
+}
+
+pub unsafe fn csv_scan(
+    text: *const u8, len: i32,
+    out_commas: *mut i32, out_newlines: *mut i32,
+    out_n_comma: *mut i32, out_n_newline: *mut i32,
+) {
+    (k().csv_scan)(text, len, out_commas, out_newlines, out_n_comma, out_n_newline);
 }
 
 /// SIMD-accelerated ANSI byte classification.
