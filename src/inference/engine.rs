@@ -77,6 +77,7 @@ pub struct LayerWeights {
     pub w_up_repacked: Option<Vec<u8>>,
     pub w_down_repacked: Option<Vec<u8>>,
     pub w_down_q6k_repacked: Option<Vec<u8>>,
+    pub w_down_q6k_d_arr: Option<Vec<f32>>,
     // Q6K 4-row repack + pre-computed d_arr for attention Q/V projections
     // (Gemma 4 E2B Q4_K_M assigns these as Q6K in 17 of 35 layers).
     // Populated by engine_helpers::populate_q4k_repacked when dtype is Q6K.
@@ -344,6 +345,7 @@ impl Gemma4Model {
                 w_up_repacked: None,
                 w_down_repacked: None,
                 w_down_q6k_repacked: None,
+                w_down_q6k_d_arr: None,
                 wq_q6k_repacked: None,
                 wq_q6k_d_arr: None,
                 wv_q6k_repacked: None,

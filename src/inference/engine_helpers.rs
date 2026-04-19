@@ -278,8 +278,14 @@ pub(crate) fn populate_q4k_repacked(
     lw.w_gate_repacked = try_repack_q4k(lw.w_gate, lw.w_gate_dtype, ffn_dim, hidden_dim);
     lw.w_up_repacked = try_repack_q4k(lw.w_up, lw.w_up_dtype, ffn_dim, hidden_dim);
     lw.w_down_repacked = try_repack_q4k(lw.w_down, lw.w_down_dtype, hidden_dim, ffn_dim);
-    // Q6K ffn_down repack (4-row tiles)
+    // Q6K ffn_down repack + pre-d (4-row tiles). Pre-d keeps the per-matvec
+    // f16→f32 scale conversion out of the hot path (same pattern as wq/wv).
     lw.w_down_q6k_repacked = try_repack_q6k(lw.w_down, lw.w_down_dtype, hidden_dim, ffn_dim);
+    if lw.w_down_q6k_repacked.is_some() {
+        lw.w_down_q6k_d_arr = Some(crate::inference::repack::q6k_precompute_d_arr(
+            lw.w_down, hidden_dim, ffn_dim,
+        ));
+    }
     // PLE projections
     if ple_dim > 0 {
         lw.inp_gate_repacked = try_repack_q4k(lw.inp_gate, lw.inp_gate_dtype, ple_dim, hidden_dim);

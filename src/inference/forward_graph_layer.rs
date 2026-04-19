@@ -416,9 +416,11 @@ pub(super) fn layer_forward_graph_timed(
     let t0 = t!();
     current_chunk.store(nth as i32, Ordering::Relaxed);
     barrier.wait();
-    if let Some(ref q6k_buf) = lw.w_down_q6k_repacked {
-        matmul_graph::q6k_repacked_batch_ws(
-            q6k_buf.as_ptr(), lw.w_down,
+    if let (Some(ref q6k_buf), Some(ref d_arr)) =
+        (&lw.w_down_q6k_repacked, &lw.w_down_q6k_d_arr)
+    {
+        matmul_graph::q6k_repacked_batch_ws_pre_d(
+            q6k_buf.as_ptr(), d_arr.as_ptr(),
             state.ffn_q8_qs.as_ptr(), state.ffn_q8_d.as_ptr(), state.ffn_q8_bsums.as_ptr(),
             state.down.as_mut_ptr(), state.q6k_d_scratch.as_mut_ptr(),
             hd, ffn_dim, 1, hd,
