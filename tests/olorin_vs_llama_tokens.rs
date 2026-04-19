@@ -8,7 +8,7 @@
 //!
 //! Run: cargo test --release --test olorin_vs_llama_tokens -- --nocapture --ignored
 
-use olorin::inference::generate::Engine;
+use olorin::inference::generate::{Engine, GenEvent};
 use olorin::inference::gguf::GgufFile;
 use olorin::inference::tokenizer::Tokenizer;
 use std::cell::RefCell;
@@ -65,11 +65,13 @@ fn run_comparison(path: &Path) {
 
     let got = RefCell::new(String::new());
     let tokens_seen: RefCell<Vec<String>> = RefCell::new(Vec::new());
-    let on_token = |t: &str| {
-        got.borrow_mut().push_str(t);
-        tokens_seen.borrow_mut().push(t.to_string());
+    let on_event = |ev: GenEvent| {
+        if let GenEvent::Token(t) = ev {
+            got.borrow_mut().push_str(t);
+            tokens_seen.borrow_mut().push(t.to_string());
+        }
     };
-    engine.generate(PROMPT, SYSTEM, &on_token).expect("generate");
+    engine.generate(PROMPT, SYSTEM, &on_event).expect("generate");
 
     println!("\n========== OLORIN FIRST 20 GREEDY TOKENS ==========");
     println!("concatenated output: {:?}", got.into_inner());

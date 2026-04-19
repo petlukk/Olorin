@@ -5,7 +5,7 @@
 //!
 //! Run: cargo test --release --test narration_verify -- --ignored --nocapture
 
-use olorin::inference::generate::Engine;
+use olorin::inference::generate::{Engine, GenEvent};
 use std::path::Path;
 
 #[test]
@@ -51,8 +51,8 @@ fn run(path: &Path) {
 
     use std::cell::RefCell;
     let got = RefCell::new(String::new());
-    let on_token = |t: &str| got.borrow_mut().push_str(t);
-    engine.generate(prompt, "", &on_token).expect("generate");
+    let on_event = |ev: GenEvent| if let GenEvent::Token(t) = ev { got.borrow_mut().push_str(t); };
+    engine.generate(prompt, "", &on_event).expect("generate");
     let text = got.into_inner();
 
     eprintln!("---- narration output ----\n{text}\n----");

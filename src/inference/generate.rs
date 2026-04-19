@@ -15,12 +15,27 @@ use crate::inference::tokenizer::Tokenizer;
 // Engine
 // ---------------------------------------------------------------------------
 
+/// Streaming event emitted by `Engine::generate`.
+///
+/// `Token` carries user-visible text (thinking content is already filtered
+/// out). `Thinking(true|false)` fires when the model opens / closes a
+/// `<|channel>...<channel|>` block — no token text is emitted while the
+/// block is active.
+pub enum GenEvent<'a> {
+    Token(&'a str),
+    Thinking(bool),
+}
+
 pub struct Engine {
     _gguf: GgufFile,           // owns the mmap — keeps weight pointers valid
     model: Gemma4Model,
     tokenizer: Tokenizer,
     state: Gemma4State,
     graph_pool: crate::inference::threadpool::GraphPool,
+    /// `<|channel>` token id — opens a thinking block. None if not in vocab.
+    channel_open_id: Option<u32>,
+    /// `<channel|>` token id — closes the thinking block.
+    channel_close_id: Option<u32>,
     pub max_tokens: usize,
     pub temperature: f32,
     pub top_k: usize,
@@ -44,12 +59,19 @@ impl Engine {
         eprintln!("[Olorin] Thread pool: {} threads", pool.thread_count());
         let state = Gemma4State::new(&model, max_seq_len, &pool);
 
+        // Gemma 4 brackets chain-of-thought in `<|channel>...<channel|>`.
+        // Look up the token ids once so the decode loop can compare by id.
+        let channel_open_id  = tokenizer.token_to_id("<|channel>");
+        let channel_close_id = tokenizer.token_to_id("<channel|>");
+
         Ok(Self {
             _gguf: gguf,
             model,
             tokenizer,
             state,
             graph_pool,
+            channel_open_id,
+            channel_close_id,
             // Defaults match llama.cpp + GGUF metadata for this model:
             //   general.sampling.top_k = 64
             //   general.sampling.top_p = 0.95
@@ -77,13 +99,17 @@ impl Engine {
         "gemma4-q4k"
     }
 
-    /// Generate text from a prompt. Calls `on_token` for each generated token.
-    /// Returns the complete generated text.
+    /// Generate text from a prompt.
+    ///
+    /// `on_event` is called with every user-visible token and with state
+    /// transitions when the model opens or closes a `<|channel>` thinking
+    /// block. Returned `String` is the user-visible text (thinking content
+    /// is excluded).
     pub fn generate(
         &mut self,
         prompt: &str,
         system: &str,
-        on_token: &dyn Fn(&str),
+        on_event: &dyn Fn(GenEvent),
     ) -> Result<String> {
         // 1. Format as Gemma chat template
         let formatted = format_chat(prompt, system);
@@ -124,6 +150,9 @@ impl Engine {
         let mut t_copy_total: u64 = 0;
         let mut t_other_total: u64 = 0;
 
+        // Track whether we're inside a Gemma 4 thinking block.
+        let mut in_thinking = false;
+
         for _ in 0..self.max_tokens {
             let t0 = Instant::now();
             let token_id = sample(
@@ -143,10 +172,29 @@ impl Engine {
             n_decode += 1;
 
             let t0 = Instant::now();
-            if !self.tokenizer.is_control_or_user_defined(token_id) {
+            if std::env::var("OLORIN_DEBUG_TOKENS").is_ok() {
                 let text = self.tokenizer.decode(&[token_id]);
-                on_token(&text);
-                output.push_str(&text);
+                let skipped = self.tokenizer.is_control_or_user_defined(token_id);
+                eprintln!(
+                    "[token] id={token_id:6} skipped={skipped} in_think={in_thinking} text={text:?}"
+                );
+            }
+            if Some(token_id) == self.channel_open_id {
+                if !in_thinking {
+                    in_thinking = true;
+                    on_event(GenEvent::Thinking(true));
+                }
+            } else if Some(token_id) == self.channel_close_id {
+                if in_thinking {
+                    in_thinking = false;
+                    on_event(GenEvent::Thinking(false));
+                }
+            } else if !self.tokenizer.is_control_or_user_defined(token_id) {
+                let text = self.tokenizer.decode(&[token_id]);
+                if !in_thinking {
+                    on_event(GenEvent::Token(&text));
+                    output.push_str(&text);
+                }
             }
             t_other_total += t0.elapsed().as_micros() as u64;
 
@@ -187,10 +235,8 @@ impl Engine {
 // ---------------------------------------------------------------------------
 
 fn format_chat(user: &str, system: &str) -> String {
-    // Gemma 4 chat format — exact match for llama.cpp default behavior with
-    // enable_thinking=1 (the default for this instruction-tuned model).
-    //
-    // Jinja chat_template emits:
+    // Gemma 4 chat format with enable_thinking=1 (the default for this
+    // instruction-tuned model). Jinja chat_template emits:
     //   {{ bos_token }}                           <- caller adds bos_id
     //   if enable_thinking or system or tools:
     //     <|turn>system\n
@@ -200,9 +246,15 @@ fn format_chat(user: &str, system: &str) -> String {
     //   for each msg:
     //     <|turn>{role}\n{content}<turn|>\n
     //   <|turn>model\n
+    //
+    // The `<|think|>` token signals "chain-of-thought enabled" — the model
+    // then wraps its reasoning in `<|channel>...<channel|>` during decode.
+    // The decode loop hides that block from user-visible output while still
+    // letting the model benefit from the reasoning.
     let mut out = String::with_capacity(system.len() + user.len() + 96);
     let sys_trim = system.trim();
     out.push_str("<|turn>system\n");
+    out.push_str("<|think|>");
     if !sys_trim.is_empty() {
         out.push_str(sys_trim);
     }

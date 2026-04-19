@@ -230,18 +230,23 @@ impl DispatchContext {
         if let Some(engine) = &mut self.engine {
             let tx_ref = tx.clone();
 
-            let on_token = move |token_text: &str| {
-                if safety::is_chatml_hallucination(token_text) {
-                    let _ = tx_ref.send(StreamEvent::Error(format!(
-                        "[safety: dropped prompt-header token '{}']",
-                        token_text.escape_debug()
-                    )));
-                    return;
+            let on_event = move |ev: crate::inference::generate::GenEvent| match ev {
+                crate::inference::generate::GenEvent::Token(token_text) => {
+                    if safety::is_chatml_hallucination(token_text) {
+                        let _ = tx_ref.send(StreamEvent::Error(format!(
+                            "[safety: dropped prompt-header token '{}']",
+                            token_text.escape_debug()
+                        )));
+                        return;
+                    }
+                    let _ = tx_ref.send(StreamEvent::Token(token_text.to_string()));
                 }
-                let _ = tx_ref.send(StreamEvent::Token(token_text.to_string()));
+                crate::inference::generate::GenEvent::Thinking(active) => {
+                    let _ = tx_ref.send(StreamEvent::Thinking(active));
+                }
             };
 
-            match engine.generate(&prompt, &system, &on_token) {
+            match engine.generate(&prompt, &system, &on_event) {
                 Ok(text) => {
                     if safety::scan_outbound(text.as_bytes()).blocked {
                         let _ = tx.send(StreamEvent::Error(
@@ -477,7 +482,7 @@ impl DispatchContext {
             None => self.last_user_text(),
         };
         if let Some(engine) = &mut self.engine {
-            match engine.generate(&prompt, &system, &|_| {}) {
+            match engine.generate(&prompt, &system, &|_ev| {}) {
                 Ok(text) => return Ok(text),
                 Err(e) => {
                     eprintln!("[olorin] local inference failed: {e}");
