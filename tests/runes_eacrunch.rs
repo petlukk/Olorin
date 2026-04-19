@@ -270,3 +270,35 @@ fn eacrunch_runs_on_tiny_fixture() {
     assert!(result.answer.contains("amount"),
         "expected amount column mentioned: {}", result.answer);
 }
+
+#[test]
+fn eacrunch_scales_to_1000_rows() {
+    olorin::kernels::ffi::init().unwrap();
+
+    // Deterministic synthetic dataset.
+    let mut csv = String::from("date,category,amount,merchant\n");
+    let cats = ["groceries", "rent", "food", "transport", "entertainment"];
+    let merchants = ["Coop", "ICA", "SL", "Willys", "Landlord", "Kiosk", "Spotify"];
+    for i in 0..1000 {
+        let day = (i % 28) + 1;
+        let cat = cats[i % cats.len()];
+        let merch = merchants[(i * 7) % merchants.len()];
+        let amount = ((i * 97) % 3000) as f32 / 10.0 + 1.0;
+        csv.push_str(&format!("2024-{:02}-{:02},{cat},{amount:.2},{merch}\n",
+            (i / 28) % 12 + 1, day));
+    }
+
+    let tmp = std::env::temp_dir().join("olorin_eacrunch_1000.csv");
+    std::fs::write(&tmp, &csv).unwrap();
+
+    let result = olorin::runes::run_rune("eacrunch", tmp.to_str().unwrap())
+        .expect("eacrunch exists");
+    assert!(result.success, "rune failed: {}", result.answer);
+    assert!(result.answer.contains("1000"));
+    assert!(result.answer.contains("amount"));
+    assert!(result.answer.contains("category"));
+    // Must complete in under 100ms on 1000 rows.
+    assert!(result.timing_us < 100_000,
+        "too slow: {} µs", result.timing_us);
+    std::fs::remove_file(&tmp).ok();
+}
