@@ -68,6 +68,16 @@ impl DispatchContext {
                     body.push_str(&d);
                 }
                 body.push_str(&format!("\n[timing: {}µs]", result.timing_us));
+                // Spec requires inbound safety::scan on rune output before it
+                // can reach the LLM turn. Runes classified UntrustedQuoted
+                // (e.g. eacrunch, eacount) echo file-derived bytes, so this
+                // is the last defense before the content enters context.
+                // Runs on every rune path regardless of OutputSafety — the
+                // extra few µs on Trusted output is cheap defense-in-depth.
+                let scan = safety::scan(body.as_bytes());
+                if scan.blocked {
+                    return Response::blocked("Rune output blocked by safety scan.");
+                }
                 self.vault_save(b"user", full.as_bytes());
                 self.vault_save(b"tool", body.as_bytes());
                 Response::text(body)

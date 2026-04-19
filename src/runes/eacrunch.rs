@@ -169,7 +169,11 @@ fn summarize_csv(bytes: &[u8]) -> Result<String, String> {
     }
 
     // Collect per-column f32 values (numeric cols) and unique-value counts
-    // (text cols, simple HashMap).
+    // (text cols, simple HashMap). Text cardinality is capped to bound
+    // memory on attacker-controlled inputs — values past the cap still
+    // bump existing counters but don't create new entries. Top-3 stays
+    // approximate-but-useful for realistic categorical columns.
+    const TEXT_CARDINALITY_CAP: usize = 10_000;
     let mut numeric_vals: Vec<Vec<f32>> = vec![Vec::new(); n_cols];
     let mut text_tops: Vec<std::collections::HashMap<String, u32>> =
         vec![std::collections::HashMap::new(); n_cols];
@@ -183,8 +187,10 @@ fn summarize_csv(bytes: &[u8]) -> Result<String, String> {
                 if let Ok(v) = txt.parse::<f32>() {
                     numeric_vals[c].push(v);
                 }
-            } else {
-                *text_tops[c].entry(txt.to_string()).or_insert(0) += 1;
+            } else if let Some(ct) = text_tops[c].get_mut(txt) {
+                *ct += 1;
+            } else if text_tops[c].len() < TEXT_CARDINALITY_CAP {
+                text_tops[c].insert(txt.to_string(), 1);
             }
         }
     }
