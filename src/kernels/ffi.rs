@@ -27,6 +27,11 @@ type CsvScanFn          = unsafe extern "C" fn(
     *mut i32, *mut i32,
     *mut i32, *mut i32,
 );
+type F32StatsFn         = unsafe extern "C" fn(
+    *const f32, i32,
+    *mut i32,
+    *mut f32, *mut f32, *mut f32,
+);
 type EvalExprFn         = unsafe extern "C" fn(*const u8, i32, *mut i64, *mut i32, *mut i64, *mut i32);
 type ZeroizeFn          = unsafe extern "C" fn(*mut u8, i32);
 type AnsiClassifyFn     = unsafe extern "C" fn(*const u8, *mut u8, i32);
@@ -72,6 +77,7 @@ pub struct KernelTable {
     pub scan_safety_fused:        FusedSafetyFn,
     pub classify_intent:          ClassifyIntentFn,
     pub csv_scan:                 CsvScanFn,
+    pub f32_stats:                F32StatsFn,
     pub eval_expr:                EvalExprFn,
     pub zeroize:                  ZeroizeFn,
     pub batch_dot:                BatchDotFn,
@@ -170,6 +176,7 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
     let fused_safety    = load("fused_safety")?;
     let intent_router   = load("intent_router")?;
     let csv_scan_lib    = load("csv_scan")?;
+    let f32_stats_lib   = load("f32_stats")?;
     let expr_eval       = load("expr_eval")?;
     let zeroize_lib     = load("zeroize")?;
     let jl_project_lib  = load("jl_project")?;
@@ -218,6 +225,8 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
                 sym(&intent_router, b"classify_intent\0")?),
             csv_scan: std::mem::transmute(
                 sym(&csv_scan_lib, b"csv_scan\0")?),
+            f32_stats: std::mem::transmute(
+                sym(&f32_stats_lib, b"f32_stats\0")?),
             eval_expr: std::mem::transmute(
                 sym(&expr_eval, b"eval_expr\0")?),
             zeroize: std::mem::transmute(
@@ -254,7 +263,7 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
                 zeroize_lib, search, jl_project_lib,
                 chacha20_lib, chacha20_sv2, pretokenize_lib,
                 ansi_parser_lib, terminal_diff_lib,
-                csv_scan_lib,
+                csv_scan_lib, f32_stats_lib,
             ],
         };
         Ok(table)
@@ -429,6 +438,21 @@ pub unsafe fn csv_scan(
     out_n_comma: *mut i32, out_n_newline: *mut i32,
 ) {
     (k().csv_scan)(text, len, out_commas, out_newlines, out_n_comma, out_n_newline);
+}
+
+/// Streaming stats over `len` f32 elements. Writes count, sum, min, max.
+///
+/// # Safety
+/// - `data` must point to `len` readable `f32` elements.
+/// - `out_count`, `out_sum`, `out_min`, `out_max` must each be valid
+///   for one writable element. Pointer validity is required even when
+///   `len == 0` (the kernel always writes zeros).
+pub unsafe fn f32_stats(
+    data: *const f32, len: i32,
+    out_count: *mut i32,
+    out_sum: *mut f32, out_min: *mut f32, out_max: *mut f32,
+) {
+    (k().f32_stats)(data, len, out_count, out_sum, out_min, out_max);
 }
 
 /// SIMD-accelerated ANSI byte classification.

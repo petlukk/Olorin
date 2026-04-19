@@ -171,3 +171,82 @@ fn csv_scan_no_final_newline() {
     assert_eq!(n_nline, 0);
     assert_eq!(&commas[..2], &[1, 3]);
 }
+
+#[test]
+fn f32_stats_basic() {
+    olorin::kernels::ffi::init().unwrap();
+    let data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+    let mut count = 0i32;
+    let mut sum   = 0.0f32;
+    let mut min_v = 0.0f32;
+    let mut max_v = 0.0f32;
+    unsafe {
+        olorin::kernels::ffi::f32_stats(
+            data.as_ptr(), data.len() as i32,
+            &mut count, &mut sum, &mut min_v, &mut max_v,
+        );
+    }
+    assert_eq!(count, 5);
+    assert!((sum - 15.0).abs() < 1e-5);
+    assert!((min_v - 1.0).abs() < 1e-5);
+    assert!((max_v - 5.0).abs() < 1e-5);
+}
+
+#[test]
+fn f32_stats_empty_safe() {
+    olorin::kernels::ffi::init().unwrap();
+    let data: Vec<f32> = vec![];
+    let mut count = 0i32;
+    let mut sum   = 0.0f32;
+    let mut min_v = 0.0f32;
+    let mut max_v = 0.0f32;
+    unsafe {
+        olorin::kernels::ffi::f32_stats(
+            data.as_ptr(), 0,
+            &mut count, &mut sum, &mut min_v, &mut max_v,
+        );
+    }
+    assert_eq!(count, 0);
+    assert_eq!(sum, 0.0);
+}
+
+#[test]
+fn f32_stats_single_element() {
+    olorin::kernels::ffi::init().unwrap();
+    let data: Vec<f32> = vec![42.5];
+    let mut count = 0i32;
+    let mut sum   = 0.0f32;
+    let mut min_v = 0.0f32;
+    let mut max_v = 0.0f32;
+    unsafe {
+        olorin::kernels::ffi::f32_stats(
+            data.as_ptr(), 1,
+            &mut count, &mut sum, &mut min_v, &mut max_v,
+        );
+    }
+    assert_eq!(count, 1);
+    assert!((sum - 42.5).abs() < 1e-5);
+    assert!((min_v - 42.5).abs() < 1e-5);
+    assert!((max_v - 42.5).abs() < 1e-5);
+}
+
+#[test]
+fn f32_stats_negatives() {
+    // Real bank data has refunds/credits — negatives must be handled.
+    olorin::kernels::ffi::init().unwrap();
+    let data: Vec<f32> = vec![-10.0, 5.0, -3.0, 2.0];
+    let mut count = 0i32;
+    let mut sum   = 0.0f32;
+    let mut min_v = 0.0f32;
+    let mut max_v = 0.0f32;
+    unsafe {
+        olorin::kernels::ffi::f32_stats(
+            data.as_ptr(), data.len() as i32,
+            &mut count, &mut sum, &mut min_v, &mut max_v,
+        );
+    }
+    assert_eq!(count, 4);
+    assert!((sum - (-6.0)).abs() < 1e-5);
+    assert!((min_v - (-10.0)).abs() < 1e-5);
+    assert!((max_v - 5.0).abs() < 1e-5);
+}
