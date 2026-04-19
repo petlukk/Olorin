@@ -217,6 +217,7 @@ fn main() {
     out.push_str("];\n");
 
     let out_file = out_dir.join("runes_registry.rs");
-    fs::write(&out_file, out).unwrap();
+    fs::write(&out_file, out)
+        .unwrap_or_else(|e| panic!("cannot write runes_registry.rs: {e}"));
     println!("cargo:rerun-if-changed=src/runes");
 }
