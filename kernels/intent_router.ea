@@ -49,9 +49,6 @@ export func classify_intent(text: *u8, len: i32, out_intent: *mut i32, out_arg_s
             if b == 43 {
                 state = 2
             }
-            if b == 45 {
-                state = 2
-            }
             if b == 42 {
                 state = 2
             }
@@ -63,6 +60,37 @@ export func classify_intent(text: *u8, len: i32, out_intent: *mut i32, out_arg_s
             }
             if b == 37 {
                 state = 2
+            }
+            // `-` requires whitespace on at least one side. Prevents dates
+            // (2024-01-15), date ranges (Nov 3-7), and phone numbers
+            // (555-123-4567) from hijacking to calc.
+            if b == 45 {
+                let mut prev_ws: i32 = 0
+                if i > 0 {
+                    let pb: i32 = to_i32(text[i - 1])
+                    if pb == 32 {
+                        prev_ws = 1
+                    }
+                    if pb == 9 {
+                        prev_ws = 1
+                    }
+                }
+                let mut next_ws: i32 = 0
+                if i + 1 < len {
+                    let nb: i32 = to_i32(text[i + 1])
+                    if nb == 32 {
+                        next_ws = 1
+                    }
+                    if nb == 9 {
+                        next_ws = 1
+                    }
+                }
+                if prev_ws == 1 {
+                    state = 2
+                }
+                if next_ws == 1 {
+                    state = 2
+                }
             }
         }
         if state == 2 {
