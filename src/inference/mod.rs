@@ -11,6 +11,8 @@ pub mod repack;
 pub mod dequant;
 pub mod generate;
 pub mod threadpool;
+mod threadpool_detect;
+mod threadpool_legacy;
 pub mod forward;
 mod forward_ple;
 pub mod matmul_graph;

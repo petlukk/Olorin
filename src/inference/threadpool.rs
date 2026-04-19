@@ -2,128 +2,41 @@
 //!
 //! Two implementations:
 //! - `ThreadPool`: legacy mutex/condvar dispatch (used during migration)
-//! - `SpinBarrier`: atomic barrier matching llama.cpp ggml_barrier()
+//! - `SpinBarrier`: atomic barrier, bounded spin then futex-block. Matches
+//!   the behavior of llama.cpp's ggml_barrier() compiled with OpenMP
+//!   (`GOMP_barrier`), which is the form Pi/Debian distributes.
 
-use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering, fence};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering, fence};
+use std::sync::{Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 
+// Thread-count / cache-size detection lives in its own module to keep this
+// file focused on the threadpool primitives. Re-exported so external callers
+// keep the `threadpool::detect_*` path.
+pub use super::threadpool_detect::{detect_prefill_ubatch, detect_thread_count};
+
+
 // ---------------------------------------------------------------------------
-// Thread-count detection
+// SpinBarrier — bounded spin then futex block, matching GOMP_barrier
 // ---------------------------------------------------------------------------
 
-/// Count physical (non-SMT) CPU cores via Linux sysfs.
-/// Returns None if the sysfs interface isn't available or unreadable
-/// (e.g. non-Linux, sandboxed containers).
-fn physical_core_count_sysfs() -> Option<usize> {
-    let entries = std::fs::read_dir("/sys/devices/system/cpu").ok()?;
-    let mut siblings_first: HashSet<u32> = HashSet::new();
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if !name.starts_with("cpu") || !name[3..].chars().all(|c| c.is_ascii_digit()) {
-            continue;
-        }
-        let path = entry.path().join("topology/thread_siblings_list");
-        let Ok(txt) = std::fs::read_to_string(&path) else { continue };
-        // Format: "0,8" or "0-1" or "0". First sibling ID = physical core representative.
-        let first = txt
-            .trim()
-            .split(|c: char| c == ',' || c == '-')
-            .next()?
-            .parse::<u32>()
-            .ok()?;
-        siblings_first.insert(first);
-    }
-    if siblings_first.is_empty() { None } else { Some(siblings_first.len()) }
-}
+/// Iterations of `spin_loop()` before falling to futex block. ~15-60 µs at
+/// 2.4 GHz. Sized to cover jitter between threads arriving at a barrier
+/// during a tight graph dispatch, without burning cycles when a thread has
+/// been preempted by the kernel. GOMP default for few-core systems is
+/// comparable.
+const BARRIER_SPIN_BUDGET: u32 = 30_000;
 
-/// Decide worker thread count. Priority:
-/// 1. `OLORIN_THREADS` env var (positive integer).
-/// 2. Physical-core count from sysfs — ignores SMT siblings on x86,
-///    equals logical count on ARM (no SMT on Cortex-A76 / Pi 5).
-/// 3. `std::thread::available_parallelism()` fallback.
-/// 4. `1` last-resort.
-pub fn detect_thread_count() -> usize {
-    if let Ok(s) = std::env::var("OLORIN_THREADS") {
-        if let Ok(n) = s.trim().parse::<usize>() {
-            if n >= 1 { return n; }
-        }
-    }
-    if let Some(n) = physical_core_count_sysfs() {
-        return n;
-    }
-    thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
-}
-
-/// Read the largest shared-cache size from Linux sysfs, in bytes.
-/// Walks `/sys/devices/system/cpu/cpu0/cache/index*/size`, picks the
-/// entry with the highest `level`, returns its size in bytes.
-/// Returns None on non-Linux or when the files are unreadable.
-fn largest_cache_bytes_sysfs() -> Option<usize> {
-    let mut best: Option<(u32, usize)> = None; // (level, bytes)
-    for entry in std::fs::read_dir("/sys/devices/system/cpu/cpu0/cache").ok()?.flatten() {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if !name.starts_with("index") { continue; }
-        let level_str = std::fs::read_to_string(entry.path().join("level")).ok()?;
-        let level: u32 = level_str.trim().parse().ok()?;
-        let size_str = std::fs::read_to_string(entry.path().join("size")).ok()?;
-        // Format: "512K", "8192K", "2M" — integer followed by one suffix char.
-        let s = size_str.trim();
-        let (num_part, mult) = match s.as_bytes().last()? {
-            b'K' | b'k' => (&s[..s.len()-1], 1024usize),
-            b'M' | b'm' => (&s[..s.len()-1], 1024 * 1024),
-            b'G' | b'g' => (&s[..s.len()-1], 1024 * 1024 * 1024),
-            _ => (s, 1),
-        };
-        let bytes: usize = num_part.parse::<usize>().ok()? * mult;
-        match best {
-            None => best = Some((level, bytes)),
-            Some((lvl, _)) if level > lvl => best = Some((level, bytes)),
-            _ => {}
-        }
-    }
-    best.map(|(_, bytes)| bytes)
-}
-
-/// Decide the default prefill ubatch size. Priority:
-/// 1. `OLORIN_PREFILL_UBATCH` env var (≥1 or 0 to disable).
-/// 2. If the largest CPU cache is ≥ 8 MB → 64 (empirically the sweet
-///    spot on Zen 1 Ryzen 7 1700 with a 16 MB L3 split across 2 CCXes;
-///    keeps gemm_down's activation + weight working set well inside L3).
-/// 3. Otherwise → `usize::MAX` (no chunking). Pi 5 (Cortex-A76, 2 MB
-///    shared L3) falls here because the weight already can't fit in
-///    cache, so the ubatch savings wouldn't outweigh the 4× weight
-///    re-reads.
+/// Atomic barrier. All n_threads call wait(); last arrival resets and wakes
+/// everyone. Fast path is a short spin on `n_barrier_passed`; slow path is
+/// a futex block so preempted threads can get the CPU back.
 ///
-/// Caller treats `usize::MAX` as "process the whole prompt in one pass."
-pub fn detect_prefill_ubatch() -> usize {
-    if let Ok(s) = std::env::var("OLORIN_PREFILL_UBATCH") {
-        if let Ok(k) = s.trim().parse::<usize>() {
-            if k >= 1 { return k; }
-            return usize::MAX; // "0" or negative → disabled
-        }
-    }
-    match largest_cache_bytes_sysfs() {
-        Some(bytes) if bytes >= 8 * 1024 * 1024 => 64,
-        _ => usize::MAX,
-    }
-}
-
-// ---------------------------------------------------------------------------
-// SpinBarrier — matches llama.cpp ggml_barrier() exactly
-// ---------------------------------------------------------------------------
-
-/// Atomic spin-barrier. All n_threads call wait(); last arrival resets and
-/// signals others. Spin-loop uses YIELD (ARM) / PAUSE (x86).
-/// Ref: llama.cpp ggml-cpu.c:562
+/// Ref: llama.cpp ggml-cpu.c ggml_barrier() with GGML_USE_OPENMP → GOMP_barrier.
 #[repr(C, align(64))]
 pub struct SpinBarrier {
     n_threads: i32,
     n_barrier: AtomicI32,
-    n_barrier_passed: AtomicI32,
+    n_barrier_passed: AtomicU32,
 }
 
 impl SpinBarrier {
@@ -131,7 +44,7 @@ impl SpinBarrier {
         Self {
             n_threads: n_threads as i32,
             n_barrier: AtomicI32::new(0),
-            n_barrier_passed: AtomicI32::new(0),
+            n_barrier_passed: AtomicU32::new(0),
         }
     }
 
@@ -141,21 +54,81 @@ impl SpinBarrier {
 
         let old_passed = self.n_barrier_passed.load(Ordering::Relaxed);
 
-        // Enter barrier (full seq-cst fence)
+        // Enter barrier (full seq-cst fence).
         let n = self.n_barrier.fetch_add(1, Ordering::SeqCst);
 
         if n == self.n_threads - 1 {
-            // Last thread — reset counter and signal
+            // Last arrival — reset counter, bump pass counter, wake all waiters.
             self.n_barrier.store(0, Ordering::Relaxed);
             self.n_barrier_passed.fetch_add(1, Ordering::SeqCst);
+            futex_wake_all(&self.n_barrier_passed);
             return;
         }
 
-        // Spin until last thread signals
-        while self.n_barrier_passed.load(Ordering::Relaxed) == old_passed {
+        // Fast path: bounded spin covers tight arrivals (µs scale).
+        for _ in 0..BARRIER_SPIN_BUDGET {
+            if self.n_barrier_passed.load(Ordering::Relaxed) != old_passed {
+                fence(Ordering::SeqCst);
+                return;
+            }
             std::hint::spin_loop();
         }
-        std::sync::atomic::fence(Ordering::SeqCst);
+
+        // Slow path: block on futex so a preempted peer can get its core back.
+        while self.n_barrier_passed.load(Ordering::Relaxed) == old_passed {
+            futex_wait(&self.n_barrier_passed, old_passed);
+        }
+        fence(Ordering::SeqCst);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Linux futex wrappers — direct syscall via libc, no new deps.
+// ---------------------------------------------------------------------------
+
+const FUTEX_WAIT: libc::c_int = 0;
+const FUTEX_WAKE: libc::c_int = 1;
+const FUTEX_PRIVATE_FLAG: libc::c_int = 128;
+const FUTEX_WAIT_PRIVATE: libc::c_int = FUTEX_WAIT | FUTEX_PRIVATE_FLAG;
+const FUTEX_WAKE_PRIVATE: libc::c_int = FUTEX_WAKE | FUTEX_PRIVATE_FLAG;
+
+static FUTEX_WAIT_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+/// Diagnostic: total `futex_wait` invocations since process start. Used by
+/// the preemption-robustness test to assert the slow path was taken.
+pub fn futex_wait_call_count() -> usize {
+    FUTEX_WAIT_CALLS.load(Ordering::Relaxed)
+}
+
+/// Block until `*addr != expected` or a wake arrives. Returns promptly on
+/// EAGAIN (value already changed) / EINTR (signal); the caller re-checks
+/// the condition in a loop.
+#[inline(never)]
+fn futex_wait(addr: &AtomicU32, expected: u32) {
+    FUTEX_WAIT_CALLS.fetch_add(1, Ordering::Relaxed);
+    let ptr = addr as *const AtomicU32 as *const u32;
+    unsafe {
+        libc::syscall(
+            libc::SYS_futex,
+            ptr,
+            FUTEX_WAIT_PRIVATE,
+            expected as libc::c_int,
+            std::ptr::null::<libc::timespec>(),
+        );
+    }
+}
+
+/// Wake all waiters blocked on `addr`.
+#[inline(never)]
+fn futex_wake_all(addr: &AtomicU32) {
+    let ptr = addr as *const AtomicU32 as *const u32;
+    unsafe {
+        libc::syscall(
+            libc::SYS_futex,
+            ptr,
+            FUTEX_WAKE_PRIVATE,
+            i32::MAX,
+        );
     }
 }
 
@@ -365,183 +338,7 @@ impl Drop for GraphPool {
 unsafe impl Send for GraphPool {}
 unsafe impl Sync for GraphPool {}
 
-// ---------------------------------------------------------------------------
-// Legacy ThreadPool (mutex/condvar dispatch)
-// ---------------------------------------------------------------------------
-
-static NOOP_FN: &(dyn Fn(usize, usize) + Send + Sync) = &|_, _| {};
-
-struct WorkState {
-    funcs: [*const dyn Fn(usize, usize); 3],
-    bounds: [usize; 3],
-    n_groups: usize,
-    generation: u64,
-    shutdown: bool,
-}
-
-unsafe impl Send for WorkState {}
-unsafe impl Sync for WorkState {}
-
-pub struct ThreadPool {
-    shared: Arc<(Mutex<WorkState>, Condvar)>,
-    done: Arc<AtomicUsize>,
-    done_signal: Arc<(Mutex<bool>, Condvar)>,
-    workers: Vec<JoinHandle<()>>,
-    n_threads: usize,
-}
-
-impl ThreadPool {
-    pub fn new() -> Self {
-        let n_threads = detect_thread_count();
-
-        let noop_ptr = NOOP_FN as *const dyn Fn(usize, usize);
-        let shared = Arc::new((
-            Mutex::new(WorkState {
-                funcs: [noop_ptr, noop_ptr, noop_ptr],
-                bounds: [0, 0, 0],
-                n_groups: 0,
-                generation: 0,
-                shutdown: false,
-            }),
-            Condvar::new(),
-        ));
-        let done = Arc::new(AtomicUsize::new(0));
-        let done_signal = Arc::new((Mutex::new(false), Condvar::new()));
-
-        let mut workers = Vec::with_capacity(n_threads);
-        for tid in 0..n_threads {
-            let shared = Arc::clone(&shared);
-            let done = Arc::clone(&done);
-            let done_signal = Arc::clone(&done_signal);
-            let handle = thread::Builder::new()
-                .stack_size(32 * 1024 * 1024)
-                .spawn(move || {
-                let mut last_gen: u64 = 0;
-                loop {
-                    let (funcs, bounds, n_groups);
-                    {
-                        let (lock, cvar) = &*shared;
-                        let mut state = lock.lock().unwrap();
-                        while state.generation == last_gen && !state.shutdown {
-                            state = cvar.wait(state).unwrap();
-                        }
-                        if state.shutdown {
-                            return;
-                        }
-                        last_gen = state.generation;
-                        funcs = state.funcs;
-                        bounds = state.bounds;
-                        n_groups = state.n_groups;
-                    }
-                    let n_active_total = bounds[n_groups - 1];
-                    if tid < n_active_total {
-                        if tid < bounds[0] {
-                            let f = unsafe { &*funcs[0] };
-                            f(tid, bounds[0]);
-                        } else if n_groups >= 2 && tid < bounds[1] {
-                            let f = unsafe { &*funcs[1] };
-                            f(tid - bounds[0], bounds[1] - bounds[0]);
-                        } else if n_groups >= 3 && tid < bounds[2] {
-                            let f = unsafe { &*funcs[2] };
-                            f(tid - bounds[1], bounds[2] - bounds[1]);
-                        }
-                    }
-                    if done.fetch_sub(1, Ordering::AcqRel) == 1 {
-                        let (lock, cvar) = &*done_signal;
-                        let mut finished = lock.lock().unwrap();
-                        *finished = true;
-                        cvar.notify_one();
-                    }
-                }
-            }).expect("spawn pool worker");
-            workers.push(handle);
-        }
-
-        ThreadPool { shared, done, done_signal, workers, n_threads }
-    }
-
-    pub fn thread_count(&self) -> usize {
-        self.n_threads
-    }
-
-    fn dispatch(
-        &self,
-        funcs: [*const dyn Fn(usize, usize); 3],
-        bounds: [usize; 3],
-        n_groups: usize,
-    ) {
-        self.done.store(self.n_threads, Ordering::Release);
-        {
-            let mut finished = self.done_signal.0.lock().unwrap();
-            *finished = false;
-        }
-
-        {
-            let (lock, cvar) = &*self.shared;
-            let mut state = lock.lock().unwrap();
-            state.funcs = funcs;
-            state.bounds = bounds;
-            state.n_groups = n_groups;
-            state.generation += 1;
-            cvar.notify_all();
-        }
-
-        {
-            let (lock, cvar) = &*self.done_signal;
-            let mut finished = lock.lock().unwrap();
-            while !*finished {
-                finished = cvar.wait(finished).unwrap();
-            }
-        }
-    }
-
-    pub fn run(&self, n: usize, f: impl Fn(usize, usize) + Send + Sync) {
-        debug_assert!(n <= self.n_threads, "n ({n}) > pool size ({})", self.n_threads);
-        if n == 0 { return; }
-        let func_ref: &dyn Fn(usize, usize) = &f;
-        let func_ref: &dyn Fn(usize, usize) = unsafe { std::mem::transmute(func_ref) };
-        self.dispatch(
-            [func_ref as *const _, NOOP_FN as *const _, NOOP_FN as *const _],
-            [n, 0, 0],
-            1,
-        );
-    }
-
-    pub fn run_split3(
-        &self,
-        n1: usize, f1: impl Fn(usize, usize) + Send + Sync,
-        n2: usize, f2: impl Fn(usize, usize) + Send + Sync,
-        n3: usize, f3: impl Fn(usize, usize) + Send + Sync,
-    ) {
-        debug_assert!(
-            n1 + n2 + n3 <= self.n_threads,
-            "split3 {} + {} + {} > pool {}", n1, n2, n3, self.n_threads
-        );
-        if n1 + n2 + n3 == 0 { return; }
-        let r1: &dyn Fn(usize, usize) = &f1;
-        let r2: &dyn Fn(usize, usize) = &f2;
-        let r3: &dyn Fn(usize, usize) = &f3;
-        let r1: &dyn Fn(usize, usize) = unsafe { std::mem::transmute(r1) };
-        let r2: &dyn Fn(usize, usize) = unsafe { std::mem::transmute(r2) };
-        let r3: &dyn Fn(usize, usize) = unsafe { std::mem::transmute(r3) };
-        self.dispatch(
-            [r1 as *const _, r2 as *const _, r3 as *const _],
-            [n1, n1 + n2, n1 + n2 + n3],
-            3,
-        );
-    }
-}
-
-impl Drop for ThreadPool {
-    fn drop(&mut self) {
-        {
-            let (lock, cvar) = &*self.shared;
-            let mut state = lock.lock().unwrap();
-            state.shutdown = true;
-            cvar.notify_all();
-        }
-        for handle in self.workers.drain(..) {
-            let _ = handle.join();
-        }
-    }
-}
+// Legacy `ThreadPool` (mutex/condvar dispatch) lives in its own file since
+// it's migration-era code. Re-exported so external callers keep the
+// `threadpool::ThreadPool` path.
+pub use super::threadpool_legacy::ThreadPool;
