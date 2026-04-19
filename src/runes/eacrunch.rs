@@ -17,7 +17,7 @@ impl Rune for Eacrunch {
     fn description(&self) -> &'static str {
         "Summarize a CSV file via SIMD: row count, per-column type \
          (numeric/text), and per-numeric-column stats (min/max/mean/sum). \
-         Top values for small-cardinality text columns. Args: <path.csv>."
+         Top-3 most frequent values for text columns. Args: <path.csv>."
     }
     fn usage(&self) -> &'static str { "eacrunch <path.csv>" }
     fn output_safety(&self) -> OutputSafety { OutputSafety::UntrustedQuoted }
@@ -42,7 +42,8 @@ impl Rune for Eacrunch {
             Err(PathError::Io(e)) =>
                 return refusal(t0, &format!("io error: {e}")),
         };
-        // IMPORTANT: open_capped takes `home` — second arg.
+        // `home` is passed so open_capped can re-check the canonical path
+        // against the allowlist — catches symlinks that resolve outside it.
         let bytes = match open_capped(&resolved, &home) {
             Ok(b) => b,
             Err(e) => return refusal(t0, &format!("open failed: {e:?}")),
@@ -74,6 +75,15 @@ fn summarize_csv(bytes: &[u8]) -> Result<String, String> {
 
     if bytes.is_empty() {
         return Err("empty file".into());
+    }
+    // csv_scan takes an i32 length. The 4 GB allowlist in open_capped is
+    // wider than i32::MAX, so guard the narrowing cast before calling.
+    // Lifting the kernel to i64 is deferred to the streaming MVP+1 pass.
+    if bytes.len() > i32::MAX as usize {
+        return Err(format!(
+            "file too large for csv_scan: {} bytes (2 GB limit)",
+            bytes.len()
+        ));
     }
 
     let len = bytes.len() as i32;
