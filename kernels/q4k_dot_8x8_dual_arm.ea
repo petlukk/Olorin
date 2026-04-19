@@ -3,12 +3,12 @@
 // Fuses two weight matrices (e.g. ffn_gate + ffn_up) against the same Q8K
 // input column. Uses 4-byte interleaved Q4K layout with vdot_i32 + dup4
 // broadcast for raw Q8K input. Shares Q8 loads across both weight streams.
+//
+// Scale decode + bias correction are NEON-vectorized via widen_u8_i32x4_{0,4,8}
+// and per-lane i32x4 bitwise ops. Bit-exact with the scalar formulation that
+// the single-matvec kernel uses; the `dual_q4k_8x8` regression test guards this.
 
 #[cfg(aarch64)]
-
-func ubyte(p: *restrict u8, off: i32) -> i32 {
-    return to_i32(p[off]) & 255
-}
 
 export func q4k_8x8_q8k_matvec_dual(
     packed_a: *restrict u8,
@@ -26,9 +26,13 @@ export func q4k_8x8_q8k_matvec_dual(
     let nb: i32 = n_cols / 256
     let m4b: i8x16 = splat(15)
     let shift4: i8x16 = splat(4)
-    let km1: i32 = 0x3f3f3f3f
-    let km2: i32 = 0x0f0f0f0f
-    let km3: i32 = 0x03030303
+
+    // Per-lane i32x4 masks/shifts used by the vectorized scale decode.
+    let c3f: i32x4 = splat(0x3f)
+    let c0f: i32x4 = splat(0x0f)
+    let c03: i32x4 = splat(0x03)
+    let c4:  i32x4 = splat(4)
+    let c6:  i32x4 = splat(6)
 
     // Broadcast mask: duplicate 4 bytes to fill 16 bytes
     let dup4: u8x16 = [0,1,2,3, 0,1,2,3, 0,1,2,3, 0,1,2,3]
@@ -96,51 +100,50 @@ export func q4k_8x8_q8k_matvec_dual(
                 let bs0: i16 = scratch_i16[sb * 2]
                 let bs1: i16 = scratch_i16[sb * 2 + 1]
 
-                // A-side scale decode
-                let sp_mat_a: *restrict i32 = ptr_as_i32(ptr_as_i8(packed_a))
-                let u00_mat_a: i32 = sp_mat_a[sc0/4]
-                let u01_mat_a: i32 = sp_mat_a[sc0/4+1]
-                let u02_mat_a: i32 = sp_mat_a[sc0/4+2]
-                let t00_mat_a: i32 = u00_mat_a & km1
-                let t02_mat_a: i32 = u01_mat_a & km1
-                let t01_mat_a: i32 = (u02_mat_a & km2) | (((u00_mat_a >> 6) & km3) << 4)
-                let t03_mat_a: i32 = ((u02_mat_a >> 4) & km2) | (((u01_mat_a >> 6) & km3) << 4)
+                // ---- A-side scale + mins decode (NEON-vectorized) ----
+                // Each u8x16 load covers 12 meaningful bytes (u00..u02) + 4 don't-care.
+                let sc0_bytes_a: u8x16 = load(packed_a, sc0)
+                let sc1_bytes_a: u8x16 = load(packed_a, sc1)
 
-                let u10_mat_a: i32 = sp_mat_a[sc1/4]
-                let u11_mat_a: i32 = sp_mat_a[sc1/4+1]
-                let u12_mat_a: i32 = sp_mat_a[sc1/4+2]
-                let t10_mat_a: i32 = u10_mat_a & km1
-                let t12_mat_a: i32 = u11_mat_a & km1
-                let t11_mat_a: i32 = (u12_mat_a & km2) | (((u10_mat_a >> 6) & km3) << 4)
-                let t13_mat_a: i32 = ((u12_mat_a >> 4) & km2) | (((u11_mat_a >> 6) & km3) << 4)
+                let u00_a: i32x4 = widen_u8_i32x4(sc0_bytes_a)
+                let u01_a: i32x4 = widen_u8_i32x4_4(sc0_bytes_a)
+                let u02_a: i32x4 = widen_u8_i32x4_8(sc0_bytes_a)
+                let u10_a: i32x4 = widen_u8_i32x4(sc1_bytes_a)
+                let u11_a: i32x4 = widen_u8_i32x4_4(sc1_bytes_a)
+                let u12_a: i32x4 = widen_u8_i32x4_8(sc1_bytes_a)
 
-                let sc_lo_0_mat_a: i32x4 = [t00_mat_a & 255, (t00_mat_a>>8)&255, (t00_mat_a>>16)&255, (t00_mat_a>>24)&255]
-                let sc_hi_0_mat_a: i32x4 = [t01_mat_a & 255, (t01_mat_a>>8)&255, (t01_mat_a>>16)&255, (t01_mat_a>>24)&255]
-                let sc_lo_1_mat_a: i32x4 = [t10_mat_a & 255, (t10_mat_a>>8)&255, (t10_mat_a>>16)&255, (t10_mat_a>>24)&255]
-                let sc_hi_1_mat_a: i32x4 = [t11_mat_a & 255, (t11_mat_a>>8)&255, (t11_mat_a>>16)&255, (t11_mat_a>>24)&255]
+                // Scales (used for the vdot product).
+                let sc_lo_0_mat_a: i32x4 = u00_a .& c3f
+                let sc_hi_0_mat_a: i32x4 = (u02_a .& c0f) .| (((u00_a .>> c6) .& c03) .<< c4)
+                let sc_lo_1_mat_a: i32x4 = u10_a .& c3f
+                let sc_hi_1_mat_a: i32x4 = (u12_a .& c0f) .| (((u10_a .>> c6) .& c03) .<< c4)
 
-                // B-side scale decode (moved up so we can fuse the vdot loops)
-                let sp_mat_b: *restrict i32 = ptr_as_i32(ptr_as_i8(packed_b))
-                let u00_mat_b: i32 = sp_mat_b[sc0/4]
-                let u01_mat_b: i32 = sp_mat_b[sc0/4+1]
-                let u02_mat_b: i32 = sp_mat_b[sc0/4+2]
-                let t00_mat_b: i32 = u00_mat_b & km1
-                let t02_mat_b: i32 = u01_mat_b & km1
-                let t01_mat_b: i32 = (u02_mat_b & km2) | (((u00_mat_b >> 6) & km3) << 4)
-                let t03_mat_b: i32 = ((u02_mat_b >> 4) & km2) | (((u01_mat_b >> 6) & km3) << 4)
+                // Mins (used for the bias correction).
+                let mins_lo_0_mat_a: i32x4 = u01_a .& c3f
+                let mins_hi_0_mat_a: i32x4 = ((u02_a .>> c4) .& c0f) .| (((u01_a .>> c6) .& c03) .<< c4)
+                let mins_lo_1_mat_a: i32x4 = u11_a .& c3f
+                let mins_hi_1_mat_a: i32x4 = ((u12_a .>> c4) .& c0f) .| (((u11_a .>> c6) .& c03) .<< c4)
 
-                let u10_mat_b: i32 = sp_mat_b[sc1/4]
-                let u11_mat_b: i32 = sp_mat_b[sc1/4+1]
-                let u12_mat_b: i32 = sp_mat_b[sc1/4+2]
-                let t10_mat_b: i32 = u10_mat_b & km1
-                let t12_mat_b: i32 = u11_mat_b & km1
-                let t11_mat_b: i32 = (u12_mat_b & km2) | (((u10_mat_b >> 6) & km3) << 4)
-                let t13_mat_b: i32 = ((u12_mat_b >> 4) & km2) | (((u11_mat_b >> 6) & km3) << 4)
+                // ---- B-side scale + mins decode (same shape) ----
+                let sc0_bytes_b: u8x16 = load(packed_b, sc0)
+                let sc1_bytes_b: u8x16 = load(packed_b, sc1)
 
-                let sc_lo_0_mat_b: i32x4 = [t00_mat_b & 255, (t00_mat_b>>8)&255, (t00_mat_b>>16)&255, (t00_mat_b>>24)&255]
-                let sc_hi_0_mat_b: i32x4 = [t01_mat_b & 255, (t01_mat_b>>8)&255, (t01_mat_b>>16)&255, (t01_mat_b>>24)&255]
-                let sc_lo_1_mat_b: i32x4 = [t10_mat_b & 255, (t10_mat_b>>8)&255, (t10_mat_b>>16)&255, (t10_mat_b>>24)&255]
-                let sc_hi_1_mat_b: i32x4 = [t11_mat_b & 255, (t11_mat_b>>8)&255, (t11_mat_b>>16)&255, (t11_mat_b>>24)&255]
+                let u00_b: i32x4 = widen_u8_i32x4(sc0_bytes_b)
+                let u01_b: i32x4 = widen_u8_i32x4_4(sc0_bytes_b)
+                let u02_b: i32x4 = widen_u8_i32x4_8(sc0_bytes_b)
+                let u10_b: i32x4 = widen_u8_i32x4(sc1_bytes_b)
+                let u11_b: i32x4 = widen_u8_i32x4_4(sc1_bytes_b)
+                let u12_b: i32x4 = widen_u8_i32x4_8(sc1_bytes_b)
+
+                let sc_lo_0_mat_b: i32x4 = u00_b .& c3f
+                let sc_hi_0_mat_b: i32x4 = (u02_b .& c0f) .| (((u00_b .>> c6) .& c03) .<< c4)
+                let sc_lo_1_mat_b: i32x4 = u10_b .& c3f
+                let sc_hi_1_mat_b: i32x4 = (u12_b .& c0f) .| (((u10_b .>> c6) .& c03) .<< c4)
+
+                let mins_lo_0_mat_b: i32x4 = u01_b .& c3f
+                let mins_hi_0_mat_b: i32x4 = ((u02_b .>> c4) .& c0f) .| (((u01_b .>> c6) .& c03) .<< c4)
+                let mins_lo_1_mat_b: i32x4 = u11_b .& c3f
+                let mins_hi_1_mat_b: i32x4 = ((u12_b .>> c4) .& c0f) .| (((u11_b .>> c6) .& c03) .<< c4)
 
                 // Fused A+B vdot loop — each k iteration loads Q8K once and feeds both A and B vdots
                 let mut alo_03_mat_a: i32x4 = splat(0)
@@ -194,19 +197,14 @@ export func q4k_8x8_q8k_matvec_dual(
                 let sumf_hi_47_mat_a: f32x4 = to_f32(sc_hi_1_mat_a .* ahi_47_mat_a)
                 acc1_mat_a = fma(sb_sc1_mat_a, sumf_hi_47_mat_a, acc1_mat_a)
 
-                // A-side bias
-                let b0_0_mat_a: i32 = (t02_mat_a & 255) * to_i32(bs0) + (t12_mat_a & 255) * to_i32(bs1)
-                let b0_1_mat_a: i32 = ((t02_mat_a>>8)&255) * to_i32(bs0) + ((t12_mat_a>>8)&255) * to_i32(bs1)
-                let b0_2_mat_a: i32 = ((t02_mat_a>>16)&255) * to_i32(bs0) + ((t12_mat_a>>16)&255) * to_i32(bs1)
-                let b0_3_mat_a: i32 = ((t02_mat_a>>24)&255) * to_i32(bs0) + ((t12_mat_a>>24)&255) * to_i32(bs1)
-                let bias_delta0_mat_a: i32x4 = [b0_0_mat_a, b0_1_mat_a, b0_2_mat_a, b0_3_mat_a]
+                // A-side bias (vectorized, replaces 16 scalar muls + 4 scalar adds per group)
+                let bs0_v: i32x4 = splat(to_i32(bs0))
+                let bs1_v: i32x4 = splat(to_i32(bs1))
+
+                let bias_delta0_mat_a: i32x4 = (mins_lo_0_mat_a .* bs0_v) .+ (mins_lo_1_mat_a .* bs1_v)
                 bias0_mat_a = bias0_mat_a .+ bias_delta0_mat_a
 
-                let b1_0_mat_a: i32 = (t03_mat_a & 255) * to_i32(bs0) + (t13_mat_a & 255) * to_i32(bs1)
-                let b1_1_mat_a: i32 = ((t03_mat_a>>8)&255) * to_i32(bs0) + ((t13_mat_a>>8)&255) * to_i32(bs1)
-                let b1_2_mat_a: i32 = ((t03_mat_a>>16)&255) * to_i32(bs0) + ((t13_mat_a>>16)&255) * to_i32(bs1)
-                let b1_3_mat_a: i32 = ((t03_mat_a>>24)&255) * to_i32(bs0) + ((t13_mat_a>>24)&255) * to_i32(bs1)
-                let bias_delta1_mat_a: i32x4 = [b1_0_mat_a, b1_1_mat_a, b1_2_mat_a, b1_3_mat_a]
+                let bias_delta1_mat_a: i32x4 = (mins_hi_0_mat_a .* bs0_v) .+ (mins_hi_1_mat_a .* bs1_v)
                 bias1_mat_a = bias1_mat_a .+ bias_delta1_mat_a
 
                 // B-side scale application (vdots already computed in fused A+B loop)
@@ -219,19 +217,11 @@ export func q4k_8x8_q8k_matvec_dual(
                 let sumf_hi_47_mat_b: f32x4 = to_f32(sc_hi_1_mat_b .* ahi_47_mat_b)
                 acc1_mat_b = fma(sb_sc1_mat_b, sumf_hi_47_mat_b, acc1_mat_b)
 
-                // B-side bias
-                let b0_0_mat_b: i32 = (t02_mat_b & 255) * to_i32(bs0) + (t12_mat_b & 255) * to_i32(bs1)
-                let b0_1_mat_b: i32 = ((t02_mat_b>>8)&255) * to_i32(bs0) + ((t12_mat_b>>8)&255) * to_i32(bs1)
-                let b0_2_mat_b: i32 = ((t02_mat_b>>16)&255) * to_i32(bs0) + ((t12_mat_b>>16)&255) * to_i32(bs1)
-                let b0_3_mat_b: i32 = ((t02_mat_b>>24)&255) * to_i32(bs0) + ((t12_mat_b>>24)&255) * to_i32(bs1)
-                let bias_delta0_mat_b: i32x4 = [b0_0_mat_b, b0_1_mat_b, b0_2_mat_b, b0_3_mat_b]
+                // B-side bias (vectorized)
+                let bias_delta0_mat_b: i32x4 = (mins_lo_0_mat_b .* bs0_v) .+ (mins_lo_1_mat_b .* bs1_v)
                 bias0_mat_b = bias0_mat_b .+ bias_delta0_mat_b
 
-                let b1_0_mat_b: i32 = (t03_mat_b & 255) * to_i32(bs0) + (t13_mat_b & 255) * to_i32(bs1)
-                let b1_1_mat_b: i32 = ((t03_mat_b>>8)&255) * to_i32(bs0) + ((t13_mat_b>>8)&255) * to_i32(bs1)
-                let b1_2_mat_b: i32 = ((t03_mat_b>>16)&255) * to_i32(bs0) + ((t13_mat_b>>16)&255) * to_i32(bs1)
-                let b1_3_mat_b: i32 = ((t03_mat_b>>24)&255) * to_i32(bs0) + ((t13_mat_b>>24)&255) * to_i32(bs1)
-                let bias_delta1_mat_b: i32x4 = [b1_0_mat_b, b1_1_mat_b, b1_2_mat_b, b1_3_mat_b]
+                let bias_delta1_mat_b: i32x4 = (mins_hi_0_mat_b .* bs0_v) .+ (mins_hi_1_mat_b .* bs1_v)
                 bias1_mat_b = bias1_mat_b .+ bias_delta1_mat_b
 
                 sb = sb + 1
