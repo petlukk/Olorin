@@ -257,6 +257,23 @@ pub(crate) fn populate_q4k_repacked(
     lw.wk_repacked = try_repack_q4k(lw.wk, lw.wk_dtype, n_kv_heads * head_dim_k, hidden_dim);
     lw.wv_repacked = try_repack_q4k(lw.wv, lw.wv_dtype, n_kv_heads * head_dim_v, hidden_dim);
     lw.wo_repacked = try_repack_q4k(lw.wo, lw.wo_dtype, hidden_dim, n_heads * head_dim_k);
+    // Q6K repack + pre-d for Q/V (gemma-4-e2b-it-Q4_K_M has Q6K wq/wv in 17 of
+    // 35 layers). try_repack_q6k returns None for non-Q6K dtypes, so these stay
+    // None when the weight is Q4K (and a wq_repacked / wv_repacked will be
+    // populated above instead). Pre-d moves the per-matvec f16→f32 scale
+    // conversion out of the hot path, same pattern as embed_q6k_d_arr.
+    lw.wq_q6k_repacked = try_repack_q6k(lw.wq, lw.wq_dtype, n_heads * head_dim_k, hidden_dim);
+    if lw.wq_q6k_repacked.is_some() {
+        lw.wq_q6k_d_arr = Some(crate::inference::repack::q6k_precompute_d_arr(
+            lw.wq, n_heads * head_dim_k, hidden_dim,
+        ));
+    }
+    lw.wv_q6k_repacked = try_repack_q6k(lw.wv, lw.wv_dtype, n_kv_heads * head_dim_v, hidden_dim);
+    if lw.wv_q6k_repacked.is_some() {
+        lw.wv_q6k_d_arr = Some(crate::inference::repack::q6k_precompute_d_arr(
+            lw.wv, n_kv_heads * head_dim_v, hidden_dim,
+        ));
+    }
     // FFN projections
     lw.w_gate_repacked = try_repack_q4k(lw.w_gate, lw.w_gate_dtype, ffn_dim, hidden_dim);
     lw.w_up_repacked = try_repack_q4k(lw.w_up, lw.w_up_dtype, ffn_dim, hidden_dim);
