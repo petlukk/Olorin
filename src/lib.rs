@@ -14,6 +14,7 @@ pub mod interface;
 pub mod tools;
 pub mod kernels;
 pub mod recall;
+pub mod runes;
 
 pub fn home_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(std::env::var("HOME").expect("HOME not set"))
