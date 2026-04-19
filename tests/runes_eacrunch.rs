@@ -66,7 +66,11 @@ fn truncate_answer_handles_utf8_boundary() {
     while s.len() < MAX_ANSWER_BYTES + 20  { s.push('Å'); }
     let out = truncate_answer(&s);              // must not panic
     assert!(out.contains("[...truncated"));
-    assert!(out.len() <= s.len());              // smaller than input
+    assert!(
+        out.len() <= MAX_ANSWER_BYTES,
+        "out.len()={} exceeds MAX_ANSWER_BYTES={}",
+        out.len(), MAX_ANSWER_BYTES
+    );
 }
 
 #[test]
