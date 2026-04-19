@@ -288,8 +288,18 @@ fn eacrunch_scales_to_1000_rows() {
             (i / 28) % 12 + 1, day));
     }
 
-    let tmp = std::env::temp_dir().join("olorin_eacrunch_1000.csv");
+    // Per-process filename so two concurrent test processes can't clobber
+    // each other (useful on boxes where someone forgets --test-threads=1).
+    let tmp = std::env::temp_dir()
+        .join(format!("olorin_eacrunch_1000_{}.csv", std::process::id()));
     std::fs::write(&tmp, &csv).unwrap();
+
+    // RAII cleanup: the file is removed even if an assert below panics.
+    struct TmpFile(std::path::PathBuf);
+    impl Drop for TmpFile {
+        fn drop(&mut self) { let _ = std::fs::remove_file(&self.0); }
+    }
+    let _guard = TmpFile(tmp.clone());
 
     let result = olorin::runes::run_rune("eacrunch", tmp.to_str().unwrap())
         .expect("eacrunch exists");
@@ -298,7 +308,5 @@ fn eacrunch_scales_to_1000_rows() {
     assert!(result.answer.contains("amount"));
     assert!(result.answer.contains("category"));
     // Must complete in under 100ms on 1000 rows.
-    assert!(result.timing_us < 100_000,
-        "too slow: {} µs", result.timing_us);
-    std::fs::remove_file(&tmp).ok();
+    assert!(result.timing_us < 100_000, "too slow: {} µs", result.timing_us);
 }
