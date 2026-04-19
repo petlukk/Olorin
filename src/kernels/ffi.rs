@@ -22,7 +22,7 @@ type ScanPrefixesFn     = unsafe extern "C" fn(*const u8, i32, *mut i32, *mut i3
 type MatchCommandFn     = unsafe extern "C" fn(*const u8, i32, *mut i32);
 type FusedSafetyFn      = unsafe extern "C" fn(*const u8, i32, *mut i32, *mut i32, *mut i32);
 type ClassifyIntentFn   = unsafe extern "C" fn(*const u8, i32, *mut i32, *mut i32, *mut i32);
-pub type CsvScanFn      = unsafe extern "C" fn(
+type CsvScanFn          = unsafe extern "C" fn(
     *const u8, i32,
     *mut i32, *mut i32,
     *mut i32, *mut i32,
@@ -414,6 +414,15 @@ pub unsafe fn chacha20_search_v2(
     );
 }
 
+/// Scan CSV bytes, writing comma and newline byte-indices into the two
+/// output arrays and the counts into `out_n_comma` / `out_n_newline`.
+///
+/// # Safety
+/// - `text` must point to `len` readable bytes.
+/// - `out_commas` and `out_newlines` must each be valid for at least `len`
+///   writable `i32` elements (worst case is every byte being a delimiter).
+/// - `out_n_comma` and `out_n_newline` must each be valid for one writable
+///   `i32`. Passing non-null dangling pointers is UB even when `len == 0`.
 pub unsafe fn csv_scan(
     text: *const u8, len: i32,
     out_commas: *mut i32, out_newlines: *mut i32,

@@ -2,10 +2,18 @@
 // index of every `,` (44) into out_commas and every `\n` (10) into
 // out_newlines. Writes the populated counts to out_n_comma / out_n_newline.
 //
-// Scope: assumes unquoted CSV (quoted fields with embedded commas are a
-// future extension — MVP bank-statement data is unquoted numerics + text).
-// The caller mmaps the file and allocates out arrays of size `len` (the
-// worst case is every byte being a delimiter).
+// Scope (all out of scope for MVP — caller is responsible):
+//   - Unquoted CSV only. Quoted fields with embedded commas are not handled.
+//   - CRLF (`\r\n`) line endings: the scan finds `\n`; stray `\r` bytes are
+//     left at the end of the last field on each row. `str::trim()` on the
+//     field range in the caller strips them.
+// The caller mmaps the file and allocates the two out arrays at size `len`
+// (the worst case is every byte being a delimiter).
+//
+// TODO(simd): replace the scalar loop with a u8x16 vector-compare once
+// eacrunch is past MVP — the caller has already mmapped and aligned the
+// buffer, so a lane-compare against splat(44) and splat(10) would emit
+// position arrays 8–16× faster on typical CSVs.
 
 export func csv_scan(text: *u8, len: i32, out_commas: *mut i32, out_newlines: *mut i32, out_n_comma: *mut i32, out_n_newline: *mut i32) {
     let mut nc: i32 = 0
