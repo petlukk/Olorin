@@ -201,7 +201,10 @@ impl Gemma4State {
         let n_blocks_ffn = max_ffn / 256;
         let n_blocks_out = hd / 256;
 
-        let max_batch = 512usize;
+        // Matches max_seq_len=2048 in the server (src/core/router.rs). Anything
+        // smaller here caps prefill-in-one-pass to that value; a prompt of
+        // max_batch+1 tokens hits a hard assertion in the forward pass.
+        let max_batch = 2048usize;
         let ple_dim = model.ple_dim.max(1);
         let ple_nb = (ple_dim / 256).max(1);
 
