@@ -68,6 +68,8 @@ impl DispatchContext {
                     body.push_str(&d);
                 }
                 body.push_str(&format!("\n[timing: {}µs]", result.timing_us));
+                self.vault_save(b"user", full.as_bytes());
+                self.vault_save(b"tool", body.as_bytes());
                 Response::text(body)
             }
             None => Response::text(format!("unknown rune: {name}")),
