@@ -252,3 +252,21 @@ fn f32_stats_negatives() {
     assert!((min_v - (-10.0)).abs() < 1e-5);
     assert!((max_v - 5.0).abs() < 1e-5);
 }
+
+#[test]
+fn eacrunch_runs_on_tiny_fixture() {
+    olorin::kernels::ffi::init().unwrap();
+    let path = std::env::current_dir().unwrap()
+        .join("tests/fixtures/runes/tiny.csv");
+    let args = format!("{}", path.display());
+    let result = olorin::runes::run_rune("eacrunch", &args)
+        .expect("eacrunch should exist");
+    assert!(result.success, "rune failed: {}", result.answer);
+    assert!(result.timing_us > 0);
+    assert!(
+        result.answer.contains("10") || result.answer.contains("rows"),
+        "expected row count in answer: {}", result.answer,
+    );
+    assert!(result.answer.contains("amount"),
+        "expected amount column mentioned: {}", result.answer);
+}

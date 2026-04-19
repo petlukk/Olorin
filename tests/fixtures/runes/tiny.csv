@@ -1,0 +1,11 @@
+date,category,amount,merchant
+2024-01-15,groceries,42.50,Coop
+2024-01-16,rent,1800.00,Landlord
+2024-01-17,transport,15.00,SL
+2024-01-18,groceries,38.25,Willys
+2024-01-19,groceries,22.10,ICA
+2024-01-20,transport,15.00,SL
+2024-01-21,food,87.50,Restaurant
+2024-01-22,food,12.00,Kiosk
+2024-01-23,transport,15.00,SL
+2024-01-24,groceries,51.80,Coop

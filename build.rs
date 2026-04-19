@@ -208,7 +208,16 @@ fn main() {
 
     let mut out = String::new();
     for m in &rune_mods {
-        out.push_str(&format!("pub mod {m};\n"));
+        // Use #[path] with the manifest-relative source path so that
+        // `pub mod` inside the include!()'d registry file resolves correctly
+        // (Rust otherwise looks in OUT_DIR, not src/runes/).
+        let src_path = Path::new(&manifest_dir)
+            .join("src/runes")
+            .join(format!("{m}.rs"));
+        out.push_str(&format!(
+            "#[path = \"{}\"]\npub mod {m};\n",
+            src_path.display()
+        ));
     }
     out.push_str("pub const RUNES: &[&(dyn crate::runes::Rune + Sync)] = &[\n");
     for m in &rune_mods {
