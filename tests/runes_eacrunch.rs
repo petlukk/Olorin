@@ -44,3 +44,50 @@ fn resolve_path_accepts_tmp() {
     let p = resolve_path("/tmp/test.csv", &PathBuf::from("/home/nobody")).unwrap();
     assert_eq!(p, PathBuf::from("/tmp/test.csv"));
 }
+
+#[test]
+fn resolve_path_rejects_absolute_outside_allowlist() {
+    let home = std::env::var("HOME").unwrap();
+    let err = olorin::runes::common::resolve_path(
+        "/var/data/foo.csv", &PathBuf::from(&home)
+    ).unwrap_err();
+    assert!(matches!(err, olorin::runes::common::PathError::OutsideAllowlist));
+}
+
+#[test]
+fn truncate_answer_handles_utf8_boundary() {
+    use olorin::runes::common::{truncate_answer, MAX_ANSWER_BYTES};
+    // Build a string just under the limit, then append multi-byte chars that
+    // span the cut point. "Å" is 2 bytes in UTF-8.
+    let mut s = String::with_capacity(MAX_ANSWER_BYTES + 50);
+    // Fill up to MAX_ANSWER_BYTES - 33 so the char-boundary walk has to
+    // step back past a multi-byte char.
+    while s.len() < MAX_ANSWER_BYTES - 33 { s.push('a'); }
+    while s.len() < MAX_ANSWER_BYTES + 20  { s.push('Å'); }
+    let out = truncate_answer(&s);              // must not panic
+    assert!(out.contains("[...truncated"));
+    assert!(out.len() <= s.len());              // smaller than input
+}
+
+#[test]
+fn truncate_answer_passthrough_under_limit() {
+    use olorin::runes::common::truncate_answer;
+    let s = "hello world";
+    assert_eq!(truncate_answer(s), s);
+}
+
+#[test]
+fn open_capped_rejects_symlink_outside_allowlist() {
+    use std::os::unix::fs::symlink;
+    // Create a symlink in /tmp pointing outside the allowlist.
+    let link = std::env::temp_dir().join("olorin_runes_symlink_test.link");
+    let _ = std::fs::remove_file(&link);
+    symlink("/etc/hostname", &link).unwrap();
+    let home = PathBuf::from(std::env::var("HOME").unwrap());
+    let err = olorin::runes::common::open_capped(&link, &home).unwrap_err();
+    assert!(
+        matches!(err, olorin::runes::common::PathError::OutsideAllowlist),
+        "expected OutsideAllowlist, got {err:?}"
+    );
+    let _ = std::fs::remove_file(&link);
+}

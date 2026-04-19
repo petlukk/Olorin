@@ -18,8 +18,10 @@ pub enum PathError {
 }
 
 /// Resolve a user-supplied path against the allowlist (user home + /tmp).
-/// Accepts `~/...` as home-relative. Rejects anything that canonicalizes
-/// outside the allowlist (including symlink traversal).
+/// Accepts `~/...` as home-relative. Performs lexical-only validation —
+/// rejects `..` components and paths that don't start with `home` or `/tmp`
+/// after expansion. Does NOT follow symlinks; see `open_capped` for the
+/// canonical-path check that covers symlink traversal.
 pub fn resolve_path(path: &str, home: &Path) -> Result<PathBuf, PathError> {
     let expanded = if let Some(rest) = path.strip_prefix("~/") {
         home.join(rest)
@@ -49,7 +51,11 @@ pub fn resolve_path(path: &str, home: &Path) -> Result<PathBuf, PathError> {
 /// Open a file and mmap-equivalent read the full contents, rejecting
 /// anything beyond `MAX_INPUT_BYTES`. Returns the bytes as a `Vec<u8>`;
 /// the MVP reads eagerly (streamed read comes later for GB files).
-pub fn open_capped(path: &Path) -> Result<Vec<u8>, PathError> {
+///
+/// After confirming the file exists, canonicalizes the path and re-checks
+/// that the canonical form lives under `home` or `/tmp`. This catches
+/// symlinks in `/tmp` (or elsewhere in the allowlist) that point outside it.
+pub fn open_capped(path: &Path, home: &Path) -> Result<Vec<u8>, PathError> {
     use std::io::Read;
 
     let metadata = std::fs::metadata(path)
@@ -62,6 +68,16 @@ pub fn open_capped(path: &Path) -> Result<Vec<u8>, PathError> {
     if size > MAX_INPUT_BYTES {
         return Err(PathError::TooLarge(size));
     }
+
+    // Canonicalize now that we know the file exists, and re-check the
+    // allowlist on the real path to catch symlink traversal.
+    let canonical = std::fs::canonicalize(path)
+        .map_err(|e| PathError::Io(e.to_string()))?;
+    let allowed = canonical.starts_with(home) || canonical.starts_with("/tmp");
+    if !allowed {
+        return Err(PathError::OutsideAllowlist);
+    }
+
     let mut f = File::open(path).map_err(|e| PathError::Io(e.to_string()))?;
     let mut buf = Vec::with_capacity(size as usize);
     f.read_to_end(&mut buf).map_err(|e| PathError::Io(e.to_string()))?;
@@ -69,10 +85,14 @@ pub fn open_capped(path: &Path) -> Result<Vec<u8>, PathError> {
 }
 
 /// Truncate a summary string to `MAX_ANSWER_BYTES`, appending a marker.
+/// Walks the cut point back to the nearest valid UTF-8 char boundary so
+/// multi-byte characters (e.g. Swedish letters, emoji) never cause a panic.
 pub fn truncate_answer(s: &str) -> String {
     if s.len() <= MAX_ANSWER_BYTES {
         return s.to_string();
     }
-    let dropped = s.len() - MAX_ANSWER_BYTES + 32;
-    format!("{} [...truncated {dropped} bytes]", &s[..MAX_ANSWER_BYTES - 32])
+    let cut = MAX_ANSWER_BYTES - 32;
+    let cut = (0..=cut).rev().find(|&i| s.is_char_boundary(i)).unwrap_or(0);
+    let dropped = s.len() - cut;
+    format!("{} [...truncated {dropped} bytes]", &s[..cut])
 }
