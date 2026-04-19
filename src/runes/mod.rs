@@ -2,6 +2,8 @@
 //! is auto-discovered by build.rs; the generated registry is included
 //! below.
 
+pub mod common;
+
 /// Output safety classification for a rune's `answer` field.
 /// Declared per-rune, never computed at runtime.
 pub enum OutputSafety {
