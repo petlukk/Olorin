@@ -35,9 +35,7 @@ pub trait Rune: Sync {
     fn run(&self, args: &str) -> RuneResult;
 }
 
-/// Registry generated at build time — placeholder until build.rs
-/// task lands. Replaced in Task 3 by `include!(...)`.
-pub const RUNES: &[&(dyn Rune + Sync)] = &[];
+include!(concat!(env!("OUT_DIR"), "/runes_registry.rs"));
 
 /// Look up and invoke a rune by name. Returns None if not found.
 pub fn run_rune(name: &str, args: &str) -> Option<RuneResult> {

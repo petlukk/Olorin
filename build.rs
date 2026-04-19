@@ -183,4 +183,40 @@ fn main() {
     let out_path = out_dir.join("embedded_kernels.rs");
     fs::write(&out_path, &code)
         .unwrap_or_else(|e| panic!("cannot write embedded_kernels.rs: {e}"));
+
+    // ── Rune auto-discovery ───────────────────────────────────────────
+    // Scans src/runes/*.rs (excluding mod.rs, common.rs). For each file,
+    // verify it exports `pub const RUNE` (grep-parse, no syntactic Rust
+    // analysis); emit runes_registry.rs into OUT_DIR.
+    let runes_dir = Path::new(&manifest_dir).join("src/runes");
+    let mut rune_mods: Vec<String> = Vec::new();
+    if runes_dir.is_dir() {
+        for entry in fs::read_dir(&runes_dir).unwrap() {
+            let entry = entry.unwrap();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !name.ends_with(".rs") { continue; }
+            if name == "mod.rs" || name == "common.rs" { continue; }
+            let stem = name.strip_suffix(".rs").unwrap();
+            let contents = fs::read_to_string(entry.path()).unwrap_or_default();
+            if !contents.contains("pub const RUNE") {
+                panic!("rune file {name} is missing `pub const RUNE: <Type> = ...`");
+            }
+            rune_mods.push(stem.to_string());
+        }
+    }
+    rune_mods.sort();
+
+    let mut out = String::new();
+    for m in &rune_mods {
+        out.push_str(&format!("pub mod {m};\n"));
+    }
+    out.push_str("pub const RUNES: &[&(dyn crate::runes::Rune + Sync)] = &[\n");
+    for m in &rune_mods {
+        out.push_str(&format!("    &{m}::RUNE,\n"));
+    }
+    out.push_str("];\n");
+
+    let out_file = out_dir.join("runes_registry.rs");
+    fs::write(&out_file, out).unwrap();
+    println!("cargo:rerun-if-changed=src/runes");
 }
