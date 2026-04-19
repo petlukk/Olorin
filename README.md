@@ -242,3 +242,42 @@ for cloud inference as fallback.
 | Dependencies | 2 (libc, libloading) |
 | Release binary (ARM) | 3.4 MB (all kernels embedded) |
 | Max file size | 500 lines (enforced) |
+
+## Runes — SIMD tool calls
+
+Runes let Olorin reason over data that is bigger than the model's context
+window. Gemma 4 2B has ~128K tokens of context; a modest bank statement
+can be 50 MB of text. A kernel summarizes the file in sub-second time,
+then the model narrates the summary in one or two plain-English sentences.
+
+### Try it
+
+```
+/rune eacrunch ~/Downloads/statement.csv
+```
+
+Sample output:
+
+```
+rows: 1247
+columns: 4
+date (text): 340 unique; top values: 2024-01-15, 2024-02-10, 2024-03-05
+category (text): 8 unique; top values: groceries, food, rent
+amount (number): count=1247, mean=46.70, min=1.00, max=1850.00, sum=58235.00
+merchant (text): 42 unique; top values: Coop, ICA, SL
+```
+
+### Real public data to try it on
+
+- **Synthetic fixture** — `tests/fixtures/runes/tiny.csv` in this repo. 10 rows, good for a smoke test.
+- **US Bank Transaction Categories v2** — 68K real transaction descriptions, MIT-licensed:
+  https://huggingface.co/datasets/DoDataThings/us-bank-transaction-categories-v2
+- **NYC TLC Yellow Taxi trip records** — millions of rows per month, permissive:
+  https://catalog.data.gov/dataset/2023-yellow-taxi-trip-data
+
+### Limits (MVP)
+
+- Max input: 4 GB (2 GB for `csv_scan` in this MVP — bumping to i64 is a planned follow-up).
+- Path allowlist: `~` and `/tmp` only. Symlinks escaping the allowlist are rejected at open time.
+- Output cap: 32 KB summary (truncated with a `[...truncated N bytes]` marker at a UTF-8-safe boundary).
+- Unquoted CSV only; CRLF line endings are tolerated (trailing `\r` trimmed per field).
