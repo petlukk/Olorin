@@ -10,6 +10,10 @@
 //
 // TODO(simd): replace loop with f32x4 or f32x8 accumulators + horizontal
 // reduce once eacrunch is past MVP.
+//
+// Signature is single-line to appease the current Eä parser — multi-line
+// parameter lists fail with `expected parameter name`. Once that's fixed
+// it can be split across lines for readability.
 
 export func f32_stats(data: *f32, len: i32, out_count: *mut i32, out_sum: *mut f32, out_min: *mut f32, out_max: *mut f32) {
     out_count[0] = 0

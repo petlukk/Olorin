@@ -443,10 +443,11 @@ pub unsafe fn csv_scan(
 /// Streaming stats over `len` f32 elements. Writes count, sum, min, max.
 ///
 /// # Safety
-/// - `data` must point to `len` readable `f32` elements.
-/// - `out_count`, `out_sum`, `out_min`, `out_max` must each be valid
-///   for one writable element. Pointer validity is required even when
-///   `len == 0` (the kernel always writes zeros).
+/// - `data` must point to `len` readable `f32` elements; may be dangling
+///   when `len == 0` (the kernel does not dereference it in that case).
+/// - `out_count`, `out_sum`, `out_min`, `out_max` must each be valid for
+///   one writable element **even when `len == 0`** — the kernel always
+///   writes zeros to all four before the early return.
 pub unsafe fn f32_stats(
     data: *const f32, len: i32,
     out_count: *mut i32,

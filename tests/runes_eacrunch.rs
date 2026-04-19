@@ -208,6 +208,8 @@ fn f32_stats_empty_safe() {
     }
     assert_eq!(count, 0);
     assert_eq!(sum, 0.0);
+    assert_eq!(min_v, 0.0);
+    assert_eq!(max_v, 0.0);
 }
 
 #[test]
