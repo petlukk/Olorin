@@ -158,16 +158,26 @@ pub(crate) fn matvec_batch_step(
     n_rows: usize, n_cols: usize, n: usize, n_pad: usize, output_stride: usize,
     current_chunk: &AtomicI32, ith: usize, nth: usize,
 ) {
-    match repacked {
-        Some(p) => matmul_graph::q4k_gemm_8x8_batch_ws(
+    if let Some(p) = repacked {
+        matmul_graph::q4k_gemm_8x8_batch_ws(
             p.as_ptr(), q8_a, output,
             n_cols, n_rows, n_pad, output_stride,
             current_chunk, ith, nth,
-        ),
-        None => matmul_graph::matvec_batch_ws(
-            dtype, weight, q8_qs, q8_d, q8_bsums, output, d_scratch,
-            n_rows, n_cols, n, output_stride,
-            current_chunk, ith, nth,
-        ),
+        );
+        return;
     }
+    #[cfg(target_arch = "aarch64")]
+    if dtype == matmul::GGML_TYPE_Q5_K {
+        matmul_graph::q5k_gemm_batch_ws(
+            weight, q8_a, output,
+            n_cols, n_rows, n_pad, output_stride,
+            current_chunk, ith, nth,
+        );
+        return;
+    }
+    matmul_graph::matvec_batch_ws(
+        dtype, weight, q8_qs, q8_d, q8_bsums, output, d_scratch,
+        n_rows, n_cols, n, output_stride,
+        current_chunk, ith, nth,
+    );
 }

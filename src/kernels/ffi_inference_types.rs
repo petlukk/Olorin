@@ -35,8 +35,20 @@ pub type Q6kDot4RowRepackedFn = unsafe extern "C" fn(
     i32,         // n_blocks
     *const f32,  // d_arr (interleaved: d_arr[blk*4+row])
 );
+#[cfg(target_arch = "aarch64")]
 pub type Q6kGemmFn = unsafe extern "C" fn(
     *const u8,   // weight (raw Q6K blocks)
+    *const u8,   // q8_a (block_q8_Kx4 tiles)
+    *mut u8,     // scratch
+    *mut f32,    // out
+    i32,         // output_stride
+    i32,         // n_inner
+    i32,         // nr (tokens, must be %4==0)
+    i32,         // nc (weight rows)
+);
+#[cfg(target_arch = "aarch64")]
+pub type Q5kGemmFn = unsafe extern "C" fn(
+    *const u8,   // weight (raw Q5K blocks)
     *const u8,   // q8_a (block_q8_Kx4 tiles)
     *mut u8,     // scratch
     *mut f32,    // out

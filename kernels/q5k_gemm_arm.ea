@@ -1,0 +1,331 @@
+// q5k_gemm_arm.ea — Q5K × Q8Kx4 GEMM kernel (ARM NEON + dotprod)
+//
+// Processes nc weight rows × nr tokens (4 at a time via vdot_lane_i32).
+// Weight: raw Q5K blocks (176 bytes per superblock).
+// Q8K input: block_q8_Kx4 interleaved format (1168 bytes per superblock).
+//
+// Q5K layout (176 B per 256 elements):
+//   d (f16) @ 0,  dmin (f16) @ 2,  scales[12] @ 4,  qh[32] @ 16,  qs[128] @ 48
+//
+// Scales/mins: same packed 12-byte format as Q4K
+//   sc[0..3] = u0 & 0x3f3f3f3f                 where u0 = read_u32(sp+0)
+//   sc[4..7] = (u2 & 0x0f) | (((u0>>6)&0x03)<<4)   u2 = read_u32(sp+8)
+//   mn[0..3] = u1 & 0x3f3f3f3f                 u1 = read_u32(sp+4)
+//   mn[4..7] = ((u2>>4)&0x0f) | (((u1>>6)&0x03)<<4)
+//
+// Sub-group mapping (8 sub-groups × 32 elements):
+//   sg=0: qs[0..32], lo nibble, qh bit 0
+//   sg=1: qs[0..32], hi nibble, qh bit 1
+//   sg=2: qs[32..64], lo nibble, qh bit 2
+//   sg=3: qs[32..64], hi nibble, qh bit 3
+//   sg=4: qs[64..96], lo nibble, qh bit 4
+//   sg=5: qs[64..96], hi nibble, qh bit 5
+//   sg=6: qs[96..128], lo nibble, qh bit 6
+//   sg=7: qs[96..128], hi nibble, qh bit 7
+
+#[cfg(aarch64)]
+
+func read_u32(p: *restrict i8, off: i32) -> i32 {
+    let p32: *restrict i32 = ptr_as_i32(p)
+    return p32[off / 4]
+}
+
+// 16-element dot of one weight half against 4 tokens worth of Q8K data.
+// q8_off points at 64 bytes of Q8K_x4: 4 chunks of 16B, each chunk = [t0 4B, t1 4B, t2 4B, t3 4B].
+// Returns i32x4 = [dot_t0, dot_t1, dot_t2, dot_t3].
+func vdot_16x4(
+    q8: *restrict i8, q8_off: i32, weight: i8x16
+) -> i32x4 {
+    let q0: i8x16 = load(q8, q8_off + 0)
+    let q1: i8x16 = load(q8, q8_off + 16)
+    let q2: i8x16 = load(q8, q8_off + 32)
+    let q3: i8x16 = load(q8, q8_off + 48)
+    let mut acc: i32x4 = splat(0)
+    acc = vdot_lane_i32(acc, q0, weight, 0)
+    acc = vdot_lane_i32(acc, q1, weight, 1)
+    acc = vdot_lane_i32(acc, q2, weight, 2)
+    acc = vdot_lane_i32(acc, q3, weight, 3)
+    return acc
+}
+
+export func q5k_gemm(
+    weight: *restrict u8,
+    q8_a: *restrict u8,
+    scratch: *mut u8,
+    out: *mut f32,
+    output_stride: i32,
+    n_inner: i32,
+    nr: i32,
+    nc: i32
+) {
+    let nb: i32 = n_inner / 256
+    let row_bytes: i32 = nb * 176
+    let q8_tile_bytes: i32 = nb * 1168
+
+    let mask_lo: i8x16 = splat(15)
+    let shift4: i8x16 = splat(4)
+    let one: i8x16 = splat(1)
+    let sh0: i8x16 = splat(0)
+    let sh1: i8x16 = splat(1)
+    let sh2: i8x16 = splat(2)
+    let sh3: i8x16 = splat(3)
+    let sh5: i8x16 = splat(5)
+    let sh6: i8x16 = splat(6)
+    let sh7: i8x16 = splat(7)
+
+    let nr4: i32 = nr / 4
+    let weight_i8: *restrict i8 = ptr_as_i8(weight)
+    let q8_i8: *restrict i8 = ptr_as_i8(q8_a)
+    let q8_f32: *restrict f32 = ptr_as_f32(ptr_as_i8(q8_a))
+    let out_f32: *mut f32 = ptr_as_f32(ptr_as_i8(out))
+
+    let mut r: i32 = 0
+    while r < nc {
+        let wb_row: i32 = r * row_bytes
+
+        let mut tg: i32 = 0
+        while tg < nr4 {
+            let ab_tile: i32 = tg * q8_tile_bytes
+
+            // Per-token f32 result accumulator across all superblocks.
+            let mut res: f32x4 = splat(0.0)
+
+            let mut blk: i32 = 0
+            while blk < nb {
+                let wb: i32 = wb_row + blk * 176
+                let ab: i32 = ab_tile + blk * 1168
+
+                // Q8K d for 4 tokens (first 16 bytes of block_q8_Kx4 = 4 × f32)
+                let q8d: f32x4 = [
+                    q8_f32[ab / 4],
+                    q8_f32[ab / 4 + 1],
+                    q8_f32[ab / 4 + 2],
+                    q8_f32[ab / 4 + 3]
+                ]
+
+                // Q5K d, dmin (first 4 bytes = 2 × f16)
+                let d16_ptr: *restrict i16 = ptr_as_i16(weight_i8)
+                let d_dm_raw: i16x4 = load(d16_ptr, wb / 2)
+                let d_dm: f32x4 = cvt_f16_f32(d_dm_raw)
+                let d: f32 = d_dm[0]
+                let dm: f32 = d_dm[1]
+
+                // Per-token superblock scales
+                let sb_scale: f32x4 = [
+                    d * q8d[0], d * q8d[1], d * q8d[2], d * q8d[3]
+                ]
+                let sb_min: f32x4 = [
+                    dm * q8d[0], dm * q8d[1], dm * q8d[2], dm * q8d[3]
+                ]
+
+                // Decode 8 sub-group scales + 8 mins from packed 12 bytes at wb+4
+                let u0: i32 = read_u32(weight_i8, wb + 4)
+                let u1: i32 = read_u32(weight_i8, wb + 8)
+                let u2: i32 = read_u32(weight_i8, wb + 12)
+                let sc03: i32 = u0 & 0x3f3f3f3f
+                let sc47: i32 = (u2 & 0x0f0f0f0f) | (((u0 >> 6) & 0x03030303) << 4)
+                let mn03: i32 = u1 & 0x3f3f3f3f
+                let mn47: i32 = ((u2 >> 4) & 0x0f0f0f0f) | (((u1 >> 6) & 0x03030303) << 4)
+
+                // Load qh once per superblock
+                let qh_a: i8x16 = load(weight_i8, wb + 16)
+                let qh_b: i8x16 = load(weight_i8, wb + 16 + 16)
+
+                // Bsums: block_q8_Kx4 has 64 paired-bsum slots at +1040.
+                // Layout for Q5K (8 sub-groups of 32 elem): per sub-group s, 4 tokens.
+                // Bytes 1040..1168 = 128 B = 64 i16. Q4K-style pairing: pair adjacent
+                // bsums into one i16 per (sub-group, token). Q4K's gemm uses the
+                // same 8-sub-group / 4-scale-block grouping; mirror that indexing.
+                //
+                // For sub-block sb (0..3, each = 2 sub-groups), token t:
+                //   bsums_i16[(ab + 1040)/2 + sb*16 + t*4 + 2*hi + nib_idx]
+                // where hi is the nibble half (0=lo, 1=hi) and nib_idx selects pair offset.
+                // We accumulate across sub-groups via the per-sub-group scale.
+                let bsums_i16: *restrict i16 = ptr_as_i16(q8_i8)
+
+                // Per-token integer accumulator for activation×weight contribution
+                let mut sumi: i32x4 = splat(0)
+                // Per-token integer accumulator for mins×bsum correction
+                let mut bias: i32x4 = splat(0)
+
+                // ── Sub-group sg=0: ql[0..16] lo nibble, qh bit 0 ──
+                let pa0: i8x16 = load(weight_i8, wb + 48 + 0)
+                let pb0: i8x16 = load(weight_i8, wb + 48 + 16)
+                let h0_a: i8x16 = ((qh_a .>> sh0) .& one) .<< shift4
+                let h0_b: i8x16 = ((qh_b .>> sh0) .& one) .<< shift4
+                let w0a: i8x16 = (pa0 .& mask_lo) .| h0_a
+                let w0b: i8x16 = (pb0 .& mask_lo) .| h0_b
+                let q8_sg0_off: i32 = ab + 16 + 0 * 128
+                let dot0a: i32x4 = vdot_16x4(q8_i8, q8_sg0_off + 0, w0a)
+                let dot0b: i32x4 = vdot_16x4(q8_i8, q8_sg0_off + 64, w0b)
+                // sg=0 covers elements 0..31: w0a × q8[0..15], w0b × q8[16..31]
+                let sc0: i32 = sc03 & 0xff
+                sumi = sumi .+ splat(sc0) .* (dot0a .+ dot0b)
+
+                // Bsum pair for sub-group 0, 4 tokens. sb_iter=0 (sg/2=0), nibble half lo.
+                // bsums layout: same 4-byte interleaved per token within each sb, paired adjacent.
+                let bs_base_w: i32 = (ab + 1040) / 2
+                let bs0_t0: i32 = to_i32(bsums_i16[bs_base_w + 0]) + to_i32(bsums_i16[bs_base_w + 1])
+                let bs0_t1: i32 = to_i32(bsums_i16[bs_base_w + 4]) + to_i32(bsums_i16[bs_base_w + 5])
+                let bs0_t2: i32 = to_i32(bsums_i16[bs_base_w + 8]) + to_i32(bsums_i16[bs_base_w + 9])
+                let bs0_t3: i32 = to_i32(bsums_i16[bs_base_w + 12]) + to_i32(bsums_i16[bs_base_w + 13])
+                let bsum0: i32x4 = [bs0_t0, bs0_t1, bs0_t2, bs0_t3]
+                let mn0: i32 = mn03 & 0xff
+                bias = bias .+ splat(mn0) .* bsum0
+
+                // ── sg=1: ql[0..16] hi nibble, qh bit 1 (elements 32..63) ──
+                let h1_a: i8x16 = ((qh_a .>> sh1) .& one) .<< shift4
+                let h1_b: i8x16 = ((qh_b .>> sh1) .& one) .<< shift4
+                let w1a: i8x16 = ((pa0 .>> shift4) .& mask_lo) .| h1_a
+                let w1b: i8x16 = ((pb0 .>> shift4) .& mask_lo) .| h1_b
+                let q8_sg1_off: i32 = ab + 16 + 1 * 128
+                let dot1a: i32x4 = vdot_16x4(q8_i8, q8_sg1_off + 0, w1a)
+                let dot1b: i32x4 = vdot_16x4(q8_i8, q8_sg1_off + 64, w1b)
+                let sc1: i32 = (sc03 >> 8) & 0xff
+                sumi = sumi .+ splat(sc1) .* (dot1a .+ dot1b)
+
+                let bs1_t0: i32 = to_i32(bsums_i16[bs_base_w + 2]) + to_i32(bsums_i16[bs_base_w + 3])
+                let bs1_t1: i32 = to_i32(bsums_i16[bs_base_w + 6]) + to_i32(bsums_i16[bs_base_w + 7])
+                let bs1_t2: i32 = to_i32(bsums_i16[bs_base_w + 10]) + to_i32(bsums_i16[bs_base_w + 11])
+                let bs1_t3: i32 = to_i32(bsums_i16[bs_base_w + 14]) + to_i32(bsums_i16[bs_base_w + 15])
+                let bsum1: i32x4 = [bs1_t0, bs1_t1, bs1_t2, bs1_t3]
+                let mn1: i32 = (mn03 >> 8) & 0xff
+                bias = bias .+ splat(mn1) .* bsum1
+
+                // ── sg=2: ql[16..32] lo nibble, qh bit 2 ──
+                let pa1: i8x16 = load(weight_i8, wb + 48 + 32)
+                let pb1: i8x16 = load(weight_i8, wb + 48 + 48)
+                let h2_a: i8x16 = ((qh_a .>> sh2) .& one) .<< shift4
+                let h2_b: i8x16 = ((qh_b .>> sh2) .& one) .<< shift4
+                let w2a: i8x16 = (pa1 .& mask_lo) .| h2_a
+                let w2b: i8x16 = (pb1 .& mask_lo) .| h2_b
+                let q8_sg2_off: i32 = ab + 16 + 2 * 128
+                let dot2a: i32x4 = vdot_16x4(q8_i8, q8_sg2_off + 0, w2a)
+                let dot2b: i32x4 = vdot_16x4(q8_i8, q8_sg2_off + 64, w2b)
+                let sc2: i32 = (sc03 >> 16) & 0xff
+                sumi = sumi .+ splat(sc2) .* (dot2a .+ dot2b)
+
+                let bs2_t0: i32 = to_i32(bsums_i16[bs_base_w + 16]) + to_i32(bsums_i16[bs_base_w + 17])
+                let bs2_t1: i32 = to_i32(bsums_i16[bs_base_w + 20]) + to_i32(bsums_i16[bs_base_w + 21])
+                let bs2_t2: i32 = to_i32(bsums_i16[bs_base_w + 24]) + to_i32(bsums_i16[bs_base_w + 25])
+                let bs2_t3: i32 = to_i32(bsums_i16[bs_base_w + 28]) + to_i32(bsums_i16[bs_base_w + 29])
+                let bsum2: i32x4 = [bs2_t0, bs2_t1, bs2_t2, bs2_t3]
+                let mn2: i32 = (mn03 >> 16) & 0xff
+                bias = bias .+ splat(mn2) .* bsum2
+
+                // ── sg=3: ql[16..32] hi nibble, qh bit 3 (elements 96..127) ──
+                let h3_a: i8x16 = ((qh_a .>> sh3) .& one) .<< shift4
+                let h3_b: i8x16 = ((qh_b .>> sh3) .& one) .<< shift4
+                let w3a: i8x16 = ((pa1 .>> shift4) .& mask_lo) .| h3_a
+                let w3b: i8x16 = ((pb1 .>> shift4) .& mask_lo) .| h3_b
+                let q8_sg3_off: i32 = ab + 16 + 3 * 128
+                let dot3a: i32x4 = vdot_16x4(q8_i8, q8_sg3_off + 0, w3a)
+                let dot3b: i32x4 = vdot_16x4(q8_i8, q8_sg3_off + 64, w3b)
+                let sc3: i32 = (sc03 >> 24) & 0xff
+                sumi = sumi .+ splat(sc3) .* (dot3a .+ dot3b)
+
+                let bs3_t0: i32 = to_i32(bsums_i16[bs_base_w + 18]) + to_i32(bsums_i16[bs_base_w + 19])
+                let bs3_t1: i32 = to_i32(bsums_i16[bs_base_w + 22]) + to_i32(bsums_i16[bs_base_w + 23])
+                let bs3_t2: i32 = to_i32(bsums_i16[bs_base_w + 26]) + to_i32(bsums_i16[bs_base_w + 27])
+                let bs3_t3: i32 = to_i32(bsums_i16[bs_base_w + 30]) + to_i32(bsums_i16[bs_base_w + 31])
+                let bsum3: i32x4 = [bs3_t0, bs3_t1, bs3_t2, bs3_t3]
+                let mn3: i32 = (mn03 >> 24) & 0xff
+                bias = bias .+ splat(mn3) .* bsum3
+
+                // ── sg=4: ql[32..48] lo nibble, qh bit 4 ──
+                let pa2: i8x16 = load(weight_i8, wb + 48 + 64)
+                let pb2: i8x16 = load(weight_i8, wb + 48 + 80)
+                let h4_a: i8x16 = ((qh_a .>> shift4) .& one) .<< shift4
+                let h4_b: i8x16 = ((qh_b .>> shift4) .& one) .<< shift4
+                let w4a: i8x16 = (pa2 .& mask_lo) .| h4_a
+                let w4b: i8x16 = (pb2 .& mask_lo) .| h4_b
+                let q8_sg4_off: i32 = ab + 16 + 4 * 128
+                let dot4a: i32x4 = vdot_16x4(q8_i8, q8_sg4_off + 0, w4a)
+                let dot4b: i32x4 = vdot_16x4(q8_i8, q8_sg4_off + 64, w4b)
+                let sc4: i32 = sc47 & 0xff
+                sumi = sumi .+ splat(sc4) .* (dot4a .+ dot4b)
+
+                let bs4_t0: i32 = to_i32(bsums_i16[bs_base_w + 32]) + to_i32(bsums_i16[bs_base_w + 33])
+                let bs4_t1: i32 = to_i32(bsums_i16[bs_base_w + 36]) + to_i32(bsums_i16[bs_base_w + 37])
+                let bs4_t2: i32 = to_i32(bsums_i16[bs_base_w + 40]) + to_i32(bsums_i16[bs_base_w + 41])
+                let bs4_t3: i32 = to_i32(bsums_i16[bs_base_w + 44]) + to_i32(bsums_i16[bs_base_w + 45])
+                let bsum4: i32x4 = [bs4_t0, bs4_t1, bs4_t2, bs4_t3]
+                let mn4: i32 = mn47 & 0xff
+                bias = bias .+ splat(mn4) .* bsum4
+
+                // ── sg=5: ql[32..48] hi nibble, qh bit 5 (elements 160..191) ──
+                let h5_a: i8x16 = ((qh_a .>> sh5) .& one) .<< shift4
+                let h5_b: i8x16 = ((qh_b .>> sh5) .& one) .<< shift4
+                let w5a: i8x16 = ((pa2 .>> shift4) .& mask_lo) .| h5_a
+                let w5b: i8x16 = ((pb2 .>> shift4) .& mask_lo) .| h5_b
+                let q8_sg5_off: i32 = ab + 16 + 5 * 128
+                let dot5a: i32x4 = vdot_16x4(q8_i8, q8_sg5_off + 0, w5a)
+                let dot5b: i32x4 = vdot_16x4(q8_i8, q8_sg5_off + 64, w5b)
+                let sc5: i32 = (sc47 >> 8) & 0xff
+                sumi = sumi .+ splat(sc5) .* (dot5a .+ dot5b)
+
+                let bs5_t0: i32 = to_i32(bsums_i16[bs_base_w + 34]) + to_i32(bsums_i16[bs_base_w + 35])
+                let bs5_t1: i32 = to_i32(bsums_i16[bs_base_w + 38]) + to_i32(bsums_i16[bs_base_w + 39])
+                let bs5_t2: i32 = to_i32(bsums_i16[bs_base_w + 42]) + to_i32(bsums_i16[bs_base_w + 43])
+                let bs5_t3: i32 = to_i32(bsums_i16[bs_base_w + 46]) + to_i32(bsums_i16[bs_base_w + 47])
+                let bsum5: i32x4 = [bs5_t0, bs5_t1, bs5_t2, bs5_t3]
+                let mn5: i32 = (mn47 >> 8) & 0xff
+                bias = bias .+ splat(mn5) .* bsum5
+
+                // ── sg=6: ql[48..64] lo nibble, qh bit 6 ──
+                let pa3: i8x16 = load(weight_i8, wb + 48 + 96)
+                let pb3: i8x16 = load(weight_i8, wb + 48 + 112)
+                let h6_a: i8x16 = ((qh_a .>> sh6) .& one) .<< shift4
+                let h6_b: i8x16 = ((qh_b .>> sh6) .& one) .<< shift4
+                let w6a: i8x16 = (pa3 .& mask_lo) .| h6_a
+                let w6b: i8x16 = (pb3 .& mask_lo) .| h6_b
+                let q8_sg6_off: i32 = ab + 16 + 6 * 128
+                let dot6a: i32x4 = vdot_16x4(q8_i8, q8_sg6_off + 0, w6a)
+                let dot6b: i32x4 = vdot_16x4(q8_i8, q8_sg6_off + 64, w6b)
+                let sc6: i32 = (sc47 >> 16) & 0xff
+                sumi = sumi .+ splat(sc6) .* (dot6a .+ dot6b)
+
+                let bs6_t0: i32 = to_i32(bsums_i16[bs_base_w + 48]) + to_i32(bsums_i16[bs_base_w + 49])
+                let bs6_t1: i32 = to_i32(bsums_i16[bs_base_w + 52]) + to_i32(bsums_i16[bs_base_w + 53])
+                let bs6_t2: i32 = to_i32(bsums_i16[bs_base_w + 56]) + to_i32(bsums_i16[bs_base_w + 57])
+                let bs6_t3: i32 = to_i32(bsums_i16[bs_base_w + 60]) + to_i32(bsums_i16[bs_base_w + 61])
+                let bsum6: i32x4 = [bs6_t0, bs6_t1, bs6_t2, bs6_t3]
+                let mn6: i32 = (mn47 >> 16) & 0xff
+                bias = bias .+ splat(mn6) .* bsum6
+
+                // ── sg=7: ql[48..64] hi nibble, qh bit 7 (elements 224..255) ──
+                let h7_a: i8x16 = ((qh_a .>> sh7) .& one) .<< shift4
+                let h7_b: i8x16 = ((qh_b .>> sh7) .& one) .<< shift4
+                let w7a: i8x16 = ((pa3 .>> shift4) .& mask_lo) .| h7_a
+                let w7b: i8x16 = ((pb3 .>> shift4) .& mask_lo) .| h7_b
+                let q8_sg7_off: i32 = ab + 16 + 7 * 128
+                let dot7a: i32x4 = vdot_16x4(q8_i8, q8_sg7_off + 0, w7a)
+                let dot7b: i32x4 = vdot_16x4(q8_i8, q8_sg7_off + 64, w7b)
+                let sc7: i32 = (sc47 >> 24) & 0xff
+                sumi = sumi .+ splat(sc7) .* (dot7a .+ dot7b)
+
+                let bs7_t0: i32 = to_i32(bsums_i16[bs_base_w + 50]) + to_i32(bsums_i16[bs_base_w + 51])
+                let bs7_t1: i32 = to_i32(bsums_i16[bs_base_w + 54]) + to_i32(bsums_i16[bs_base_w + 55])
+                let bs7_t2: i32 = to_i32(bsums_i16[bs_base_w + 58]) + to_i32(bsums_i16[bs_base_w + 59])
+                let bs7_t3: i32 = to_i32(bsums_i16[bs_base_w + 62]) + to_i32(bsums_i16[bs_base_w + 63])
+                let bsum7: i32x4 = [bs7_t0, bs7_t1, bs7_t2, bs7_t3]
+                let mn7: i32 = (mn47 >> 24) & 0xff
+                bias = bias .+ splat(mn7) .* bsum7
+
+                // Combine per-superblock contribution: d * sumi - dm * bias, scaled by q8d per token.
+                res = res .+ sb_scale .* to_f32(sumi) .- sb_min .* to_f32(bias)
+
+                blk = blk + 1
+            }
+
+            out_f32[tg * 4 * output_stride + r] = res[0]
+            out_f32[(tg * 4 + 1) * output_stride + r] = res[1]
+            out_f32[(tg * 4 + 2) * output_stride + r] = res[2]
+            out_f32[(tg * 4 + 3) * output_stride + r] = res[3]
+
+            tg = tg + 1
+        }
+
+        r = r + 1
+    }
+}

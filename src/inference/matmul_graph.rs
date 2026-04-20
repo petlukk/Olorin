@@ -309,6 +309,8 @@ pub fn matvec_ws(
 // Re-export batch functions from matmul_graph_batch
 pub use super::matmul_graph_batch::{
     q4k_matvec_8x8_batch_ws, q4k_gemm_8x8_batch_ws,
-    q6k_gemm_batch_ws, q6k_repacked_batch_ws, q6k_repacked_batch_ws_pre_d,
+    q6k_repacked_batch_ws, q6k_repacked_batch_ws_pre_d,
     matvec_batch_ws,
 };
+#[cfg(target_arch = "aarch64")]
+pub use super::matmul_graph_batch::{q6k_gemm_batch_ws, q5k_gemm_batch_ws};
