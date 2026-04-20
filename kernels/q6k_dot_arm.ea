@@ -17,6 +17,7 @@ export func q6k_dot_q8k(
     let shift2: i8x16 = splat(2)
     let shift4: i8x16 = splat(4)
     let shift6: i8x16 = splat(6)
+    let off32: i8x16 = splat(32)
     let mut result: f32 = 0.0
 
     let mut blk: i32 = 0
@@ -44,36 +45,36 @@ export func q6k_dot_q8k(
             let ql2a: i8x16 = load(weight, ql_off + 32)
             let ql2b: i8x16 = load(weight, ql_off + 48)
 
-            // Group 0: ql[0..31] LOW nibble + qh bits 0-1
-            let q6_0a: i8x16 = (ql0a .& mask_lo) .+ ((qh_a .& mask_2) .<< shift4)
-            let q6_0b: i8x16 = (ql0b .& mask_lo) .+ ((qh_b .& mask_2) .<< shift4)
+            // Group 0 — q6 folded to signed [-32, 31]
+            let q6_0a: i8x16 = ((ql0a .& mask_lo) .+ ((qh_a .& mask_2) .<< shift4)) .- off32
+            let q6_0b: i8x16 = ((ql0b .& mask_lo) .+ ((qh_b .& mask_2) .<< shift4)) .- off32
             let q8_a: i8x16 = load(q8, q8_off)
             let q8_b: i8x16 = load(q8, q8_off + 16)
-            sumi = sumi + to_i32(weight[si]) * (reduce_add(vdot_i32(q6_0a, q8_a)) - 32 * to_i32(bsums[bi]))
-            sumi = sumi + to_i32(weight[si+1]) * (reduce_add(vdot_i32(q6_0b, q8_b)) - 32 * to_i32(bsums[bi+1]))
+            sumi = sumi + to_i32(weight[si]) * reduce_add(vdot_i32(q6_0a, q8_a))
+            sumi = sumi + to_i32(weight[si+1]) * reduce_add(vdot_i32(q6_0b, q8_b))
 
-            // Group 1: ql[32..63] LOW nibble + qh bits 2-3
-            let q6_1a: i8x16 = (ql2a .& mask_lo) .+ (((qh_a .>> shift2) .& mask_2) .<< shift4)
-            let q6_1b: i8x16 = (ql2b .& mask_lo) .+ (((qh_b .>> shift2) .& mask_2) .<< shift4)
+            // Group 1 — signed
+            let q6_1a: i8x16 = ((ql2a .& mask_lo) .+ (((qh_a .>> shift2) .& mask_2) .<< shift4)) .- off32
+            let q6_1b: i8x16 = ((ql2b .& mask_lo) .+ (((qh_b .>> shift2) .& mask_2) .<< shift4)) .- off32
             let q8_c: i8x16 = load(q8, q8_off + 32)
             let q8_d: i8x16 = load(q8, q8_off + 48)
-            sumi = sumi + to_i32(weight[si+2]) * (reduce_add(vdot_i32(q6_1a, q8_c)) - 32 * to_i32(bsums[bi+2]))
-            sumi = sumi + to_i32(weight[si+3]) * (reduce_add(vdot_i32(q6_1b, q8_d)) - 32 * to_i32(bsums[bi+3]))
+            sumi = sumi + to_i32(weight[si+2]) * reduce_add(vdot_i32(q6_1a, q8_c))
+            sumi = sumi + to_i32(weight[si+3]) * reduce_add(vdot_i32(q6_1b, q8_d))
 
-            // Group 2: ql[0..31] HIGH nibble + qh bits 4-5
-            let q6_2a: i8x16 = ((ql0a .>> shift4) .& mask_lo) .+ (((qh_a .>> shift4) .& mask_2) .<< shift4)
-            let q6_2b: i8x16 = ((ql0b .>> shift4) .& mask_lo) .+ (((qh_b .>> shift4) .& mask_2) .<< shift4)
+            // Group 2 — signed
+            let q6_2a: i8x16 = (((ql0a .>> shift4) .& mask_lo) .+ (((qh_a .>> shift4) .& mask_2) .<< shift4)) .- off32
+            let q6_2b: i8x16 = (((ql0b .>> shift4) .& mask_lo) .+ (((qh_b .>> shift4) .& mask_2) .<< shift4)) .- off32
             let q8_e: i8x16 = load(q8, q8_off + 64)
             let q8_f: i8x16 = load(q8, q8_off + 80)
-            sumi = sumi + to_i32(weight[si+4]) * (reduce_add(vdot_i32(q6_2a, q8_e)) - 32 * to_i32(bsums[bi+4]))
-            sumi = sumi + to_i32(weight[si+5]) * (reduce_add(vdot_i32(q6_2b, q8_f)) - 32 * to_i32(bsums[bi+5]))
+            sumi = sumi + to_i32(weight[si+4]) * reduce_add(vdot_i32(q6_2a, q8_e))
+            sumi = sumi + to_i32(weight[si+5]) * reduce_add(vdot_i32(q6_2b, q8_f))
 
-            let q6_3a: i8x16 = ((ql2a .>> shift4) .& mask_lo) .+ (((qh_a .>> shift6) .& mask_2) .<< shift4)
-            let q6_3b: i8x16 = ((ql2b .>> shift4) .& mask_lo) .+ (((qh_b .>> shift6) .& mask_2) .<< shift4)
+            let q6_3a: i8x16 = (((ql2a .>> shift4) .& mask_lo) .+ (((qh_a .>> shift6) .& mask_2) .<< shift4)) .- off32
+            let q6_3b: i8x16 = (((ql2b .>> shift4) .& mask_lo) .+ (((qh_b .>> shift6) .& mask_2) .<< shift4)) .- off32
             let q8_g: i8x16 = load(q8, q8_off + 96)
             let q8_h: i8x16 = load(q8, q8_off + 112)
-            sumi = sumi + to_i32(weight[si+6]) * (reduce_add(vdot_i32(q6_3a, q8_g)) - 32 * to_i32(bsums[bi+6]))
-            sumi = sumi + to_i32(weight[si+7]) * (reduce_add(vdot_i32(q6_3b, q8_h)) - 32 * to_i32(bsums[bi+7]))
+            sumi = sumi + to_i32(weight[si+6]) * reduce_add(vdot_i32(q6_3a, q8_g))
+            sumi = sumi + to_i32(weight[si+7]) * reduce_add(vdot_i32(q6_3b, q8_h))
 
             h = h + 1
         }
@@ -100,6 +101,7 @@ export func q6k_dot_q8k_4row(
     let shift2: i8x16 = splat(2)
     let shift4: i8x16 = splat(4)
     let shift6: i8x16 = splat(6)
+    let off32: i8x16 = splat(32)
     let mut res0: f32 = 0.0
     let mut res1: f32 = 0.0
     let mut res2: f32 = 0.0
@@ -133,27 +135,25 @@ export func q6k_dot_q8k_4row(
             let qh3a: i8x16 = load(w3, qh_h)
             let qh3b: i8x16 = load(w3, qh_h + 16)
 
-            // Group 0
+            // Group 0 — q6 folded to signed [-32, 31]
             let q8_a: i8x16 = load(q8, q8_off)
             let q8_b: i8x16 = load(q8, q8_off + 16)
-            let bc0: i32 = 32 * to_i32(bsums[bi])
-            let bc1: i32 = 32 * to_i32(bsums[bi + 1])
             let r0a: i8x16 = load(w0, ql_h)
             let r0b: i8x16 = load(w0, ql_h + 16)
-            s0 = s0 + to_i32(w0[si]) * (reduce_add(vdot_i32((r0a .& mask_lo) .+ ((qh0a .& mask_2) .<< shift4), q8_a)) - bc0)
-            s0 = s0 + to_i32(w0[si+1]) * (reduce_add(vdot_i32((r0b .& mask_lo) .+ ((qh0b .& mask_2) .<< shift4), q8_b)) - bc1)
+            s0 = s0 + to_i32(w0[si]) * reduce_add(vdot_i32(((r0a .& mask_lo) .+ ((qh0a .& mask_2) .<< shift4)) .- off32, q8_a))
+            s0 = s0 + to_i32(w0[si+1]) * reduce_add(vdot_i32(((r0b .& mask_lo) .+ ((qh0b .& mask_2) .<< shift4)) .- off32, q8_b))
             let r1a: i8x16 = load(w1, ql_h)
             let r1b: i8x16 = load(w1, ql_h + 16)
-            s1 = s1 + to_i32(w1[si]) * (reduce_add(vdot_i32((r1a .& mask_lo) .+ ((qh1a .& mask_2) .<< shift4), q8_a)) - bc0)
-            s1 = s1 + to_i32(w1[si+1]) * (reduce_add(vdot_i32((r1b .& mask_lo) .+ ((qh1b .& mask_2) .<< shift4), q8_b)) - bc1)
+            s1 = s1 + to_i32(w1[si]) * reduce_add(vdot_i32(((r1a .& mask_lo) .+ ((qh1a .& mask_2) .<< shift4)) .- off32, q8_a))
+            s1 = s1 + to_i32(w1[si+1]) * reduce_add(vdot_i32(((r1b .& mask_lo) .+ ((qh1b .& mask_2) .<< shift4)) .- off32, q8_b))
             let r2a: i8x16 = load(w2, ql_h)
             let r2b: i8x16 = load(w2, ql_h + 16)
-            s2 = s2 + to_i32(w2[si]) * (reduce_add(vdot_i32((r2a .& mask_lo) .+ ((qh2a .& mask_2) .<< shift4), q8_a)) - bc0)
-            s2 = s2 + to_i32(w2[si+1]) * (reduce_add(vdot_i32((r2b .& mask_lo) .+ ((qh2b .& mask_2) .<< shift4), q8_b)) - bc1)
+            s2 = s2 + to_i32(w2[si]) * reduce_add(vdot_i32(((r2a .& mask_lo) .+ ((qh2a .& mask_2) .<< shift4)) .- off32, q8_a))
+            s2 = s2 + to_i32(w2[si+1]) * reduce_add(vdot_i32(((r2b .& mask_lo) .+ ((qh2b .& mask_2) .<< shift4)) .- off32, q8_b))
             let r3a: i8x16 = load(w3, ql_h)
             let r3b: i8x16 = load(w3, ql_h + 16)
-            s3 = s3 + to_i32(w3[si]) * (reduce_add(vdot_i32((r3a .& mask_lo) .+ ((qh3a .& mask_2) .<< shift4), q8_a)) - bc0)
-            s3 = s3 + to_i32(w3[si+1]) * (reduce_add(vdot_i32((r3b .& mask_lo) .+ ((qh3b .& mask_2) .<< shift4), q8_b)) - bc1)
+            s3 = s3 + to_i32(w3[si]) * reduce_add(vdot_i32(((r3a .& mask_lo) .+ ((qh3a .& mask_2) .<< shift4)) .- off32, q8_a))
+            s3 = s3 + to_i32(w3[si+1]) * reduce_add(vdot_i32(((r3b .& mask_lo) .+ ((qh3b .& mask_2) .<< shift4)) .- off32, q8_b))
 
             // Load ql[32..63] for all 4 rows (needed for group 1 + group 3)
             let r0c: i8x16 = load(w0, ql_h + 32)
@@ -165,47 +165,41 @@ export func q6k_dot_q8k_4row(
             let r3c: i8x16 = load(w3, ql_h + 32)
             let r3d: i8x16 = load(w3, ql_h + 48)
 
-            // Group 1: ql[32..63] LOW nibble + qh bits 2-3
+            // Group 1 — signed
             let q8_c: i8x16 = load(q8, q8_off + 32)
             let q8_d: i8x16 = load(q8, q8_off + 48)
-            let bc2: i32 = 32 * to_i32(bsums[bi + 2])
-            let bc3: i32 = 32 * to_i32(bsums[bi + 3])
-            s0 = s0 + to_i32(w0[si+2]) * (reduce_add(vdot_i32((r0c .& mask_lo) .+ (((qh0a .>> shift2) .& mask_2) .<< shift4), q8_c)) - bc2)
-            s0 = s0 + to_i32(w0[si+3]) * (reduce_add(vdot_i32((r0d .& mask_lo) .+ (((qh0b .>> shift2) .& mask_2) .<< shift4), q8_d)) - bc3)
-            s1 = s1 + to_i32(w1[si+2]) * (reduce_add(vdot_i32((r1c .& mask_lo) .+ (((qh1a .>> shift2) .& mask_2) .<< shift4), q8_c)) - bc2)
-            s1 = s1 + to_i32(w1[si+3]) * (reduce_add(vdot_i32((r1d .& mask_lo) .+ (((qh1b .>> shift2) .& mask_2) .<< shift4), q8_d)) - bc3)
-            s2 = s2 + to_i32(w2[si+2]) * (reduce_add(vdot_i32((r2c .& mask_lo) .+ (((qh2a .>> shift2) .& mask_2) .<< shift4), q8_c)) - bc2)
-            s2 = s2 + to_i32(w2[si+3]) * (reduce_add(vdot_i32((r2d .& mask_lo) .+ (((qh2b .>> shift2) .& mask_2) .<< shift4), q8_d)) - bc3)
-            s3 = s3 + to_i32(w3[si+2]) * (reduce_add(vdot_i32((r3c .& mask_lo) .+ (((qh3a .>> shift2) .& mask_2) .<< shift4), q8_c)) - bc2)
-            s3 = s3 + to_i32(w3[si+3]) * (reduce_add(vdot_i32((r3d .& mask_lo) .+ (((qh3b .>> shift2) .& mask_2) .<< shift4), q8_d)) - bc3)
+            s0 = s0 + to_i32(w0[si+2]) * reduce_add(vdot_i32(((r0c .& mask_lo) .+ (((qh0a .>> shift2) .& mask_2) .<< shift4)) .- off32, q8_c))
+            s0 = s0 + to_i32(w0[si+3]) * reduce_add(vdot_i32(((r0d .& mask_lo) .+ (((qh0b .>> shift2) .& mask_2) .<< shift4)) .- off32, q8_d))
+            s1 = s1 + to_i32(w1[si+2]) * reduce_add(vdot_i32(((r1c .& mask_lo) .+ (((qh1a .>> shift2) .& mask_2) .<< shift4)) .- off32, q8_c))
+            s1 = s1 + to_i32(w1[si+3]) * reduce_add(vdot_i32(((r1d .& mask_lo) .+ (((qh1b .>> shift2) .& mask_2) .<< shift4)) .- off32, q8_d))
+            s2 = s2 + to_i32(w2[si+2]) * reduce_add(vdot_i32(((r2c .& mask_lo) .+ (((qh2a .>> shift2) .& mask_2) .<< shift4)) .- off32, q8_c))
+            s2 = s2 + to_i32(w2[si+3]) * reduce_add(vdot_i32(((r2d .& mask_lo) .+ (((qh2b .>> shift2) .& mask_2) .<< shift4)) .- off32, q8_d))
+            s3 = s3 + to_i32(w3[si+2]) * reduce_add(vdot_i32(((r3c .& mask_lo) .+ (((qh3a .>> shift2) .& mask_2) .<< shift4)) .- off32, q8_c))
+            s3 = s3 + to_i32(w3[si+3]) * reduce_add(vdot_i32(((r3d .& mask_lo) .+ (((qh3b .>> shift2) .& mask_2) .<< shift4)) .- off32, q8_d))
 
-            // Group 2: ql[0..31] HIGH nibble + qh bits 4-5
+            // Group 2 — signed
             let q8_e: i8x16 = load(q8, q8_off + 64)
             let q8_f: i8x16 = load(q8, q8_off + 80)
-            let bc4: i32 = 32 * to_i32(bsums[bi + 4])
-            let bc5: i32 = 32 * to_i32(bsums[bi + 5])
-            s0 = s0 + to_i32(w0[si+4]) * (reduce_add(vdot_i32(((r0a .>> shift4) .& mask_lo) .+ (((qh0a .>> shift4) .& mask_2) .<< shift4), q8_e)) - bc4)
-            s0 = s0 + to_i32(w0[si+5]) * (reduce_add(vdot_i32(((r0b .>> shift4) .& mask_lo) .+ (((qh0b .>> shift4) .& mask_2) .<< shift4), q8_f)) - bc5)
-            s1 = s1 + to_i32(w1[si+4]) * (reduce_add(vdot_i32(((r1a .>> shift4) .& mask_lo) .+ (((qh1a .>> shift4) .& mask_2) .<< shift4), q8_e)) - bc4)
-            s1 = s1 + to_i32(w1[si+5]) * (reduce_add(vdot_i32(((r1b .>> shift4) .& mask_lo) .+ (((qh1b .>> shift4) .& mask_2) .<< shift4), q8_f)) - bc5)
-            s2 = s2 + to_i32(w2[si+4]) * (reduce_add(vdot_i32(((r2a .>> shift4) .& mask_lo) .+ (((qh2a .>> shift4) .& mask_2) .<< shift4), q8_e)) - bc4)
-            s2 = s2 + to_i32(w2[si+5]) * (reduce_add(vdot_i32(((r2b .>> shift4) .& mask_lo) .+ (((qh2b .>> shift4) .& mask_2) .<< shift4), q8_f)) - bc5)
-            s3 = s3 + to_i32(w3[si+4]) * (reduce_add(vdot_i32(((r3a .>> shift4) .& mask_lo) .+ (((qh3a .>> shift4) .& mask_2) .<< shift4), q8_e)) - bc4)
-            s3 = s3 + to_i32(w3[si+5]) * (reduce_add(vdot_i32(((r3b .>> shift4) .& mask_lo) .+ (((qh3b .>> shift4) .& mask_2) .<< shift4), q8_f)) - bc5)
+            s0 = s0 + to_i32(w0[si+4]) * reduce_add(vdot_i32((((r0a .>> shift4) .& mask_lo) .+ (((qh0a .>> shift4) .& mask_2) .<< shift4)) .- off32, q8_e))
+            s0 = s0 + to_i32(w0[si+5]) * reduce_add(vdot_i32((((r0b .>> shift4) .& mask_lo) .+ (((qh0b .>> shift4) .& mask_2) .<< shift4)) .- off32, q8_f))
+            s1 = s1 + to_i32(w1[si+4]) * reduce_add(vdot_i32((((r1a .>> shift4) .& mask_lo) .+ (((qh1a .>> shift4) .& mask_2) .<< shift4)) .- off32, q8_e))
+            s1 = s1 + to_i32(w1[si+5]) * reduce_add(vdot_i32((((r1b .>> shift4) .& mask_lo) .+ (((qh1b .>> shift4) .& mask_2) .<< shift4)) .- off32, q8_f))
+            s2 = s2 + to_i32(w2[si+4]) * reduce_add(vdot_i32((((r2a .>> shift4) .& mask_lo) .+ (((qh2a .>> shift4) .& mask_2) .<< shift4)) .- off32, q8_e))
+            s2 = s2 + to_i32(w2[si+5]) * reduce_add(vdot_i32((((r2b .>> shift4) .& mask_lo) .+ (((qh2b .>> shift4) .& mask_2) .<< shift4)) .- off32, q8_f))
+            s3 = s3 + to_i32(w3[si+4]) * reduce_add(vdot_i32((((r3a .>> shift4) .& mask_lo) .+ (((qh3a .>> shift4) .& mask_2) .<< shift4)) .- off32, q8_e))
+            s3 = s3 + to_i32(w3[si+5]) * reduce_add(vdot_i32((((r3b .>> shift4) .& mask_lo) .+ (((qh3b .>> shift4) .& mask_2) .<< shift4)) .- off32, q8_f))
 
-            // Group 3
+            // Group 3 — signed
             let q8_g: i8x16 = load(q8, q8_off + 96)
             let q8_h: i8x16 = load(q8, q8_off + 112)
-            let bc6: i32 = 32 * to_i32(bsums[bi + 6])
-            let bc7: i32 = 32 * to_i32(bsums[bi + 7])
-            s0 = s0 + to_i32(w0[si+6]) * (reduce_add(vdot_i32(((r0c .>> shift4) .& mask_lo) .+ (((qh0a .>> shift6) .& mask_2) .<< shift4), q8_g)) - bc6)
-            s0 = s0 + to_i32(w0[si+7]) * (reduce_add(vdot_i32(((r0d .>> shift4) .& mask_lo) .+ (((qh0b .>> shift6) .& mask_2) .<< shift4), q8_h)) - bc7)
-            s1 = s1 + to_i32(w1[si+6]) * (reduce_add(vdot_i32(((r1c .>> shift4) .& mask_lo) .+ (((qh1a .>> shift6) .& mask_2) .<< shift4), q8_g)) - bc6)
-            s1 = s1 + to_i32(w1[si+7]) * (reduce_add(vdot_i32(((r1d .>> shift4) .& mask_lo) .+ (((qh1b .>> shift6) .& mask_2) .<< shift4), q8_h)) - bc7)
-            s2 = s2 + to_i32(w2[si+6]) * (reduce_add(vdot_i32(((r2c .>> shift4) .& mask_lo) .+ (((qh2a .>> shift6) .& mask_2) .<< shift4), q8_g)) - bc6)
-            s2 = s2 + to_i32(w2[si+7]) * (reduce_add(vdot_i32(((r2d .>> shift4) .& mask_lo) .+ (((qh2b .>> shift6) .& mask_2) .<< shift4), q8_h)) - bc7)
-            s3 = s3 + to_i32(w3[si+6]) * (reduce_add(vdot_i32(((r3c .>> shift4) .& mask_lo) .+ (((qh3a .>> shift6) .& mask_2) .<< shift4), q8_g)) - bc6)
-            s3 = s3 + to_i32(w3[si+7]) * (reduce_add(vdot_i32(((r3d .>> shift4) .& mask_lo) .+ (((qh3b .>> shift6) .& mask_2) .<< shift4), q8_h)) - bc7)
+            s0 = s0 + to_i32(w0[si+6]) * reduce_add(vdot_i32((((r0c .>> shift4) .& mask_lo) .+ (((qh0a .>> shift6) .& mask_2) .<< shift4)) .- off32, q8_g))
+            s0 = s0 + to_i32(w0[si+7]) * reduce_add(vdot_i32((((r0d .>> shift4) .& mask_lo) .+ (((qh0b .>> shift6) .& mask_2) .<< shift4)) .- off32, q8_h))
+            s1 = s1 + to_i32(w1[si+6]) * reduce_add(vdot_i32((((r1c .>> shift4) .& mask_lo) .+ (((qh1a .>> shift6) .& mask_2) .<< shift4)) .- off32, q8_g))
+            s1 = s1 + to_i32(w1[si+7]) * reduce_add(vdot_i32((((r1d .>> shift4) .& mask_lo) .+ (((qh1b .>> shift6) .& mask_2) .<< shift4)) .- off32, q8_h))
+            s2 = s2 + to_i32(w2[si+6]) * reduce_add(vdot_i32((((r2c .>> shift4) .& mask_lo) .+ (((qh2a .>> shift6) .& mask_2) .<< shift4)) .- off32, q8_g))
+            s2 = s2 + to_i32(w2[si+7]) * reduce_add(vdot_i32((((r2d .>> shift4) .& mask_lo) .+ (((qh2b .>> shift6) .& mask_2) .<< shift4)) .- off32, q8_h))
+            s3 = s3 + to_i32(w3[si+6]) * reduce_add(vdot_i32((((r3c .>> shift4) .& mask_lo) .+ (((qh3a .>> shift6) .& mask_2) .<< shift4)) .- off32, q8_g))
+            s3 = s3 + to_i32(w3[si+7]) * reduce_add(vdot_i32((((r3d .>> shift4) .& mask_lo) .+ (((qh3b .>> shift6) .& mask_2) .<< shift4)) .- off32, q8_h))
 
             h = h + 1
         }
