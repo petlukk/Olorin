@@ -175,6 +175,15 @@ pub(crate) fn matvec_batch_step(
         );
         return;
     }
+    #[cfg(target_arch = "aarch64")]
+    if dtype == matmul::GGML_TYPE_Q6_K {
+        matmul_graph::q6k_gemm_batch_ws(
+            weight, q8_a, output,
+            n_cols, n_rows, n_pad, output_stride,
+            current_chunk, ith, nth,
+        );
+        return;
+    }
     matmul_graph::matvec_batch_ws(
         dtype, weight, q8_qs, q8_d, q8_bsums, output, d_scratch,
         n_rows, n_cols, n, output_stride,
