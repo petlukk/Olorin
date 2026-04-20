@@ -116,6 +116,10 @@ export func q4k_8x8_q8k_gemm(
                     let sc_hi_0: i32x4 = [t01 & 255, (t01>>8)&255, (t01>>16)&255, (t01>>24)&255]
                     let sc_lo_1: i32x4 = [t10 & 255, (t10>>8)&255, (t10>>16)&255, (t10>>24)&255]
                     let sc_hi_1: i32x4 = [t11 & 255, (t11>>8)&255, (t11>>16)&255, (t11>>24)&255]
+                    let mins_t02_v: i32x4 = [t02 & 255, (t02>>8)&255, (t02>>16)&255, (t02>>24)&255]
+                    let mins_t12_v: i32x4 = [t12 & 255, (t12>>8)&255, (t12>>16)&255, (t12>>24)&255]
+                    let mins_t03_v: i32x4 = [t03 & 255, (t03>>8)&255, (t03>>16)&255, (t03>>24)&255]
+                    let mins_t13_v: i32x4 = [t13 & 255, (t13>>8)&255, (t13>>16)&255, (t13>>24)&255]
 
                     // Q4K base for this sub-block
                     let q4_base: i32 = bp + 128 + sb * 256
@@ -223,50 +227,41 @@ export func q4k_8x8_q8k_gemm(
                     acc1_3 = fma(sb_sc1_3, sf_lo_47_3, acc1_3)
                     acc1_3 = fma(sb_sc1_3, sf_hi_47_3, acc1_3)
 
-                    // Bsums per input row
+                    // Bsums per input row — vectorized 2 vmul + 1 vadd per row
                     let bsums_i16: *restrict i16 = ptr_as_i16(q8_i8)
                     let bsums_base: i32 = (ab + 1040) / 2 + sb * 16
-                    let mut cc: i32 = 0
-                    while cc < 4 {
-                        let rb: i32 = (cc / 2) * 8 + (cc % 2) * 4
-                        let bp0: i16 = bsums_i16[bsums_base + rb]
-                        let bp1: i16 = bsums_i16[bsums_base + rb + 1]
-                        let bp2: i16 = bsums_i16[bsums_base + rb + 2]
-                        let bp3: i16 = bsums_i16[bsums_base + rb + 3]
-                        let bs0: i16 = bp0 + bp1
-                        let bs1: i16 = bp2 + bp3
 
-                        let b0_0: i32 = (t02 & 255) * to_i32(bs0) + (t12 & 255) * to_i32(bs1)
-                        let b0_1: i32 = ((t02>>8)&255) * to_i32(bs0) + ((t12>>8)&255) * to_i32(bs1)
-                        let b0_2: i32 = ((t02>>16)&255) * to_i32(bs0) + ((t12>>16)&255) * to_i32(bs1)
-                        let b0_3: i32 = ((t02>>24)&255) * to_i32(bs0) + ((t12>>24)&255) * to_i32(bs1)
-                        let bias_d0: i32x4 = [b0_0, b0_1, b0_2, b0_3]
+                    // cc=0: rb=0
+                    let bs0_0: i16 = bsums_i16[bsums_base + 0] + bsums_i16[bsums_base + 1]
+                    let bs1_0: i16 = bsums_i16[bsums_base + 2] + bsums_i16[bsums_base + 3]
+                    let bs0_0v: i32x4 = splat(to_i32(bs0_0))
+                    let bs1_0v: i32x4 = splat(to_i32(bs1_0))
+                    bias0_0 = bias0_0 .+ mins_t02_v .* bs0_0v .+ mins_t12_v .* bs1_0v
+                    bias1_0 = bias1_0 .+ mins_t03_v .* bs0_0v .+ mins_t13_v .* bs1_0v
 
-                        let b1_0: i32 = (t03 & 255) * to_i32(bs0) + (t13 & 255) * to_i32(bs1)
-                        let b1_1: i32 = ((t03>>8)&255) * to_i32(bs0) + ((t13>>8)&255) * to_i32(bs1)
-                        let b1_2: i32 = ((t03>>16)&255) * to_i32(bs0) + ((t13>>16)&255) * to_i32(bs1)
-                        let b1_3: i32 = ((t03>>24)&255) * to_i32(bs0) + ((t13>>24)&255) * to_i32(bs1)
-                        let bias_d1: i32x4 = [b1_0, b1_1, b1_2, b1_3]
+                    // cc=1: rb=4
+                    let bs0_1: i16 = bsums_i16[bsums_base + 4] + bsums_i16[bsums_base + 5]
+                    let bs1_1: i16 = bsums_i16[bsums_base + 6] + bsums_i16[bsums_base + 7]
+                    let bs0_1v: i32x4 = splat(to_i32(bs0_1))
+                    let bs1_1v: i32x4 = splat(to_i32(bs1_1))
+                    bias0_1 = bias0_1 .+ mins_t02_v .* bs0_1v .+ mins_t12_v .* bs1_1v
+                    bias1_1 = bias1_1 .+ mins_t03_v .* bs0_1v .+ mins_t13_v .* bs1_1v
 
-                        if cc == 0 {
-                            bias0_0 = bias0_0 .+ bias_d0
-                            bias1_0 = bias1_0 .+ bias_d1
-                        }
-                        if cc == 1 {
-                            bias0_1 = bias0_1 .+ bias_d0
-                            bias1_1 = bias1_1 .+ bias_d1
-                        }
-                        if cc == 2 {
-                            bias0_2 = bias0_2 .+ bias_d0
-                            bias1_2 = bias1_2 .+ bias_d1
-                        }
-                        if cc == 3 {
-                            bias0_3 = bias0_3 .+ bias_d0
-                            bias1_3 = bias1_3 .+ bias_d1
-                        }
+                    // cc=2: rb=8
+                    let bs0_2: i16 = bsums_i16[bsums_base + 8] + bsums_i16[bsums_base + 9]
+                    let bs1_2: i16 = bsums_i16[bsums_base + 10] + bsums_i16[bsums_base + 11]
+                    let bs0_2v: i32x4 = splat(to_i32(bs0_2))
+                    let bs1_2v: i32x4 = splat(to_i32(bs1_2))
+                    bias0_2 = bias0_2 .+ mins_t02_v .* bs0_2v .+ mins_t12_v .* bs1_2v
+                    bias1_2 = bias1_2 .+ mins_t03_v .* bs0_2v .+ mins_t13_v .* bs1_2v
 
-                        cc = cc + 1
-                    }
+                    // cc=3: rb=12
+                    let bs0_3: i16 = bsums_i16[bsums_base + 12] + bsums_i16[bsums_base + 13]
+                    let bs1_3: i16 = bsums_i16[bsums_base + 14] + bsums_i16[bsums_base + 15]
+                    let bs0_3v: i32x4 = splat(to_i32(bs0_3))
+                    let bs1_3v: i32x4 = splat(to_i32(bs1_3))
+                    bias0_3 = bias0_3 .+ mins_t02_v .* bs0_3v .+ mins_t12_v .* bs1_3v
+                    bias1_3 = bias1_3 .+ mins_t03_v .* bs0_3v .+ mins_t13_v .* bs1_3v
 
                     sb = sb + 1
                 }
