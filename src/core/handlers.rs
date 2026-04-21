@@ -85,7 +85,12 @@ pub fn dispatch_tool_call(name: &str, input: &crate::storage::json::Object) -> R
         let mut it = input.iter();
         match (it.next(), it.next()) {
             (Some((_key, crate::storage::json::Value::Str(s))), None) => s.clone(),
-            _ => crate::storage::json::serialize(input),
+            _ => {
+                return Err(format!(
+                    "tool '{name}' received multi-field or non-string arguments; \
+                     v1 single-string contract violated"
+                ));
+            }
         }
     };
 

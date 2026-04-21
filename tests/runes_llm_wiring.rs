@@ -126,7 +126,6 @@ fn dispatch_tool_call_routes_eacrunch_to_rune() {
     input.set("path", Value::Str(tmp.to_string_lossy().into_owned()));
 
     let out = dispatch_tool_call("eacrunch", &input).expect("eacrunch should succeed");
-    eprintln!("OUTPUT: {out}");
 
     // UntrustedQuoted → must be wrapped.
     assert!(
@@ -151,4 +150,18 @@ fn dispatch_tool_call_routes_eacrunch_to_rune() {
     );
 
     let _ = std::fs::remove_file(&tmp);
+}
+
+#[test]
+fn dispatch_tool_call_rejects_multi_field_args() {
+    let mut input = Object::new();
+    input.set("path", Value::Str("/tmp/x.csv".to_string()));
+    input.set("mode", Value::Str("csv".to_string()));
+    let res = dispatch_tool_call("eacrunch", &input);
+    assert!(res.is_err(), "multi-field args should be rejected");
+    let msg = res.unwrap_err();
+    assert!(
+        msg.contains("multi-field") || msg.contains("single-string"),
+        "err should explain the v1 contract: {msg}"
+    );
 }
