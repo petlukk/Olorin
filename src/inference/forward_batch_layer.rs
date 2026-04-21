@@ -73,12 +73,11 @@ pub(crate) fn layer_forward_batch(
     if ith == 0 { t_accum!(t0, quant_input, tm!()); }
     // ── 1c. Q8K repack + chunk store ────────────────────────────
     let t0 = t_start!();
-    if ith == 0 {
-        repack_q8_for_gemm(
-            &state.batch_q8_qs, &state.batch_q8_d, &state.batch_q8_bsums,
-            &mut state.batch_q8_a, hd, n_pad,
-        );
-    }
+    repack_q8_for_gemm(
+        &state.batch_q8_qs, &state.batch_q8_d, &state.batch_q8_bsums,
+        &mut state.batch_q8_a, hd, n_pad,
+        ith, nth,
+    );
     current_chunk.store(nth as i32, Ordering::Relaxed);
     barrier.wait(); // B3
     if ith == 0 { t_accum!(t0, repack_q8, tm!()); }
@@ -263,11 +262,12 @@ pub(crate) fn layer_forward_batch(
     barrier.wait(); // B12
     if ith == 0 { t_accum!(t0, quant_wo, tm!()); }
     let t0 = t_start!();
-    if ith == 0 {
+    {
         let ao_dim = n_heads * head_dim;
         repack_q8_for_gemm(
             &state.batch_q8_qs, &state.batch_q8_d, &state.batch_q8_bsums,
             &mut state.batch_q8_a, ao_dim, n_pad,
+            ith, nth,
         );
     }
     current_chunk.store(nth as i32, Ordering::Relaxed);
@@ -326,12 +326,11 @@ pub(crate) fn layer_forward_batch(
     if ith == 0 { t_accum!(t0, quant_ffn, tm!()); }
     let ffn_dim = model.ffn_dim[il];
     let t0 = t_start!();
-    if ith == 0 {
-        repack_q8_for_gemm(
-            &state.batch_q8_qs, &state.batch_q8_d, &state.batch_q8_bsums,
-            &mut state.batch_q8_a, hd, n_pad,
-        );
-    }
+    repack_q8_for_gemm(
+        &state.batch_q8_qs, &state.batch_q8_d, &state.batch_q8_bsums,
+        &mut state.batch_q8_a, hd, n_pad,
+        ith, nth,
+    );
     current_chunk.store(nth as i32, Ordering::Relaxed);
     barrier.wait(); // B17
     if ith == 0 { t_accum!(t0, repack_ffn, tm!()); }
@@ -388,12 +387,11 @@ pub(crate) fn layer_forward_batch(
     barrier.wait(); // B22
     if ith == 0 { t_accum!(t0, quant_down, tm!()); }
     let t0 = t_start!();
-    if ith == 0 {
-        repack_q8_for_gemm(
-            &state.batch_ffn_q8_qs, &state.batch_ffn_q8_d, &state.batch_ffn_q8_bsums,
-            &mut state.batch_ffn_q8_a, ffn_dim, n_pad,
-        );
-    }
+    repack_q8_for_gemm(
+        &state.batch_ffn_q8_qs, &state.batch_ffn_q8_d, &state.batch_ffn_q8_bsums,
+        &mut state.batch_ffn_q8_a, ffn_dim, n_pad,
+        ith, nth,
+    );
     current_chunk.store(nth as i32, Ordering::Relaxed);
     barrier.wait(); // B23
     if ith == 0 { t_accum!(t0, repack_down, tm!()); }

@@ -116,16 +116,22 @@ pub(crate) fn parallel_batch_quant(
     }
 }
 
-/// Repack Q8K -> block_q8_Kx4 tiles for GEMM. Thread 0 only.
+/// All threads cooperatively repack Q8K -> block_q8_Kx4 tiles for GEMM.
+/// Groups of 4 tokens are striped across threads (group = ith, ith+nth, ...).
+/// Caller MUST barrier.wait() after this call: the subsequent GEMM needs
+/// all tiles populated.
 #[inline]
 pub(crate) fn repack_q8_for_gemm(
     qs: &[i8], d: &[f32], bsums: &[i16], q8_a: &mut [u8],
     dim: usize, n_pad: usize,
+    ith: usize, nth: usize,
 ) {
     let nb = dim / 256;
     let qs_stride = dim + 12;
     let tile_size = nb * 1168;
-    for group in 0..(n_pad / 4) {
+    let n_groups = n_pad / 4;
+    let mut group = ith;
+    while group < n_groups {
         let r0 = group * 4;
         let mut row_d = [0.0f32; 192];
         for b in 0..nb {
@@ -146,6 +152,7 @@ pub(crate) fn repack_q8_for_gemm(
                 nb as i32,
             );
         }
+        group += nth;
     }
 }
 

@@ -37,13 +37,12 @@ pub(crate) fn ple_batch(
     );
     barrier.wait();
 
-    // ── Step 2: Thread 0 repacks into batch_q8_a ──
-    if ith == 0 {
-        repack_q8_for_gemm(
-            &state.batch_q8_qs, &state.batch_q8_d, &state.batch_q8_bsums,
-            &mut state.batch_q8_a, hd, n_pad,
-        );
-    }
+    // ── Step 2: All threads repack into batch_q8_a ──
+    repack_q8_for_gemm(
+        &state.batch_q8_qs, &state.batch_q8_d, &state.batch_q8_bsums,
+        &mut state.batch_q8_a, hd, n_pad,
+        ith, nth,
+    );
     current_chunk.store(nth as i32, Ordering::Relaxed);
     barrier.wait();
 
@@ -84,13 +83,12 @@ pub(crate) fn ple_batch(
     );
     barrier.wait();
 
-    // ── Step 6: Thread 0 repacks PLE Q8K into batch_ple_q8_a ──
-    if ith == 0 {
-        repack_q8_for_gemm(
-            &state.batch_ple_q8_qs, &state.batch_ple_q8_d, &state.batch_ple_q8_bsums,
-            &mut state.batch_ple_q8_a, ple_dim, n_pad,
-        );
-    }
+    // ── Step 6: All threads repack PLE Q8K into batch_ple_q8_a ──
+    repack_q8_for_gemm(
+        &state.batch_ple_q8_qs, &state.batch_ple_q8_d, &state.batch_ple_q8_bsums,
+        &mut state.batch_ple_q8_a, ple_dim, n_pad,
+        ith, nth,
+    );
     current_chunk.store(nth as i32, Ordering::Relaxed);
     barrier.wait();
 
