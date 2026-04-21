@@ -102,7 +102,15 @@ fn dispatch_tool_call_routes_unknown_name_to_error() {
     let mut input = Object::new();
     input.set("path", Value::Str("/tmp/x.csv".to_string()));
     let res = dispatch_tool_call("does_not_exist", &input);
-    assert!(res.is_err(), "unknown tool/rune should error");
+    let msg = res.unwrap_err();
+    assert!(
+        msg.contains("does_not_exist"),
+        "err msg should name the offending tool: {msg}"
+    );
+    assert!(
+        msg.contains("unknown"),
+        "err msg should classify as unknown: {msg}"
+    );
 }
 
 #[test]
@@ -118,10 +126,28 @@ fn dispatch_tool_call_routes_eacrunch_to_rune() {
     input.set("path", Value::Str(tmp.to_string_lossy().into_owned()));
 
     let out = dispatch_tool_call("eacrunch", &input).expect("eacrunch should succeed");
+    eprintln!("OUTPUT: {out}");
+
     // UntrustedQuoted → must be wrapped.
     assert!(
         out.contains("<rune_output rune=\"eacrunch\" untrusted=\"true\">"),
         "eacrunch output not delimiter-wrapped: {out}"
+    );
+
+    // Prove the rune actually ran and produced CSV-derived content.
+    // The fixture has 2 data rows ("1,2" and "3,4"), so eacrunch reports "rows: 2".
+    // If this fails, the rune likely received malformed args (e.g. raw JSON).
+    assert!(
+        !out.contains("open failed"),
+        "rune reported open failure — args may be malformed: {out}"
+    );
+    assert!(
+        !out.contains("NotFound"),
+        "rune reported NotFound — args may be malformed: {out}"
+    );
+    assert!(
+        out.contains("rows: 2"),
+        "eacrunch did not report 2 data rows — rune may not have run: {out}"
     );
 
     let _ = std::fs::remove_file(&tmp);
