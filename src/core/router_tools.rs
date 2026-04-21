@@ -364,7 +364,15 @@ Agent: Olorin".to_string()
                 .map(|(r, t)| (r.as_str(), t.as_str()))
                 .collect();
             match client.generate(&system, &pairs) {
-                Ok(second_text) => return second_text,
+                Ok(second_text) => {
+                    if safety::scan_outbound(second_text.as_bytes()).blocked {
+                        // Outbound scan flagged the follow-up response. Fall back to the
+                        // raw tool result so the user still sees something, and stays
+                        // consistent with the local path's behavior.
+                        return tool_result;
+                    }
+                    return second_text;
+                }
                 Err(e) => eprintln!("[olorin] cloud follow-up inference failed: {e}"),
             }
         }
