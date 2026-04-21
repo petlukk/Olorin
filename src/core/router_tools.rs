@@ -13,6 +13,13 @@ use crate::core::router::{DispatchContext, Response, StreamEvent};
 use crate::storage::json;
 use std::time::Instant;
 
+/// Shared closer for the tool-call follow-up prompt. Both the local and
+/// cloud tool-call paths append this after the tool result so the model
+/// is nudged to answer the original question without chaining tool calls.
+/// Kept as a const to prevent drift between the two paths.
+const FOLLOWUP_CLOSER: &str =
+    "Now answer my original question using the tool result above. Do NOT call another tool.";
+
 impl DispatchContext {
     // ── The Olorin Pipe (non-streaming) ──────────────────────────────────────
 
@@ -276,8 +283,7 @@ Agent: Olorin".to_string()
              <tool_call>{{\"name\": \"{tool_name}\", \"arguments\": {args_json}}}</tool_call>\n\
              [the tool returned]\n\
              {tool_result}\n\n\
-             Now answer my original question using the tool result above. \
-             Do NOT call another tool."
+             {FOLLOWUP_CLOSER}"
         );
 
         // Step 4: second generate — stream tokens through tx.
@@ -353,8 +359,7 @@ Agent: Olorin".to_string()
         msg_pairs_owned.push(("assistant".to_string(), first_text));
         msg_pairs_owned.push(("user".to_string(), format!(
             "[the tool you called returned]\n{tool_result}\n\n\
-             Now answer my original question using the tool result above. \
-             Do NOT call another tool."
+             {FOLLOWUP_CLOSER}"
         )));
 
         // Step 4: second cloud call.
