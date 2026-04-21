@@ -265,7 +265,7 @@ pub fn teleport_loop_streaming(
 }
 
 /// Start the WhatsApp bridge as standalone (--whatsapp flag).
-pub fn run_whatsapp(model_arg: Option<&str>, draft_arg: Option<&str>, draft_k: Option<usize>) {
+pub fn run_whatsapp(model_arg: Option<&str>) {
     let bridge_path = find_bridge();
 
     let home = std::env::var("HOME").unwrap_or_default();
@@ -282,7 +282,7 @@ pub fn run_whatsapp(model_arg: Option<&str>, draft_arg: Option<&str>, draft_k: O
 
     let api_key = std::env::var("ANTHROPIC_API_KEY").ok();
     let ctx = std::sync::Arc::new(std::sync::Mutex::new(
-        DispatchContext::new(api_key, model_arg, draft_arg, draft_k),
+        DispatchContext::new(api_key, model_arg),
     ));
 
     eprintln!("[olorin] WhatsApp bridge started (pid={})", child.pid);

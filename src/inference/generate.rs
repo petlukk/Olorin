@@ -42,7 +42,6 @@ pub struct Engine {
     pub top_p: f32,
     pub min_p: f32,
     pub repetition_penalty: f32,
-    pub draft_k: usize,
 }
 
 impl Engine {
@@ -83,15 +82,7 @@ impl Engine {
             top_p: 0.95,
             min_p: 0.05,
             repetition_penalty: 1.0,
-            draft_k: 0,
         })
-    }
-
-    /// Load a draft model for speculative decoding.
-    pub fn load_draft(&mut self, _path: &Path) -> Result<()> {
-        Err(Error::Inference(
-            "Gemma 4 speculative decoding not yet implemented".into(),
-        ))
     }
 
     /// Detect quantization type of the loaded model.

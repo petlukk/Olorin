@@ -23,31 +23,6 @@ pub(crate) fn timing_enabled() -> bool {
 // RoPE table computation
 // ---------------------------------------------------------------------------
 
-/// Compute cos/sin tables for RoPE. If freq_factors is Some, each frequency
-/// is divided by freq_factors[d] (matching llama.cpp's rope_ext behaviour).
-pub(crate) fn compute_rope_tables(
-    cos: &mut [f32],
-    sin: &mut [f32],
-    pos: usize,
-    n_rot: usize,
-    theta: f32,
-    freq_factors: Option<&[f32]>,
-) {
-    let half = n_rot / 2;
-    debug_assert!(half <= cos.len(), "rope: half={half} > cos={}", cos.len());
-    debug_assert!(half <= sin.len(), "rope: half={half} > sin={}", sin.len());
-    for d in 0..half {
-        let base_freq = 1.0 / theta.powf(2.0 * d as f32 / n_rot as f32);
-        let freq = match freq_factors {
-            Some(ff) => base_freq / ff[d],
-            None => base_freq,
-        };
-        let angle = pos as f32 * freq;
-        cos[d] = angle.cos();
-        sin[d] = angle.sin();
-    }
-}
-
 /// Standalone RoPE table computation into arbitrary slices (for per-thread scratch).
 pub(crate) fn compute_rope_tables_into(
     cos: &mut [f32], sin: &mut [f32],
