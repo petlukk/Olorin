@@ -20,7 +20,6 @@ use crate::inference::generate::Engine;
 use crate::recall::VectorStore;
 use crate::storage::vault::Vault;
 use std::path::PathBuf;
-use std::time::Instant;
 
 // ── Public types ─────────────────────────────────────────────────────────────
 
@@ -154,55 +153,6 @@ impl DispatchContext {
         &self.system_prompt
     }
 
-    /// The Olorin Pipe — process a single input through the pipeline.
-    ///
-    /// ```text
-    /// raw input
-    ///     |
-    ///     +- 1. Safety Scan (inbound) → BLOCK if dangerous
-    ///     +- 2. Slash Command? → tools direct
-    ///     +- 3. Intent Router → kernel (calc/time/cpu/weather)
-    ///     +- 4. Recall → vault context
-    ///     +- 5. Inference → generate tokens
-    ///     +- 6. Leak Scan (outbound) + ChatML Trim
-    ///     |
-    ///     v
-    /// Response → vault save
-    /// ```
-    pub fn dispatch(&mut self, input: &str) -> Response {
-        let input = input.trim();
-        if input.is_empty() {
-            return Response::text("");
-        }
-
-        let safety_start = Instant::now();
-        let recall_context = match self.pre_inference(input) {
-            Err(early) => return early,
-            Ok(ctx) => ctx,
-        };
-        let safety_us = safety_start.elapsed().as_micros() as u64;
-
-        // ── Inference ────────────────────────────────────────────────
-        self.messages.push(handlers::user_message(input));
-        let response = self.run_inference(&recall_context);
-
-        match response {
-            Ok(text) => {
-                if safety::scan_outbound(text.as_bytes()).blocked {
-                    return Response::blocked("Response blocked: potential secret leak.");
-                }
-                self.finalize_response(input, &text);
-                self.last_timing = Some(handlers::TurnTiming {
-                    safety_scan_us: safety_us,
-                    llm_call_ms: 0,
-                    tool_execs: vec![],
-                });
-                Response::text(text)
-            }
-            Err(e) => Response::text(format!("LLM error: {e}")),
-        }
-    }
-
     /// Streaming variant of the Olorin Pipe.
     /// Tokens stream via `tx` as they are generated. ChatML hallucinations
     /// trigger early stop. Outbound leak scan runs on the complete text.
@@ -266,8 +216,8 @@ impl DispatchContext {
             };
 
             match engine.generate(&prompt, &system, &on_event) {
-                Ok(text) => {
-                    if safety::scan_outbound(text.as_bytes()).blocked {
+                Ok(first_text) => {
+                    if safety::scan_outbound(first_text.as_bytes()).blocked {
                         let _ = tx.send(StreamEvent::Error(
                             "Response blocked: potential secret leak.".to_string(),
                         ));
@@ -276,8 +226,11 @@ impl DispatchContext {
                         });
                         return;
                     }
-                    self.finalize_response(input, &text);
-                    let _ = tx.send(StreamEvent::Done { full_text: text });
+                    let final_text = self.run_local_followup_if_tool_call(
+                        input, &system, &first_text, &tx,
+                    ).unwrap_or(first_text);
+                    self.finalize_response(input, &final_text);
+                    let _ = tx.send(StreamEvent::Done { full_text: final_text });
                     return;
                 }
                 Err(e) => eprintln!("[olorin] local inference failed: {e}"),
@@ -292,8 +245,8 @@ impl DispatchContext {
                 .map(|(r, t)| (r.as_str(), t.as_str())).collect();
 
             match client.generate(&system, &msg_pairs) {
-                Ok(text) => {
-                    if safety::scan_outbound(text.as_bytes()).blocked {
+                Ok(first_text) => {
+                    if safety::scan_outbound(first_text.as_bytes()).blocked {
                         let _ = tx.send(StreamEvent::Error(
                             "Response blocked: potential secret leak.".to_string(),
                         ));
@@ -302,9 +255,10 @@ impl DispatchContext {
                         });
                         return;
                     }
-                    let _ = tx.send(StreamEvent::Token(text.clone()));
-                    self.finalize_response(input, &text);
-                    let _ = tx.send(StreamEvent::Done { full_text: text });
+                    let final_text = self.maybe_handle_tool_call_cloud(input, first_text);
+                    let _ = tx.send(StreamEvent::Token(final_text.clone()));
+                    self.finalize_response(input, &final_text);
+                    let _ = tx.send(StreamEvent::Done { full_text: final_text });
                     return;
                 }
                 Err(e) => eprintln!("[olorin] cloud inference failed: {e}"),
@@ -322,7 +276,7 @@ impl DispatchContext {
     /// Steps 1-4: safety scan, slash, intent, recall.
     /// Returns Ok(recall_context) to continue to inference,
     /// or Err(Response) for early exit (command, tool, blocked).
-    fn pre_inference(&mut self, input: &str) -> Result<Option<String>, Response> {
+    pub(crate) fn pre_inference(&mut self, input: &str) -> Result<Option<String>, Response> {
         // ── Step 1: Safety Scan ──────────────────────────────────────
         let scan = safety::scan(input.as_bytes());
         if scan.blocked {
@@ -437,7 +391,7 @@ impl DispatchContext {
     /// Post-inference bookkeeping: vault save + message history.
     /// Only user input is indexed for recall — model output is not stored
     /// in the recall index to prevent garbage feedback loops.
-    fn finalize_response(&mut self, input: &str, text: &str) {
+    pub(crate) fn finalize_response(&mut self, input: &str, text: &str) {
         self.vault_save(b"user", input.as_bytes());
         self.vault_save(b"assistant", text.as_bytes());
         self.messages.push(handlers::assistant_message(text));
@@ -478,7 +432,7 @@ impl DispatchContext {
     // ── Inference ────────────────────────────────────────────────────────────
 
     /// Build (role, text) pairs from message history for cloud fallback.
-    fn build_cloud_messages(&self) -> Vec<(String, String)> {
+    pub(crate) fn build_cloud_messages(&self) -> Vec<(String, String)> {
         self.messages.iter().map(|m| {
             let role = m.role.as_str().to_string();
             let text = m.content.iter().find_map(|b| {
@@ -492,7 +446,7 @@ impl DispatchContext {
         }).collect()
     }
 
-    fn run_inference(
+    pub(crate) fn run_inference(
         &mut self,
         recall_context: &Option<String>,
     ) -> Result<String, String> {
