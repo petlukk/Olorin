@@ -91,3 +91,38 @@ fn wrap_rune_result_blocks_on_injection_pattern() {
         "wrap_rune_result should block known injection patterns"
     );
 }
+
+// ── Task 4: dispatch_tool_call tests ─────────────────────────────────────────
+
+use olorin::core::handlers::dispatch_tool_call;
+use olorin::storage::json::{Object, Value};
+
+#[test]
+fn dispatch_tool_call_routes_unknown_name_to_error() {
+    let mut input = Object::new();
+    input.set("path", Value::Str("/tmp/x.csv".to_string()));
+    let res = dispatch_tool_call("does_not_exist", &input);
+    assert!(res.is_err(), "unknown tool/rune should error");
+}
+
+#[test]
+fn dispatch_tool_call_routes_eacrunch_to_rune() {
+    // Write a tiny CSV fixture so eacrunch can run for real.
+    let tmp = std::env::temp_dir().join(format!(
+        "olorin_runes_llm_wiring_{}.csv",
+        std::process::id()
+    ));
+    std::fs::write(&tmp, b"a,b\n1,2\n3,4\n").unwrap();
+
+    let mut input = Object::new();
+    input.set("path", Value::Str(tmp.to_string_lossy().into_owned()));
+
+    let out = dispatch_tool_call("eacrunch", &input).expect("eacrunch should succeed");
+    // UntrustedQuoted → must be wrapped.
+    assert!(
+        out.contains("<rune_output rune=\"eacrunch\" untrusted=\"true\">"),
+        "eacrunch output not delimiter-wrapped: {out}"
+    );
+
+    let _ = std::fs::remove_file(&tmp);
+}

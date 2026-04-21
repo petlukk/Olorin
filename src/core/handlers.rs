@@ -56,6 +56,47 @@ pub fn process_output(text: &str) -> LlmResponse {
     tool_parse::extract_tool_calls(text)
 }
 
+// ── Tool/rune dispatch ────────────────────────────────────────────────────────
+
+/// Route a parsed tool call (from the LLM's `<tool_call>` XML) to the right
+/// executor. Tries `tools::run_tool` first, then falls through to
+/// `runes::run_rune`. On a rune hit, applies `wrap_rune_result` with the
+/// rune's declared `OutputSafety` before returning.
+///
+/// Returns the string to inject back into the LLM's follow-up prompt, or an
+/// error describing why dispatch failed (so the caller can return that error
+/// text to the model as a tool-result payload).
+pub fn dispatch_tool_call(name: &str, input: &crate::storage::json::Object) -> Result<String, String> {
+    // 1) Tools path. Serialize the Object to compact JSON for existing tool handlers.
+    let args_json = crate::storage::json::serialize(input);
+    if let Some(tool_result) = crate::tools::run_tool(name, &args_json) {
+        let scan = crate::core::safety::scan(tool_result.output.as_bytes());
+        if scan.blocked {
+            return Err("tool output blocked by safety scan".to_string());
+        }
+        return Ok(tool_result.output);
+    }
+
+    // 2) Runes path.
+    if let Some(result) = crate::runes::run_rune(name, &args_json) {
+        let safety_class = crate::runes::RUNES
+            .iter()
+            .find(|r| r.name() == name)
+            .map(|r| r.output_safety())
+            .unwrap_or(crate::runes::OutputSafety::UntrustedQuoted);
+
+        return match crate::runes::wrap_rune_result(name, safety_class, result) {
+            Ok(wrapped) => Ok(wrapped),
+            Err(crate::runes::WrapError::Blocked) => {
+                Err("rune output blocked by safety scan".to_string())
+            }
+        };
+    }
+
+    // 3) Unknown name.
+    Err(format!("unknown tool or rune: {name}"))
+}
+
 // ── Timing ───────────────────────────────────────────────────────────────────
 
 /// Timing data for a single dispatch turn.
