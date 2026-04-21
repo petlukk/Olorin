@@ -20,11 +20,6 @@ use std::time::Instant;
 const FOLLOWUP_CLOSER: &str =
     "Now answer my original question using the tool result above. Do NOT call another tool.";
 
-/// Check if OLORIN_DEBUG_RUNES environment variable is set.
-fn debug_runes() -> bool {
-    std::env::var("OLORIN_DEBUG_RUNES").is_ok()
-}
-
 impl DispatchContext {
     // ── The Olorin Pipe (non-streaming) ──────────────────────────────────────
 
@@ -298,20 +293,12 @@ Agent: Olorin".to_string()
         first_output: &str,
         tx: Option<&std::sync::mpsc::Sender<StreamEvent>>,
     ) -> Option<String> {
-        if debug_runes() {
-            eprintln!("[runes-dbg] followup_if_tool_call: first_output.len()={}", first_output.len());
-        }
-
         // Step 1: parse tool calls from the first output.
         let parsed = tool_parse::extract_tool_calls(first_output);
         let tool_use = parsed.content.iter().find_map(|b| match b {
             ContentBlock::ToolUse { name, input, .. } => Some((name.clone(), input.clone())),
             _ => None,
         });
-
-        if debug_runes() {
-            eprintln!("[runes-dbg] extract_tool_calls: tool_use_found={}", tool_use.is_some());
-        }
 
         let (tool_name, tool_input) = tool_use?;
 
@@ -332,14 +319,6 @@ Agent: Olorin".to_string()
              {tool_result}\n\n\
              {FOLLOWUP_CLOSER}"
         );
-
-        if debug_runes() {
-            eprintln!("[runes-dbg] dispatch_tool_call: name={} result_kind={} tool_result.len()={}",
-                     tool_name,
-                     if dispatch_result.is_ok() { "ok" } else { "err" },
-                     tool_result.len());
-            eprintln!("[runes-dbg] followup_prompt.len()={}", followup_prompt.len());
-        }
 
         // Step 4: second generate.
         // Streaming path: emit tokens through tx as they arrive.
@@ -366,19 +345,6 @@ Agent: Olorin".to_string()
             None
         };
 
-        if debug_runes() {
-            eprintln!("[runes-dbg] followup_generate: kind={} final_text.len()={}",
-                     match &gen_result {
-                         Some(Ok(_)) => "ok",
-                         Some(Err(_)) => "err",
-                         None => "none",
-                     },
-                     match &gen_result {
-                         Some(Ok(text)) => text.len(),
-                         _ => 0,
-                     });
-        }
-
         // Step 5: apply outbound scan; surface tool_result on generation failure.
         let final_text = match gen_result {
             Some(Ok(text)) => text,
@@ -390,10 +356,6 @@ Agent: Olorin".to_string()
         };
 
         let outbound_scan = safety::scan_outbound(final_text.as_bytes());
-        if debug_runes() && outbound_scan.blocked {
-            eprintln!("[runes-dbg] safety::scan_outbound blocked the follow-up");
-        }
-
         if outbound_scan.blocked {
             if let Some(tx_ref) = tx {
                 let _ = tx_ref.send(StreamEvent::Error(
