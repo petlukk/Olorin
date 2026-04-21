@@ -2,6 +2,10 @@
 //! is auto-discovered by build.rs; the generated registry is included
 //! below.
 
+use std::sync::OnceLock;
+
+use crate::core::safety;
+
 pub mod common;
 
 /// Output safety classification for a rune's `answer` field.
@@ -45,8 +49,6 @@ pub fn run_rune(name: &str, args: &str) -> Option<RuneResult> {
         .map(|r| r.run(args))
 }
 
-use std::sync::OnceLock;
-
 /// Formatted tools block for the LLM system prompt. Built once at first use
 /// from the static `RUNES` registry. Stable pointer across calls so callers
 /// can cheaply compare or store `&'static str` references.
@@ -78,4 +80,37 @@ pub fn runes_prompt_block() -> &'static str {
         );
         s
     })
+}
+
+/// Error type when wrap_rune_result refuses to surface a rune's output.
+#[derive(Debug, PartialEq)]
+pub enum WrapError {
+    /// Safety scan blocked the rune output (injection / secret leak pattern).
+    Blocked,
+}
+
+/// Format a rune result for injection into the LLM's follow-up turn.
+///
+/// - Trusted → returns `answer` verbatim.
+/// - UntrustedQuoted → wraps in `<rune_output rune="<name>" untrusted="true">...</rune_output>`.
+///
+/// In both cases, the final string is run through `safety::scan` (inbound
+/// variant) before it is returned; a blocked scan becomes `Err(WrapError::Blocked)`.
+pub fn wrap_rune_result(
+    rune_name: &str,
+    safety_class: OutputSafety,
+    result: RuneResult,
+) -> Result<String, WrapError> {
+    let body = match safety_class {
+        OutputSafety::Trusted => result.answer,
+        OutputSafety::UntrustedQuoted => format!(
+            "<rune_output rune=\"{rune_name}\" untrusted=\"true\">{}</rune_output>",
+            result.answer
+        ),
+    };
+    let scan = safety::scan(body.as_bytes());
+    if scan.blocked {
+        return Err(WrapError::Blocked);
+    }
+    Ok(body)
 }
