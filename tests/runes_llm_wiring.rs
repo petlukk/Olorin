@@ -32,3 +32,11 @@ fn runes_prompt_block_is_stable_across_calls() {
     // Same pointer: confirms OnceLock caching (no per-call rebuild).
     assert!(std::ptr::eq(a.as_ptr(), b.as_ptr()));
 }
+
+#[test]
+fn dispatch_context_new_system_prompt_contains_rune_block() {
+    let ctx = olorin::core::router::DispatchContext::new(None, None, None, None);
+    let sp = ctx.system_prompt_for_test();
+    assert!(sp.contains("- eacrunch:"), "rune block not composed into system_prompt");
+    assert!(sp.contains("<tools>"), "tools opener missing in composed prompt");
+}

@@ -96,7 +96,15 @@ impl DispatchContext {
             engine,
             anthropic,
             last_timing:   None,
-            system_prompt: llm::SYSTEM_PROMPT.to_string(),
+            system_prompt: {
+                let base = llm::SYSTEM_PROMPT;
+                let runes_block = crate::runes::runes_prompt_block();
+                if base.is_empty() {
+                    runes_block.to_string()
+                } else {
+                    format!("{base}\n\n{runes_block}")
+                }
+            },
             recall_level:  0,
             _max_turns:    8,
             teleported:        false,
@@ -131,8 +139,19 @@ impl DispatchContext {
 
     /// Create with a custom system prompt.
     pub fn with_system_prompt(mut self, prompt: &str) -> Self {
-        self.system_prompt = format!("{}\n\n{prompt}", llm::SYSTEM_PROMPT);
+        let runes_block = crate::runes::runes_prompt_block();
+        let base = llm::SYSTEM_PROMPT;
+        self.system_prompt = if base.is_empty() {
+            format!("{prompt}\n\n{runes_block}")
+        } else {
+            format!("{base}\n\n{prompt}\n\n{runes_block}")
+        };
         self
+    }
+
+    #[doc(hidden)]
+    pub fn system_prompt_for_test(&self) -> &str {
+        &self.system_prompt
     }
 
     /// The Olorin Pipe — process a single input through the pipeline.
