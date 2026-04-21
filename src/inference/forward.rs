@@ -122,9 +122,13 @@ pub struct Gemma4State {
     // Q6K d_scratch for output matmul
     pub(crate) q6k_d_scratch: Vec<f32>,
 
-    // RoPE tables
-    pub(crate) cos_table: Vec<f32>,
-    pub(crate) sin_table: Vec<f32>,
+    // Pre-baked RoPE tables: layout [max_seq_len × half], row p = positions p*half..p*half+half.
+    pub(crate) rope_half_swa: usize,
+    pub(crate) rope_half_global: usize,
+    pub(crate) rope_cos_swa: Vec<f32>,
+    pub(crate) rope_sin_swa: Vec<f32>,
+    pub(crate) rope_cos_global: Vec<f32>,
+    pub(crate) rope_sin_global: Vec<f32>,
 
     // Post-attention residual (attn_out_res in the pipeline)
     pub(crate) attn_res: Vec<f32>,
@@ -145,10 +149,7 @@ pub struct Gemma4State {
     pub(crate) batch_ple_q8_bsums: Vec<i16>,
     pub(crate) batch_ple_q8_a: Vec<u8>,
 
-    // Per-thread scratch for parallelized norms/RoPE
     pub(crate) batch_head_scratch: Vec<f32>,   // [max_head_dim * n_threads]
-    pub(crate) batch_cos_tables: Vec<f32>,     // [max_rope_half * n_threads]
-    pub(crate) batch_sin_tables: Vec<f32>,     // [max_rope_half * n_threads]
 
     // ── Batched forward buffers (column-major [dim, max_batch]) ──
     pub(crate) batch_x: Vec<f32>,
@@ -222,6 +223,32 @@ impl Gemma4State {
             model.kv_shared_source.clone(),
         );
 
+        // Pre-bake RoPE tables for all positions once at construction time.
+        let rope_half_swa = model.rope_dim_swa / 2;
+        let mut rope_cos_swa = vec![0.0f32; max_seq_len * rope_half_swa];
+        let mut rope_sin_swa = vec![0.0f32; max_seq_len * rope_half_swa];
+        for pos in 0..max_seq_len {
+            let off = pos * rope_half_swa;
+            compute_rope_tables_into(
+                &mut rope_cos_swa[off..off + rope_half_swa],
+                &mut rope_sin_swa[off..off + rope_half_swa],
+                pos, model.rope_dim_swa, model.rope_theta_swa, None,
+            );
+        }
+
+        let rope_half_global = model.rope_dim_global / 2;
+        let mut rope_cos_global = vec![0.0f32; max_seq_len * rope_half_global];
+        let mut rope_sin_global = vec![0.0f32; max_seq_len * rope_half_global];
+        for pos in 0..max_seq_len {
+            let off = pos * rope_half_global;
+            compute_rope_tables_into(
+                &mut rope_cos_global[off..off + rope_half_global],
+                &mut rope_sin_global[off..off + rope_half_global],
+                pos, model.rope_dim_global, model.rope_theta_global,
+                model.rope_freqs.as_deref(),
+            );
+        }
+
         Self {
             x: vec![0.0; hd],
             x_norm: vec![0.0; hd],
@@ -255,12 +282,14 @@ impl Gemma4State {
             logit_rows: model.vocab_size,
             q6k_d_scratch: vec![0.0; std::cmp::max(n_blocks_out, n_blocks_ffn) * 4 * n_thread_slots],
 
-            cos_table: vec![0.0; max_head / 2],
-            sin_table: vec![0.0; max_head / 2],
+            rope_half_swa,
+            rope_half_global,
+            rope_cos_swa,
+            rope_sin_swa,
+            rope_cos_global,
+            rope_sin_global,
 
             batch_head_scratch: vec![0.0; max_head_k * n_thread_slots],
-            batch_cos_tables: vec![0.0; (max_head / 2) * n_thread_slots],
-            batch_sin_tables: vec![0.0; (max_head / 2) * n_thread_slots],
 
             attn_res: vec![0.0; hd],
 
@@ -396,5 +425,18 @@ impl Gemma4State {
     /// Reset state for a new sequence.
     pub fn reset(&mut self) {
         self.cache.reset();
+    }
+
+    /// Return (cos, sin) slices for the given absolute position.
+    pub(crate) fn rope_slices(&self, is_swa: bool, pos: usize) -> (&[f32], &[f32]) {
+        if is_swa {
+            let off = pos * self.rope_half_swa;
+            (&self.rope_cos_swa[off..off + self.rope_half_swa],
+             &self.rope_sin_swa[off..off + self.rope_half_swa])
+        } else {
+            let off = pos * self.rope_half_global;
+            (&self.rope_cos_global[off..off + self.rope_half_global],
+             &self.rope_sin_global[off..off + self.rope_half_global])
+        }
     }
 }

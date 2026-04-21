@@ -4,7 +4,7 @@
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::Instant;
 use crate::inference::engine::Gemma4Model;
-use crate::inference::forward::{compute_rope_tables_into, Gemma4State};
+use crate::inference::forward::Gemma4State;
 use crate::inference::threadpool::SpinBarrier;
 use crate::kernels::ffi_inference;
 
@@ -46,9 +46,7 @@ pub(crate) fn layer_forward_batch(
     let qkv_dim = n_heads * head_dim;
     let n_pad = (n + 3) & !3; // round up to 4 for GEMM
 
-    let n_rot = if model.is_swa[il] { model.rope_dim_swa } else { model.rope_dim_global };
-    let rope_theta = if model.is_swa[il] { model.rope_theta_swa } else { model.rope_theta_global };
-    let freq_factors = if !model.is_swa[il] { model.rope_freqs.as_deref() } else { None };
+    let is_swa = model.is_swa[il];
 
     // ── 1a. Attn norm (all threads, token-strided) ────────────────
     let t0 = t_start!();
@@ -98,18 +96,13 @@ pub(crate) fn layer_forward_batch(
     barrier.wait(); // B4
     if ith == 0 { t_accum!(t0, gemm_q, tm!()); }
     // ── 3. Q norm + RoPE (all threads, token-strided) ─────────────
-    let rope_half = n_rot / 2;
     let t0 = t_start!();
     {
         let mut t = ith;
         while t < n {
-            let cos_off = ith * rope_half;
-            let sin_off = ith * rope_half;
-            compute_rope_tables_into(
-                &mut state.batch_cos_tables[cos_off..cos_off + rope_half],
-                &mut state.batch_sin_tables[sin_off..sin_off + rope_half],
-                seq_len + t, n_rot, rope_theta, freq_factors,
-            );
+            let (rope_cos, rope_sin) = state.rope_slices(is_swa, seq_len + t);
+            let cos_ptr = rope_cos.as_ptr();
+            let sin_ptr = rope_sin.as_ptr();
             if !lw.q_norm.is_null() {
                 let scratch_off = ith * head_dim;
                 for h in 0..n_heads {
@@ -125,8 +118,7 @@ pub(crate) fn layer_forward_batch(
             }
             ffi_inference::gemma4_rope(
                 unsafe { state.batch_q.as_mut_ptr().add(t * qkv_dim) },
-                state.batch_cos_tables[cos_off..].as_ptr(),
-                state.batch_sin_tables[sin_off..].as_ptr(),
+                cos_ptr, sin_ptr,
                 head_dim as i32, n_heads as i32,
             );
             t += nth;
@@ -176,13 +168,9 @@ pub(crate) fn layer_forward_batch(
         {
             let mut t = ith;
             while t < n {
-                let cos_off = ith * rope_half;
-                let sin_off = ith * rope_half;
-                compute_rope_tables_into(
-                    &mut state.batch_cos_tables[cos_off..cos_off + rope_half],
-                    &mut state.batch_sin_tables[sin_off..sin_off + rope_half],
-                    seq_len + t, n_rot, rope_theta, freq_factors,
-                );
+                let (rope_cos, rope_sin) = state.rope_slices(is_swa, seq_len + t);
+                let cos_ptr = rope_cos.as_ptr();
+                let sin_ptr = rope_sin.as_ptr();
                 if !lw.k_norm.is_null() {
                     let scratch_off = ith * head_dim;
                     for h in 0..n_kv_heads {
@@ -204,8 +192,7 @@ pub(crate) fn layer_forward_batch(
                 }
                 ffi_inference::gemma4_rope(
                     unsafe { state.batch_k.as_mut_ptr().add(t * kv_dim) },
-                    state.batch_cos_tables[cos_off..].as_ptr(),
-                    state.batch_sin_tables[sin_off..].as_ptr(),
+                    cos_ptr, sin_ptr,
                     head_dim as i32, n_kv_heads as i32,
                 );
                 t += nth;

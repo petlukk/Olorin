@@ -2,7 +2,7 @@
 
 use std::sync::atomic::{AtomicI32, Ordering};
 use crate::inference::engine::Gemma4Model;
-use crate::inference::forward::{compute_rope_tables, Gemma4State};
+use crate::inference::forward::Gemma4State;
 use crate::inference::matmul;
 use crate::inference::matmul_graph;
 use crate::inference::threadpool::SpinBarrier;
@@ -106,14 +106,14 @@ pub(super) fn layer_forward_graph_timed(
     let head_dim_v = model.head_dim_v[il];
     let has_kv = model.kv_shared_source[il].is_none();
 
-    // ── 1. RoPE tables + attn_norm (thread 0) + parallel quant ───
+    // Look up pre-baked RoPE slices for this layer/position.
+    let (rope_cos, rope_sin) = state.rope_slices(model.is_swa[il], pos);
+    let rope_cos_ptr = rope_cos.as_ptr();
+    let rope_sin_ptr = rope_sin.as_ptr();
+
+    // ── 1. attn_norm (thread 0) + parallel quant ─────────────────
     let t0 = t!();
     if ith == 0 {
-        let n_rot = if model.is_swa[il] { model.rope_dim_swa } else { model.rope_dim_global };
-        let rope_theta = if model.is_swa[il] { model.rope_theta_swa } else { model.rope_theta_global };
-        let freq_factors = if !model.is_swa[il] { model.rope_freqs.as_deref() } else { None };
-        compute_rope_tables(&mut state.cos_table, &mut state.sin_table, pos, n_rot, rope_theta, freq_factors);
-
         ffi_inference::gemma4_rmsnorm(
             state.x.as_ptr(), lw.attn_norm, state.x_norm.as_mut_ptr(), hd as i32, model.rms_eps,
         );
@@ -161,7 +161,7 @@ pub(super) fn layer_forward_graph_timed(
             }
         }
         ffi_inference::gemma4_rope(
-            state.q.as_mut_ptr(), state.cos_table.as_ptr(), state.sin_table.as_ptr(),
+            state.q.as_mut_ptr(), rope_cos_ptr, rope_sin_ptr,
             head_dim as i32, n_heads as i32,
         );
     }
@@ -220,7 +220,7 @@ pub(super) fn layer_forward_graph_timed(
                 super::forward::bare_rmsnorm(&mut state.v[off..off + head_dim_v], model.rms_eps);
             }
             ffi_inference::gemma4_rope(
-                state.k.as_mut_ptr(), state.cos_table.as_ptr(), state.sin_table.as_ptr(),
+                state.k.as_mut_ptr(), rope_cos_ptr, rope_sin_ptr,
                 head_dim as i32, n_kv_heads as i32,
             );
             state.cache.store(il, &state.k[..kv_dim], &state.v[..kv_dim_v]);
