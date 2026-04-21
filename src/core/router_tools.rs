@@ -60,17 +60,40 @@ impl DispatchContext {
         let response = self.run_inference(&recall_context);
 
         match response {
-            Ok(text) => {
-                if safety::scan_outbound(text.as_bytes()).blocked {
+            Ok(first_text) => {
+                // ── Tool-call follow-up (sync path) ─────────────────────────
+                // run_local_followup_if_tool_call applies its own outbound scan
+                // internally and returns Some("") on block. Only fall through to
+                // the dispatch-level outbound scan when no tool call was detected
+                // (followup returns None), i.e. for plain LLM responses.
+                let system = self.system_prompt.clone();
+                if let Some(followup_text) = self.run_local_followup_if_tool_call(
+                    input, &system, &first_text, None,
+                ) {
+                    if followup_text.is_empty() {
+                        // Outbound scan blocked the follow-up inside the helper.
+                        return Response::blocked("Response blocked: potential secret leak.");
+                    }
+                    self.finalize_response(input, &followup_text);
+                    self.last_timing = Some(handlers::TurnTiming {
+                        safety_scan_us: safety_us,
+                        llm_call_ms: 0,
+                        tool_execs: vec![],
+                    });
+                    return Response::text(followup_text);
+                }
+
+                // No tool call — apply outbound scan on the plain LLM response.
+                if safety::scan_outbound(first_text.as_bytes()).blocked {
                     return Response::blocked("Response blocked: potential secret leak.");
                 }
-                self.finalize_response(input, &text);
+                self.finalize_response(input, &first_text);
                 self.last_timing = Some(handlers::TurnTiming {
                     safety_scan_us: safety_us,
                     llm_call_ms: 0,
                     tool_execs: vec![],
                 });
-                Response::text(text)
+                Response::text(first_text)
             }
             Err(e) => Response::text(format!("LLM error: {e}")),
         }
@@ -258,6 +281,14 @@ Agent: Olorin".to_string()
     /// Returns `None` if there was no tool call in `first_output` (caller
     /// falls through to its normal path).
     ///
+    /// When `tx` is `Some`, follow-up tokens are streamed through the channel
+    /// (Web UI / WhatsApp path). When `tx` is `None`, the follow-up runs
+    /// synchronously and the final text is returned inline (terminal REPL path).
+    /// In both cases the outbound scan is applied exactly once inside this helper;
+    /// callers must NOT apply a second scan on the returned text.
+    /// On outbound-block the helper returns `Some(String::new())` — the caller
+    /// is responsible for surfacing this as a blocked response to the user.
+    ///
     /// TODO(runes-v2): multi-iteration tool loop, WhatsApp source gating,
     /// per-rune timeout, concurrency mutex.
     pub(crate) fn run_local_followup_if_tool_call(
@@ -265,7 +296,7 @@ Agent: Olorin".to_string()
         user_input: &str,
         system: &str,
         first_output: &str,
-        tx: &std::sync::mpsc::Sender<StreamEvent>,
+        tx: Option<&std::sync::mpsc::Sender<StreamEvent>>,
     ) -> Option<String> {
         if debug_runes() {
             eprintln!("[runes-dbg] followup_if_tool_call: first_output.len()={}", first_output.len());
@@ -310,21 +341,27 @@ Agent: Olorin".to_string()
             eprintln!("[runes-dbg] followup_prompt.len()={}", followup_prompt.len());
         }
 
-        // Step 4: second generate — stream tokens through tx.
-        let tx_ref = tx.clone();
-        let on_event = move |ev: crate::inference::generate::GenEvent| match ev {
-            crate::inference::generate::GenEvent::Token(tok) => {
-                if !safety::is_chatml_hallucination(tok) {
-                    let _ = tx_ref.send(StreamEvent::Token(tok.to_string()));
-                }
-            }
-            crate::inference::generate::GenEvent::Thinking(active) => {
-                let _ = tx_ref.send(StreamEvent::Thinking(active));
-            }
-        };
-
+        // Step 4: second generate.
+        // Streaming path: emit tokens through tx as they arrive.
+        // Sync path (tx = None): use a no-op on_event; block until complete.
         let gen_result = if let Some(engine) = &mut self.engine {
-            Some(engine.generate(&followup_prompt, system, &on_event))
+            let result = if let Some(tx_ref) = tx {
+                let tx_clone = tx_ref.clone();
+                let on_event = move |ev: crate::inference::generate::GenEvent| match ev {
+                    crate::inference::generate::GenEvent::Token(tok) => {
+                        if !safety::is_chatml_hallucination(tok) {
+                            let _ = tx_clone.send(StreamEvent::Token(tok.to_string()));
+                        }
+                    }
+                    crate::inference::generate::GenEvent::Thinking(active) => {
+                        let _ = tx_clone.send(StreamEvent::Thinking(active));
+                    }
+                };
+                engine.generate(&followup_prompt, system, &on_event)
+            } else {
+                engine.generate(&followup_prompt, system, &|_ev| {})
+            };
+            Some(result)
         } else {
             None
         };
@@ -358,9 +395,13 @@ Agent: Olorin".to_string()
         }
 
         if outbound_scan.blocked {
-            let _ = tx.send(StreamEvent::Error(
-                "Response blocked: potential secret leak.".to_string(),
-            ));
+            if let Some(tx_ref) = tx {
+                let _ = tx_ref.send(StreamEvent::Error(
+                    "Response blocked: potential secret leak.".to_string(),
+                ));
+            }
+            // Return Some(String::new()) as the block sentinel.
+            // Streaming callers use the Done event; sync callers check is_empty().
             return Some(String::new());
         }
 

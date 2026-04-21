@@ -227,7 +227,7 @@ impl DispatchContext {
                         return;
                     }
                     let final_text = self.run_local_followup_if_tool_call(
-                        input, &system, &first_text, &tx,
+                        input, &system, &first_text, Some(&tx),
                     ).unwrap_or(first_text);
                     self.finalize_response(input, &final_text);
                     let _ = tx.send(StreamEvent::Done { full_text: final_text });
