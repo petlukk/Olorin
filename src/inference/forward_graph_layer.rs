@@ -2,7 +2,7 @@
 
 use std::sync::atomic::{AtomicI32, Ordering};
 use crate::inference::engine::Gemma4Model;
-use crate::inference::forward::{compute_rope_tables, Gemma4State};
+use crate::inference::forward::Gemma4State;
 use crate::inference::matmul;
 use crate::inference::matmul_graph;
 use crate::inference::threadpool::SpinBarrier;
@@ -97,23 +97,32 @@ pub(super) fn layer_forward_graph_timed(
     use std::time::Instant;
     macro_rules! t { () => { if timing { Some(Instant::now()) } else { None } }; }
     macro_rules! acc { ($s:expr, $f:expr) => { if let Some(s) = $s { *$f += s.elapsed().as_micros() as u64; } }; }
-    let hd = model.hidden_dim;
-    let n_heads = model.n_heads;
-    let n_kv_heads = model.n_kv_heads;
-    let gqa_ratio = n_heads / n_kv_heads;
+    // Gemma 4 E2B: dims are fixed at build time — let LLVM const-fold through
+    // the hot path rather than threading model fields as runtime values.
+    const HD: usize = 1536;
+    const N_HEADS: usize = 8;
+    const N_KV_HEADS: usize = 1;
+    const GQA_RATIO: usize = N_HEADS / N_KV_HEADS;
+    debug_assert_eq!(model.hidden_dim, HD);
+    debug_assert_eq!(model.n_heads, N_HEADS);
+    debug_assert_eq!(model.n_kv_heads, N_KV_HEADS);
+    let hd = HD;
+    let n_heads = N_HEADS;
+    let n_kv_heads = N_KV_HEADS;
+    let gqa_ratio = GQA_RATIO;
     let lw = &model.layers[il];
     let head_dim = model.head_dim_k[il];
     let head_dim_v = model.head_dim_v[il];
     let has_kv = model.kv_shared_source[il].is_none();
 
-    // ── 1. RoPE tables + attn_norm (thread 0) + parallel quant ───
+    // Look up pre-baked RoPE slices for this layer/position.
+    let (rope_cos, rope_sin) = state.rope_slices(model.is_swa[il], pos);
+    let rope_cos_ptr = rope_cos.as_ptr();
+    let rope_sin_ptr = rope_sin.as_ptr();
+
+    // ── 1. attn_norm (thread 0) + parallel quant ─────────────────
     let t0 = t!();
     if ith == 0 {
-        let n_rot = if model.is_swa[il] { model.rope_dim_swa } else { model.rope_dim_global };
-        let rope_theta = if model.is_swa[il] { model.rope_theta_swa } else { model.rope_theta_global };
-        let freq_factors = if !model.is_swa[il] { model.rope_freqs.as_deref() } else { None };
-        compute_rope_tables(&mut state.cos_table, &mut state.sin_table, pos, n_rot, rope_theta, freq_factors);
-
         ffi_inference::gemma4_rmsnorm(
             state.x.as_ptr(), lw.attn_norm, state.x_norm.as_mut_ptr(), hd as i32, model.rms_eps,
         );
@@ -161,7 +170,7 @@ pub(super) fn layer_forward_graph_timed(
             }
         }
         ffi_inference::gemma4_rope(
-            state.q.as_mut_ptr(), state.cos_table.as_ptr(), state.sin_table.as_ptr(),
+            state.q.as_mut_ptr(), rope_cos_ptr, rope_sin_ptr,
             head_dim as i32, n_heads as i32,
         );
     }
@@ -220,7 +229,7 @@ pub(super) fn layer_forward_graph_timed(
                 super::forward::bare_rmsnorm(&mut state.v[off..off + head_dim_v], model.rms_eps);
             }
             ffi_inference::gemma4_rope(
-                state.k.as_mut_ptr(), state.cos_table.as_ptr(), state.sin_table.as_ptr(),
+                state.k.as_mut_ptr(), rope_cos_ptr, rope_sin_ptr,
                 head_dim as i32, n_kv_heads as i32,
             );
             state.cache.store(il, &state.k[..kv_dim], &state.v[..kv_dim_v]);

@@ -8,7 +8,7 @@ use olorin::core::router::DispatchContext;
 #[test]
 fn dispatch_while_teleported_still_processes() {
     ffi::init().unwrap();
-    let mut ctx = DispatchContext::new(None, None, None, None);
+    let mut ctx = DispatchContext::new(None, None);
     ctx.teleported = true;
     let resp = ctx.dispatch("/help");
     // /help always lists the full command set; dormant message does not.
@@ -22,7 +22,7 @@ fn dispatch_while_teleported_still_processes() {
 fn teleport_command_while_already_teleported_refuses() {
     ffi::init().unwrap();
     std::env::set_var("OLORIN_BRIDGE", "/nonexistent/wa-bridge");
-    let mut ctx = DispatchContext::new(None, None, None, None);
+    let mut ctx = DispatchContext::new(None, None);
     ctx.teleported = true;
     let resp = ctx.dispatch("/teleport");
     assert!(resp.text.to_lowercase().contains("already"),
@@ -71,7 +71,7 @@ fn trigger_just_olorin_no_space() {
 fn teleport_flag_cleared_after_bridge_not_found() {
     ffi::init().unwrap();
     std::env::set_var("OLORIN_BRIDGE", "/nonexistent/wa-bridge");
-    let mut ctx = DispatchContext::new(None, None, None, None);
+    let mut ctx = DispatchContext::new(None, None);
     assert!(!ctx.teleported);
     let resp = ctx.dispatch("/teleport");
     // Bridge not found — should return error and NOT leave teleported=true
@@ -83,7 +83,7 @@ fn teleport_flag_cleared_after_bridge_not_found() {
 #[test]
 fn normal_dispatch_unaffected() {
     ffi::init().unwrap();
-    let mut ctx = DispatchContext::new(None, None, None, None);
+    let mut ctx = DispatchContext::new(None, None);
     // /help should work normally when not teleported
     let resp = ctx.dispatch("/help");
     assert!(resp.text.contains("/teleport"), "help should mention /teleport");
@@ -95,7 +95,7 @@ fn normal_dispatch_unaffected() {
 #[test]
 fn dispatch_streaming_while_teleported_still_processes() {
     ffi::init().unwrap();
-    let mut ctx = DispatchContext::new(None, None, None, None);
+    let mut ctx = DispatchContext::new(None, None);
     ctx.teleported = true;
     let (tx, rx) = std::sync::mpsc::channel();
     ctx.dispatch_streaming("/help", tx);

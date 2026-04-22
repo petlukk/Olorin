@@ -28,9 +28,9 @@ pub fn get_chat_html() -> String {
 // ── Web server ────────────────────────────────────────────────────────────────
 
 /// Start the web server. Blocks until killed.
-pub fn run(port: u16, model_arg: Option<&str>, draft_arg: Option<&str>, draft_k: Option<usize>) {
+pub fn run(port: u16, model_arg: Option<&str>) {
     let api_key = std::env::var("ANTHROPIC_API_KEY").ok();
-    let ctx = Arc::new(Mutex::new(DispatchContext::new(api_key, model_arg, draft_arg, draft_k)));
+    let ctx = Arc::new(Mutex::new(DispatchContext::new(api_key, model_arg)));
     let teleported = Arc::new(AtomicBool::new(false));
 
     // Wire the server's AtomicBool into DispatchContext so whatsapp.rs can set it
