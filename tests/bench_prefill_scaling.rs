@@ -32,9 +32,8 @@ fn prefill_scaling_inner() {
     let model = olorin::inference::engine::Gemma4Model::from_gguf(&gguf).unwrap();
     let tokenizer = olorin::inference::tokenizer::Tokenizer::from_gguf(&gguf).unwrap();
     olorin::kernels::ffi::init().unwrap();
-    let pool = olorin::inference::threadpool::ThreadPool::new();
     let graph_pool = olorin::inference::threadpool::GraphPool::new();
-    let mut state = olorin::inference::forward::Gemma4State::new(&model, 512, &pool);
+    let mut state = olorin::inference::forward::Gemma4State::new(&model, 512, &graph_pool);
 
     // Build a long prompt by repeating text
     let base = "The quick brown fox jumps over the lazy dog and then runs across the field. ";

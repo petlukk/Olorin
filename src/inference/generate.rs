@@ -53,10 +53,9 @@ impl Engine {
             .map_err(|e| Error::Inference(e))?;
         crate::kernels::ffi::init()
             .map_err(|e| Error::Inference(e))?;
-        let pool = crate::inference::threadpool::ThreadPool::new();
         let graph_pool = crate::inference::threadpool::GraphPool::new();
-        eprintln!("[Olorin] Thread pool: {} threads", pool.thread_count());
-        let state = Gemma4State::new(&model, max_seq_len, &pool);
+        eprintln!("[Olorin] Thread pool: {} threads", graph_pool.thread_count());
+        let state = Gemma4State::new(&model, max_seq_len, &graph_pool);
 
         // Gemma 4 brackets chain-of-thought in `<|channel>...<channel|>`.
         // Look up the token ids once so the decode loop can compare by id.

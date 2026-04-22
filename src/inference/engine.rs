@@ -3,7 +3,7 @@
 //! Per-layer varying dimensions: SWA layers have head_dim 256, ffn 6144;
 //! global layers have head_dim 512, ffn 12288. KV sharing across last N layers.
 
-use crate::inference::gguf::{GgufFile, MetaValue};
+use crate::inference::gguf::GgufFile;
 use crate::inference::engine_helpers::{
     self, load_norm_ptr,
     get_meta_u32, get_meta_f32, get_meta_u32_array,
@@ -209,16 +209,6 @@ impl Gemma4Model {
 
         // 3. Sliding window pattern (per-layer array: 1=SWA, 0=global)
         let swp_key = format!("{arch}.attention.sliding_window_pattern");
-        // Debug: check what metadata type the key has
-        if let Some(mv) = gguf.metadata.get(&swp_key) {
-            eprintln!("[gemma4] swp metadata type: {:?}", std::mem::discriminant(mv));
-            if let MetaValue::Array(arr) = mv {
-                eprintln!("[gemma4] swp array len={}, first elem type: {:?}",
-                    arr.len(), arr.first().map(|v| std::mem::discriminant(v)));
-            }
-        } else {
-            eprintln!("[gemma4] swp key not found in metadata!");
-        }
         let is_swa: Vec<bool> = match get_meta_u32_array(gguf, &swp_key) {
             Some(pattern) => {
                 if pattern.len() != n_layers {
@@ -227,7 +217,6 @@ impl Gemma4Model {
                         pattern.len()
                     ));
                 }
-                eprintln!("[gemma4] sliding_window_pattern loaded: first 5 = {:?}", &pattern[..5.min(pattern.len())]);
                 pattern.iter().map(|&v| v == 1).collect()
             }
             None => {

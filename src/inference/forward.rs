@@ -164,7 +164,7 @@ impl Gemma4State {
     pub fn new(
         model: &Gemma4Model,
         max_seq_len: usize,
-        pool: &crate::inference::threadpool::ThreadPool,
+        pool: &crate::inference::threadpool::GraphPool,
     ) -> Self {
         let hd = model.hidden_dim;
         let max_head_k = *model.head_dim_k.iter().max().unwrap_or(&512);

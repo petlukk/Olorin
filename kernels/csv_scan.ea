@@ -10,15 +10,51 @@
 // The caller mmaps the file and allocates the two out arrays at size `len`
 // (the worst case is every byte being a delimiter).
 //
-// TODO(simd): replace the scalar loop with a u8x16 vector-compare once
-// eacrunch is past MVP — the caller has already mmapped and aligned the
-// buffer, so a lane-compare against splat(44) and splat(10) would emit
-// position arrays 8–16× faster on typical CSVs.
+// SIMD strategy (cross-arch — no movemask, no lane-extract primitive):
+// compare a 16-byte chunk against splat(',') and splat('\n') using u8x16
+// equality, encode the two match flags into bit 0 and bit 1 of a per-lane
+// u8, store the resulting 16-byte mask to caller-provided scratch, then
+// scalar-scan those 16 bytes to emit positions. The SIMD parallelism is in
+// the compares; position emission is inherently data-dependent because
+// writes to out_commas/out_newlines are stream-compaction and there is no
+// ARM NEON equivalent of x86 pmovmskb + tzcnt.
 
-export func csv_scan(text: *u8, len: i32, out_commas: *mut i32, out_newlines: *mut i32, out_n_comma: *mut i32, out_n_newline: *mut i32) {
+export func csv_scan(text: *u8, len: i32, out_commas: *mut i32, out_newlines: *mut i32, out_n_comma: *mut i32, out_n_newline: *mut i32, scratch: *mut u8) {
+    let v_comma: u8x16 = splat(44)
+    let v_newl:  u8x16 = splat(10)
+    let v_zero:  u8x16 = splat(0)
+    let v_one:   u8x16 = splat(1)
+    let v_two:   u8x16 = splat(2)
+
     let mut nc: i32 = 0
     let mut nn: i32 = 0
+
+    let n_full: i32 = (len / 16) * 16
     let mut i: i32 = 0
+    while i < n_full {
+        let c: u8x16 = load(text, i)
+        let m_c: u8x16 = select(c .== v_comma, v_one, v_zero)
+        let m_n: u8x16 = select(c .== v_newl,  v_two, v_zero)
+        let m:   u8x16 = m_c .| m_n
+        store(scratch, 0, m)
+
+        let mut k: i32 = 0
+        while k < 16 {
+            let b: i32 = to_i32(scratch[k])
+            if (b & 1) != 0 {
+                out_commas[nc] = i + k
+                nc = nc + 1
+            }
+            if (b & 2) != 0 {
+                out_newlines[nn] = i + k
+                nn = nn + 1
+            }
+            k = k + 1
+        }
+        i = i + 16
+    }
+
+    // Scalar tail (< 16 bytes)
     while i < len {
         let b: i32 = to_i32(text[i])
         if b == 44 {

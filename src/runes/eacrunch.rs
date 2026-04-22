@@ -91,11 +91,13 @@ fn summarize_csv(bytes: &[u8]) -> Result<String, String> {
     let mut newlines = vec![0i32; bytes.len()];
     let mut n_comma  = 0i32;
     let mut n_newln  = 0i32;
+    let mut scratch  = [0u8; 16];
     unsafe {
         ffi::csv_scan(
             bytes.as_ptr(), len,
             commas.as_mut_ptr(), newlines.as_mut_ptr(),
             &mut n_comma, &mut n_newln,
+            scratch.as_mut_ptr(),
         );
     }
     let commas   = &commas[..n_comma as usize];

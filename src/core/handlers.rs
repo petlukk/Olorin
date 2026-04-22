@@ -66,9 +66,6 @@ pub fn process_output(text: &str) -> LlmResponse {
 /// Returns the string to inject back into the LLM's follow-up prompt, or an
 /// error describing why dispatch failed (so the caller can return that error
 /// text to the model as a tool-result payload).
-///
-/// TODO(runes-v2): source gating (WhatsApp), per-rune timeout, concurrency mutex,
-/// multi-field Object args, multi-iteration tool loop.
 pub fn dispatch_tool_call(name: &str, input: &crate::storage::json::Object) -> Result<String, String> {
     // Extract free-text args from the LLM's argument Object.
     //
@@ -78,9 +75,6 @@ pub fn dispatch_tool_call(name: &str, input: &crate::storage::json::Object) -> R
     // `{"path":"/tmp/x.csv"}`. Fall back to full JSON serialization for any
     // Object that isn't single-string-field (preserves behavior for tools that
     // might legitimately accept a JSON string).
-    //
-    // TODO(runes-v2): Tools/runes accepting multiple structured args need the
-    // full Object — revisit when a second rune ships.
     let args: String = {
         let mut it = input.iter();
         match (it.next(), it.next()) {

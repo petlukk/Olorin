@@ -1,10 +1,9 @@
-//! Thread pools for parallel compute dispatch.
+//! Thread pool for parallel compute dispatch.
 //!
-//! Two implementations:
-//! - `ThreadPool`: legacy mutex/condvar dispatch (used during migration)
-//! - `SpinBarrier`: atomic barrier, bounded spin then futex-block. Matches
-//!   the behavior of llama.cpp's ggml_barrier() compiled with OpenMP
-//!   (`GOMP_barrier`), which is the form Pi/Debian distributes.
+//! `GraphPool` + `SpinBarrier`: atomic kickoff via a versioned `n_graph`
+//! counter, bounded spin then futex-block at barriers. Matches the behavior
+//! of llama.cpp's `ggml_graph_compute` compiled with OpenMP (`GOMP_barrier`),
+//! which is the form Pi/Debian distributes.
 
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering, fence};
 use std::sync::{Condvar, Mutex};
@@ -337,8 +336,3 @@ impl Drop for GraphPool {
 // Safety: shared is heap-allocated and outlives all workers
 unsafe impl Send for GraphPool {}
 unsafe impl Sync for GraphPool {}
-
-// Legacy `ThreadPool` (mutex/condvar dispatch) lives in its own file since
-// it's migration-era code. Re-exported so external callers keep the
-// `threadpool::ThreadPool` path.
-pub use super::threadpool_legacy::ThreadPool;

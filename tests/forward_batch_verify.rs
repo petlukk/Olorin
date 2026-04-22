@@ -34,17 +34,16 @@ fn run_comparison(mp: &str) {
     let gguf = olorin::inference::gguf::GgufFile::open(Path::new(mp)).unwrap();
     let model = olorin::inference::engine::Gemma4Model::from_gguf(&gguf).unwrap();
 
-    let thread_pool = olorin::inference::threadpool::ThreadPool::new();
     let graph_pool = olorin::inference::threadpool::GraphPool::new();
     let max_seq = 2048;
     let bos: u32 = 2;
 
     // Path A: forward_one_graph with BOS
-    let mut state_a = olorin::inference::forward::Gemma4State::new(&model, max_seq, &thread_pool);
+    let mut state_a = olorin::inference::forward::Gemma4State::new(&model, max_seq, &graph_pool);
     let logits_a = state_a.forward_one_graph(&model, bos, &graph_pool).to_vec();
 
     // Path B: forward_batch with &[BOS]
-    let mut state_b = olorin::inference::forward::Gemma4State::new(&model, max_seq, &thread_pool);
+    let mut state_b = olorin::inference::forward::Gemma4State::new(&model, max_seq, &graph_pool);
     let logits_b = state_b.forward_batch(&model, &[bos], &graph_pool).to_vec();
 
     // Compare bit-exact

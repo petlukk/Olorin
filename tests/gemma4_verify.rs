@@ -478,8 +478,8 @@ fn step4_ple() {
         return;
     }
 
-    let pool = olorin::inference::threadpool::ThreadPool::new();
-    let mut state = olorin::inference::forward::Gemma4State::new(&model, 512, &pool);
+    let graph_pool = olorin::inference::threadpool::GraphPool::new();
+    let mut state = olorin::inference::forward::Gemma4State::new(&model, 512, &graph_pool);
 
     // Embed BOS token + scale
     olorin::inference::dequant::q6k_embed_lookup(model.embed_weight, 2, &mut state.x, hd);
@@ -509,9 +509,8 @@ fn step5_logits() {
     let model = olorin::inference::engine::Gemma4Model::from_gguf(&gguf).unwrap();
     olorin::kernels::ffi::init().unwrap();
 
-    let pool = olorin::inference::threadpool::ThreadPool::new();
     let graph_pool = olorin::inference::threadpool::GraphPool::new();
-    let mut state = olorin::inference::forward::Gemma4State::new(&model, 512, &pool);
+    let mut state = olorin::inference::forward::Gemma4State::new(&model, 512, &graph_pool);
 
     // Forward pass with BOS token (id=2)
     let logits_vec = state.forward_one_graph(&model, 2, &graph_pool).to_vec();
@@ -560,9 +559,8 @@ fn step6_two_token_vs_llama_eval_callback() {
     let model = olorin::inference::engine::Gemma4Model::from_gguf(&gguf).unwrap();
     olorin::kernels::ffi::init().unwrap();
 
-    let pool = olorin::inference::threadpool::ThreadPool::new();
     let graph_pool = olorin::inference::threadpool::GraphPool::new();
-    let mut state = olorin::inference::forward::Gemma4State::new(&model, 512, &pool);
+    let mut state = olorin::inference::forward::Gemma4State::new(&model, 512, &graph_pool);
 
     // Forward BOS at pos=0
     let _ = state.forward_one_graph(&model, 2, &graph_pool);

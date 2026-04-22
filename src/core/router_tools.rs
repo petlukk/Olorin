@@ -283,9 +283,6 @@ Agent: Olorin".to_string()
     /// callers must NOT apply a second scan on the returned text.
     /// On outbound-block the helper returns `Some(String::new())` — the caller
     /// is responsible for surfacing this as a blocked response to the user.
-    ///
-    /// TODO(runes-v2): multi-iteration tool loop, WhatsApp source gating,
-    /// per-rune timeout, concurrency mutex.
     pub(crate) fn run_local_followup_if_tool_call(
         &mut self,
         user_input: &str,
@@ -375,9 +372,6 @@ Agent: Olorin".to_string()
     ///
     /// Returns the final text to stream to the user. If there is no tool call,
     /// `first_text` is returned unchanged.
-    ///
-    /// TODO(runes-v2): multi-iteration tool loop, WhatsApp source gating,
-    /// per-rune timeout, concurrency mutex.
     pub(crate) fn maybe_handle_tool_call_cloud(
         &mut self,
         user_input: &str,

@@ -120,11 +120,13 @@ fn csv_scan_finds_delimiters() {
     let mut nlines  = vec![0i32; input.len()];
     let mut n_comma = 0i32;
     let mut n_nline = 0i32;
+    let mut scratch = [0u8; 16];
     unsafe {
         olorin::kernels::ffi::csv_scan(
             input.as_ptr(), input.len() as i32,
             commas.as_mut_ptr(), nlines.as_mut_ptr(),
             &mut n_comma, &mut n_nline,
+            scratch.as_mut_ptr(),
         );
     }
     assert_eq!(n_comma, 4);
@@ -141,11 +143,13 @@ fn csv_scan_empty_input() {
     let mut nlines  = vec![0i32; 1];
     let mut n_comma = 0i32;
     let mut n_nline = 0i32;
+    let mut scratch = [0u8; 16];
     unsafe {
         olorin::kernels::ffi::csv_scan(
             input.as_ptr(), 0,
             commas.as_mut_ptr(), nlines.as_mut_ptr(),
             &mut n_comma, &mut n_nline,
+            scratch.as_mut_ptr(),
         );
     }
     assert_eq!(n_comma, 0);
@@ -160,16 +164,48 @@ fn csv_scan_no_final_newline() {
     let mut nlines  = vec![0i32; input.len()];
     let mut n_comma = 0i32;
     let mut n_nline = 0i32;
+    let mut scratch = [0u8; 16];
     unsafe {
         olorin::kernels::ffi::csv_scan(
             input.as_ptr(), input.len() as i32,
             commas.as_mut_ptr(), nlines.as_mut_ptr(),
             &mut n_comma, &mut n_nline,
+            scratch.as_mut_ptr(),
         );
     }
     assert_eq!(n_comma, 2);
     assert_eq!(n_nline, 0);
     assert_eq!(&commas[..2], &[1, 3]);
+}
+
+#[test]
+fn csv_scan_simd_path() {
+    // Input spans multiple 16-byte SIMD chunks and includes delimiters at
+    // chunk boundaries, inside chunks, and in the scalar tail.
+    olorin::kernels::ffi::init().unwrap();
+    let input = b"abc,def,ghi\n1234567,89012345\nX,Y,Z";
+    //            0         1111111111222222222233333
+    //            0123456789012345678901234567890123
+    // commas:   3, 7, 19, 30, 32  (5)
+    // newlines: 11, 28            (2)
+    assert_eq!(input.len(), 34);
+    let mut commas  = vec![0i32; input.len()];
+    let mut nlines  = vec![0i32; input.len()];
+    let mut n_comma = 0i32;
+    let mut n_nline = 0i32;
+    let mut scratch = [0u8; 16];
+    unsafe {
+        olorin::kernels::ffi::csv_scan(
+            input.as_ptr(), input.len() as i32,
+            commas.as_mut_ptr(), nlines.as_mut_ptr(),
+            &mut n_comma, &mut n_nline,
+            scratch.as_mut_ptr(),
+        );
+    }
+    assert_eq!(n_comma, 5);
+    assert_eq!(n_nline, 2);
+    assert_eq!(&commas[..5], &[3, 7, 19, 30, 32]);
+    assert_eq!(&nlines[..2], &[11, 28]);
 }
 
 #[test]

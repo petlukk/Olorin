@@ -1,15 +1,15 @@
 // One-pass streaming stats over an f32 array. Out params receive the
 // final count, sum, min, max.
 //
-// Scalar Eä for MVP — an f32-reduction SIMD pass (accumulate min/max in
-// lane registers, horizontal reduce at the end) can replace the body
-// later. CSV parsing dominates total time so the scalar cost is small.
-//
 // Empty input zeros all four outputs and returns without touching the
 // data pointer.
 //
-// TODO(simd): replace loop with f32x4 or f32x8 accumulators + horizontal
-// reduce once eacrunch is past MVP.
+// SIMD strategy: f32x4 accumulators for sum/min/max, updated lane-wise
+// across 4-at-a-time chunks; horizontal reduce at the end via
+// reduce_add / reduce_min / reduce_max. Cross-arch (x86 SSE2 / ARM NEON).
+// `reduce_add` (not `reduce_add_fast`) is used so the sum is
+// associativity-ordered — determinism matters more than peak speed for
+// a diagnostic stats kernel.
 //
 // Signature is single-line to appease the current Eä parser — multi-line
 // parameter lists fail with `expected parameter name`. Once that's fixed
@@ -23,10 +23,27 @@ export func f32_stats(data: *f32, len: i32, out_count: *mut i32, out_sum: *mut f
     if len < 1 {
         return
     }
-    let mut s: f32 = 0.0
-    let mut mn: f32 = data[0]
-    let mut mx: f32 = data[0]
+
+    let first: f32 = data[0]
+    let mut v_sum: f32x4 = splat(0.0)
+    let mut v_min: f32x4 = splat(first)
+    let mut v_max: f32x4 = splat(first)
+
+    let n_full: i32 = (len / 4) * 4
     let mut i: i32 = 0
+    while i < n_full {
+        let v: f32x4 = load(data, i)
+        v_sum = v_sum .+ v
+        v_min = min(v_min, v)
+        v_max = max(v_max, v)
+        i = i + 4
+    }
+
+    let mut s:  f32 = reduce_add(v_sum)
+    let mut mn: f32 = reduce_min(v_min)
+    let mut mx: f32 = reduce_max(v_max)
+
+    // Scalar tail (< 4 remaining)
     while i < len {
         let v: f32 = data[i]
         s = s + v
@@ -38,6 +55,7 @@ export func f32_stats(data: *f32, len: i32, out_count: *mut i32, out_sum: *mut f
         }
         i = i + 1
     }
+
     out_count[0] = len
     out_sum[0]   = s
     out_min[0]   = mn

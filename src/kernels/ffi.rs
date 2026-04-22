@@ -26,6 +26,7 @@ type CsvScanFn          = unsafe extern "C" fn(
     *const u8, i32,
     *mut i32, *mut i32,
     *mut i32, *mut i32,
+    *mut u8,
 );
 type F32StatsFn         = unsafe extern "C" fn(
     *const f32, i32,
@@ -432,12 +433,15 @@ pub unsafe fn chacha20_search_v2(
 ///   writable `i32` elements (worst case is every byte being a delimiter).
 /// - `out_n_comma` and `out_n_newline` must each be valid for one writable
 ///   `i32`. Passing non-null dangling pointers is UB even when `len == 0`.
+/// - `scratch` must be valid for 16 writable bytes. The kernel overwrites
+///   it once per 16-byte chunk; the contents after the call are unspecified.
 pub unsafe fn csv_scan(
     text: *const u8, len: i32,
     out_commas: *mut i32, out_newlines: *mut i32,
     out_n_comma: *mut i32, out_n_newline: *mut i32,
+    scratch: *mut u8,
 ) {
-    (k().csv_scan)(text, len, out_commas, out_newlines, out_n_comma, out_n_newline);
+    (k().csv_scan)(text, len, out_commas, out_newlines, out_n_comma, out_n_newline, scratch);
 }
 
 /// Streaming stats over `len` f32 elements. Writes count, sum, min, max.

@@ -116,10 +116,16 @@ impl DispatchContext {
     }
 
     fn open_vault() -> Option<Vault> {
-        let home = std::env::var("HOME").ok()?;
+        let home = std::env::var("HOME")
+            .map_err(|e| eprintln!("[vault] HOME unset, persistence disabled: {e}"))
+            .ok()?;
         let vault_dir = PathBuf::from(home).join(".olorin").join("vault").join("default");
-        std::fs::create_dir_all(&vault_dir).ok()?;
-        Vault::open(&vault_dir).ok()
+        std::fs::create_dir_all(&vault_dir)
+            .map_err(|e| eprintln!("[vault] mkdir {} failed, persistence disabled: {e}", vault_dir.display()))
+            .ok()?;
+        Vault::open(&vault_dir)
+            .map_err(|e| eprintln!("[vault] open {} failed, persistence disabled: {e:?}", vault_dir.display()))
+            .ok()
     }
 
     /// Create with a custom system prompt.
@@ -392,10 +398,16 @@ impl DispatchContext {
             .unwrap_or_default()
     }
 
-    /// Save a message to the encrypted vault. Silently ignores errors.
+    /// Save a message to the encrypted vault. Logs on failure and continues —
+    /// a single append failure should not kill the session.
     pub(crate) fn vault_save(&mut self, role: &[u8], content: &[u8]) {
         if let Some(ref mut vault) = self.vault {
-            let _ = vault.append(role, content);
+            if let Err(e) = vault.append(role, content) {
+                eprintln!(
+                    "[vault] append failed (role={} len={}): {e:?}",
+                    String::from_utf8_lossy(role), content.len(),
+                );
+            }
         }
     }
 

@@ -112,9 +112,8 @@ fn olorin_full_bench() {
     let model = olorin::inference::engine::Gemma4Model::from_gguf(&gguf).unwrap();
     let tokenizer = olorin::inference::tokenizer::Tokenizer::from_gguf(&gguf).unwrap();
     olorin::kernels::ffi::init().unwrap();
-    let pool = olorin::inference::threadpool::ThreadPool::new();
     let graph_pool = olorin::inference::threadpool::GraphPool::new();
-    let mut state = olorin::inference::forward::Gemma4State::new(&model, 512, &pool);
+    let mut state = olorin::inference::forward::Gemma4State::new(&model, 512, &graph_pool);
     let load_ms = t_load.elapsed().as_secs_f64() * 1000.0;
 
     let rss_after_load = rss_mb();

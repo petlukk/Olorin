@@ -63,7 +63,9 @@ impl DispatchContext {
 
     pub fn store_api_key(&mut self, key: &str) {
         if let Some(vault) = &mut self.vault {
-            let _ = vault.append(b"config:api_key", key.as_bytes());
+            if let Err(e) = vault.append(b"config:api_key", key.as_bytes()) {
+                eprintln!("[vault] api_key persistence failed, key is in-memory only this session: {e:?}");
+            }
         }
         match &mut self.anthropic {
             Some(a) => a.set_api_key(key.to_string()),

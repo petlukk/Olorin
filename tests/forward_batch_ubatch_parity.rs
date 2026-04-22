@@ -35,7 +35,6 @@ fn inner() {
     let tokenizer = olorin::inference::tokenizer::Tokenizer::from_gguf(&gguf).unwrap();
     olorin::kernels::ffi::init().unwrap();
 
-    let pool = olorin::inference::threadpool::ThreadPool::new();
     let graph_pool = olorin::inference::threadpool::GraphPool::new();
 
     // Build a ~260-token prompt so ubatch=64 forces 5 chunks
@@ -48,7 +47,7 @@ fn inner() {
     prompt.extend_from_slice(&ids[..260.min(ids.len())]);
     assert!(prompt.len() >= 200, "need a prompt >= 200 tokens, got {}", prompt.len());
 
-    let mut state = olorin::inference::forward::Gemma4State::new(&model, 512, &pool);
+    let mut state = olorin::inference::forward::Gemma4State::new(&model, 512, &graph_pool);
 
     // ── Baseline: single-shot forward_batch ───────────────────────────
     state.reset();
