@@ -377,6 +377,16 @@ pub(crate) fn layer_forward_batch(
     }
     barrier.wait(); // B21
     if ith == 0 { t_accum!(t0, gelu_mul, tm!()); }
+    // Activation-sparsity tap: prefill path, env-gated, single-threaded.
+    // Records each token's post-GELU FFN hidden vector for layer `il`.
+    if ith == 0 {
+        for t in 0..n {
+            crate::inference::activation_track::record(
+                il,
+                &state.batch_gate[t * ffn_dim..(t + 1) * ffn_dim],
+            );
+        }
+    }
     let t0 = t_start!();
     parallel_batch_quant(
         &state.batch_gate, ffn_dim, n, n_pad,

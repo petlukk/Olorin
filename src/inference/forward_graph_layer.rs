@@ -355,6 +355,10 @@ pub(super) fn layer_forward_graph_timed(
     barrier.wait();
 
     acc!(t0, t_gelu_quant);
+    // Activation-sparsity tap: single-threaded, env-gated, ~1ns when disabled.
+    if ith == 0 {
+        crate::inference::activation_track::record(il, &state.gate[..ffn_dim]);
+    }
     let t0 = t!();
     current_chunk.store(nth as i32, Ordering::Relaxed);
     barrier.wait();
