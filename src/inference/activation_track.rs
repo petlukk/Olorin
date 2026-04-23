@@ -63,8 +63,34 @@ struct Tracker {
 static ENABLED: OnceLock<bool> = OnceLock::new();
 static TRACKER: OnceLock<Mutex<Tracker>> = OnceLock::new();
 
+// ── Residual-norm tracking (cheap: 4 bytes/layer/token) ──────────────
+static RESIDUAL_ENABLED: OnceLock<bool> = OnceLock::new();
+static RESIDUAL_NORMS: OnceLock<Mutex<Vec<Vec<f32>>>> = OnceLock::new();
+
+// ── Residual-snapshot tracking (heavy: hidden_dim × 4 bytes/layer/token) ─
+static SNAPSHOT_ENABLED: OnceLock<bool> = OnceLock::new();
+#[allow(clippy::type_complexity)]
+static RESIDUAL_SNAPSHOTS: OnceLock<Mutex<Vec<Vec<Vec<f32>>>>> = OnceLock::new();
+// Indexed as [token_idx][layer][neuron].
+
+// ── Logit-entropy tracking (one f32 per decoded token) ───────────────
+static ENTROPY_ENABLED: OnceLock<bool> = OnceLock::new();
+static LOGIT_ENTROPIES: OnceLock<Mutex<Vec<f32>>> = OnceLock::new();
+
 fn enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var("OLORIN_ACTIVATION_TRACK").is_ok())
+}
+
+fn residual_enabled() -> bool {
+    *RESIDUAL_ENABLED.get_or_init(|| std::env::var("OLORIN_RESIDUAL_TRACK").is_ok())
+}
+
+fn snapshot_enabled() -> bool {
+    *SNAPSHOT_ENABLED.get_or_init(|| std::env::var("OLORIN_RESIDUAL_SNAPSHOT").is_ok())
+}
+
+fn entropy_enabled() -> bool {
+    *ENTROPY_ENABLED.get_or_init(|| std::env::var("OLORIN_LOGIT_ENTROPY").is_ok())
 }
 
 fn tracker() -> &'static Mutex<Tracker> {
@@ -159,4 +185,110 @@ pub fn flush_csv() -> std::io::Result<PathBuf> {
         g.layers.len(),
         g.layers.first().map(|s| s.count.len()).unwrap_or(0));
     Ok(path)
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Residual-norm tracking
+// ─────────────────────────────────────────────────────────────────────
+
+/// Record the L2 norm of the residual stream at the end of `layer`.
+/// No-op unless OLORIN_RESIDUAL_TRACK=1. Called once per decoded token.
+pub fn record_residual_norm(layer: usize, residual: &[f32]) {
+    if !residual_enabled() { return; }
+    let sq: f32 = residual.iter().map(|&v| v * v).sum();
+    let norm = sq.sqrt();
+    let lock = RESIDUAL_NORMS.get_or_init(|| Mutex::new(Vec::new()));
+    let mut g = lock.lock().unwrap_or_else(|e| e.into_inner());
+    while g.len() <= layer {
+        g.push(Vec::new());
+    }
+    g[layer].push(norm);
+}
+
+/// Per-layer sequence of observed residual L2 norms.
+pub fn residual_norms() -> Vec<Vec<f32>> {
+    let Some(lock) = RESIDUAL_NORMS.get() else { return Vec::new(); };
+    lock.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Residual snapshots (for offline early-exit reprojection)
+// ─────────────────────────────────────────────────────────────────────
+
+/// Record the full residual state at the end of `layer` for the current
+/// token. A "new token" is detected by seeing layer == 0 again. Heavy —
+/// allocates one `Vec<f32>` (hidden_dim * 4 bytes) per layer per token.
+/// No-op unless OLORIN_RESIDUAL_SNAPSHOT=1.
+pub fn record_residual_snapshot(layer: usize, residual: &[f32]) {
+    if !snapshot_enabled() { return; }
+    let lock = RESIDUAL_SNAPSHOTS.get_or_init(|| Mutex::new(Vec::new()));
+    let mut g = lock.lock().unwrap_or_else(|e| e.into_inner());
+    // Start a new token slot when we see layer 0 again.
+    if layer == 0 || g.is_empty() {
+        g.push(Vec::new());
+    }
+    let cur = g.last_mut().unwrap();
+    while cur.len() <= layer {
+        cur.push(Vec::new());
+    }
+    cur[layer] = residual.to_vec();
+}
+
+/// All snapshots captured since the last `reset_snapshots()`.
+/// Indexed as `[token_idx][layer][neuron]`.
+pub fn residual_snapshots() -> Vec<Vec<Vec<f32>>> {
+    let Some(lock) = RESIDUAL_SNAPSHOTS.get() else { return Vec::new(); };
+    lock.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// Drop all accumulated snapshots (free memory before a new experiment).
+pub fn reset_snapshots() {
+    if let Some(lock) = RESIDUAL_SNAPSHOTS.get() {
+        lock.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Logit-entropy tracking
+// ─────────────────────────────────────────────────────────────────────
+
+/// Record the softmax entropy of a per-token logit vector.
+/// Entropy is in nats (natural log). No-op unless OLORIN_LOGIT_ENTROPY=1.
+pub fn record_logit_entropy(logits: &[f32]) {
+    if !entropy_enabled() { return; }
+    if logits.is_empty() { return; }
+    let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let mut z = 0.0f32;
+    for &l in logits {
+        z += (l - max).exp();
+    }
+    let log_z = z.ln();
+    // H = -Σ p log p = log Z - (1/Z) Σ exp(l-max) * (l-max)
+    // Equivalently: H = log Z + max - Σ p * l  where p = exp(l-max)/Z
+    let mut entropy = 0.0f32;
+    for &l in logits {
+        let p = (l - max).exp() / z;
+        if p > 1e-20 {
+            entropy -= p * (p.ln());
+        }
+    }
+    let _ = log_z; // computed for documentation symmetry, not needed for the loop above
+    let lock = LOGIT_ENTROPIES.get_or_init(|| Mutex::new(Vec::new()));
+    lock.lock().unwrap_or_else(|e| e.into_inner()).push(entropy);
+}
+
+/// All recorded per-token logit entropies since start / last reset.
+pub fn logit_entropies() -> Vec<f32> {
+    let Some(lock) = LOGIT_ENTROPIES.get() else { return Vec::new(); };
+    lock.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// Drop residual norms + logit entropies (keep snapshots — use reset_snapshots).
+pub fn reset_telemetry() {
+    if let Some(lock) = RESIDUAL_NORMS.get() {
+        lock.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+    if let Some(lock) = LOGIT_ENTROPIES.get() {
+        lock.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
 }

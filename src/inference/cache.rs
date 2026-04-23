@@ -170,6 +170,30 @@ impl KvCache {
         self.seq_len += n;
     }
 
+    /// Number of layers the cache was built for.
+    #[inline]
+    pub fn n_layers(&self) -> usize {
+        self.k.len()
+    }
+
+    /// Whether a layer reuses another layer's KV storage (shared-KV Gemma trick).
+    #[inline]
+    pub fn is_shared(&self, layer: usize) -> bool {
+        self.shared_source[layer].is_some()
+    }
+
+    /// n_kv_heads the cache was built with.
+    #[inline]
+    pub fn n_kv_heads(&self) -> usize {
+        self.n_kv_heads
+    }
+
+    /// Per-layer value head dim.
+    #[inline]
+    pub fn head_dim_v(&self, layer: usize) -> usize {
+        self.head_dim_v[layer]
+    }
+
     /// Pointer to K buffer for a layer, resolving shared source.
     #[inline]
     pub fn k_ptr(&self, layer: usize) -> *const u16 {

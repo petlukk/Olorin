@@ -446,6 +446,11 @@ pub(super) fn layer_forward_graph_timed(
                 state.x.as_ptr(), state.x.as_mut_ptr(), out_scale, hd as i32,
             );
         }
+
+        // Residual taps: norm (cheap) + full snapshot (heavy).
+        // Env-gated, single-threaded under ith == 0.
+        crate::inference::activation_track::record_residual_norm(il, &state.x[..hd]);
+        crate::inference::activation_track::record_residual_snapshot(il, &state.x[..hd]);
     }
     barrier.wait();
     acc!(t0, t_post_ffn_ple);

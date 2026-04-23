@@ -23,3 +23,6 @@ mod forward_batch_layer;
 mod forward_batch_helpers;
 mod forward_batch_ple;
 pub mod activation_track;
+pub mod weight_stats;
+pub mod exit_probe;
+pub mod kv_stats;

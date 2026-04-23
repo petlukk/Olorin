@@ -89,6 +89,18 @@ impl Engine {
         "gemma4-q4k"
     }
 
+    /// Read-only accessor for the loaded model — used by offline telemetry
+    /// (exit_probe, weight_stats). Not part of the public inference API.
+    pub fn model(&self) -> &Gemma4Model {
+        &self.model
+    }
+
+    /// Read-only accessor for the KV cache — used by offline telemetry
+    /// (kv_stats). Not part of the public inference API.
+    pub fn kv_cache(&self) -> &crate::inference::cache::KvCache {
+        &self.state.cache
+    }
+
     /// Generate text from a prompt.
     ///
     /// `on_event` is called with every user-visible token and with state
@@ -191,6 +203,10 @@ impl Engine {
             let t0 = Instant::now();
             let logits = self.state.forward_one_graph(&self.model, token_id, &self.graph_pool);
             t_forward_total += t0.elapsed().as_micros() as u64;
+
+            // Telemetry tap — softmax entropy per decoded-token logit vector.
+            // No-op unless OLORIN_LOGIT_ENTROPY=1.
+            crate::inference::activation_track::record_logit_entropy(logits);
 
             let t0 = Instant::now();
             logits_snapshot.clear();
