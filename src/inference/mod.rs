@@ -26,3 +26,4 @@ pub mod activation_track;
 pub mod weight_stats;
 pub mod exit_probe;
 pub mod kv_stats;
+pub mod adaptive_quant;
