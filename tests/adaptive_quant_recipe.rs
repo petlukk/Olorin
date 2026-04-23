@@ -1,4 +1,4 @@
-//! Produce a concrete adaptive-quant recipe from a 16-prompt calibration run.
+//! Produce a concrete adaptive-quant recipe from a 36-prompt calibration run.
 //!
 //! Runs the same calibration loop as `inference_telemetry.rs` but then pipes
 //! the tracker snapshots through `adaptive_quant::{compute_profiles,
@@ -14,7 +14,11 @@ use olorin::inference::generate::{Engine, GenEvent};
 use olorin::runes;
 use std::path::Path;
 
+// Domain-scoped calibration corpus: English + math + code. Deliberately excludes
+// other natural languages so tensors specialized for them self-identify as
+// low-magnitude and get flagged for downgrade.
 const PROMPTS: &[&str] = &[
+    // --- Code (14) ---
     "Here is a Python function that computes Fibonacci numbers:\n\n```python\ndef fibonacci(n):\n    if n <= 1:\n        return n\n    ",
     "Write a Rust function that reverses a string:\n\n```rust\nfn reverse_string(s: &str) -> String {\n    ",
     "Example of a binary search in C:\n\n```c\nint binary_search(int* arr, int n, int target) {\n    int lo = 0, hi = n - 1;\n    ",
@@ -22,21 +26,43 @@ const PROMPTS: &[&str] = &[
     "JavaScript async function that fetches JSON from a URL:\n\n```js\nasync function fetchJson(url) {\n    ",
     "Bash script to recursively count .py files in a directory:\n\n```bash\n#!/usr/bin/env bash\n",
     "Go function that reads a file line by line:\n\n```go\nfunc readLines(path string) ([]string, error) {\n    ",
+    "React custom hook for debounced input:\n\n```ts\nfunction useDebounce<T>(value: T, delay: number): T {\n    ",
+    "Dockerfile for a Rust binary with a multi-stage build:\n\n```dockerfile\nFROM rust:1 AS builder\n",
+    "Python function to validate an email address with a regex:\n\n```python\nimport re\ndef is_valid_email(addr: str) -> bool:\n    pattern = r\"",
+    "CMakeLists.txt for a C++ library with tests enabled:\n\n```cmake\ncmake_minimum_required(VERSION 3.15)\nproject(mylib CXX)\n",
+    "Rust implementation of quicksort on a mutable slice:\n\n```rust\nfn quicksort(v: &mut [i32]) {\n    ",
+    "Go worker pattern: goroutines reading jobs from a channel:\n\n```go\nfunc worker(id int, jobs <-chan int, results chan<- int) {\n    ",
+    "C function wrapping mmap for read-only file mapping:\n\n```c\nvoid* map_readonly(const char* path, size_t* out_len) {\n    int fd = open(path, O_RDONLY);\n    ",
+    // --- Math (14) ---
+    "Quantum entanglement refers to a physical phenomenon where pairs of particles ",
+    "The algorithm runs in O(n log n) time because the divide-and-conquer approach ",
+    "To prove that the square root of 2 is irrational, assume the opposite: that ",
+    "In the context of distributed systems, the CAP theorem states that ",
+    "A train travels 120 km in 1.5 hours, then another 200 km in 2 hours. The average speed over the entire trip is ",
+    "To solve the quadratic equation 3x^2 - 7x + 2 = 0 we apply the quadratic formula: x = (7 ± sqrt(",
+    "We prove by induction that 1 + 2 + ... + n = n(n+1)/2. Base case n=1: the left side is 1 and the right side is ",
+    "The derivative of f(x) = x^3 * cos(x) with respect to x is computed using the product rule: f'(x) = ",
+    "To evaluate the integral of 1/(x^2 + 1) dx we recognize this as the derivative of arctan, so the result is ",
+    "Multiplying the 2x3 matrix A=[[1,2,3],[4,5,6]] by the 3x2 matrix B=[[7,8],[9,10],[11,12]] gives a 2x2 result. The (0,0) entry is 1*7 + 2*9 + 3*11 = ",
+    "To find the eigenvalues of the matrix [[4,1],[2,3]] we solve det(A - λI) = 0, which gives the characteristic polynomial ",
+    "A medical test is 95% accurate and the disease affects 1% of the population. Given a positive test result, the probability the patient actually has the disease (by Bayes' theorem) is ",
+    "The number of ways to choose 3 items from a set of 10 distinct items, order not mattering, is C(10,3) = 10! / (3! * 7!) = ",
+    "To check whether 97 is prime, we test divisibility by primes up to sqrt(97) ≈ 9.85. Checking 2, 3, 5, 7 in turn: ",
+    // --- English (8) ---
     "I love walking in the forest on a spring morning. The birds are singing and ",
     "My grandmother used to bake bread every Sunday. The smell would fill the whole house and ",
     "Hello! How are you doing today? I was wondering if you could help me with ",
     "She sat by the window, watching the rain fall on the cobblestone street. It reminded her of ",
     "The children laughed as they chased each other across the meadow. Their dog bounded along beside them, ",
-    "Quantum entanglement refers to a physical phenomenon where pairs of particles ",
-    "The algorithm runs in O(n log n) time because the divide-and-conquer approach ",
-    "To prove that the square root of 2 is irrational, assume the opposite: that ",
-    "In the context of distributed systems, the CAP theorem states that ",
+    "Q: What is the largest moon of Saturn and what is unusual about it?\nA: The largest moon of Saturn is Titan, which is unusual because ",
+    "How to brew a good cup of French press coffee: first, grind fresh whole beans to a coarse consistency. Then, ",
+    "\"I can't believe you forgot my birthday,\" she said, crossing her arms. \"I didn't forget,\" he replied, ",
 ];
 
 const DECODE_TOKENS: usize = 32;
 
 #[test]
-#[ignore = "16-prompt calibration, ~2 min; use --ignored --nocapture"]
+#[ignore = "36-prompt calibration, ~4-5 min; use --ignored --nocapture"]
 fn generate_adaptive_quant_recipe() {
     let home = std::env::var("HOME").unwrap();
     let path = Path::new(&home).join(".olorin/models/gemma-4-e2b-it-Q4_K_M.gguf");
@@ -49,8 +75,12 @@ fn generate_adaptive_quant_recipe() {
     std::env::set_var("OLORIN_ACTIVATION_DOMAIN", "calibration");
 
     let mut engine = Box::new(Engine::load(&path, 1024).expect("load"));
-    engine.temperature = 0.0;
+    engine.temperature = std::env::var("OLORIN_CALIBRATION_TEMP")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.0);
     engine.max_tokens = DECODE_TOKENS;
+    eprintln!("[recipe] temperature = {}", engine.temperature);
     let system = runes::runes_prompt_block();
     let on_event = |_: GenEvent| {};
 

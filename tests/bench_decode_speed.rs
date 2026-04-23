@@ -14,6 +14,9 @@ const N_DECODE: usize = 64;
 const PROMPT: &str = "Write a long story about a robot:";
 
 fn model_path() -> String {
+    if let Ok(p) = std::env::var("OLORIN_MODEL_PATH") {
+        return p;
+    }
     let home = std::env::var("HOME").unwrap();
     format!("{home}/.olorin/models/gemma-4-e2b-it-Q4_K_M.gguf")
 }

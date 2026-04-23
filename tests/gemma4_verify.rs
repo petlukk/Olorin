@@ -7,6 +7,9 @@
 use std::path::Path;
 
 fn model_path() -> String {
+    if let Ok(p) = std::env::var("OLORIN_MODEL_PATH") {
+        return p;
+    }
     let home = std::env::var("HOME").unwrap();
     format!("{home}/.olorin/models/gemma-4-e2b-it-Q4_K_M.gguf")
 }
