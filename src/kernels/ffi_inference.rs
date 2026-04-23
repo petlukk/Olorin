@@ -28,7 +28,6 @@ pub struct KernelTableInference {
     pub vec_add_f32:           VecAddF32Fn,
     pub vec_scale_f32:         VecScaleF32Fn,
     pub vec_fma_f32:           VecFmaF32Fn,
-    pub vec_acc_f32:           VecAccF32Fn,
     pub f32_dot:               F32DotFn,
     pub f32_dot_acc:           F32DotAccFn,
     pub bare_rmsnorm_f32:      BareRmsnormF32Fn,
@@ -152,7 +151,6 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
             vec_add_f32:       std::mem::transmute(sym(&vec_ops_lib, b"vec_add_f32\0")?),
             vec_scale_f32:     std::mem::transmute(sym(&vec_ops_lib, b"vec_scale_f32\0")?),
             vec_fma_f32:       std::mem::transmute(sym(&vec_ops_lib, b"vec_fma_f32\0")?),
-            vec_acc_f32:       std::mem::transmute(sym(&vec_ops_lib, b"vec_acc_f32\0")?),
             f32_dot:           std::mem::transmute(sym(&attn_ops_lib, b"f32_dot\0")?),
             f32_dot_acc:       std::mem::transmute(sym(&attn_ops_lib, b"f32_dot_acc\0")?),
             bare_rmsnorm_f32:  std::mem::transmute(sym(&bare_rmsnorm_lib, b"bare_rmsnorm_f32\0")?),
@@ -331,10 +329,6 @@ pub fn vec_scale_f32(a: *const f32, out: *mut f32, s: f32, n: i32) {
 
 pub fn vec_fma_f32(a: *const f32, b: *const f32, out: *mut f32, s: f32, n: i32) {
     unsafe { (k().vec_fma_f32)(a, b, out, s, n) }
-}
-
-pub fn vec_acc_f32(out: *mut f32, a: *const f32, s: f32, n: i32) {
-    unsafe { (k().vec_acc_f32)(out, a, s, n) }
 }
 
 pub fn f32_dot(a: *const f32, b: *const f32, n: i32) -> f32 {

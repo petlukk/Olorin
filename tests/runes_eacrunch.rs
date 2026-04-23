@@ -292,10 +292,23 @@ fn f32_stats_negatives() {
 #[test]
 fn eacrunch_runs_on_tiny_fixture() {
     olorin::kernels::ffi::init().unwrap();
-    let path = std::env::current_dir().unwrap()
+
+    // Stage fixture into /tmp — runes only accept paths under $HOME or /tmp.
+    // The repo lives outside the allowlist (e.g. /mnt/c/... on WSL).
+    let fixture = std::env::current_dir().unwrap()
         .join("tests/fixtures/runes/tiny.csv");
-    let args = format!("{}", path.display());
-    let result = olorin::runes::run_rune("eacrunch", &args)
+    let bytes = std::fs::read(&fixture).expect("fixture exists");
+    let tmp = std::env::temp_dir()
+        .join(format!("olorin_eacrunch_tiny_{}.csv", std::process::id()));
+    std::fs::write(&tmp, &bytes).unwrap();
+
+    struct TmpFile(std::path::PathBuf);
+    impl Drop for TmpFile {
+        fn drop(&mut self) { let _ = std::fs::remove_file(&self.0); }
+    }
+    let _guard = TmpFile(tmp.clone());
+
+    let result = olorin::runes::run_rune("eacrunch", tmp.to_str().unwrap())
         .expect("eacrunch should exist");
     assert!(result.success, "rune failed: {}", result.answer);
     assert!(result.timing_us > 0);

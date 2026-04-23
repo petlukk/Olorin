@@ -1,7 +1,7 @@
 //! Safety pipeline — injection detection and secret leak prevention.
 //!
-//! Merges sanitizer + leak_detector into one module.
-//! Uses Eä SIMD kernels: scan_safety_fused, scan_injection_prefixes, scan_leak_prefixes.
+//! Uses the fused Eä SIMD kernel `scan_safety_fused` which does
+//! injection-prefix + leak-prefix detection in one pass.
 //!
 //! Hot path: ScanResult has `blocked` + `has_leak` for fast checks.
 //! No allocations if input is empty.

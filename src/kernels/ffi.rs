@@ -16,9 +16,7 @@ pub use embedded::KERNEL_COUNT;
 
 // ── Type aliases ──────────────────────────────────────────────────────────────
 
-type ClassifyBytesFn    = unsafe extern "C" fn(*const u8, *mut u8, i32);
 type PretokenizeFn      = unsafe extern "C" fn(*const u8, *mut u8, *mut u8, i32);
-type ScanPrefixesFn     = unsafe extern "C" fn(*const u8, i32, *mut i32, *mut i32);
 type MatchCommandFn     = unsafe extern "C" fn(*const u8, i32, *mut i32);
 type FusedSafetyFn      = unsafe extern "C" fn(*const u8, i32, *mut i32, *mut i32, *mut i32);
 type ClassifyIntentFn   = unsafe extern "C" fn(*const u8, i32, *mut i32, *mut i32, *mut i32);
@@ -37,14 +35,10 @@ type EvalExprFn         = unsafe extern "C" fn(*const u8, i32, *mut i64, *mut i3
 type ZeroizeFn          = unsafe extern "C" fn(*mut u8, i32);
 type AnsiClassifyFn     = unsafe extern "C" fn(*const u8, *mut u8, i32);
 type TerminalDiffFn     = unsafe extern "C" fn(*const u8, *const u8, *mut u8, i32);
-type BatchDotFn         = unsafe extern "C" fn(*const f32, *const f32, i32, i32, *mut f32);
 type BatchCosineFn      = unsafe extern "C" fn(*const f32, f32, *const f32, i32, i32, *mut f32);
-type BatchL2Fn          = unsafe extern "C" fn(*const f32, *const f32, i32, i32, *mut f32);
 type NormalizeFn        = unsafe extern "C" fn(*mut f32, i32, i32);
-type ThresholdFn        = unsafe extern "C" fn(*const f32, i32, f32, *mut i32, *mut i32);
 type TopKFn             = unsafe extern "C" fn(*const f32, i32, i32, *mut i32, *mut f32);
 type JlProjectFn        = unsafe extern "C" fn(*const f32, *const f32, i32, i32, *mut f32, *mut f32);
-type JlProjectBatchFn   = unsafe extern "C" fn(*const f32, *const f32, i32, i32, *mut f32, *mut f32, i32);
 type Chacha20EncryptFn  = unsafe extern "C" fn(
     *const i32, *const i32, i32,
     *const u8, *mut u8, i32,
@@ -71,9 +65,6 @@ type SearchV2Fn = unsafe extern "C" fn(
 
 pub struct KernelTable {
     pub libs: Vec<Library>,
-    pub classify_bytes:           ClassifyBytesFn,
-    pub scan_leak_prefixes:       ScanPrefixesFn,
-    pub scan_injection_prefixes:  ScanPrefixesFn,
     pub match_command:            MatchCommandFn,
     pub scan_safety_fused:        FusedSafetyFn,
     pub classify_intent:          ClassifyIntentFn,
@@ -81,14 +72,10 @@ pub struct KernelTable {
     pub f32_stats:                F32StatsFn,
     pub eval_expr:                EvalExprFn,
     pub zeroize:                  ZeroizeFn,
-    pub batch_dot:                BatchDotFn,
     pub batch_cosine:             BatchCosineFn,
-    pub batch_l2:                 BatchL2Fn,
     pub normalize_vectors:        NormalizeFn,
-    pub threshold_filter:         ThresholdFn,
     pub top_k:                    TopKFn,
     pub jl_project:               JlProjectFn,
-    pub jl_project_batch:         JlProjectBatchFn,
     pub chacha20_encrypt:         Chacha20EncryptFn,
     pub chacha20_search_v2:       SearchV2Fn,
     pub pretokenize:              PretokenizeFn,
@@ -122,9 +109,10 @@ pub fn init() -> Result<(), String> {
     }
     let dir = extract_kernels()?;
     let table = load_kernels(&dir)?;
-    let _ = KERNELS.set(table);
-    // Also initialize inference kernels
+    // Init inference kernels *before* publishing KERNELS so any concurrent
+    // caller that observes KERNELS.is_some() also sees inference initialized.
     crate::kernels::ffi_inference::init_from(&dir)?;
+    let _ = KERNELS.set(table);
     Ok(())
 }
 
@@ -170,9 +158,6 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
         }
     };
 
-    let byte_classifier = load("byte_classifier")?;
-    let leak_scanner    = load("leak_scanner")?;
-    let sanitizer       = load("sanitizer")?;
     let command_router  = load("command_router")?;
     let fused_safety    = load("fused_safety")?;
     let intent_router   = load("intent_router")?;
@@ -212,12 +197,6 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
         };
 
         let table = KernelTable {
-            classify_bytes: std::mem::transmute(
-                sym(&byte_classifier, b"classify_bytes\0")?),
-            scan_leak_prefixes: std::mem::transmute(
-                sym(&leak_scanner, b"scan_leak_prefixes\0")?),
-            scan_injection_prefixes: std::mem::transmute(
-                sym(&sanitizer, b"scan_injection_prefixes\0")?),
             match_command: std::mem::transmute(
                 sym(&command_router, b"match_command\0")?),
             scan_safety_fused: std::mem::transmute(
@@ -232,22 +211,14 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
                 sym(&expr_eval, b"eval_expr\0")?),
             zeroize: std::mem::transmute(
                 sym(&zeroize_lib, b"zeroize_simd\0")?),
-            batch_dot: std::mem::transmute(
-                sym(&search, b"batch_dot\0")?),
             batch_cosine: std::mem::transmute(
                 sym(&search, b"batch_cosine\0")?),
-            batch_l2: std::mem::transmute(
-                sym(&search, b"batch_l2\0")?),
             normalize_vectors: std::mem::transmute(
                 sym(&search, b"normalize_vectors\0")?),
-            threshold_filter: std::mem::transmute(
-                sym(&search, b"threshold_filter\0")?),
             top_k: std::mem::transmute(
                 sym(&search, b"top_k\0")?),
             jl_project: std::mem::transmute(
                 sym(&jl_project_lib, b"jl_project\0")?),
-            jl_project_batch: std::mem::transmute(
-                sym(&jl_project_lib, b"jl_project_batch\0")?),
             chacha20_encrypt: std::mem::transmute(
                 sym(&chacha20_lib, b"chacha20_encrypt\0")?),
             chacha20_search_v2: std::mem::transmute(
@@ -259,7 +230,7 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
             terminal_diff: std::mem::transmute(
                 sym(&terminal_diff_lib, b"terminal_diff\0")?),
             libs: vec![
-                byte_classifier, leak_scanner, sanitizer, command_router,
+                command_router,
                 fused_safety, intent_router, expr_eval,
                 zeroize_lib, search, jl_project_lib,
                 chacha20_lib, chacha20_sv2, pretokenize_lib,
@@ -272,22 +243,6 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
 }
 
 // ── Public wrappers ───────────────────────────────────────────────────────────
-
-pub unsafe fn classify_bytes(text: *const u8, flags: *mut u8, len: i32) {
-    (k().classify_bytes)(text, flags, len);
-}
-
-pub unsafe fn scan_leak_prefixes(
-    text: *const u8, len: i32, out_masks: *mut i32, out_n_blocks: *mut i32,
-) {
-    (k().scan_leak_prefixes)(text, len, out_masks, out_n_blocks);
-}
-
-pub unsafe fn scan_injection_prefixes(
-    text: *const u8, len: i32, out_masks: *mut i32, out_n_blocks: *mut i32,
-) {
-    (k().scan_injection_prefixes)(text, len, out_masks, out_n_blocks);
-}
 
 pub unsafe fn match_command(text: *const u8, len: i32, out_match: *mut i32) {
     (k().match_command)(text, len, out_match);
@@ -322,12 +277,6 @@ pub unsafe fn zeroize(ptr: *mut u8, len: i32) {
     (k().zeroize)(ptr, len);
 }
 
-pub unsafe fn batch_dot(
-    query: *const f32, vecs: *const f32, dim: i32, n_vecs: i32, out: *mut f32,
-) {
-    (k().batch_dot)(query, vecs, dim, n_vecs, out);
-}
-
 pub unsafe fn batch_cosine(
     query: *const f32, query_norm: f32,
     vecs: *const f32, dim: i32, n_vecs: i32, out: *mut f32,
@@ -335,21 +284,8 @@ pub unsafe fn batch_cosine(
     (k().batch_cosine)(query, query_norm, vecs, dim, n_vecs, out);
 }
 
-pub unsafe fn batch_l2(
-    query: *const f32, vecs: *const f32, dim: i32, n_vecs: i32, out: *mut f32,
-) {
-    (k().batch_l2)(query, vecs, dim, n_vecs, out);
-}
-
 pub unsafe fn normalize_vectors(vecs: *mut f32, dim: i32, n_vecs: i32) {
     (k().normalize_vectors)(vecs, dim, n_vecs);
-}
-
-pub unsafe fn threshold_filter(
-    scores: *const f32, n: i32, threshold: f32,
-    out_indices: *mut i32, out_count: *mut i32,
-) {
-    (k().threshold_filter)(scores, n, threshold, out_indices, out_count);
 }
 
 pub unsafe fn top_k(
@@ -364,13 +300,6 @@ pub unsafe fn jl_project(
     out: *mut f32, scratch: *mut f32,
 ) {
     (k().jl_project)(vec, signs, in_dim, out_dim, out, scratch);
-}
-
-pub unsafe fn jl_project_batch(
-    vecs: *const f32, signs: *const f32, in_dim: i32, out_dim: i32,
-    out: *mut f32, scratch: *mut f32, n_vecs: i32,
-) {
-    (k().jl_project_batch)(vecs, signs, in_dim, out_dim, out, scratch, n_vecs);
 }
 
 pub unsafe fn chacha20_encrypt(

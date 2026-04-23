@@ -13,15 +13,6 @@ fn test_kernel_dir_exists() {
 }
 
 #[test]
-fn test_classify_bytes() {
-    ffi::init().unwrap();
-    let input = b"hello world 123!";
-    let mut flags = vec![0u8; input.len()];
-    unsafe { ffi::classify_bytes(input.as_ptr(), flags.as_mut_ptr(), input.len() as i32) };
-    assert_ne!(flags[0], 0);
-}
-
-#[test]
 fn test_zeroize() {
     ffi::init().unwrap();
     let mut buf = vec![0xFFu8; 64];

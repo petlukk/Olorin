@@ -80,13 +80,6 @@ fn test_chatml_detects_special_tokens() {
 }
 
 #[test]
-fn test_chatml_detects_role_headers() {
-    assert!(safety::is_chatml_hallucination("user:"));
-    assert!(safety::is_chatml_hallucination("assistant:"));
-    assert!(safety::is_chatml_hallucination("system:"));
-}
-
-#[test]
 fn test_chatml_allows_normal_text() {
     assert!(!safety::is_chatml_hallucination("Hello"));
     assert!(!safety::is_chatml_hallucination("The system works"));

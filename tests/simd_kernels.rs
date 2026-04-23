@@ -103,38 +103,6 @@ fn test_vec_fma_f32_8960() {
     }
 }
 
-// ---- vec_acc_f32 ----
-
-#[test]
-fn test_vec_acc_f32_1536() {
-    init();
-    let n = 1536;
-    let s = 0.5f32;
-    let a: Vec<f32> = (0..n).map(|i| i as f32 * 0.2).collect();
-    let mut out: Vec<f32> = (0..n).map(|i| i as f32 * 0.1).collect();
-    let mut ref_out = out.clone();
-    for i in 0..n { ref_out[i] = ref_out[i] + a[i] * s; }
-    ffi_inference::vec_acc_f32(out.as_mut_ptr(), a.as_ptr(), s, n as i32);
-    for i in 0..n {
-        assert!((out[i] - ref_out[i]).abs() < 1e-4, "vec_acc mismatch at {i}: {} vs {}", out[i], ref_out[i]);
-    }
-}
-
-#[test]
-fn test_vec_acc_f32_8960() {
-    init();
-    let n = 8960;
-    let s = -1.2f32;
-    let a: Vec<f32> = (0..n).map(|i| (i as f32 * 0.005).sin()).collect();
-    let mut out: Vec<f32> = (0..n).map(|i| (i as f32 * 0.003).cos()).collect();
-    let mut ref_out = out.clone();
-    for i in 0..n { ref_out[i] = ref_out[i] + a[i] * s; }
-    ffi_inference::vec_acc_f32(out.as_mut_ptr(), a.as_ptr(), s, n as i32);
-    for i in 0..n {
-        assert!((out[i] - ref_out[i]).abs() < 1e-5, "vec_acc mismatch at {i}");
-    }
-}
-
 // ---- Odd sizes ----
 
 #[test]
@@ -169,14 +137,6 @@ fn test_vec_ops_odd_sizes() {
         for i in 0..n {
             let expected = (a[i] + b[i]) * s;
             assert!((out[i] - expected).abs() < 1e-4, "vec_fma n={n} i={i}");
-        }
-
-        // vec_acc
-        let mut out: Vec<f32> = (0..n).map(|i| i as f32 * 0.05).collect();
-        let ref_out: Vec<f32> = out.iter().zip(a.iter()).map(|(&o, &ai)| o + ai * s).collect();
-        ffi_inference::vec_acc_f32(out.as_mut_ptr(), a.as_ptr(), s, n as i32);
-        for i in 0..n {
-            assert!((out[i] - ref_out[i]).abs() < 1e-4, "vec_acc n={n} i={i}");
         }
     }
 }
