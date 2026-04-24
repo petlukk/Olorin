@@ -1,0 +1,353 @@
+// q5k_dot_8x8_arm.ea — Q5Kx8 repacked 8-row matvec via vdot_lane_i32.
+//
+// Mirrors llama.cpp ggml_gemv_q5_K_8x4_q8_K (arch/arm/repack.cpp:863-1019).
+// Consumes the block_q5_Kx8 layout produced by q5k_repack_8x8 (ARM, blck=4).
+//
+// Tile: 8 output rows × nb blocks, processed per col_group (c=0,1 → rows
+// 0-3, 4-7). Per sub-block: decode scales, load 4 × i8x16 of q8, for each
+// col_group unroll 8 qs-loads + qh-bit extraction + 8 vdot_lane_q_s32
+// per accumulator (lo/hi nibbles separately).
+//
+// Naming: "8x8" matches Olorin's Q4K convention (8 rows × 8 k-unroll).
+// llama.cpp labels the same kernel "8x4" because they use blocklen=4.
+
+#[cfg(aarch64)]
+
+func read_u32(p: *restrict u8, off: i32) -> i32 {
+    let p32: *restrict i32 = ptr_as_i32(ptr_as_i8(p))
+    return p32[off / 4]
+}
+
+export func q5k_8x8_q8k_matvec(
+    packed: *restrict u8,
+    q8_qs: *restrict i8,
+    q8_d: *restrict f32,
+    q8_bsums: *restrict i16,
+    pow2: *restrict f32,
+    scratch: *mut u8,
+    out: *mut f32,
+    n_rows: i32,
+    n_cols: i32
+) {
+    let nb: i32 = n_cols / 256
+    let m4b: i8x16 = splat(15)
+    let one: i8x16 = splat(1)
+    let two: i8x16 = splat(2)
+    let shift2: i8x16 = splat(2)
+    let shift3: i8x16 = splat(3)
+    let shift4: i8x16 = splat(4)
+    let km1: i32 = 0x3f3f3f3f
+    let km2: i32 = 0x0f0f0f0f
+    let km3: i32 = 0x03030303
+
+    let d16: *restrict i16 = ptr_as_i16(ptr_as_i8(packed))
+    let packed_i8: *restrict i8 = ptr_as_i8(packed)
+    let out_f32: *mut f32 = ptr_as_f32(ptr_as_i8(out))
+    let scratch_i16: *mut i16 = ptr_as_i16(ptr_as_i8(scratch))
+
+    let mut x: i32 = 0
+    while x < n_rows / 8 {
+        let mut acc0: f32x4 = splat(0.0)  // rows 0-3
+        let mut acc1: f32x4 = splat(0.0)  // rows 4-7
+
+        let mut b: i32 = 0
+        while b < nb {
+            let bp: i32 = (x * nb + b) * 1408
+
+            // Per-block d/dmin scales
+            let q5d0: f32x4 = cvt_f16_f32(load(d16, bp / 2))      // d[0..3]
+            let q5d1: f32x4 = cvt_f16_f32(load(d16, bp / 2 + 4))  // d[4..7]
+            let q8d: f32x4 = splat(q8_d[b])
+            let sb_sc0: f32x4 = q5d0 .* q8d
+            let sb_sc1: f32x4 = q5d1 .* q8d
+
+            let q5dm0: f32x4 = cvt_f16_f32(load(d16, bp / 2 + 8))   // dmin[0..3]
+            let q5dm1: f32x4 = cvt_f16_f32(load(d16, bp / 2 + 12))  // dmin[4..7]
+            let sb_mn0: f32x4 = q5dm0 .* q8d
+            let sb_mn1: f32x4 = q5dm1 .* q8d
+
+            let mut bias0: i32x4 = splat(0)
+            let mut bias1: i32x4 = splat(0)
+            // Per-block i32 accumulators for scaled dots (matches single-row
+            // q5k_dot_q8k: sumi stays in i32 across all sub-blocks, one f32
+            // multiply at block end).
+            let mut sumi0: i32x4 = splat(0)
+            let mut sumi1: i32x4 = splat(0)
+
+            // Pairwise-added bsums (8 × i16), store for per-sub-block scalar reads
+            let bs_lo: i16x8 = load(q8_bsums, b * 16)
+            let bs_hi: i16x8 = load(q8_bsums, b * 16 + 8)
+            let bsums: i16x8 = addp_i16(bs_lo, bs_hi)
+            store(scratch_i16, 0, bsums)
+
+            // Pre-load qh. 2 col_groups × 8 vectors of 16 bytes each.
+            // Layout: qh[c][i] at packed + bp + 128 + i*32 + 16*c
+            // (c=0 → rows 0-3 bits, c=1 → rows 4-7 bits, per llama.cpp interleave).
+            let mut qh_c0_0: i8x16 = load(packed_i8, bp + 128 + 0)
+            let mut qh_c0_1: i8x16 = load(packed_i8, bp + 128 + 32)
+            let mut qh_c0_2: i8x16 = load(packed_i8, bp + 128 + 64)
+            let mut qh_c0_3: i8x16 = load(packed_i8, bp + 128 + 96)
+            let mut qh_c0_4: i8x16 = load(packed_i8, bp + 128 + 128)
+            let mut qh_c0_5: i8x16 = load(packed_i8, bp + 128 + 160)
+            let mut qh_c0_6: i8x16 = load(packed_i8, bp + 128 + 192)
+            let mut qh_c0_7: i8x16 = load(packed_i8, bp + 128 + 224)
+            let mut qh_c1_0: i8x16 = load(packed_i8, bp + 128 + 16)
+            let mut qh_c1_1: i8x16 = load(packed_i8, bp + 128 + 48)
+            let mut qh_c1_2: i8x16 = load(packed_i8, bp + 128 + 80)
+            let mut qh_c1_3: i8x16 = load(packed_i8, bp + 128 + 112)
+            let mut qh_c1_4: i8x16 = load(packed_i8, bp + 128 + 144)
+            let mut qh_c1_5: i8x16 = load(packed_i8, bp + 128 + 176)
+            let mut qh_c1_6: i8x16 = load(packed_i8, bp + 128 + 208)
+            let mut qh_c1_7: i8x16 = load(packed_i8, bp + 128 + 240)
+
+            let mut sb: i32 = 0
+            while sb < 4 {
+                // ── Decode scales for sub-block pair (sb*2, sb*2+1) ──
+                // Each sub-block has 12-byte scales packed into the 96-byte region
+                // at packed + bp + 32. Pair uses 24 bytes: sb*24 and sb*24+12.
+                let sp: *restrict i32 = ptr_as_i32(ptr_as_i8(packed))
+                let sc0: i32 = bp + 32 + 24 * sb
+                let u00: i32 = sp[sc0/4]
+                let u01: i32 = sp[sc0/4 + 1]
+                let u02: i32 = sp[sc0/4 + 2]
+                let t00: i32 = u00 & km1                                        // s[0..3]
+                let t02: i32 = u01 & km1                                        // m[0..3]
+                let t01: i32 = (u02 & km2) | (((u00 >> 6) & km3) << 4)          // s[4..7]
+                let t03: i32 = ((u02 >> 4) & km2) | (((u01 >> 6) & km3) << 4)   // m[4..7]
+
+                let sc1: i32 = sc0 + 12
+                let u10: i32 = sp[sc1/4]
+                let u11: i32 = sp[sc1/4 + 1]
+                let u12: i32 = sp[sc1/4 + 2]
+                let t10: i32 = u10 & km1
+                let t12: i32 = u11 & km1
+                let t11: i32 = (u12 & km2) | (((u10 >> 6) & km3) << 4)
+                let t13: i32 = ((u12 >> 4) & km2) | (((u11 >> 6) & km3) << 4)
+
+                // Pack decoded scales into scratch and widen to i32x4.
+                // Layout: sc_scratch[16..20] = [t00, t01, t10, t11]
+                //         read back at byte offsets 64..80.
+                let sc_scratch: *mut i32 = ptr_as_i32(ptr_as_i8(scratch))
+                sc_scratch[16] = t00
+                sc_scratch[17] = t01
+                sc_scratch[18] = t10
+                sc_scratch[19] = t11
+                let sc_raw: u8x16 = load(scratch, 64)
+                let sc_lo_0: i32x4 = widen_u8_i32x4(sc_raw)        // t00: rows 0-3 blk0 scales
+                let sc_raw2: u8x16 = load(scratch, 68)
+                let sc_hi_0: i32x4 = widen_u8_i32x4(sc_raw2)       // t01: rows 4-7 blk0 scales
+                let sc_raw3: u8x16 = load(scratch, 72)
+                let sc_lo_1: i32x4 = widen_u8_i32x4(sc_raw3)       // t10: rows 0-3 blk1 scales
+                let sc_raw4: u8x16 = load(scratch, 76)
+                let sc_hi_1: i32x4 = widen_u8_i32x4(sc_raw4)       // t11: rows 4-7 blk1 scales
+
+                // Load 4 × i8x16 of q8 input for this sub-block's 64 elements
+                let q8b: i32 = b * 256 + sb * 64
+                let q8_qs_0: i8x16 = load(q8_qs, q8b)
+                let q8_qs_1: i8x16 = load(q8_qs, q8b + 16)
+                let q8_qs_2: i8x16 = load(q8_qs, q8b + 32)
+                let q8_qs_3: i8x16 = load(q8_qs, q8b + 48)
+
+                // qs_base for this sub-block
+                let qs_base: i32 = bp + 384 + sb * 256
+
+                // ── col_group 0 (rows 0-3) ──
+                // Load 8 qs vectors at qs_base + i*32 + 16*0
+                let qs_c0_0: i8x16 = load(packed_i8, qs_base + 0)
+                let qs_c0_1: i8x16 = load(packed_i8, qs_base + 32)
+                let qs_c0_2: i8x16 = load(packed_i8, qs_base + 64)
+                let qs_c0_3: i8x16 = load(packed_i8, qs_base + 96)
+                let qs_c0_4: i8x16 = load(packed_i8, qs_base + 128)
+                let qs_c0_5: i8x16 = load(packed_i8, qs_base + 160)
+                let qs_c0_6: i8x16 = load(packed_i8, qs_base + 192)
+                let qs_c0_7: i8x16 = load(packed_i8, qs_base + 224)
+
+                // Extract hbit_lo = qh & 1 (low bit), place at bit 4
+                // hbit_hi = (qh & 2) << 3 places bit 1 of qh at bit 4
+                let h0_lo_0: i8x16 = (qh_c0_0 .& one) .<< shift4
+                let h0_lo_1: i8x16 = (qh_c0_1 .& one) .<< shift4
+                let h0_lo_2: i8x16 = (qh_c0_2 .& one) .<< shift4
+                let h0_lo_3: i8x16 = (qh_c0_3 .& one) .<< shift4
+                let h0_lo_4: i8x16 = (qh_c0_4 .& one) .<< shift4
+                let h0_lo_5: i8x16 = (qh_c0_5 .& one) .<< shift4
+                let h0_lo_6: i8x16 = (qh_c0_6 .& one) .<< shift4
+                let h0_lo_7: i8x16 = (qh_c0_7 .& one) .<< shift4
+                let h0_hi_0: i8x16 = (qh_c0_0 .& two) .<< shift3
+                let h0_hi_1: i8x16 = (qh_c0_1 .& two) .<< shift3
+                let h0_hi_2: i8x16 = (qh_c0_2 .& two) .<< shift3
+                let h0_hi_3: i8x16 = (qh_c0_3 .& two) .<< shift3
+                let h0_hi_4: i8x16 = (qh_c0_4 .& two) .<< shift3
+                let h0_hi_5: i8x16 = (qh_c0_5 .& two) .<< shift3
+                let h0_hi_6: i8x16 = (qh_c0_6 .& two) .<< shift3
+                let h0_hi_7: i8x16 = (qh_c0_7 .& two) .<< shift3
+
+                // After consuming bits 0 and 1, shift qh right 2 for the next sub-block.
+                qh_c0_0 = qh_c0_0 .>> shift2
+                qh_c0_1 = qh_c0_1 .>> shift2
+                qh_c0_2 = qh_c0_2 .>> shift2
+                qh_c0_3 = qh_c0_3 .>> shift2
+                qh_c0_4 = qh_c0_4 .>> shift2
+                qh_c0_5 = qh_c0_5 .>> shift2
+                qh_c0_6 = qh_c0_6 .>> shift2
+                qh_c0_7 = qh_c0_7 .>> shift2
+
+                // q5_lo = (qs & 0x0F) | hbit_lo[at bit 4]
+                // q5_hi = (qs >> 4) | hbit_hi[at bit 4]
+                let q5_lo_c0_0: i8x16 = (qs_c0_0 .& m4b) .| h0_lo_0
+                let q5_lo_c0_1: i8x16 = (qs_c0_1 .& m4b) .| h0_lo_1
+                let q5_lo_c0_2: i8x16 = (qs_c0_2 .& m4b) .| h0_lo_2
+                let q5_lo_c0_3: i8x16 = (qs_c0_3 .& m4b) .| h0_lo_3
+                let q5_lo_c0_4: i8x16 = (qs_c0_4 .& m4b) .| h0_lo_4
+                let q5_lo_c0_5: i8x16 = (qs_c0_5 .& m4b) .| h0_lo_5
+                let q5_lo_c0_6: i8x16 = (qs_c0_6 .& m4b) .| h0_lo_6
+                let q5_lo_c0_7: i8x16 = (qs_c0_7 .& m4b) .| h0_lo_7
+                let q5_hi_c0_0: i8x16 = ((qs_c0_0 .>> shift4) .& m4b) .| h0_hi_0
+                let q5_hi_c0_1: i8x16 = ((qs_c0_1 .>> shift4) .& m4b) .| h0_hi_1
+                let q5_hi_c0_2: i8x16 = ((qs_c0_2 .>> shift4) .& m4b) .| h0_hi_2
+                let q5_hi_c0_3: i8x16 = ((qs_c0_3 .>> shift4) .& m4b) .| h0_hi_3
+                let q5_hi_c0_4: i8x16 = ((qs_c0_4 .>> shift4) .& m4b) .| h0_hi_4
+                let q5_hi_c0_5: i8x16 = ((qs_c0_5 .>> shift4) .& m4b) .| h0_hi_5
+                let q5_hi_c0_6: i8x16 = ((qs_c0_6 .>> shift4) .& m4b) .| h0_hi_6
+                let q5_hi_c0_7: i8x16 = ((qs_c0_7 .>> shift4) .& m4b) .| h0_hi_7
+
+                // Accumulate 8 dot-product lanes each for lo and hi (rows 0-3)
+                let mut acc_lo_c0: i32x4 = splat(0)
+                let mut acc_hi_c0: i32x4 = splat(0)
+                acc_lo_c0 = vdot_lane_i32(acc_lo_c0, q5_lo_c0_0, q8_qs_0, 0)
+                acc_lo_c0 = vdot_lane_i32(acc_lo_c0, q5_lo_c0_1, q8_qs_0, 1)
+                acc_lo_c0 = vdot_lane_i32(acc_lo_c0, q5_lo_c0_2, q8_qs_0, 2)
+                acc_lo_c0 = vdot_lane_i32(acc_lo_c0, q5_lo_c0_3, q8_qs_0, 3)
+                acc_lo_c0 = vdot_lane_i32(acc_lo_c0, q5_lo_c0_4, q8_qs_1, 0)
+                acc_lo_c0 = vdot_lane_i32(acc_lo_c0, q5_lo_c0_5, q8_qs_1, 1)
+                acc_lo_c0 = vdot_lane_i32(acc_lo_c0, q5_lo_c0_6, q8_qs_1, 2)
+                acc_lo_c0 = vdot_lane_i32(acc_lo_c0, q5_lo_c0_7, q8_qs_1, 3)
+                acc_hi_c0 = vdot_lane_i32(acc_hi_c0, q5_hi_c0_0, q8_qs_2, 0)
+                acc_hi_c0 = vdot_lane_i32(acc_hi_c0, q5_hi_c0_1, q8_qs_2, 1)
+                acc_hi_c0 = vdot_lane_i32(acc_hi_c0, q5_hi_c0_2, q8_qs_2, 2)
+                acc_hi_c0 = vdot_lane_i32(acc_hi_c0, q5_hi_c0_3, q8_qs_2, 3)
+                acc_hi_c0 = vdot_lane_i32(acc_hi_c0, q5_hi_c0_4, q8_qs_3, 0)
+                acc_hi_c0 = vdot_lane_i32(acc_hi_c0, q5_hi_c0_5, q8_qs_3, 1)
+                acc_hi_c0 = vdot_lane_i32(acc_hi_c0, q5_hi_c0_6, q8_qs_3, 2)
+                acc_hi_c0 = vdot_lane_i32(acc_hi_c0, q5_hi_c0_7, q8_qs_3, 3)
+
+                // ── col_group 1 (rows 4-7) ──
+                let qs_c1_0: i8x16 = load(packed_i8, qs_base + 16)
+                let qs_c1_1: i8x16 = load(packed_i8, qs_base + 48)
+                let qs_c1_2: i8x16 = load(packed_i8, qs_base + 80)
+                let qs_c1_3: i8x16 = load(packed_i8, qs_base + 112)
+                let qs_c1_4: i8x16 = load(packed_i8, qs_base + 144)
+                let qs_c1_5: i8x16 = load(packed_i8, qs_base + 176)
+                let qs_c1_6: i8x16 = load(packed_i8, qs_base + 208)
+                let qs_c1_7: i8x16 = load(packed_i8, qs_base + 240)
+
+                let h1_lo_0: i8x16 = (qh_c1_0 .& one) .<< shift4
+                let h1_lo_1: i8x16 = (qh_c1_1 .& one) .<< shift4
+                let h1_lo_2: i8x16 = (qh_c1_2 .& one) .<< shift4
+                let h1_lo_3: i8x16 = (qh_c1_3 .& one) .<< shift4
+                let h1_lo_4: i8x16 = (qh_c1_4 .& one) .<< shift4
+                let h1_lo_5: i8x16 = (qh_c1_5 .& one) .<< shift4
+                let h1_lo_6: i8x16 = (qh_c1_6 .& one) .<< shift4
+                let h1_lo_7: i8x16 = (qh_c1_7 .& one) .<< shift4
+                let h1_hi_0: i8x16 = (qh_c1_0 .& two) .<< shift3
+                let h1_hi_1: i8x16 = (qh_c1_1 .& two) .<< shift3
+                let h1_hi_2: i8x16 = (qh_c1_2 .& two) .<< shift3
+                let h1_hi_3: i8x16 = (qh_c1_3 .& two) .<< shift3
+                let h1_hi_4: i8x16 = (qh_c1_4 .& two) .<< shift3
+                let h1_hi_5: i8x16 = (qh_c1_5 .& two) .<< shift3
+                let h1_hi_6: i8x16 = (qh_c1_6 .& two) .<< shift3
+                let h1_hi_7: i8x16 = (qh_c1_7 .& two) .<< shift3
+
+                qh_c1_0 = qh_c1_0 .>> shift2
+                qh_c1_1 = qh_c1_1 .>> shift2
+                qh_c1_2 = qh_c1_2 .>> shift2
+                qh_c1_3 = qh_c1_3 .>> shift2
+                qh_c1_4 = qh_c1_4 .>> shift2
+                qh_c1_5 = qh_c1_5 .>> shift2
+                qh_c1_6 = qh_c1_6 .>> shift2
+                qh_c1_7 = qh_c1_7 .>> shift2
+
+                let q5_lo_c1_0: i8x16 = (qs_c1_0 .& m4b) .| h1_lo_0
+                let q5_lo_c1_1: i8x16 = (qs_c1_1 .& m4b) .| h1_lo_1
+                let q5_lo_c1_2: i8x16 = (qs_c1_2 .& m4b) .| h1_lo_2
+                let q5_lo_c1_3: i8x16 = (qs_c1_3 .& m4b) .| h1_lo_3
+                let q5_lo_c1_4: i8x16 = (qs_c1_4 .& m4b) .| h1_lo_4
+                let q5_lo_c1_5: i8x16 = (qs_c1_5 .& m4b) .| h1_lo_5
+                let q5_lo_c1_6: i8x16 = (qs_c1_6 .& m4b) .| h1_lo_6
+                let q5_lo_c1_7: i8x16 = (qs_c1_7 .& m4b) .| h1_lo_7
+                let q5_hi_c1_0: i8x16 = ((qs_c1_0 .>> shift4) .& m4b) .| h1_hi_0
+                let q5_hi_c1_1: i8x16 = ((qs_c1_1 .>> shift4) .& m4b) .| h1_hi_1
+                let q5_hi_c1_2: i8x16 = ((qs_c1_2 .>> shift4) .& m4b) .| h1_hi_2
+                let q5_hi_c1_3: i8x16 = ((qs_c1_3 .>> shift4) .& m4b) .| h1_hi_3
+                let q5_hi_c1_4: i8x16 = ((qs_c1_4 .>> shift4) .& m4b) .| h1_hi_4
+                let q5_hi_c1_5: i8x16 = ((qs_c1_5 .>> shift4) .& m4b) .| h1_hi_5
+                let q5_hi_c1_6: i8x16 = ((qs_c1_6 .>> shift4) .& m4b) .| h1_hi_6
+                let q5_hi_c1_7: i8x16 = ((qs_c1_7 .>> shift4) .& m4b) .| h1_hi_7
+
+                let mut acc_lo_c1: i32x4 = splat(0)
+                let mut acc_hi_c1: i32x4 = splat(0)
+                acc_lo_c1 = vdot_lane_i32(acc_lo_c1, q5_lo_c1_0, q8_qs_0, 0)
+                acc_lo_c1 = vdot_lane_i32(acc_lo_c1, q5_lo_c1_1, q8_qs_0, 1)
+                acc_lo_c1 = vdot_lane_i32(acc_lo_c1, q5_lo_c1_2, q8_qs_0, 2)
+                acc_lo_c1 = vdot_lane_i32(acc_lo_c1, q5_lo_c1_3, q8_qs_0, 3)
+                acc_lo_c1 = vdot_lane_i32(acc_lo_c1, q5_lo_c1_4, q8_qs_1, 0)
+                acc_lo_c1 = vdot_lane_i32(acc_lo_c1, q5_lo_c1_5, q8_qs_1, 1)
+                acc_lo_c1 = vdot_lane_i32(acc_lo_c1, q5_lo_c1_6, q8_qs_1, 2)
+                acc_lo_c1 = vdot_lane_i32(acc_lo_c1, q5_lo_c1_7, q8_qs_1, 3)
+                acc_hi_c1 = vdot_lane_i32(acc_hi_c1, q5_hi_c1_0, q8_qs_2, 0)
+                acc_hi_c1 = vdot_lane_i32(acc_hi_c1, q5_hi_c1_1, q8_qs_2, 1)
+                acc_hi_c1 = vdot_lane_i32(acc_hi_c1, q5_hi_c1_2, q8_qs_2, 2)
+                acc_hi_c1 = vdot_lane_i32(acc_hi_c1, q5_hi_c1_3, q8_qs_2, 3)
+                acc_hi_c1 = vdot_lane_i32(acc_hi_c1, q5_hi_c1_4, q8_qs_3, 0)
+                acc_hi_c1 = vdot_lane_i32(acc_hi_c1, q5_hi_c1_5, q8_qs_3, 1)
+                acc_hi_c1 = vdot_lane_i32(acc_hi_c1, q5_hi_c1_6, q8_qs_3, 2)
+                acc_hi_c1 = vdot_lane_i32(acc_hi_c1, q5_hi_c1_7, q8_qs_3, 3)
+
+                // ── Scale accumulation in i32 (matches single-row order) ──
+                // Single-row does: sumi += dot_lo_g * sc_lo_g + dot_hi_g * sc_hi_g
+                // for each group g in 0..4, then once-per-block d*to_f32(sumi).
+                // Keeping everything in i32 until end of block preserves exact
+                // operation order vs q5k_dot_q8k.
+                sumi0 = sumi0 .+ (sc_lo_0 .* acc_lo_c0)
+                sumi0 = sumi0 .+ (sc_lo_1 .* acc_hi_c0)
+                sumi1 = sumi1 .+ (sc_hi_0 .* acc_lo_c1)
+                sumi1 = sumi1 .+ (sc_hi_1 .* acc_hi_c1)
+
+                // ── Bias correction per sub-block pair ──
+                // t02 = m[0..3] of blk0; t12 = m[0..3] of blk1; t03/t13 for rows 4-7.
+                // bsums_arr[2*sb+0] and [2*sb+1] are the two blk's paired-bsums.
+                let bs0: i16 = scratch_i16[sb * 2]
+                let bs1: i16 = scratch_i16[sb * 2 + 1]
+                let b0_0: i32 = (t02 & 255) * to_i32(bs0) + (t12 & 255) * to_i32(bs1)
+                let b0_1: i32 = ((t02 >> 8) & 255) * to_i32(bs0) + ((t12 >> 8) & 255) * to_i32(bs1)
+                let b0_2: i32 = ((t02 >> 16) & 255) * to_i32(bs0) + ((t12 >> 16) & 255) * to_i32(bs1)
+                let b0_3: i32 = ((t02 >> 24) & 255) * to_i32(bs0) + ((t12 >> 24) & 255) * to_i32(bs1)
+                let bias_delta0: i32x4 = [b0_0, b0_1, b0_2, b0_3]
+                bias0 = bias0 .+ bias_delta0
+
+                let b1_0: i32 = (t03 & 255) * to_i32(bs0) + (t13 & 255) * to_i32(bs1)
+                let b1_1: i32 = ((t03 >> 8) & 255) * to_i32(bs0) + ((t13 >> 8) & 255) * to_i32(bs1)
+                let b1_2: i32 = ((t03 >> 16) & 255) * to_i32(bs0) + ((t13 >> 16) & 255) * to_i32(bs1)
+                let b1_3: i32 = ((t03 >> 24) & 255) * to_i32(bs0) + ((t13 >> 24) & 255) * to_i32(bs1)
+                let bias_delta1: i32x4 = [b1_0, b1_1, b1_2, b1_3]
+                bias1 = bias1 .+ bias_delta1
+
+                sb = sb + 1
+            }
+
+            // Per-block f32 application — single-row equivalent:
+            //   result = result + d * to_f32(sumi) - dm * to_f32(mins_corr)
+            // Left-to-right eval: (acc + d*sumi) - dm*bias.
+            acc0 = acc0 .+ to_f32(sumi0) .* sb_sc0
+            acc0 = acc0 .- to_f32(bias0) .* sb_mn0
+            acc1 = acc1 .+ to_f32(sumi1) .* sb_sc1
+            acc1 = acc1 .- to_f32(bias1) .* sb_mn1
+
+            b = b + 1
+        }
+
+        store(out_f32, x * 8, acc0)
+        store(out_f32, x * 8 + 4, acc1)
+
+        x = x + 1
+    }
+}
