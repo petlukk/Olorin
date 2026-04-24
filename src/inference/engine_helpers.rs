@@ -208,6 +208,47 @@ pub(crate) fn try_repack_q4k(
     Some(crate::inference::repack::q4k_repack_8x8(weight, n_rows, n_cols))
 }
 
+/// Attempt to repack a Q5K weight matrix into the 8-row interleaved layout.
+/// Returns `None` if the weight is not eligible (non-Q5K dtype, bad shape,
+/// or ARM dotprod missing). Q5K 8x8 is ARM-only (no x86 kernel exists).
+pub(crate) fn try_repack_q5k(
+    #[cfg_attr(not(target_arch = "aarch64"), allow(unused_variables))]
+    weight: *const u8,
+    dtype: u32,
+    n_rows: usize,
+    n_cols: usize,
+) -> Option<Vec<u8>> {
+    if dtype != crate::inference::matmul::GGML_TYPE_Q5_K { return None; }
+    if n_rows % 8 != 0 { return None; }
+    if n_cols % 256 != 0 { return None; }
+    #[cfg(not(target_arch = "aarch64"))]
+    { return None; }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if !q4k_8x8_supported() { return None; }  // same dotprod gate as Q4K
+        Some(crate::inference::repack::q5k_repack_8x8(weight, n_rows, n_cols))
+    }
+}
+
+/// Try Q4K 8x8 repack, then Q5K 8x8 repack. Returns the repacked buffer for
+/// whichever matches this weight's dtype. The returned bytes use different
+/// layouts (Q4Kx8 = 1152 B/sb, Q5Kx8 = 1408 B/sb); the caller discriminates
+/// by dtype at dispatch time.
+pub(crate) fn try_repack_k8x8(
+    weight: *const u8,
+    dtype: u32,
+    n_rows: usize,
+    n_cols: usize,
+) -> Option<Vec<u8>> {
+    match dtype {
+        d if d == crate::inference::matmul::GGML_TYPE_Q4_K =>
+            try_repack_q4k(weight, dtype, n_rows, n_cols),
+        d if d == crate::inference::matmul::GGML_TYPE_Q5_K =>
+            try_repack_q5k(weight, dtype, n_rows, n_cols),
+        _ => None,
+    }
+}
+
 /// Attempt to repack a Q6K weight matrix into the 4-row interleaved layout.
 /// Returns `None` if the weight is not eligible:
 /// - `dtype` is not Q6K
@@ -253,10 +294,12 @@ pub(crate) fn populate_q4k_repacked(
 ) {
     // Attention projections. Weight shape = [n_cols, n_rows] in GGUF, but
     // matmul call sites pass n_rows as "output dim" — match those shapes.
-    lw.wq_repacked = try_repack_q4k(lw.wq, lw.wq_dtype, n_heads * head_dim_k, hidden_dim);
-    lw.wk_repacked = try_repack_q4k(lw.wk, lw.wk_dtype, n_kv_heads * head_dim_k, hidden_dim);
-    lw.wv_repacked = try_repack_q4k(lw.wv, lw.wv_dtype, n_kv_heads * head_dim_v, hidden_dim);
-    lw.wo_repacked = try_repack_q4k(lw.wo, lw.wo_dtype, hidden_dim, n_heads * head_dim_k);
+    // try_repack_k8x8 dispatches on dtype: Q4K → block_q4_Kx8 (1152 B/sb),
+    // Q5K → block_q5_Kx8 (1408 B/sb). Dispatch discriminates at call time.
+    lw.wq_repacked = try_repack_k8x8(lw.wq, lw.wq_dtype, n_heads * head_dim_k, hidden_dim);
+    lw.wk_repacked = try_repack_k8x8(lw.wk, lw.wk_dtype, n_kv_heads * head_dim_k, hidden_dim);
+    lw.wv_repacked = try_repack_k8x8(lw.wv, lw.wv_dtype, n_kv_heads * head_dim_v, hidden_dim);
+    lw.wo_repacked = try_repack_k8x8(lw.wo, lw.wo_dtype, hidden_dim, n_heads * head_dim_k);
     // Q6K repack + pre-d for Q/V (gemma-4-e2b-it-Q4_K_M has Q6K wq/wv in 17 of
     // 35 layers). try_repack_q6k returns None for non-Q6K dtypes, so these stay
     // None when the weight is Q4K (and a wq_repacked / wv_repacked will be
@@ -275,9 +318,9 @@ pub(crate) fn populate_q4k_repacked(
         ));
     }
     // FFN projections
-    lw.w_gate_repacked = try_repack_q4k(lw.w_gate, lw.w_gate_dtype, ffn_dim, hidden_dim);
-    lw.w_up_repacked = try_repack_q4k(lw.w_up, lw.w_up_dtype, ffn_dim, hidden_dim);
-    lw.w_down_repacked = try_repack_q4k(lw.w_down, lw.w_down_dtype, hidden_dim, ffn_dim);
+    lw.w_gate_repacked = try_repack_k8x8(lw.w_gate, lw.w_gate_dtype, ffn_dim, hidden_dim);
+    lw.w_up_repacked = try_repack_k8x8(lw.w_up, lw.w_up_dtype, ffn_dim, hidden_dim);
+    lw.w_down_repacked = try_repack_k8x8(lw.w_down, lw.w_down_dtype, hidden_dim, ffn_dim);
     // Q6K ffn_down repack + pre-d (4-row tiles). Pre-d keeps the per-matvec
     // f16→f32 scale conversion out of the hot path (same pattern as wq/wv).
     lw.w_down_q6k_repacked = try_repack_q6k(lw.w_down, lw.w_down_dtype, hidden_dim, ffn_dim);
@@ -288,7 +331,7 @@ pub(crate) fn populate_q4k_repacked(
     }
     // PLE projections
     if ple_dim > 0 {
-        lw.inp_gate_repacked = try_repack_q4k(lw.inp_gate, lw.inp_gate_dtype, ple_dim, hidden_dim);
-        lw.proj_repacked = try_repack_q4k(lw.proj, lw.proj_dtype, hidden_dim, ple_dim);
+        lw.inp_gate_repacked = try_repack_k8x8(lw.inp_gate, lw.inp_gate_dtype, ple_dim, hidden_dim);
+        lw.proj_repacked = try_repack_k8x8(lw.proj, lw.proj_dtype, hidden_dim, ple_dim);
     }
 }

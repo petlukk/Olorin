@@ -44,6 +44,8 @@ pub struct KernelTableInference {
     pub q5k_gemm:               Q5kGemmFn,
     #[cfg(target_arch = "aarch64")]
     pub q5k_8x8_q8k_matvec:     Q4k8x8MatvecFn,
+    #[cfg(target_arch = "aarch64")]
+    pub q5k_8x8_q8k_gemm:       Q4k8x8GemmFn,
     pub attn_fused_batched:      AttnFusedBatchedFn,
 }
 
@@ -124,6 +126,8 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
     let q5k_gemm_lib         = load("q5k_gemm")?;
     #[cfg(target_arch = "aarch64")]
     let q5k_dot_8x8_lib      = load("q5k_dot_8x8")?;
+    #[cfg(target_arch = "aarch64")]
+    let q5k_dot_8x8_gemm_lib = load("q5k_dot_8x8_gemm")?;
     let attn_fused_batched_lib = load("attn_fused_batched")?;
 
     unsafe {
@@ -173,6 +177,8 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
             q5k_gemm:               std::mem::transmute(sym(&q5k_gemm_lib, b"q5k_gemm\0")?),
             #[cfg(target_arch = "aarch64")]
             q5k_8x8_q8k_matvec:     std::mem::transmute(sym(&q5k_dot_8x8_lib, b"q5k_8x8_q8k_matvec\0")?),
+            #[cfg(target_arch = "aarch64")]
+            q5k_8x8_q8k_gemm:       std::mem::transmute(sym(&q5k_dot_8x8_gemm_lib, b"q5k_8x8_q8k_gemm\0")?),
             attn_fused_batched:      std::mem::transmute(sym(&attn_fused_batched_lib, b"attn_fused_batched\0")?),
             libs: {
                 #[allow(unused_mut)]
@@ -183,6 +189,8 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
                 libs.push(q5k_gemm_lib);
                 #[cfg(target_arch = "aarch64")]
                 libs.push(q5k_dot_8x8_lib);
+                #[cfg(target_arch = "aarch64")]
+                libs.push(q5k_dot_8x8_gemm_lib);
                 libs
             },
         };
@@ -457,6 +465,21 @@ pub unsafe fn q4k_8x8_q8k_gemm(
     nc: i32,
 ) {
     (k().q4k_8x8_q8k_gemm)(packed, q8_a, scratch, out, bs, n, nr, nc)
+}
+
+#[cfg(target_arch = "aarch64")]
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn q5k_8x8_q8k_gemm(
+    packed: *const u8,
+    q8_a: *const u8,
+    scratch: *mut u8,
+    out: *mut f32,
+    bs: i32,
+    n: i32,
+    nr: i32,
+    nc: i32,
+) {
+    (k().q5k_8x8_q8k_gemm)(packed, q8_a, scratch, out, bs, n, nr, nc)
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -45,6 +45,33 @@ pub fn q4k_repack_8x8(src: *const u8, n_rows: usize, n_cols: usize) -> Vec<u8> {
     dst
 }
 
+/// Repack `n_rows × n_cols` Q5K weights into 8-row interleaved `block_q5_Kx8`
+/// layout (1408 bytes per superblock × 8-row tile). Byte-for-byte match with
+/// llama.cpp `block_q5_Kx8` produced by `make_block_q5_Kx8` (blocklen=4).
+///
+/// # Requirements
+/// - `n_rows` must be a multiple of 8.
+/// - `n_cols` must be a multiple of 256.
+/// - `olorin::kernels::ffi::init()` must have been called.
+pub fn q5k_repack_8x8(src: *const u8, n_rows: usize, n_cols: usize) -> Vec<u8> {
+    debug_assert!(n_rows % 8 == 0,  "q5k_repack_8x8: n_rows ({n_rows}) must be a multiple of 8");
+    debug_assert!(n_cols % 256 == 0, "q5k_repack_8x8: n_cols ({n_cols}) must be a multiple of 256");
+
+    let nb = n_cols / 256;
+    let tile_bytes = nb * 1408;
+    let n_tiles = n_rows / 8;
+    let mut dst = vec![0u8; n_tiles * tile_bytes];
+    unsafe {
+        ffi_inference::q5k_repack_8x8(
+            src,
+            dst.as_mut_ptr(),
+            n_rows as i32,
+            n_cols as i32,
+        );
+    }
+    dst
+}
+
 /// Repack Q6K weights: interleave 4 consecutive rows into contiguous tiles.
 /// Each tile = 4 × 210 = 840 bytes per superblock column.
 ///
