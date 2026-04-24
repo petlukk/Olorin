@@ -306,9 +306,15 @@ pub fn format_recipe_deltas(recipe: &[TensorRecipe]) -> String {
 /// Keeps a row only if the recommended bucket has LOWER precision than the
 /// current dtype — i.e. this is a bandwidth saving, not a quality upgrade.
 /// For llama.cpp's baseline, this gives a pure-savings recipe.
+///
+/// **Policy: never downgrade Q6K sources.** Q6K tensors in Gemma 4 E2B
+/// (embeddings, wq/wv and w_down on a subset of layers) sit on paths with
+/// dedicated pre-computed d-arrays and repack layouts. Downgrading them
+/// forfeits both quality and optimized-path infrastructure.
 pub fn filter_downgrades(recipe: &[TensorRecipe]) -> Vec<TensorRecipe> {
     recipe.iter()
         .filter(|r| {
+            if r.current_dtype == "Q6K" { return false; }
             let cur = match r.current_dtype {
                 "Q4K" => 4, "Q5K" => 5, "Q6K" => 6, _ => 99,
             };

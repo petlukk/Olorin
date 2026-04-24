@@ -1,0 +1,16 @@
+blk\.1\.attn_k\.weight=q4_K
+blk\.1\.attn_output\.weight=q4_K
+blk\.2\.attn_k\.weight=q4_K
+blk\.2\.attn_output\.weight=q4_K
+blk\.10\.attn_k\.weight=q4_K
+blk\.10\.attn_output\.weight=q4_K
+blk\.11\.attn_k\.weight=q4_K
+blk\.11\.attn_output\.weight=q4_K
+blk\.12\.attn_k\.weight=q4_K
+blk\.12\.attn_output\.weight=q4_K
+blk\.13\.attn_k\.weight=q4_K
+blk\.13\.attn_output\.weight=q4_K
+blk\.23\.attn_k\.weight=q4_K
+blk\.23\.attn_output\.weight=q4_K
+blk\.34\.attn_k\.weight=q4_K
+blk\.34\.attn_output\.weight=q4_K
