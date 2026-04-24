@@ -443,15 +443,25 @@ fn xorshift64(state: &mut u64) -> u64 {
 /// Find a GGUF model in standard locations. Prefers gemma4 if present.
 pub fn find_model() -> Option<PathBuf> {
     let dir = models_dir()?;
-    let gemma4 = dir.join("gemma-4-e2b-it-Q4_K_M.gguf");
-    if gemma4.exists() {
-        return Some(gemma4);
+    for candidate in GEMMA4_CANDIDATES {
+        let p = dir.join(candidate);
+        if p.exists() {
+            return Some(p);
+        }
     }
     std::fs::read_dir(&dir).ok()?
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .find(|p| p.extension().map(|e| e == "gguf").unwrap_or(false))
 }
+
+/// gemma4 gguf preference order: adaptive+imatrix first (lighter RSS on
+/// bandwidth-constrained targets, decode within noise of baseline),
+/// plain Q4_K_M baseline second.
+const GEMMA4_CANDIDATES: &[&str] = &[
+    "gemma-4-e2b-it-Q4_K_M-adaptive-imatrix.gguf",
+    "gemma-4-e2b-it-Q4_K_M.gguf",
+];
 
 fn models_dir() -> Option<PathBuf> {
     let home = std::env::var("HOME").ok()?;
@@ -480,22 +490,13 @@ pub fn available_models() -> Vec<String> {
 pub fn resolve_model(arg: Option<&str>) -> Option<PathBuf> {
     let home = std::env::var("HOME").unwrap_or_default();
     let olorin_models = Path::new(&home).join(".olorin/models");
-    let aliases: &[(&str, &str)] = &[
-        ("gemma4", "gemma-4-e2b-it-Q4_K_M.gguf"),
-    ];
     match arg {
+        Some("gemma4") | None => find_model(),
         Some(name) => {
-            for &(alias, filename) in aliases {
-                if name == alias {
-                    let p = olorin_models.join(filename);
-                    return p.exists().then_some(p);
-                }
-            }
             let stem_path = olorin_models.join(format!("{name}.gguf"));
             if stem_path.exists() { return Some(stem_path); }
             let p = PathBuf::from(name);
             p.exists().then_some(p)
         }
-        None => find_model(),
     }
 }
