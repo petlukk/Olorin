@@ -10,7 +10,7 @@
 //   d[8]        @ 0   (16 bytes)
 //   dmin[8]     @ 16  (16 bytes)
 //   scales[96]  @ 32  (96 bytes, 8 sub-blocks × 12 bytes each)
-//   qh[256]     @ 128 (256 bytes, 32 bytes × 8 rows, row-sequential)
+//   qh[256]     @ 128 (256 bytes, interleaved 4 bytes per row, 8 groups × 32 bytes)
 //   qs[1024]    @ 384 (1024 bytes, interleaved 4 bytes per row)
 
 #[cfg(aarch64)]
@@ -43,9 +43,11 @@ func copy_d_dmin(
     d16d[d / 2 + 15] = d16s[r7 / 2 + 1]
 }
 
-// Copy qh[32] from each of 8 source blocks, row-sequential in output.
-// Source qh at offset 16 in each block; each is 32 bytes = 8 × i32 words.
-// Output: row r at dst+d+128+r*32 (256 bytes total at dst+d+128..384).
+// Copy qh[32] from each of 8 source blocks, INTERLEAVED in 4-byte chunks
+// (matching llama.cpp make_block_q5_Kx8 with blck_size_interleave=4).
+// Source qh at offset 16 in each block; each is 32 bytes.
+// Output: 256 bytes at dst+d+128, round-robin 4 bytes per row.
+// 8 groups × 32 bytes (8 rows × 4 bytes) = 256 bytes total.
 func copy_qh(
     src: *restrict u8, dst: *mut u8, d: i32,
     r0: i32, r1: i32, r2: i32, r3: i32,
@@ -55,15 +57,15 @@ func copy_qh(
     let d32: *mut i32 = ptr_as_i32(ptr_as_i8(dst))
     let mut c: i32 = 0
     while c < 8 {
-        let so: i32 = 16 + c * 4
-        d32[(d + 128) / 4 + c] = s32[(r0 + so) / 4]
-        d32[(d + 160) / 4 + c] = s32[(r1 + so) / 4]
-        d32[(d + 192) / 4 + c] = s32[(r2 + so) / 4]
-        d32[(d + 224) / 4 + c] = s32[(r3 + so) / 4]
-        d32[(d + 256) / 4 + c] = s32[(r4 + so) / 4]
-        d32[(d + 288) / 4 + c] = s32[(r5 + so) / 4]
-        d32[(d + 320) / 4 + c] = s32[(r6 + so) / 4]
-        d32[(d + 352) / 4 + c] = s32[(r7 + so) / 4]
+        let dq: i32 = (d + 128 + c * 32) / 4
+        d32[dq]     = s32[(r0 + 16 + c * 4) / 4]
+        d32[dq + 1] = s32[(r1 + 16 + c * 4) / 4]
+        d32[dq + 2] = s32[(r2 + 16 + c * 4) / 4]
+        d32[dq + 3] = s32[(r3 + 16 + c * 4) / 4]
+        d32[dq + 4] = s32[(r4 + 16 + c * 4) / 4]
+        d32[dq + 5] = s32[(r5 + 16 + c * 4) / 4]
+        d32[dq + 6] = s32[(r6 + 16 + c * 4) / 4]
+        d32[dq + 7] = s32[(r7 + 16 + c * 4) / 4]
         c = c + 1
     }
 }

@@ -96,30 +96,31 @@ fn q5k_repack_8x8_layout_matches_spec() {
                 );
             }
 
-            // qh[256] at dst+d+128, row-sequential (32 bytes per row).
-            // Source: qh at offset 16 of each block.
+            // qh[256] at dst+d+128, interleaved like qs but across its own
+            // 32-bytes-per-row source. On ARM: 4-byte chunks; on x86: 8-byte
+            // chunks. Per-row: for each row r, qh's 32 source bytes get split
+            // into 32/CHUNK groups of CHUNK bytes each; group g of row r lands
+            // at dst offset d + 128 + g * (CHUNK * 8) + r * CHUNK.
+            // qs[1024] at dst+d+384 follows the same pattern on 128 source bytes.
+            let chunk = if cfg!(target_arch = "aarch64") { 4usize } else { 8usize };
+            let qh_groups = 32 / chunk;
             for r in 0..8 {
-                for b in 0..32 {
-                    let src_qh_off = row_base + r * src_row_bytes + blk * 176 + 16 + b;
-                    let dst_qh_off = d_offset + 128 + r * 32 + b;
-                    assert_eq!(
-                        dst[dst_qh_off], src_slice[src_qh_off],
-                        "qh tile={tile} blk={blk} row={r} byte={b}"
-                    );
+                for g in 0..qh_groups {
+                    for b in 0..chunk {
+                        let src_qh_off =
+                            row_base + r * src_row_bytes + blk * 176 + 16 + g * chunk + b;
+                        let dst_qh_off = d_offset + 128 + g * (chunk * 8) + r * chunk + b;
+                        assert_eq!(
+                            dst[dst_qh_off], src_slice[src_qh_off],
+                            "qh tile={tile} blk={blk} row={r} group={g} byte={b}"
+                        );
+                    }
                 }
             }
 
-            // qs[1024] at dst+d+384, interleaved in CHUNK-sized groups per row.
-            // On ARM: 4-byte chunks. On x86: 8-byte chunks. Either way, every
-            // source byte should appear SOMEWHERE in dst — verify via per-row
-            // chunk reconstruction:
-            // - For each row r, the row's 128 source qs bytes get split into
-            //   128 / CHUNK groups of CHUNK bytes; group g of row r lands at
-            //   dst offset d + 384 + g * (CHUNK * 8) + r * CHUNK.
-            let chunk = if cfg!(target_arch = "aarch64") { 4usize } else { 8usize };
-            let groups = 128 / chunk;
+            let qs_groups = 128 / chunk;
             for r in 0..8 {
-                for g in 0..groups {
+                for g in 0..qs_groups {
                     for b in 0..chunk {
                         let src_qs_off =
                             row_base + r * src_row_bytes + blk * 176 + 48 + g * chunk + b;
