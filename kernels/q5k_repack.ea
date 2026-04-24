@@ -1,0 +1,250 @@
+// q5k_repack.ea — Repack standard Q5K blocks into 8-row interleaved layout.
+//
+// Mirrors q4k_repack.ea pattern. Q5K layout is identical to Q4K for
+// d/dmin/scales; adds a 32-byte qh (high-bits) field between scales and qs.
+//
+// Q5K source block (176 bytes per 256 elements):
+//   d(f16)@0  dmin(f16)@2  scales[12]@4  qh[32]@16  qs[128]@48
+//
+// Repacked 8-row tile (1408 bytes, llama.cpp block_q5_Kx8 layout):
+//   d[8]        @ 0   (16 bytes)
+//   dmin[8]     @ 16  (16 bytes)
+//   scales[96]  @ 32  (96 bytes, 8 sub-blocks × 12 bytes each)
+//   qh[256]     @ 128 (256 bytes, 32 bytes × 8 rows, row-sequential)
+//   qs[1024]    @ 384 (1024 bytes, interleaved 8 bytes per row)
+
+#[cfg(x86_64)]
+
+// Copy d[0..7] and dmin[0..7] from 8 source blocks.
+// Each source block has d at +0 (2 bytes), dmin at +2 (2 bytes).
+// Output: d[0..7] at dst+d, dmin[0..7] at dst+d+16.
+func copy_d_dmin(
+    src: *restrict u8, dst: *mut u8, d: i32,
+    r0: i32, r1: i32, r2: i32, r3: i32,
+    r4: i32, r5: i32, r6: i32, r7: i32
+) {
+    let d16s: *restrict i16 = ptr_as_i16(ptr_as_i8(src))
+    let d16d: *mut i16 = ptr_as_i16(ptr_as_i8(dst))
+    d16d[d / 2]     = d16s[r0 / 2]
+    d16d[d / 2 + 1] = d16s[r1 / 2]
+    d16d[d / 2 + 2] = d16s[r2 / 2]
+    d16d[d / 2 + 3] = d16s[r3 / 2]
+    d16d[d / 2 + 4] = d16s[r4 / 2]
+    d16d[d / 2 + 5] = d16s[r5 / 2]
+    d16d[d / 2 + 6] = d16s[r6 / 2]
+    d16d[d / 2 + 7] = d16s[r7 / 2]
+    d16d[d / 2 + 8]  = d16s[r0 / 2 + 1]
+    d16d[d / 2 + 9]  = d16s[r1 / 2 + 1]
+    d16d[d / 2 + 10] = d16s[r2 / 2 + 1]
+    d16d[d / 2 + 11] = d16s[r3 / 2 + 1]
+    d16d[d / 2 + 12] = d16s[r4 / 2 + 1]
+    d16d[d / 2 + 13] = d16s[r5 / 2 + 1]
+    d16d[d / 2 + 14] = d16s[r6 / 2 + 1]
+    d16d[d / 2 + 15] = d16s[r7 / 2 + 1]
+}
+
+// Copy qh[32] from each of 8 source blocks, row-sequential in output.
+// Source qh at offset 16 in each block; each is 32 bytes = 4 × i64 words.
+// Output: row r at dst+d+128+r*32 (256 bytes total at dst+d+128..384).
+func copy_qh(
+    src: *restrict u8, dst: *mut u8, d: i32,
+    r0: i32, r1: i32, r2: i32, r3: i32,
+    r4: i32, r5: i32, r6: i32, r7: i32
+) {
+    let s64: *restrict i64 = ptr_as_i64(ptr_as_i8(src))
+    let d64: *mut i64 = ptr_as_i64(ptr_as_i8(dst))
+    let mut c: i32 = 0
+    while c < 4 {
+        let so: i32 = 16 + c * 8
+        d64[(d + 128) / 8 + c] = s64[(r0 + so) / 8]
+        d64[(d + 160) / 8 + c] = s64[(r1 + so) / 8]
+        d64[(d + 192) / 8 + c] = s64[(r2 + so) / 8]
+        d64[(d + 224) / 8 + c] = s64[(r3 + so) / 8]
+        d64[(d + 256) / 8 + c] = s64[(r4 + so) / 8]
+        d64[(d + 288) / 8 + c] = s64[(r5 + so) / 8]
+        d64[(d + 320) / 8 + c] = s64[(r6 + so) / 8]
+        d64[(d + 352) / 8 + c] = s64[(r7 + so) / 8]
+        c = c + 1
+    }
+}
+
+// Interleave quants from 8 source blocks in 8-byte chunks via i64 load/store.
+// Source quants: offset 48..175 in each 176-byte Q5K block (128 bytes per block).
+// Output: 1024 bytes at dst+d+384, round-robin 8 bytes per row.
+// 16 groups × 64 bytes (8 rows × 8 bytes) = 1024 bytes total.
+func interleave_quants(
+    src: *restrict u8, dst: *mut u8, d: i32,
+    r0: i32, r1: i32, r2: i32, r3: i32,
+    r4: i32, r5: i32, r6: i32, r7: i32
+) {
+    let s64: *restrict i64 = ptr_as_i64(ptr_as_i8(src))
+    let d64: *mut i64 = ptr_as_i64(ptr_as_i8(dst))
+    let mut c: i32 = 0
+    while c < 16 {
+        let dq: i32 = (d + 384 + c * 64) / 8
+        d64[dq]     = s64[(r0 + 48 + c * 8) / 8]
+        d64[dq + 1] = s64[(r1 + 48 + c * 8) / 8]
+        d64[dq + 2] = s64[(r2 + 48 + c * 8) / 8]
+        d64[dq + 3] = s64[(r3 + 48 + c * 8) / 8]
+        d64[dq + 4] = s64[(r4 + 48 + c * 8) / 8]
+        d64[dq + 5] = s64[(r5 + 48 + c * 8) / 8]
+        d64[dq + 6] = s64[(r6 + 48 + c * 8) / 8]
+        d64[dq + 7] = s64[(r7 + 48 + c * 8) / 8]
+        c = c + 1
+    }
+}
+
+// Repack 6-bit scales: sub-blocks 0..3 (lower bits).
+// IDENTICAL to q4k_repack: scales live at offset 4 in both Q4K and Q5K blocks.
+func repack_scales_lo(
+    src: *restrict u8, dst: *mut u8, d: i32,
+    r0: i32, r1: i32, r2: i32, r3: i32,
+    r4: i32, r5: i32, r6: i32, r7: i32
+) {
+    let mut sb: i32 = 0
+    while sb < 4 {
+        let s0: i16 = to_i16(to_i32(src[r0 + 4 + sb]) & 63)
+        let s1: i16 = to_i16(to_i32(src[r1 + 4 + sb]) & 63)
+        let s2: i16 = to_i16(to_i32(src[r2 + 4 + sb]) & 63)
+        let s3: i16 = to_i16(to_i32(src[r3 + 4 + sb]) & 63)
+        let s4: i16 = to_i16(to_i32(src[r4 + 4 + sb]) & 63)
+        let s5: i16 = to_i16(to_i32(src[r5 + 4 + sb]) & 63)
+        let s6: i16 = to_i16(to_i32(src[r6 + 4 + sb]) & 63)
+        let s7: i16 = to_i16(to_i32(src[r7 + 4 + sb]) & 63)
+        let m0: i16 = to_i16(to_i32(src[r0 + 8 + sb]) & 63)
+        let m1: i16 = to_i16(to_i32(src[r1 + 8 + sb]) & 63)
+        let m2: i16 = to_i16(to_i32(src[r2 + 8 + sb]) & 63)
+        let m3: i16 = to_i16(to_i32(src[r3 + 8 + sb]) & 63)
+        let m4: i16 = to_i16(to_i32(src[r4 + 8 + sb]) & 63)
+        let m5: i16 = to_i16(to_i32(src[r5 + 8 + sb]) & 63)
+        let m6: i16 = to_i16(to_i32(src[r6 + 8 + sb]) & 63)
+        let m7: i16 = to_i16(to_i32(src[r7 + 8 + sb]) & 63)
+
+        let out_scales: i16x8 = [
+            s0 + ((s4 & to_i16(48)) << 2),
+            s1 + ((s5 & to_i16(48)) << 2),
+            s2 + ((s6 & to_i16(48)) << 2),
+            s3 + ((s7 & to_i16(48)) << 2),
+            m0 + ((m4 & to_i16(48)) << 2),
+            m1 + ((m5 & to_i16(48)) << 2),
+            m2 + ((m6 & to_i16(48)) << 2),
+            m3 + ((m7 & to_i16(48)) << 2)
+        ]
+        let out_extra: i16x8 = [
+            (s4 & to_i16(15)) + ((m4 & to_i16(15)) << 4),
+            (s5 & to_i16(15)) + ((m5 & to_i16(15)) << 4),
+            (s6 & to_i16(15)) + ((m6 & to_i16(15)) << 4),
+            (s7 & to_i16(15)) + ((m7 & to_i16(15)) << 4),
+            to_i16(0), to_i16(0), to_i16(0), to_i16(0)
+        ]
+        let packed: u8x16 = pack_usat_i16x8(out_scales, out_extra)
+        let o: i32 = d + 32 + sb * 12
+        dst[o]      = packed[0]
+        dst[o + 1]  = packed[1]
+        dst[o + 2]  = packed[2]
+        dst[o + 3]  = packed[3]
+        dst[o + 4]  = packed[4]
+        dst[o + 5]  = packed[5]
+        dst[o + 6]  = packed[6]
+        dst[o + 7]  = packed[7]
+        dst[o + 8]  = packed[8]
+        dst[o + 9]  = packed[9]
+        dst[o + 10] = packed[10]
+        dst[o + 11] = packed[11]
+        sb = sb + 1
+    }
+}
+
+// Repack 6-bit scales: sub-blocks 4..7 (upper bits from scales[0..3] + scales[8..11]).
+// IDENTICAL to q4k_repack: scales live at offset 4 in both Q4K and Q5K blocks.
+func repack_scales_hi(
+    src: *restrict u8, dst: *mut u8, d: i32,
+    r0: i32, r1: i32, r2: i32, r3: i32,
+    r4: i32, r5: i32, r6: i32, r7: i32
+) {
+    let mut sb: i32 = 0
+    while sb < 4 {
+        let s0: i16 = to_i16(((to_i32(src[r0 + 4 + sb]) & 192) >> 2) | (to_i32(src[r0 + 12 + sb]) & 15))
+        let s1: i16 = to_i16(((to_i32(src[r1 + 4 + sb]) & 192) >> 2) | (to_i32(src[r1 + 12 + sb]) & 15))
+        let s2: i16 = to_i16(((to_i32(src[r2 + 4 + sb]) & 192) >> 2) | (to_i32(src[r2 + 12 + sb]) & 15))
+        let s3: i16 = to_i16(((to_i32(src[r3 + 4 + sb]) & 192) >> 2) | (to_i32(src[r3 + 12 + sb]) & 15))
+        let s4: i16 = to_i16(((to_i32(src[r4 + 4 + sb]) & 192) >> 2) | (to_i32(src[r4 + 12 + sb]) & 15))
+        let s5: i16 = to_i16(((to_i32(src[r5 + 4 + sb]) & 192) >> 2) | (to_i32(src[r5 + 12 + sb]) & 15))
+        let s6: i16 = to_i16(((to_i32(src[r6 + 4 + sb]) & 192) >> 2) | (to_i32(src[r6 + 12 + sb]) & 15))
+        let s7: i16 = to_i16(((to_i32(src[r7 + 4 + sb]) & 192) >> 2) | (to_i32(src[r7 + 12 + sb]) & 15))
+        let m0: i16 = to_i16(((to_i32(src[r0 + 8 + sb]) & 192) >> 2) | ((to_i32(src[r0 + 12 + sb]) & 240) >> 4))
+        let m1: i16 = to_i16(((to_i32(src[r1 + 8 + sb]) & 192) >> 2) | ((to_i32(src[r1 + 12 + sb]) & 240) >> 4))
+        let m2: i16 = to_i16(((to_i32(src[r2 + 8 + sb]) & 192) >> 2) | ((to_i32(src[r2 + 12 + sb]) & 240) >> 4))
+        let m3: i16 = to_i16(((to_i32(src[r3 + 8 + sb]) & 192) >> 2) | ((to_i32(src[r3 + 12 + sb]) & 240) >> 4))
+        let m4: i16 = to_i16(((to_i32(src[r4 + 8 + sb]) & 192) >> 2) | ((to_i32(src[r4 + 12 + sb]) & 240) >> 4))
+        let m5: i16 = to_i16(((to_i32(src[r5 + 8 + sb]) & 192) >> 2) | ((to_i32(src[r5 + 12 + sb]) & 240) >> 4))
+        let m6: i16 = to_i16(((to_i32(src[r6 + 8 + sb]) & 192) >> 2) | ((to_i32(src[r6 + 12 + sb]) & 240) >> 4))
+        let m7: i16 = to_i16(((to_i32(src[r7 + 8 + sb]) & 192) >> 2) | ((to_i32(src[r7 + 12 + sb]) & 240) >> 4))
+
+        let out_scales: i16x8 = [
+            s0 + ((s4 & to_i16(48)) << 2),
+            s1 + ((s5 & to_i16(48)) << 2),
+            s2 + ((s6 & to_i16(48)) << 2),
+            s3 + ((s7 & to_i16(48)) << 2),
+            m0 + ((m4 & to_i16(48)) << 2),
+            m1 + ((m5 & to_i16(48)) << 2),
+            m2 + ((m6 & to_i16(48)) << 2),
+            m3 + ((m7 & to_i16(48)) << 2)
+        ]
+        let out_extra: i16x8 = [
+            (s4 & to_i16(15)) + ((m4 & to_i16(15)) << 4),
+            (s5 & to_i16(15)) + ((m5 & to_i16(15)) << 4),
+            (s6 & to_i16(15)) + ((m6 & to_i16(15)) << 4),
+            (s7 & to_i16(15)) + ((m7 & to_i16(15)) << 4),
+            to_i16(0), to_i16(0), to_i16(0), to_i16(0)
+        ]
+        let packed: u8x16 = pack_usat_i16x8(out_scales, out_extra)
+        let o: i32 = d + 32 + (sb + 4) * 12
+        dst[o]      = packed[0]
+        dst[o + 1]  = packed[1]
+        dst[o + 2]  = packed[2]
+        dst[o + 3]  = packed[3]
+        dst[o + 4]  = packed[4]
+        dst[o + 5]  = packed[5]
+        dst[o + 6]  = packed[6]
+        dst[o + 7]  = packed[7]
+        dst[o + 8]  = packed[8]
+        dst[o + 9]  = packed[9]
+        dst[o + 10] = packed[10]
+        dst[o + 11] = packed[11]
+        sb = sb + 1
+    }
+}
+
+export func q5k_repack_8x8(
+    src: *restrict u8, dst: *mut u8,
+    n_rows: i32, n_cols: i32
+) {
+    let nb: i32 = n_cols / 256
+    let rb: i32 = nb * 176
+
+    let mut tile: i32 = 0
+    while tile < n_rows / 8 {
+        let base: i32 = tile * 8 * rb
+        let mut blk: i32 = 0
+        while blk < nb {
+            let s: i32 = base + blk * 176
+            let d: i32 = (tile * nb + blk) * 1408
+            let r0: i32 = s
+            let r1: i32 = s + rb
+            let r2: i32 = s + 2 * rb
+            let r3: i32 = s + 3 * rb
+            let r4: i32 = s + 4 * rb
+            let r5: i32 = s + 5 * rb
+            let r6: i32 = s + 6 * rb
+            let r7: i32 = s + 7 * rb
+            copy_d_dmin(src, dst, d, r0, r1, r2, r3, r4, r5, r6, r7)
+            copy_qh(src, dst, d, r0, r1, r2, r3, r4, r5, r6, r7)
+            interleave_quants(src, dst, d, r0, r1, r2, r3, r4, r5, r6, r7)
+            repack_scales_lo(src, dst, d, r0, r1, r2, r3, r4, r5, r6, r7)
+            repack_scales_hi(src, dst, d, r0, r1, r2, r3, r4, r5, r6, r7)
+            blk = blk + 1
+        }
+        tile = tile + 1
+    }
+}
