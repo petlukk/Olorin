@@ -126,6 +126,10 @@ fn olorin_full_bench() {
     // to match llama.cpp's `<bos>` framing.
     let mut prompt_ids: Vec<u32> = vec![2]; // BOS
     prompt_ids.extend(tokenizer.encode(PROMPT));
+    if let Some(n) = std::env::var("OLORIN_PROMPT_TOKENS").ok().and_then(|s| s.trim().parse::<usize>().ok()) {
+        prompt_ids.truncate(n);
+        while prompt_ids.len() < n { prompt_ids.push(2); }
+    }
     let n_prompt = prompt_ids.len();
 
     // ── Prefill (prompt eval) — batched forward ────────────────────────
