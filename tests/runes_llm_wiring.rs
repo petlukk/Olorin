@@ -37,7 +37,11 @@ fn runes_prompt_block_is_stable_across_calls() {
 
 #[test]
 fn dispatch_context_new_system_prompt_contains_rune_block() {
-    let ctx = olorin::core::router::DispatchContext::new(None, None);
+    // system_prompt composition doesn't depend on the engine — pass an
+    // unresolvable model_arg so DispatchContext::new skips the model-load
+    // path. Keeps the test fast and independent of which gguf happens to be
+    // the production default (and of parallel-run ordering of ffi::init).
+    let ctx = olorin::core::router::DispatchContext::new(None, Some("nonexistent-model-name-for-test"));
     let sp = ctx.system_prompt_for_test();
     assert!(sp.contains("- eacrunch:"), "rune block not composed into system_prompt");
     assert!(sp.contains("<tools>"), "tools opener missing in composed prompt");

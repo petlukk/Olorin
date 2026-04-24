@@ -1,3 +1,9 @@
 /target
 *.so
 *.ea.json
+
+# Disassembly / IR dumps (debug output from `ea --emit-asm` and friends).
+# These land in the repo root; keep them out of git.
+/*.s
+/*.ll
+/*.o
