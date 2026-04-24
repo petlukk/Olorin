@@ -82,6 +82,12 @@ pub type Q4kRepack8x8Fn = unsafe extern "C" fn(
     i32,         // n_rows (multiple of 8)
     i32,         // n_cols (multiple of 256)
 );
+pub type Q5kRepack8x8Fn = unsafe extern "C" fn(
+    *const u8,   // src (standard Q5K blocks, row-major, 176 B per 256 elements)
+    *mut u8,     // dst (block_q5_Kx8 tiles, 1408 B per 8 rows × 256 elements)
+    i32,         // n_rows (multiple of 8)
+    i32,         // n_cols (multiple of 256)
+);
 pub type Q4k8x8MatvecFn = unsafe extern "C" fn(
     *const u8,   // packed (block_q4_Kx8 tiles)
     *const i8,   // q8_qs

@@ -33,6 +33,7 @@ pub struct KernelTableInference {
     pub bare_rmsnorm_f32:      BareRmsnormF32Fn,
     pub softcap_f32:           SoftcapF32Fn,
     pub q4k_repack_8x8:          Q4kRepack8x8Fn,
+    pub q5k_repack_8x8:          Q5kRepack8x8Fn,
     pub q4k_8x8_q8k_matvec:      Q4k8x8MatvecFn,
     pub q4k_8x8_q8k_matvec_dual: Q4k8x8MatvecDualFn,
     pub q8k_repack_4:            Q8kRepack4Fn,
@@ -110,6 +111,7 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
     let bare_rmsnorm_lib   = load("bare_rmsnorm")?;
     let softcap_lib        = load("softcap")?;
     let q4k_repack_lib       = load("q4k_repack")?;
+    let q5k_repack_lib       = load("q5k_repack")?;
     let q4k_dot_8x8_lib      = load("q4k_dot_8x8")?;
     let q4k_dot_8x8_dual_lib = load("q4k_dot_8x8_dual")?;
     let q8k_repack_4_lib     = load("q8k_repack_4")?;
@@ -156,6 +158,7 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
             bare_rmsnorm_f32:  std::mem::transmute(sym(&bare_rmsnorm_lib, b"bare_rmsnorm_f32\0")?),
             softcap_f32:       std::mem::transmute(sym(&softcap_lib, b"softcap_f32\0")?),
             q4k_repack_8x8:          std::mem::transmute(sym(&q4k_repack_lib,       b"q4k_repack_8x8\0")?),
+            q5k_repack_8x8:          std::mem::transmute(sym(&q5k_repack_lib,       b"q5k_repack_8x8\0")?),
             q4k_8x8_q8k_matvec:      std::mem::transmute(sym(&q4k_dot_8x8_lib,      b"q4k_8x8_q8k_matvec\0")?),
             q4k_8x8_q8k_matvec_dual: std::mem::transmute(sym(&q4k_dot_8x8_dual_lib, b"q4k_8x8_q8k_matvec_dual\0")?),
             q8k_repack_4:            std::mem::transmute(sym(&q8k_repack_4_lib,     b"q8k_repack_4\0")?),
@@ -167,7 +170,7 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
             attn_fused_batched:      std::mem::transmute(sym(&attn_fused_batched_lib, b"attn_fused_batched\0")?),
             libs: {
                 #[allow(unused_mut)]
-                let mut libs = vec![q4kq, q4kd, q5kd, q6kd, q6k_dot_repacked_lib, f16_conv_lib, softmax_lib, gemma4_rmsnorm_lib, gemma4_gelu_lib, gemma4_rope_lib, bf16_matvec_lib, vec_ops_lib, attn_ops_lib, bare_rmsnorm_lib, softcap_lib, q4k_repack_lib, q4k_dot_8x8_lib, q4k_dot_8x8_dual_lib, q8k_repack_4_lib, q4k_dot_8x8_gemm_lib, attn_fused_batched_lib];
+                let mut libs = vec![q4kq, q4kd, q5kd, q6kd, q6k_dot_repacked_lib, f16_conv_lib, softmax_lib, gemma4_rmsnorm_lib, gemma4_gelu_lib, gemma4_rope_lib, bf16_matvec_lib, vec_ops_lib, attn_ops_lib, bare_rmsnorm_lib, softcap_lib, q4k_repack_lib, q5k_repack_lib, q4k_dot_8x8_lib, q4k_dot_8x8_dual_lib, q8k_repack_4_lib, q4k_dot_8x8_gemm_lib, attn_fused_batched_lib];
                 #[cfg(target_arch = "aarch64")]
                 libs.push(q6k_gemm_lib);
                 #[cfg(target_arch = "aarch64")]
@@ -351,6 +354,12 @@ pub unsafe fn q4k_repack_8x8(
     src: *const u8, dst: *mut u8, n_rows: i32, n_cols: i32,
 ) {
     (k().q4k_repack_8x8)(src, dst, n_rows, n_cols)
+}
+
+pub unsafe fn q5k_repack_8x8(
+    src: *const u8, dst: *mut u8, n_rows: i32, n_cols: i32,
+) {
+    (k().q5k_repack_8x8)(src, dst, n_rows, n_cols)
 }
 
 #[allow(clippy::too_many_arguments)]
