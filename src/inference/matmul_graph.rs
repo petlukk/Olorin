@@ -249,6 +249,44 @@ pub fn q4k_matvec_8x8_ws(
     }
 }
 
+/// Q5K 8×8 repacked matvec: work-stealing, one 8-row tile per chunk.
+/// Mirrors q4k_matvec_8x8_ws but for block_q5_Kx8 tiles (1408 B/sb).
+#[cfg(target_arch = "aarch64")]
+pub fn q5k_matvec_8x8_ws(
+    packed: *const u8,
+    q8: *const i8, q8_d: *const f32, bsums: *const i16,
+    output: *mut f32,
+    n_rows: usize, n_cols: usize,
+    current_chunk: &AtomicI32, ith: usize, nth: usize,
+) {
+    debug_assert!(n_rows % 8 == 0, "q5k_matvec_8x8_ws: n_rows must be multiple of 8");
+    debug_assert!(n_cols % Q5K_BLOCK_SIZE == 0, "q5k_matvec_8x8_ws: n_cols must be multiple of 256");
+    let _ = nth;
+
+    let n_blocks = n_cols / Q5K_BLOCK_SIZE;
+    let tile_bytes = n_blocks * 1408;
+    let n_tiles = n_rows / 8;
+    let pow2 = pow2_table();
+    let mut scratch = [0u8; 256];
+
+    let mut chunk = ith as i32;
+    while (chunk as usize) < n_tiles {
+        let tile = chunk as usize;
+        unsafe {
+            ffi_inference::q5k_8x8_q8k_matvec(
+                packed.add(tile * tile_bytes),
+                q8, q8_d, bsums,
+                pow2.as_ptr(),
+                scratch.as_mut_ptr(),
+                output.add(tile * 8),
+                8i32,
+                n_cols as i32,
+            );
+        }
+        chunk = current_chunk.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 /// Q4K 8×8 repacked fused dual matvec (gate + up): work-stealing.
 /// Same requirements as q4k_matvec_8x8_ws, applied to both weight matrices.
 pub fn q4k_matvec_dual_8x8_ws(

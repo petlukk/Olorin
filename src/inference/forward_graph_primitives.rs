@@ -50,16 +50,19 @@ pub(super) fn matvec_step(
     nth: usize,
 ) {
     if let Some(p) = repacked {
-        // Q5K-layout repacked buffer (1408 B/sb) is populated for prefill GEMM
-        // only. Decode at N=1 is bandwidth-bound on Pi 5 (verified 2026-04-24),
-        // so there's no benefit to a tile matvec — fall through to matvec_ws.
-        if dtype != crate::inference::matmul::GGML_TYPE_Q5_K {
-            matmul_graph::q4k_matvec_8x8_ws(
+        #[cfg(target_arch = "aarch64")]
+        if dtype == crate::inference::matmul::GGML_TYPE_Q5_K {
+            matmul_graph::q5k_matvec_8x8_ws(
                 p.as_ptr(), q8, q8_d, bsums, output,
                 n_rows, n_cols, current_chunk, ith, nth,
             );
             return;
         }
+        matmul_graph::q4k_matvec_8x8_ws(
+            p.as_ptr(), q8, q8_d, bsums, output,
+            n_rows, n_cols, current_chunk, ith, nth,
+        );
+        return;
     }
     if let (Some(p), Some(d)) = (q6k_repacked, q6k_d_arr) {
         matmul_graph::q6k_repacked_batch_ws_pre_d(
