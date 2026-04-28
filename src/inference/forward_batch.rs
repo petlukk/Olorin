@@ -56,7 +56,7 @@ pub(crate) fn forward_batch_inner(
 
     for t in t_start..t_end {
         let slot = &mut state.batch_x[t * hd..(t + 1) * hd];
-        dequant::q6k_embed_lookup(model.embed_weight, tokens[t] as usize, slot, hd);
+        dequant::embed_lookup(model.embed_weight, model.embed_dtype, tokens[t] as usize, slot, hd);
         ffi_inference::vec_scale_f32(
             slot.as_ptr(), slot.as_mut_ptr(), embed_scale, hd as i32,
         );

@@ -36,6 +36,12 @@ pub struct GgufFile {
     pub metadata: HashMap<String, MetaValue>,
     pub tensors: Vec<TensorInfo>,
     pub tensor_map: HashMap<String, usize>,
+    /// Tensor names in the order they appear in the tensor-info table.
+    /// `tensor_names[i]` corresponds to `tensors[i]`.
+    pub tensor_names: Vec<String>,
+    /// Byte offset where the tensor-info section starts (== end of metadata).
+    /// Lets requant tools byte-copy the metadata range without re-serializing.
+    pub meta_end: u64,
     pub data_offset: u64,
     mmap: MmapBuf,
 }
@@ -310,8 +316,11 @@ impl GgufFile {
             pos = p;
         }
 
+        let meta_end = pos as u64;
+
         let mut tensors = Vec::with_capacity(n_tensors as usize);
         let mut tensor_map = HashMap::new();
+        let mut tensor_names = Vec::with_capacity(n_tensors as usize);
         for i in 0..n_tensors as usize {
             let (name, p) = read_string(&raw, pos)?;
             let (n_dims, p) = read_u32(&raw, p)?;
@@ -324,14 +333,25 @@ impl GgufFile {
             }
             let (dtype, p) = read_u32(&raw, p)?;
             let (offset, p) = read_u64(&raw, p)?;
-            tensor_map.insert(name, i);
+            tensor_map.insert(name.clone(), i);
+            tensor_names.push(name);
             tensors.push(TensorInfo { dims, dtype, offset });
             pos = p;
         }
 
         let data_offset = align_up(pos as u64, ALIGNMENT);
 
-        Ok(GgufFile { version, metadata, tensors, tensor_map, data_offset, mmap })
+        Ok(GgufFile {
+            version, metadata, tensors, tensor_map, tensor_names,
+            meta_end, data_offset, mmap,
+        })
+    }
+
+    /// Raw mmap bytes of the underlying file. Useful for byte-range copies
+    /// when rewriting a GGUF (e.g. requant tools) — the metadata section
+    /// `[24..meta_end]` is preserved verbatim.
+    pub fn raw(&self) -> &[u8] {
+        self.mmap.as_slice()
     }
 
     pub fn tensor_data(&self, name: &str) -> Option<&[u8]> {

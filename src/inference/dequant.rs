@@ -2,7 +2,23 @@
 //!
 //! Separate from matmul.rs to keep files under 500 lines.
 
-use super::matmul::{Q6K_BLOCK_SIZE, Q6K_BLOCK_BYTES, f16_to_f32_scalar};
+use super::matmul::{
+    GGML_TYPE_Q4_K, GGML_TYPE_Q6_K,
+    Q4K_BLOCK_SIZE, Q4K_BLOCK_BYTES,
+    Q6K_BLOCK_SIZE, Q6K_BLOCK_BYTES,
+    f16_to_f32_scalar,
+};
+
+/// Dispatch a single-row embedding dequantization by dtype.
+/// Q6K and Q4K are the dtypes used for `token_embd.weight` across the
+/// supported model variants (Q4_K_M baseline = Q6K; Q4K-embed variant = Q4K).
+pub fn embed_lookup(weight: *const u8, dtype: u32, token_id: usize, output: &mut [f32], hidden_dim: usize) {
+    match dtype {
+        GGML_TYPE_Q6_K => q6k_embed_lookup(weight, token_id, output, hidden_dim),
+        GGML_TYPE_Q4_K => q4k_embed_lookup(weight, token_id, output, hidden_dim),
+        other => panic!("embed_lookup: unsupported dtype {other} for token_embd"),
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Q6K embedding dequantization
@@ -134,4 +150,73 @@ pub fn q6k_dequant_row(
     row_dim: usize,
 ) {
     q6k_embed_lookup(weight, row_id, output, row_dim)
+}
+
+// ---------------------------------------------------------------------------
+// Q4K embedding dequantization
+// ---------------------------------------------------------------------------
+
+/// Dequantize a single row from a Q4K embedding table to f32.
+///
+/// Q4K block layout (144 bytes per 256 elements):
+///   d(f16)@0  dmin(f16)@2  scales[12]@4  qs[128]@16
+///
+/// Each element is 4-bit. The 256-element block is split into 8 sub-blocks
+/// of 32 elements; each sub-block has its own 6-bit scale and 6-bit min,
+/// packed across `scales[12]`. Element value = d*sc[j] * q4 - dmin*m[j].
+pub fn q4k_embed_lookup(
+    weight: *const u8,
+    token_id: usize,
+    output: &mut [f32],
+    hidden_dim: usize,
+) {
+    debug_assert!(hidden_dim % Q4K_BLOCK_SIZE == 0);
+    let n_blocks = hidden_dim / Q4K_BLOCK_SIZE;
+    let row_bytes = n_blocks * Q4K_BLOCK_BYTES;
+    let row_base = unsafe { weight.add(token_id * row_bytes) };
+
+    for blk in 0..n_blocks {
+        let block = unsafe { row_base.add(blk * Q4K_BLOCK_BYTES) };
+        let out_base = blk * Q4K_BLOCK_SIZE;
+
+        let d_raw = unsafe { u16::from_le_bytes([*block.add(0), *block.add(1)]) };
+        let dmin_raw = unsafe { u16::from_le_bytes([*block.add(2), *block.add(3)]) };
+        let d = f16_to_f32_scalar(d_raw);
+        let dmin = f16_to_f32_scalar(dmin_raw);
+
+        // Read sub-block scale/min pairs once and dequantize 32 elements at a time.
+        // Pairs (0,1), (2,3), (4,5), (6,7) share 32 bytes of qs each.
+        for pair in 0..4usize {
+            let j_lo = pair * 2;
+            let j_hi = pair * 2 + 1;
+            let (sc_lo, m_lo) = q4k_get_scale_min(j_lo, block);
+            let (sc_hi, m_hi) = q4k_get_scale_min(j_hi, block);
+            let d1 = d * sc_lo as f32;
+            let d2 = d * sc_hi as f32;
+            let mn1 = dmin * m_lo as f32;
+            let mn2 = dmin * m_hi as f32;
+
+            let qs = unsafe { block.add(16 + pair * 32) };
+            let elem = out_base + pair * 64;
+            for l in 0..32usize {
+                let q = unsafe { *qs.add(l) };
+                output[elem + l]      = d1 * (q & 0x0F) as f32 - mn1;
+                output[elem + 32 + l] = d2 * (q >> 4)   as f32 - mn2;
+            }
+        }
+    }
+}
+
+/// Read sub-block 6-bit scale and min from `scales[12]` packed at block+4.
+/// Mirrors llama.cpp `get_scale_min_k4`.
+#[inline]
+fn q4k_get_scale_min(j: usize, block: *const u8) -> (u8, u8) {
+    let s = |i: usize| unsafe { *block.add(4 + i) };
+    if j < 4 {
+        (s(j) & 63, s(j + 4) & 63)
+    } else {
+        let d = (s(j + 4) & 0x0F) | ((s(j - 4) >> 6) << 4);
+        let m = (s(j + 4) >> 4)   | ((s(j) >> 6) << 4);
+        (d, m)
+    }
 }

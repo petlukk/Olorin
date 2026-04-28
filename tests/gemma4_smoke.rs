@@ -9,9 +9,12 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 #[test]
 fn smoke_hi_greedy() {
-    let home = std::env::var("HOME").unwrap();
-    let path: std::path::PathBuf =
-        Path::new(&home).join(".olorin/models/gemma-4-e2b-it-Q4_K_M.gguf");
+    let path: std::path::PathBuf = if let Ok(p) = std::env::var("OLORIN_MODEL_PATH") {
+        std::path::PathBuf::from(p)
+    } else {
+        let home = std::env::var("HOME").unwrap();
+        Path::new(&home).join(".olorin/models/gemma-4-e2b-it-Q4_K_M.gguf")
+    };
     if !path.exists() {
         eprintln!("SKIP: no model");
         return;

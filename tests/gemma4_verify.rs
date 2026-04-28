@@ -101,8 +101,8 @@ fn step1_embedding() {
     let hd = model.hidden_dim;
     let mut embed = vec![0.0f32; hd];
 
-    olorin::inference::dequant::q6k_embed_lookup(
-        model.embed_weight, token_id, &mut embed, hd,
+    olorin::inference::dequant::embed_lookup(
+        model.embed_weight, model.embed_dtype, token_id, &mut embed, hd,
     );
 
     let raw_l2 = l2(&embed);
@@ -151,7 +151,7 @@ fn step2_rmsnorm() {
 
     let hd = model.hidden_dim;
     let mut embed = vec![0.0f32; hd];
-    olorin::inference::dequant::q6k_embed_lookup(model.embed_weight, 2, &mut embed, hd);
+    olorin::inference::dequant::embed_lookup(model.embed_weight, model.embed_dtype, 2, &mut embed, hd);
     let scale = (hd as f32).sqrt();
     for v in embed.iter_mut() { *v *= scale; }
 
@@ -193,7 +193,7 @@ fn step3_qkv_projection() {
 
     // ── Embed BOS (token 2) + scale ─────────────────────────────
     let mut x = vec![0.0f32; hd];
-    olorin::inference::dequant::q6k_embed_lookup(model.embed_weight, 2, &mut x, hd);
+    olorin::inference::dequant::embed_lookup(model.embed_weight, model.embed_dtype, 2, &mut x, hd);
     let scale = (hd as f32).sqrt();
     for v in x.iter_mut() { *v *= scale; }
 
@@ -485,7 +485,7 @@ fn step4_ple() {
     let mut state = olorin::inference::forward::Gemma4State::new(&model, 512, &graph_pool);
 
     // Embed BOS token + scale
-    olorin::inference::dequant::q6k_embed_lookup(model.embed_weight, 2, &mut state.x, hd);
+    olorin::inference::dequant::embed_lookup(model.embed_weight, model.embed_dtype, 2, &mut state.x, hd);
     let scale = (hd as f32).sqrt();
     for v in state.x[..hd].iter_mut() { *v *= scale; }
 
@@ -699,7 +699,7 @@ fn step8_q8k_quant_real_embedding() {
 
     // Get scaled BOS embedding (same as forward_one does)
     let mut embed = vec![0.0f32; hd];
-    olorin::inference::dequant::q6k_embed_lookup(model.embed_weight, 2, &mut embed, hd);
+    olorin::inference::dequant::embed_lookup(model.embed_weight, model.embed_dtype, 2, &mut embed, hd);
     let scale = (hd as f32).sqrt();
     for v in embed.iter_mut() { *v *= scale; }
 
@@ -896,7 +896,7 @@ fn step9_q4k_dot_vs_llama_ref() {
 
     // Get scaled BOS embedding
     let mut embed = vec![0.0f32; hd];
-    olorin::inference::dequant::q6k_embed_lookup(model.embed_weight, 2, &mut embed, hd);
+    olorin::inference::dequant::embed_lookup(model.embed_weight, model.embed_dtype, 2, &mut embed, hd);
     let scale = (hd as f32).sqrt();
     for v in embed.iter_mut() { *v *= scale; }
 
@@ -1086,7 +1086,7 @@ fn step10_q5k_dot_vs_llama_ref() {
 
     // BOS embedding → RMSNorm → Q8K
     let mut embed = vec![0.0f32; hd];
-    olorin::inference::dequant::q6k_embed_lookup(model.embed_weight, 2, &mut embed, hd);
+    olorin::inference::dequant::embed_lookup(model.embed_weight, model.embed_dtype, 2, &mut embed, hd);
     let scale = (hd as f32).sqrt();
     for v in embed.iter_mut() { *v *= scale; }
 
@@ -1218,7 +1218,7 @@ fn step11_q6k_dot_vs_llama_ref() {
 
     // BOS embedding → RMSNorm → Q8K
     let mut embed = vec![0.0f32; hd];
-    olorin::inference::dequant::q6k_embed_lookup(model.embed_weight, 2, &mut embed, hd);
+    olorin::inference::dequant::embed_lookup(model.embed_weight, model.embed_dtype, 2, &mut embed, hd);
     let scale = (hd as f32).sqrt();
     for v in embed.iter_mut() { *v *= scale; }
 
@@ -1311,7 +1311,7 @@ fn step12_rmsnorm_vs_llama_ref() {
 
     // BOS embedding (scaled)
     let mut embed = vec![0.0f32; hd];
-    olorin::inference::dequant::q6k_embed_lookup(model.embed_weight, 2, &mut embed, hd);
+    olorin::inference::dequant::embed_lookup(model.embed_weight, model.embed_dtype, 2, &mut embed, hd);
     let scale = (hd as f32).sqrt();
     for v in embed.iter_mut() { *v *= scale; }
 
@@ -1408,7 +1408,7 @@ fn step13_rope_vs_llama_ref() {
 
     // 2. Compare full RoPE application on Q projection
     let mut embed = vec![0.0f32; hd];
-    olorin::inference::dequant::q6k_embed_lookup(model.embed_weight, 2, &mut embed, hd);
+    olorin::inference::dequant::embed_lookup(model.embed_weight, model.embed_dtype, 2, &mut embed, hd);
     let scale = (hd as f32).sqrt();
     for v in embed.iter_mut() { *v *= scale; }
 

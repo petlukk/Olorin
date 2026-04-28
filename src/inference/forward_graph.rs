@@ -32,7 +32,7 @@ pub(crate) fn forward_one_inner(
 
     // ── Pre-loop: embed + scale + PLE (thread 0 only) ────────────
     if ith == 0 {
-        dequant::q6k_embed_lookup(model.embed_weight, token_id as usize, &mut state.x, hd);
+        dequant::embed_lookup(model.embed_weight, model.embed_dtype, token_id as usize, &mut state.x, hd);
         let embed_scale = (hd as f32).sqrt();
         ffi_inference::vec_scale_f32(
             state.x.as_ptr(), state.x.as_mut_ptr(), embed_scale, hd as i32,
