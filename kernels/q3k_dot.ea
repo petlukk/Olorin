@@ -1,0 +1,218 @@
+// q3k_dot.ea — Q3_K × Q8_K dot product (x86 SSSE3, host-test path)
+//
+// Q3_K block layout (110 bytes / 256 elements, scale-only — no min):
+//   bp +   0..31   hmask[32]
+//   bp +  32..95   qs[64]
+//   bp +  96..107  scales[12]   16 sub-blocks × 6-bit scale
+//   bp + 108..109  d (f16)
+//
+// Algorithm (per sub-block of 16 elements):
+//   q3_unsigned ∈ [0..7]: u8x16     (low 2 bits from qs OR (hmask bit << 2))
+//   pairs   = maddubs_i16(q3_unsigned, q8_chunk)             // u8*i8, pair-summed → i16x8
+//   scaled  = madd_i16(splat(scale_i16), pairs)              // i16*i16, pair-summed → i32x4
+//   sub_dot_unsigned = reduce_add(scaled) = scale·Σq3_unsigned·q8
+//
+// Signed correction (q3_signed = q3_unsigned - 4):
+//   Σ scale·q3_signed·q8 = sub_dot_unsigned - 4·scale·bsum[s]
+//   (bsum[s] = Σ_{l in sub-block s} q8[l], stored in block_q8_K::bsums)
+//
+// Per block: isum = Σ_s (sub_dot_unsigned[s] - 4·scale[s]·bsum[s])
+//            result += d * isum
+//
+// f16→f32 d via pow2 table (same pattern as q4k_dot.ea f16_load).
+
+#[cfg(x86_64)]
+
+func ubyte(p: *restrict u8, off: i32) -> i32 {
+    return to_i32(p[off]) & 255
+}
+
+// Q3_K's d can be negative (quantizer sets d = max_abs / -32 in ggml-quants.c).
+// The original q4k_dot.ea f16_load ignores the sign bit because Q4K d/dmin are
+// always positive in practice — that pattern is unsafe for Q3_K, so we extract
+// sign explicitly here. sign_mult is +1.0 for sign_bit=0, -1.0 for sign_bit=1.
+func f16_d(p: *restrict u8, off: i32, pow2: *restrict f32) -> f32 {
+    let raw: i32 = ubyte(p, off) | (ubyte(p, off + 1) << 8)
+    let sign_bit: i32 = (raw >> 15) & 1
+    let sign_mult: f32 = to_f32(1 - 2 * sign_bit)
+    let exp: i32 = (raw >> 10) & 31
+    if exp == 0 {
+        return sign_mult * pow2[1] * to_f32(raw & 1023) * 0.0009765625
+    } else {
+        return sign_mult * pow2[exp] * (1.0 + to_f32(raw & 1023) * 0.0009765625)
+    }
+}
+
+// scale·Σq3_unsigned·q8 over one 16-element sub-block.
+func sub_dot_uns(
+    q3_unsigned: u8x16, q8: *restrict i8, q8_off: i32, scale_v: i16x8
+) -> i32 {
+    let q8_chunk: i8x16 = load(q8, q8_off)
+    let pairs:  i16x8 = maddubs_i16(q3_unsigned, q8_chunk)
+    let scaled: i32x4 = madd_i16(scale_v, pairs)
+    return reduce_add(scaled)
+}
+
+// Process one Q3_K block (256 elements, 16 sub-blocks of 16).
+func dot_block(
+    q3: *restrict u8, bp: i32,
+    q8: *restrict i8, q8_off: i32,
+    bsums: *restrict i16, bs_off: i32,
+    mask3: u8x16, mask1: u8x16
+) -> i32 {
+    // ----- Unpack 12 packed scale bytes → 16 signed scales [-32..31] -----
+    // Byte-assemble u32s rather than aligned i32 reads. Q3_K's 110-byte block
+    // stride is not divisible by 4, so `p32[(bp+N)/4]` would silently truncate
+    // for any block where bp%4 != 0 (e.g. bp=110 → reads bytes 204..207 instead
+    // of the intended 206..209). This is the same shape as q4k_dot.ea's i32 read
+    // pattern but Q4K's 144-byte stride hides the issue there.
+    let a0: i32 = ubyte(q3, bp +  96) | (ubyte(q3, bp +  97) << 8)
+                | (ubyte(q3, bp +  98) << 16) | (ubyte(q3, bp +  99) << 24)
+    let a1: i32 = ubyte(q3, bp + 100) | (ubyte(q3, bp + 101) << 8)
+                | (ubyte(q3, bp + 102) << 16) | (ubyte(q3, bp + 103) << 24)
+    let a2: i32 = ubyte(q3, bp + 104) | (ubyte(q3, bp + 105) << 8)
+                | (ubyte(q3, bp + 106) << 16) | (ubyte(q3, bp + 107) << 24)
+    let kmask1: i32 = 0x03030303
+    let kmask2: i32 = 0x0f0f0f0f
+    let u0: i32 =  (a0       & kmask2) | (((a2 >> 0) & kmask1) << 4)
+    let u1: i32 =  (a1       & kmask2) | (((a2 >> 2) & kmask1) << 4)
+    let u2: i32 = ((a0 >> 4) & kmask2) | (((a2 >> 4) & kmask1) << 4)
+    let u3: i32 = ((a1 >> 4) & kmask2) | (((a2 >> 6) & kmask1) << 4)
+    let s0:  i32 = ( u0        & 255) - 32
+    let s1:  i32 = ((u0 >>  8) & 255) - 32
+    let s2:  i32 = ((u0 >> 16) & 255) - 32
+    let s3:  i32 = ((u0 >> 24) & 255) - 32
+    let s4:  i32 = ( u1        & 255) - 32
+    let s5:  i32 = ((u1 >>  8) & 255) - 32
+    let s6:  i32 = ((u1 >> 16) & 255) - 32
+    let s7:  i32 = ((u1 >> 24) & 255) - 32
+    let s8:  i32 = ( u2        & 255) - 32
+    let s9:  i32 = ((u2 >>  8) & 255) - 32
+    let s10: i32 = ((u2 >> 16) & 255) - 32
+    let s11: i32 = ((u2 >> 24) & 255) - 32
+    let s12: i32 = ( u3        & 255) - 32
+    let s13: i32 = ((u3 >>  8) & 255) - 32
+    let s14: i32 = ((u3 >> 16) & 255) - 32
+    let s15: i32 = ((u3 >> 24) & 255) - 32
+
+    // ----- Load hmask (32 bytes; bit b of hm[ll] is high bit for sub-block-position b) -----
+    let qh_a: u8x16 = load(q3, bp +  0)   // hmask for element-positions 0..15  in each sub-block
+    let qh_b: u8x16 = load(q3, bp + 16)   // hmask for element-positions 16..31 in each sub-block
+
+    // ===== Half j=0: elements 0..127, qs[0..31], hmask bits 0..3 =====
+    let qa0: u8x16 = load(q3, bp + 32)
+    let qb0: u8x16 = load(q3, bp + 48)
+
+    // sub-block scale broadcasts (i16x8 each)
+    let sv0:  i16x8 = splat(to_i16(s0))
+    let sv1:  i16x8 = splat(to_i16(s1))
+    let sv2:  i16x8 = splat(to_i16(s2))
+    let sv3:  i16x8 = splat(to_i16(s3))
+    let sv4:  i16x8 = splat(to_i16(s4))
+    let sv5:  i16x8 = splat(to_i16(s5))
+    let sv6:  i16x8 = splat(to_i16(s6))
+    let sv7:  i16x8 = splat(to_i16(s7))
+    let sv8:  i16x8 = splat(to_i16(s8))
+    let sv9:  i16x8 = splat(to_i16(s9))
+    let sv10: i16x8 = splat(to_i16(s10))
+    let sv11: i16x8 = splat(to_i16(s11))
+    let sv12: i16x8 = splat(to_i16(s12))
+    let sv13: i16x8 = splat(to_i16(s13))
+    let sv14: i16x8 = splat(to_i16(s14))
+    let sv15: i16x8 = splat(to_i16(s15))
+
+    // sub-blocks 0,1: shift=0, mbit=0
+    let p0a: u8x16 = (qa0 .& mask3) .| ((qh_a .& mask1) .<< splat(2))
+    let p0b: u8x16 = (qb0 .& mask3) .| ((qh_b .& mask1) .<< splat(2))
+    let d0a: i32 = sub_dot_uns(p0a, q8, q8_off +   0, sv0)
+    let d0b: i32 = sub_dot_uns(p0b, q8, q8_off +  16, sv1)
+
+    // sub-blocks 2,3: shift=2, mbit=1
+    let p1a: u8x16 = ((qa0 .>> splat(2)) .& mask3) .| (((qh_a .>> splat(1)) .& mask1) .<< splat(2))
+    let p1b: u8x16 = ((qb0 .>> splat(2)) .& mask3) .| (((qh_b .>> splat(1)) .& mask1) .<< splat(2))
+    let d1a: i32 = sub_dot_uns(p1a, q8, q8_off +  32, sv2)
+    let d1b: i32 = sub_dot_uns(p1b, q8, q8_off +  48, sv3)
+
+    // sub-blocks 4,5: shift=4, mbit=2
+    let p2a: u8x16 = ((qa0 .>> splat(4)) .& mask3) .| (((qh_a .>> splat(2)) .& mask1) .<< splat(2))
+    let p2b: u8x16 = ((qb0 .>> splat(4)) .& mask3) .| (((qh_b .>> splat(2)) .& mask1) .<< splat(2))
+    let d2a: i32 = sub_dot_uns(p2a, q8, q8_off +  64, sv4)
+    let d2b: i32 = sub_dot_uns(p2b, q8, q8_off +  80, sv5)
+
+    // sub-blocks 6,7: shift=6, mbit=3
+    let p3a: u8x16 = ((qa0 .>> splat(6)) .& mask3) .| (((qh_a .>> splat(3)) .& mask1) .<< splat(2))
+    let p3b: u8x16 = ((qb0 .>> splat(6)) .& mask3) .| (((qh_b .>> splat(3)) .& mask1) .<< splat(2))
+    let d3a: i32 = sub_dot_uns(p3a, q8, q8_off +  96, sv6)
+    let d3b: i32 = sub_dot_uns(p3b, q8, q8_off + 112, sv7)
+
+    // ===== Half j=1: elements 128..255, qs[32..63], hmask bits 4..7 =====
+    let qa1: u8x16 = load(q3, bp + 64)
+    let qb1: u8x16 = load(q3, bp + 80)
+
+    // sub-blocks 8,9: shift=0, mbit=4
+    let p4a: u8x16 = (qa1 .& mask3) .| (((qh_a .>> splat(4)) .& mask1) .<< splat(2))
+    let p4b: u8x16 = (qb1 .& mask3) .| (((qh_b .>> splat(4)) .& mask1) .<< splat(2))
+    let d4a: i32 = sub_dot_uns(p4a, q8, q8_off + 128, sv8)
+    let d4b: i32 = sub_dot_uns(p4b, q8, q8_off + 144, sv9)
+
+    // sub-blocks 10,11: shift=2, mbit=5
+    let p5a: u8x16 = ((qa1 .>> splat(2)) .& mask3) .| (((qh_a .>> splat(5)) .& mask1) .<< splat(2))
+    let p5b: u8x16 = ((qb1 .>> splat(2)) .& mask3) .| (((qh_b .>> splat(5)) .& mask1) .<< splat(2))
+    let d5a: i32 = sub_dot_uns(p5a, q8, q8_off + 160, sv10)
+    let d5b: i32 = sub_dot_uns(p5b, q8, q8_off + 176, sv11)
+
+    // sub-blocks 12,13: shift=4, mbit=6
+    let p6a: u8x16 = ((qa1 .>> splat(4)) .& mask3) .| (((qh_a .>> splat(6)) .& mask1) .<< splat(2))
+    let p6b: u8x16 = ((qb1 .>> splat(4)) .& mask3) .| (((qh_b .>> splat(6)) .& mask1) .<< splat(2))
+    let d6a: i32 = sub_dot_uns(p6a, q8, q8_off + 192, sv12)
+    let d6b: i32 = sub_dot_uns(p6b, q8, q8_off + 208, sv13)
+
+    // sub-blocks 14,15: shift=6, mbit=7
+    let p7a: u8x16 = ((qa1 .>> splat(6)) .& mask3) .| (((qh_a .>> splat(7)) .& mask1) .<< splat(2))
+    let p7b: u8x16 = ((qb1 .>> splat(6)) .& mask3) .| (((qh_b .>> splat(7)) .& mask1) .<< splat(2))
+    let d7a: i32 = sub_dot_uns(p7a, q8, q8_off + 224, sv14)
+    let d7b: i32 = sub_dot_uns(p7b, q8, q8_off + 240, sv15)
+
+    // ----- Sum unsigned scaled dots; subtract 4·Σ scale[s]·bsum[s] correction -----
+    let sum_uns: i32 = d0a + d0b + d1a + d1b + d2a + d2b + d3a + d3b
+                     + d4a + d4b + d5a + d5b + d6a + d6b + d7a + d7b
+
+    let correction: i32 =
+          s0  * to_i32(bsums[bs_off +  0]) + s1  * to_i32(bsums[bs_off +  1])
+        + s2  * to_i32(bsums[bs_off +  2]) + s3  * to_i32(bsums[bs_off +  3])
+        + s4  * to_i32(bsums[bs_off +  4]) + s5  * to_i32(bsums[bs_off +  5])
+        + s6  * to_i32(bsums[bs_off +  6]) + s7  * to_i32(bsums[bs_off +  7])
+        + s8  * to_i32(bsums[bs_off +  8]) + s9  * to_i32(bsums[bs_off +  9])
+        + s10 * to_i32(bsums[bs_off + 10]) + s11 * to_i32(bsums[bs_off + 11])
+        + s12 * to_i32(bsums[bs_off + 12]) + s13 * to_i32(bsums[bs_off + 13])
+        + s14 * to_i32(bsums[bs_off + 14]) + s15 * to_i32(bsums[bs_off + 15])
+
+    return sum_uns - 4 * correction
+}
+
+// Single-row Q3_K × Q8_K dot product.
+//
+// ABI matches q4k_dot_q8k. Q3_K consumes bsums (for the symmetric correction).
+// pow2 is required for f16 d unpack.
+export func q3k_dot_q8k(
+    q3: *restrict u8,
+    q8: *restrict i8,
+    bsums: *restrict i16,
+    n_blocks: i32,
+    q8_d: *restrict f32,
+    pow2: *restrict f32
+) -> f32 {
+    let mask3: u8x16 = splat(3)
+    let mask1: u8x16 = splat(1)
+    let mut result: f32 = 0.0
+
+    let mut blk: i32 = 0
+    while blk < n_blocks {
+        let bp: i32 = blk * 110
+        let sumi: i32 = dot_block(q3, bp, q8, blk * 256, bsums, blk * 16, mask3, mask1)
+        let d: f32 = f16_d(q3, bp + 108, pow2) * q8_d[blk]
+        result = result + d * to_f32(sumi)
+        blk = blk + 1
+    }
+    return result
+}
