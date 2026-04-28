@@ -12,6 +12,7 @@ pub struct KernelTableInference {
     pub q4k_dot_q8k_4row:      Q4kDot4RowFn,
     pub q4k_dot_q8k_4row_dual: Q4kDot4RowDualFn,
     pub q3k_dot_q8k:           Q3kDotQ8kFn,
+    pub q3k_dot_q8k_4row:      Q3kDot4RowFn,
     pub q5k_dot_q8k:           Q5kDotQ8kFn,
     pub q5k_dot_q8k_4row:      Q5kDot4RowFn,
     pub q6k_dot_q8k:           Q6kDotQ8kFn,
@@ -147,6 +148,7 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
             q4k_dot_q8k_4row:      std::mem::transmute(sym(&q4kd, b"q4k_dot_q8k_4row\0")?),
             q4k_dot_q8k_4row_dual: std::mem::transmute(sym(&q4kd, b"q4k_dot_q8k_4row_dual\0")?),
             q3k_dot_q8k:           std::mem::transmute(sym(&q3kd, b"q3k_dot_q8k\0")?),
+            q3k_dot_q8k_4row:      std::mem::transmute(sym(&q3kd, b"q3k_dot_q8k_4row\0")?),
             q5k_dot_q8k:           std::mem::transmute(sym(&q5kd, b"q5k_dot_q8k\0")?),
             q5k_dot_q8k_4row:      std::mem::transmute(sym(&q5kd, b"q5k_dot_q8k_4row\0")?),
             q6k_dot_q8k:               std::mem::transmute(sym(&q6kd, b"q6k_dot_q8k\0")?),
@@ -243,6 +245,15 @@ pub unsafe fn q3k_dot_q8k(
     n_blocks: i32, q8_d: *const f32, pow2: *const f32,
 ) -> f32 {
     (k().q3k_dot_q8k)(q3, q8, bsums, n_blocks, q8_d, pow2)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn q3k_dot_q8k_4row(
+    rw0: *const u8, rw1: *const u8, rw2: *const u8, rw3: *const u8,
+    q8: *const i8, bsums: *const i16,
+    scores: *mut f32, n_blocks: i32, q8_d: *const f32, pow2: *const f32,
+) {
+    (k().q3k_dot_q8k_4row)(rw0, rw1, rw2, rw3, q8, bsums, scores, n_blocks, q8_d, pow2)
 }
 
 pub unsafe fn q5k_dot_q8k(

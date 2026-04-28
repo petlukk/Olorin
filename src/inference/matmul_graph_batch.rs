@@ -428,7 +428,8 @@ pub fn matvec_batch_ws(
 
             match dtype {
                 GGML_TYPE_Q3_K => {
-                    // No 4-row Q3K kernel — call 1-row in a tight loop.
+                    // 1-row kernel called 4× per chunk. The naive 4-row wrapper
+                    // regressed decode in benching — see q3k_matvec doc.
                     let row_bytes = n_blocks * Q3K_BLOCK_BYTES;
                     unsafe {
                         for r in 0..4 {

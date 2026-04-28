@@ -106,10 +106,10 @@ pub fn q4k_matvec_dual_ws(
     }
 }
 
-/// Q3K matvec: work-stealing variant. No 4-row Q3K kernel exists yet, so the
-/// inner loop calls q3k_dot_q8k once per row. Chunk size is 4 rows (atomic
-/// granularity matches Q4K/Q5K/Q6K) — the 4-row 1-row-call sequence keeps
-/// fetch_add contention low even though each row is its own FFI call.
+/// Q3K matvec: work-stealing variant. Single-row kernel inside 4-row chunk
+/// granularity (atomic contention matches Q4K/Q5K/Q6K). The naive 4-row
+/// wrapper kernel regressed decode in benching — see q3k_matvec doc in
+/// matmul_seq.rs.
 pub fn q3k_matvec_ws(
     weight: *const u8, q8: *const i8, q8_d: *const f32, bsums: *const i16,
     output: *mut f32, n_rows: usize, n_cols: usize,

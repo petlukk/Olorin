@@ -20,9 +20,12 @@ use super::matmul::{
 
 /// Q3K matrix-vector: weight (n_rows × n_cols, Q3K) × input (Q8K) → output (f32).
 ///
-/// Single-row kernel only — no q3k_dot_q8k_4row variant exists yet, so the
-/// hot loop is one row per FFI call. Add a 4-row Ea kernel before optimizing
-/// further if Q3K bucket measurements show row-dispatch overhead dominating.
+/// Single-row kernel only. A naive 4-row wrapper exists in
+/// `kernels/q3k_dot{,_arm}.ea` (`q3k_dot_q8k_4row`) but benchmarking on Pi 5
+/// showed it regresses decode by ~6% with only marginal prefill gain — the
+/// dominant Q3K-ffn-impl prefill cost is inherent kernel bit-extraction
+/// overhead (no native 3-bit dot on Cortex-A76), not FFI dispatch. Revisit
+/// with a properly-fused 4-row inner-loop kernel before re-wiring.
 pub fn q3k_matvec(
     weight: *const u8,
     input_qs: &[i8],

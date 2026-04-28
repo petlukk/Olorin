@@ -188,3 +188,57 @@ export func q3k_dot_q8k(
     }
     return result
 }
+
+// 4-row Q3_K × Q8_K dot product.
+//
+// Mirrors q4k_dot_q8k_4row — same 4-weight-pointer + shared q8 ABI. Each block
+// iteration calls dot_block 4× and computes 4 row scores. The win over calling
+// q3k_dot_q8k 4× from caller-side: amortizes FFI dispatch and constant setup
+// (mask3/mask1/four splats, q8_d index) across all 4 rows. q8 byte loads are
+// candidates for LLVM CSE within the inlined loop body since q8/q8_off are
+// identical across the 4 dot_block calls and the `*restrict` pointers prove
+// non-aliasing.
+export func q3k_dot_q8k_4row(
+    rw0: *restrict i8, rw1: *restrict i8, rw2: *restrict i8, rw3: *restrict i8,
+    q8: *restrict i8,
+    bsums: *restrict i16,
+    out scores: *mut f32,
+    n_blocks: i32,
+    q8_d: *restrict f32,
+    pow2: *restrict f32
+) {
+    let mask3: i8x16 = splat(3)
+    let mask1: i8x16 = splat(1)
+    let four:  i8x16 = splat(4)
+    let mut res0: f32 = 0.0
+    let mut res1: f32 = 0.0
+    let mut res2: f32 = 0.0
+    let mut res3: f32 = 0.0
+
+    let mut blk: i32 = 0
+    while blk < n_blocks {
+        let bp: i32 = blk * 110
+        let q8o: i32 = blk * 256
+        let qd: f32 = q8_d[blk]
+
+        let s0: i32 = dot_block(rw0, bp, q8, q8o, mask3, mask1, four)
+        let s1: i32 = dot_block(rw1, bp, q8, q8o, mask3, mask1, four)
+        let s2: i32 = dot_block(rw2, bp, q8, q8o, mask3, mask1, four)
+        let s3: i32 = dot_block(rw3, bp, q8, q8o, mask3, mask1, four)
+
+        let d0: f32 = f16_d(rw0, bp) * qd
+        let d1: f32 = f16_d(rw1, bp) * qd
+        let d2: f32 = f16_d(rw2, bp) * qd
+        let d3: f32 = f16_d(rw3, bp) * qd
+        res0 = res0 + d0 * to_f32(s0)
+        res1 = res1 + d1 * to_f32(s1)
+        res2 = res2 + d2 * to_f32(s2)
+        res3 = res3 + d3 * to_f32(s3)
+
+        blk = blk + 1
+    }
+    scores[0] = res0
+    scores[1] = res1
+    scores[2] = res2
+    scores[3] = res3
+}

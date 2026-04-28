@@ -216,3 +216,52 @@ export func q3k_dot_q8k(
     }
     return result
 }
+
+// 4-row Q3_K × Q8_K dot product (x86 SSSE3, host-test path).
+//
+// Mirrors q3k_dot_q8k_4row's ARM ABI. Same pattern: amortize FFI dispatch and
+// per-block constant setup across 4 rows that share q8/bsums input.
+export func q3k_dot_q8k_4row(
+    rw0: *restrict u8, rw1: *restrict u8, rw2: *restrict u8, rw3: *restrict u8,
+    q8: *restrict i8,
+    bsums: *restrict i16,
+    out scores: *mut f32,
+    n_blocks: i32,
+    q8_d: *restrict f32,
+    pow2: *restrict f32
+) {
+    let mask3: u8x16 = splat(3)
+    let mask1: u8x16 = splat(1)
+    let mut res0: f32 = 0.0
+    let mut res1: f32 = 0.0
+    let mut res2: f32 = 0.0
+    let mut res3: f32 = 0.0
+
+    let mut blk: i32 = 0
+    while blk < n_blocks {
+        let bp: i32 = blk * 110
+        let q8o: i32 = blk * 256
+        let bso: i32 = blk * 16
+        let qd: f32 = q8_d[blk]
+
+        let s0: i32 = dot_block(rw0, bp, q8, q8o, bsums, bso, mask3, mask1)
+        let s1: i32 = dot_block(rw1, bp, q8, q8o, bsums, bso, mask3, mask1)
+        let s2: i32 = dot_block(rw2, bp, q8, q8o, bsums, bso, mask3, mask1)
+        let s3: i32 = dot_block(rw3, bp, q8, q8o, bsums, bso, mask3, mask1)
+
+        let d0: f32 = f16_d(rw0, bp + 108, pow2) * qd
+        let d1: f32 = f16_d(rw1, bp + 108, pow2) * qd
+        let d2: f32 = f16_d(rw2, bp + 108, pow2) * qd
+        let d3: f32 = f16_d(rw3, bp + 108, pow2) * qd
+        res0 = res0 + d0 * to_f32(s0)
+        res1 = res1 + d1 * to_f32(s1)
+        res2 = res2 + d2 * to_f32(s2)
+        res3 = res3 + d3 * to_f32(s3)
+
+        blk = blk + 1
+    }
+    scores[0] = res0
+    scores[1] = res1
+    scores[2] = res2
+    scores[3] = res3
+}
