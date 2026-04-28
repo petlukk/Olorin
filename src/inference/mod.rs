@@ -7,6 +7,7 @@ pub mod cache;
 pub mod matmul;
 mod matmul_seq;
 mod matmul_graph_batch;
+mod matmul_graph_batch_gemm;
 pub mod repack;
 pub mod dequant;
 pub mod generate;
