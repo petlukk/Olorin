@@ -11,6 +11,7 @@ pub struct KernelTableInference {
     pub q4k_dot_q8k:           Q4kDotQ8kFn,
     pub q4k_dot_q8k_4row:      Q4kDot4RowFn,
     pub q4k_dot_q8k_4row_dual: Q4kDot4RowDualFn,
+    pub q3k_dot_q8k:           Q3kDotQ8kFn,
     pub q5k_dot_q8k:           Q5kDotQ8kFn,
     pub q5k_dot_q8k_4row:      Q5kDot4RowFn,
     pub q6k_dot_q8k:           Q6kDotQ8kFn,
@@ -101,6 +102,7 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
 
     let q4kq = load("q4k_quant")?;
     let q4kd = load_best("q4k_dot")?;
+    let q3kd = load("q3k_dot")?;
     let q5kd = load("q5k_dot")?;
     let q6kd = load("q6k_dot")?;
     let q6k_dot_repacked_lib = load("q6k_dot_repacked")?;
@@ -144,6 +146,7 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
             q4k_dot_q8k:           std::mem::transmute(sym(&q4kd, b"q4k_dot_q8k\0")?),
             q4k_dot_q8k_4row:      std::mem::transmute(sym(&q4kd, b"q4k_dot_q8k_4row\0")?),
             q4k_dot_q8k_4row_dual: std::mem::transmute(sym(&q4kd, b"q4k_dot_q8k_4row_dual\0")?),
+            q3k_dot_q8k:           std::mem::transmute(sym(&q3kd, b"q3k_dot_q8k\0")?),
             q5k_dot_q8k:           std::mem::transmute(sym(&q5kd, b"q5k_dot_q8k\0")?),
             q5k_dot_q8k_4row:      std::mem::transmute(sym(&q5kd, b"q5k_dot_q8k_4row\0")?),
             q6k_dot_q8k:               std::mem::transmute(sym(&q6kd, b"q6k_dot_q8k\0")?),
@@ -182,7 +185,7 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
             attn_fused_batched:      std::mem::transmute(sym(&attn_fused_batched_lib, b"attn_fused_batched\0")?),
             libs: {
                 #[allow(unused_mut)]
-                let mut libs = vec![q4kq, q4kd, q5kd, q6kd, q6k_dot_repacked_lib, f16_conv_lib, softmax_lib, gemma4_rmsnorm_lib, gemma4_gelu_lib, gemma4_rope_lib, bf16_matvec_lib, vec_ops_lib, attn_ops_lib, bare_rmsnorm_lib, softcap_lib, q4k_repack_lib, q5k_repack_lib, q4k_dot_8x8_lib, q4k_dot_8x8_dual_lib, q8k_repack_4_lib, q4k_dot_8x8_gemm_lib, attn_fused_batched_lib];
+                let mut libs = vec![q4kq, q4kd, q3kd, q5kd, q6kd, q6k_dot_repacked_lib, f16_conv_lib, softmax_lib, gemma4_rmsnorm_lib, gemma4_gelu_lib, gemma4_rope_lib, bf16_matvec_lib, vec_ops_lib, attn_ops_lib, bare_rmsnorm_lib, softcap_lib, q4k_repack_lib, q5k_repack_lib, q4k_dot_8x8_lib, q4k_dot_8x8_dual_lib, q8k_repack_4_lib, q4k_dot_8x8_gemm_lib, attn_fused_batched_lib];
                 #[cfg(target_arch = "aarch64")]
                 libs.push(q6k_gemm_lib);
                 #[cfg(target_arch = "aarch64")]
@@ -233,6 +236,13 @@ pub unsafe fn q4k_dot_q8k_4row_dual(
     (k().q4k_dot_q8k_4row_dual)(
         gw0, gw1, gw2, gw3, uw0, uw1, uw2, uw3,
         q8, bsums, gate_scores, up_scores, n_blocks, q8_d, pow2)
+}
+
+pub unsafe fn q3k_dot_q8k(
+    q3: *const u8, q8: *const i8, bsums: *const i16,
+    n_blocks: i32, q8_d: *const f32, pow2: *const f32,
+) -> f32 {
+    (k().q3k_dot_q8k)(q3, q8, bsums, n_blocks, q8_d, pow2)
 }
 
 pub unsafe fn q5k_dot_q8k(

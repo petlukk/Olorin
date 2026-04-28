@@ -15,12 +15,14 @@ use crate::kernels::ffi_inference;
 // Re-exports: q4k_matvec used by tests/repack_q4k.rs; q5k/q6k used by
 // `matvec` below (exercised by tests/gemma4_verify.rs); bf16_matvec used
 // by PLE phase-A decode.
-pub use super::matmul_seq::{q4k_matvec, q5k_matvec, q6k_matvec, bf16_matvec};
+pub use super::matmul_seq::{q3k_matvec, q4k_matvec, q5k_matvec, q6k_matvec, bf16_matvec};
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
+pub const Q3K_BLOCK_SIZE: usize = 256; // elements per Q3K superblock
+pub const Q3K_BLOCK_BYTES: usize = 110; // bytes per Q3K superblock (hmask 32 + qs 64 + scales 12 + d 2)
 pub const Q4K_BLOCK_SIZE: usize = 256; // elements per Q4K superblock
 pub const Q4K_BLOCK_BYTES: usize = 144; // bytes per Q4K superblock
 pub const Q5K_BLOCK_SIZE: usize = 256; // elements per Q5K superblock
@@ -29,6 +31,7 @@ pub const Q6K_BLOCK_SIZE: usize = 256; // elements per Q6K superblock
 pub const Q6K_BLOCK_BYTES: usize = 210; // bytes per Q6K superblock
 
 // GGUF dtype codes
+pub const GGML_TYPE_Q3_K: u32 = 11;
 pub const GGML_TYPE_Q4_K: u32 = 12;
 pub const GGML_TYPE_Q5_K: u32 = 13;
 pub const GGML_TYPE_Q6_K: u32 = 14;
@@ -147,6 +150,7 @@ pub fn matvec(
     n_cols: usize,
 ) {
     match dtype {
+        GGML_TYPE_Q3_K => q3k_matvec(weight, input_qs, input_d, input_bsums, output, n_rows, n_cols),
         GGML_TYPE_Q4_K => q4k_matvec(weight, input_qs, input_d, input_bsums, output, n_rows, n_cols),
         GGML_TYPE_Q5_K => q5k_matvec(weight, input_qs, input_d, input_bsums, output, n_rows, n_cols),
         GGML_TYPE_Q6_K => q6k_matvec(weight, input_qs, input_d, input_bsums, output, d_scratch, n_rows, n_cols),

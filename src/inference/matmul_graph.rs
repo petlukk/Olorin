@@ -106,6 +106,49 @@ pub fn q4k_matvec_dual_ws(
     }
 }
 
+/// Q3K matvec: work-stealing variant. No 4-row Q3K kernel exists yet, so the
+/// inner loop calls q3k_dot_q8k once per row. Chunk size is 4 rows (atomic
+/// granularity matches Q4K/Q5K/Q6K) — the 4-row 1-row-call sequence keeps
+/// fetch_add contention low even though each row is its own FFI call.
+pub fn q3k_matvec_ws(
+    weight: *const u8, q8: *const i8, q8_d: *const f32, bsums: *const i16,
+    output: *mut f32, n_rows: usize, n_cols: usize,
+    current_chunk: &AtomicI32, ith: usize, _nth: usize,
+) {
+    let n_blocks = n_cols / Q3K_BLOCK_SIZE;
+    let row_bytes = n_blocks * Q3K_BLOCK_BYTES;
+    let full_quads = n_rows / 4;
+    let pow2 = pow2_table();
+    let pow2_ptr = pow2.as_ptr();
+
+    let mut chunk = ith as i32;
+    while (chunk as usize) < full_quads {
+        let base_row = (chunk as usize) * 4;
+        unsafe {
+            for r in 0..4 {
+                *output.add(base_row + r) = ffi_inference::q3k_dot_q8k(
+                    weight.add((base_row + r) * row_bytes), q8, bsums,
+                    n_blocks as i32, q8_d, pow2_ptr,
+                );
+            }
+        }
+        chunk = current_chunk.fetch_add(1, Ordering::Relaxed);
+    }
+
+    if ith == 0 {
+        let base = full_quads * 4;
+        for i in 0..(n_rows % 4) {
+            let row = base + i;
+            unsafe {
+                *output.add(row) = ffi_inference::q3k_dot_q8k(
+                    weight.add(row * row_bytes), q8, bsums,
+                    n_blocks as i32, q8_d, pow2_ptr,
+                );
+            }
+        }
+    }
+}
+
 pub fn q5k_matvec_ws(
     weight: *const u8, q8: *const i8, q8_d: *const f32, bsums: *const i16,
     output: *mut f32, n_rows: usize, n_cols: usize,
@@ -337,6 +380,7 @@ pub fn matvec_ws(
     // Reset chunk counter — thread 0 does this, others wait at barrier
     // (caller must barrier after this op)
     match dtype {
+        GGML_TYPE_Q3_K => q3k_matvec_ws(weight, q8, q8_d, bsums, output, n_rows, n_cols, current_chunk, ith, nth),
         GGML_TYPE_Q4_K => q4k_matvec_ws(weight, q8, q8_d, bsums, output, n_rows, n_cols, current_chunk, ith, nth),
         GGML_TYPE_Q5_K => q5k_matvec_ws(weight, q8, q8_d, bsums, output, n_rows, n_cols, current_chunk, ith, nth),
         GGML_TYPE_Q6_K => q6k_matvec_ws(weight, q8, q8_d, bsums, output, d_scratch, n_rows, n_cols, current_chunk, ith, nth),

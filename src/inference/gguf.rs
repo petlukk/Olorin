@@ -244,6 +244,11 @@ fn tensor_byte_size(dims: &[u64], dtype: u32) -> Result<usize> {
         // I2_S: 2 bits per element + 32 bytes trailing per-tensor scale
         return Ok((n_elements as usize) / 4 + 32);
     }
+    if dtype == 11 {
+        // Q3_K: block_q3_K = 32(hmask) + 64(qs) + 12(scales) + 2(d) = 110 bytes per 256 elements
+        let n_blocks = (n_elements as usize + 255) / 256;
+        return Ok(n_blocks * 110);
+    }
     if dtype == 12 {
         // Q4_K: block_q4_K = 2(d) + 2(dmin) + 12(scales) + 128(qs) = 144 bytes per 256 elements
         let n_blocks = (n_elements as usize + 255) / 256;

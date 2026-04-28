@@ -7,11 +7,48 @@
 
 use crate::kernels::ffi_inference;
 use super::matmul::{
+    Q3K_BLOCK_SIZE, Q3K_BLOCK_BYTES,
     Q4K_BLOCK_SIZE, Q4K_BLOCK_BYTES,
     Q5K_BLOCK_SIZE, Q5K_BLOCK_BYTES,
     Q6K_BLOCK_SIZE, Q6K_BLOCK_BYTES,
     pow2_table, f16_to_f32_scalar,
 };
+
+// ---------------------------------------------------------------------------
+// Q3K matrix-vector multiply
+// ---------------------------------------------------------------------------
+
+/// Q3K matrix-vector: weight (n_rows × n_cols, Q3K) × input (Q8K) → output (f32).
+///
+/// Single-row kernel only — no q3k_dot_q8k_4row variant exists yet, so the
+/// hot loop is one row per FFI call. Add a 4-row Ea kernel before optimizing
+/// further if Q3K bucket measurements show row-dispatch overhead dominating.
+pub fn q3k_matvec(
+    weight: *const u8,
+    input_qs: &[i8],
+    input_d: &[f32],
+    input_bsums: &[i16],
+    output: &mut [f32],
+    n_rows: usize,
+    n_cols: usize,
+) {
+    debug_assert!(n_cols % Q3K_BLOCK_SIZE == 0);
+    let n_blocks = n_cols / Q3K_BLOCK_SIZE;
+    let row_bytes = n_blocks * Q3K_BLOCK_BYTES;
+    let pow2 = pow2_table();
+    let q8 = input_qs.as_ptr();
+    let bsums = input_bsums.as_ptr();
+    let q8_d = input_d.as_ptr();
+    let pow2_ptr = pow2.as_ptr();
+    unsafe {
+        for row in 0..n_rows {
+            output[row] = ffi_inference::q3k_dot_q8k(
+                weight.add(row * row_bytes), q8, bsums,
+                n_blocks as i32, q8_d, pow2_ptr,
+            );
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Q4K matrix-vector multiply

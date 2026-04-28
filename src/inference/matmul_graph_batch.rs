@@ -427,6 +427,18 @@ pub fn matvec_batch_ws(
             let out_ptr = unsafe { output.add(t * output_stride + base_row) };
 
             match dtype {
+                GGML_TYPE_Q3_K => {
+                    // No 4-row Q3K kernel — call 1-row in a tight loop.
+                    let row_bytes = n_blocks * Q3K_BLOCK_BYTES;
+                    unsafe {
+                        for r in 0..4 {
+                            *out_ptr.add(r) = ffi_inference::q3k_dot_q8k(
+                                weight.add((base_row + r) * row_bytes), q8, bsums,
+                                n_blocks as i32, q8_d, pow2.as_ptr(),
+                            );
+                        }
+                    }
+                }
                 GGML_TYPE_Q4_K => {
                     let row_bytes = n_blocks * Q4K_BLOCK_BYTES;
                     unsafe {
@@ -496,6 +508,15 @@ pub fn matvec_batch_ws(
                 let bsums = unsafe { batch_q8_bsums.add(t * n_blocks * 16) };
                 let out_ptr = unsafe { output.add(t * output_stride + row) };
                 match dtype {
+                    GGML_TYPE_Q3_K => {
+                        let row_bytes = n_blocks * Q3K_BLOCK_BYTES;
+                        unsafe {
+                            *out_ptr = ffi_inference::q3k_dot_q8k(
+                                weight.add(row * row_bytes), q8, bsums,
+                                n_blocks as i32, q8_d, pow2.as_ptr(),
+                            );
+                        }
+                    }
                     GGML_TYPE_Q4_K => {
                         let row_bytes = n_blocks * Q4K_BLOCK_BYTES;
                         unsafe {
