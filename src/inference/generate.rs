@@ -455,10 +455,14 @@ pub fn find_model() -> Option<PathBuf> {
         .find(|p| p.extension().map(|e| e == "gguf").unwrap_or(false))
 }
 
-/// gemma4 gguf preference order: adaptive+imatrix first (lighter RSS on
-/// bandwidth-constrained targets, decode within noise of baseline),
-/// plain Q4_K_M baseline second.
+/// gemma4 gguf preference order:
+/// 1. q3kffnimpl — current ship (Q3K on both FFN arms, +13.4% prefill /
+///    +14.1% decode / -24.7% RSS vs Q4K_M baseline; requires Q3Kx8 GEMM
+///    kernel from commit 9eaebb2).
+/// 2. adaptive-imatrix — earlier RSS-leaning variant.
+/// 3. plain Q4_K_M baseline.
 const GEMMA4_CANDIDATES: &[&str] = &[
+    "gemma-4-e2b-it-Q4_K_M-q3kffnimpl.gguf",
     "gemma-4-e2b-it-Q4_K_M-adaptive-imatrix.gguf",
     "gemma-4-e2b-it-Q4_K_M.gguf",
 ];
