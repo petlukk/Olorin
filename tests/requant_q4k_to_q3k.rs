@@ -38,9 +38,14 @@ const KEEP_AS_IS: &[&str] = &["token_embd.weight"];
 /// First-cut "all Q4K → Q3K" was too aggressive (gemma4_smoke produced empty
 /// output, 27.9% logits drift). Per the port plan's pitfall section, Q3K
 /// accuracy is meaningfully worse than Q4K and likely needs selective
-/// application. Starting with the two biggest per-layer tensors (ffn_up,
+/// application. Default: the two biggest per-layer tensors (ffn_up,
 /// ffn_gate at ~10.6 MB each × 35 layers = ~742 MB of the Q4K bucket).
-const REQUANT_SUFFIXES: &[&str] = &["ffn_up.weight", "ffn_gate.weight"];
+///
+/// Override with `OLORIN_REQUANT_SUFFIXES=ffn_up.weight` (comma-separated)
+/// for selective-revert experiments — e.g. drop one arm of the GeGLU back
+/// to Q4K to recover prefill while keeping the decode bandwidth saving on
+/// the other arm.
+const REQUANT_SUFFIXES_DEFAULT: &[&str] = &["ffn_up.weight", "ffn_gate.weight"];
 
 #[test]
 #[ignore]
@@ -55,8 +60,15 @@ fn requant_q4k_to_q3k() {
         .unwrap_or_else(|_| Path::new(&home)
             .join(".olorin/models/gemma-4-e2b-it-Q4_K_M-q3kbucket.gguf"));
     assert!(src.exists(), "source not found: {}", src.display());
-    eprintln!("source: {}", src.display());
-    eprintln!("dest:   {}", dst.display());
+
+    let suffix_env = std::env::var("OLORIN_REQUANT_SUFFIXES").ok();
+    let suffixes: Vec<&str> = match suffix_env.as_deref() {
+        Some(s) => s.split(',').map(str::trim).filter(|s| !s.is_empty()).collect(),
+        None => REQUANT_SUFFIXES_DEFAULT.to_vec(),
+    };
+    eprintln!("source:   {}", src.display());
+    eprintln!("dest:     {}", dst.display());
+    eprintln!("suffixes: {:?}", suffixes);
 
     let gguf = GgufFile::open(&src).expect("open source gguf");
 
@@ -68,9 +80,9 @@ fn requant_q4k_to_q3k() {
         let t = &gguf.tensors[i];
         if t.dtype != GGML_TYPE_Q4_K { continue; }
         if KEEP_AS_IS.contains(&gguf.tensor_names[i].as_str()) { continue; }
-        if !REQUANT_SUFFIXES.is_empty() {
+        if !suffixes.is_empty() {
             let name = gguf.tensor_names[i].as_str();
-            if !REQUANT_SUFFIXES.iter().any(|s| name.ends_with(s)) { continue; }
+            if !suffixes.iter().any(|s| name.ends_with(s)) { continue; }
         }
         let n_elements: u64 = t.dims.iter().product();
         let n_blocks = (n_elements as usize + QK_K - 1) / QK_K;
