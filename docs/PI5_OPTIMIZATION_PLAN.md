@@ -62,15 +62,28 @@ The actual per-token bandwidth is dominated by the transformer body (~1.1 GB) pl
 | F32 norms quantization | Total F32 norms = 1.1 MB. Nothing to optimize. |
 | Rust toolchain pin (1.83) for cross-compile | Tested — still pulls GLIBC_2.39 weak symbols. The actual fix is RUSTFLAGS wrap (see below). |
 
-## Re-prioritized queue (post 2026-04-28)
+## Re-prioritized queue (post 2026-04-29)
 
-| # | Lever | Mechanism | Decode ceiling | Effort |
-|---|-------|-----------|----------------|--------|
-| ~~1~~ | ~~**Output head reduction**~~ | ~~Q6K token_embd → Q4K via custom requantize.~~ | ~~~10%~~ | DONE (+12.1%, see Status) |
-| 1 | **Q3_K port for Q4K bucket** | 755 MB → ~577 MB. Scale-only 3-bit (no `min` per sub-block, simpler than Q4K). 16 sub-blocks × 16 elements. From-scratch port — no Q3_K kernels in eacompute or Olorin yet. | ~5–6% | 2–3 wk |
-| 2 | **Q6K → Q5K downgrade on layer Q6K** | 11× 14.77 MB ffn_down + others, ~162 MB target. Requires custom requantize (llama-quantize ignores overrides — see eabrain note 2026-04-24, same gotcha as Q4K-embed). | ~3% if accuracy holds | 1–2 wk + tool |
-| 3 | **f16 KV path** with `--fp16` build | Keep KV f16 end-to-end, no f32 round-trip per attention/RoPE/RMSNorm. Activation axis. | Tens of MB at long context; scales with seq | 1–2 wk |
-| 4 | Q5K → Q4K | 97 MB → 76 MB | ~0.6% | <1 wk |
+| # | Lever | Mechanism | Win | Effort |
+|---|-------|-----------|-----|--------|
+| ~~0~~ | ~~**Output head reduction**~~ | ~~Q6K token_embd → Q4K via custom requantize.~~ | ~~+12.1% decode~~ | DONE (5fffa70) |
+| ~~1~~ | ~~**Q3_K port for Q4K bucket**~~ | ~~Selective Q3K on FFN tensors (1-row dot), then Q3Kx8 prefill GEMM (Tier 2 C).~~ | ~~+13.4% prefill, +14.1% decode, −24.7% RSS vs Q4K_M~~ | DONE (4821351 — q3kffnimpl ship) |
+| 1 | **Vocab pruning** | Output head matmul `1536 × 262144` is the biggest single matvec (315 MB Q4K). Token-frequency analysis on representative chat traces → drop unused vocab → output head + token_embd shrink linearly. Helps prefill AND decode on the biggest matvec. | ~5–10% decode, scales with prune fraction | 1 wk |
+| 2 | **Q3Kx8 dual-matvec** | For q3kffnimpl, both FFN arms are Q3K. Mirror `q4k_dot_8x8_dual_arm.ea`'s shared-Q8K-load pattern for a fused gate+up matvec — halves Q8K bandwidth. Decode-side win (prefill already on 8x8 GEMM). | ~3–5% decode for q3kffnimpl | <1 wk |
+| 3 | **f16 KV cache** with `--fp16` build | Keep KV f16 end-to-end, no f32 round-trip per attention/RoPE/RMSNorm. Activation axis. | Tens of MB at long context; scales with seq | 1–2 wk |
+| 4 | **i8mm/smmla port** for Q4Kx8 + Q3Kx8 | Both 8×8 GEMMs currently use `vdot_lane_i32` (dotprod). Cortex-A76 has both dotprod + i8mm (`smmla_i32` is in eacompute). Modest A76 win likely; bigger A78+ portability. Memory line claiming "Q4Kx8 uses smmla" was wrong — true i8mm port is OPEN work. | Unknown; needs A/B | 1–2 wk |
+| 5 | **Q6K → Q5K downgrade on Q6K layers** | 11× 14.77 MB ffn_down + others, ~162 MB target. Requires custom requantize (llama-quantize ignores overrides — see eabrain note 2026-04-24, same gotcha as Q4K-embed). Template: `tests/requant_q4k_to_q3k.rs`. | ~3% if accuracy holds | 1–2 wk + tool |
+| 6 | **imatrix-based Q3K** | Lets `attn_*` tensors safely join the Q3K subset (~30 MB more decode bandwidth). Requires running calibration on representative data. Doesn't change prefill. | ~1–2% decode | 1–2 wk + calibration |
+| 7 | **Q3K matvec_8x8 (decode 8x8 single-Q8)** | Decode currently uses 1-row q3k_dot_q8k. The Q3Kx8 repack stays resident (paid at load); a single-Q8 matvec_8x8 path could exploit it for decode like Q5K does (`q5k_8x8_q8k_matvec`). Bandwidth-bound, modest win expected. | ~2–3% decode? speculative | 3–5 days |
+| 8 | **Memory bloat cleanup** | Q3Kx8 repack adds +328 MB RSS (raw Q3K weights kept alongside repacked). Investigate dropping raw weights once repack is built — saves ~190 MB RSS. Decode currently uses raw via matvec_ws, so #7 is a prerequisite. | Memory only, no perf | 1 day after #7 |
+| 9 | **Q5K → Q4K** | 97 MB → 76 MB | ~0.6% | <1 wk |
+
+## Outstanding tech debt
+
+- `src/inference/generate.rs` at **502 lines** (2 over the 500-line cap). Trivial trim or small split.
+- `q3k_dot_q8k_4row` symbol + Q3kDot4RowFn FFI: exported but unused at dispatch sites (kept for cross-arch dispatch parity per q4k pattern). Could be removed.
+- Q3Kx8 debug tools (`tests/q3k_repack_scalar_gemm.rs`, `tests/q3k_pi_scalar_vs_kernel.rs`): used during bring-up to bisect kernel vs layout bugs. Keep as future debugging template OR delete to reduce noise — the durable parity gate is `tests/gemm_q3k_8x8.rs`.
+- Plan-doc/memory drift in earlier sessions claimed "Q4Kx8 uses i8mm smmla" — it doesn't. Both Q4K and Q3K 8×8 GEMMs use `vdot_lane_i32` (dotprod). Update memory line 121 if the Pi5 plan note resurfaces. (Memory file already corrected in this session.)
 
 ## How to resume tomorrow
 
