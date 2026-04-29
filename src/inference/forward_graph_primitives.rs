@@ -58,6 +58,18 @@ pub(super) fn matvec_step(
             );
             return;
         }
+        // Q3K's repacked buffer (block_q3_Kx8, 1168 B/sb) has a different layout
+        // from Q4K (1152 B/sb). There is no Q3K single-Q8 8x8 kernel today —
+        // the repack only pays off for prefill batched gemm (handled in
+        // matvec_batch_step). For decode, fall through to the 1-row q3k_dot_q8k
+        // path via matvec_ws, which is bandwidth-bound anyway.
+        if dtype == crate::inference::matmul::GGML_TYPE_Q3_K {
+            matmul_graph::matvec_ws(
+                dtype, weight, q8, q8_d, bsums, output, d_scratch,
+                n_rows, n_cols, current_chunk, ith, nth,
+            );
+            return;
+        }
         matmul_graph::q4k_matvec_8x8_ws(
             p.as_ptr(), q8, q8_d, bsums, output,
             n_rows, n_cols, current_chunk, ith, nth,

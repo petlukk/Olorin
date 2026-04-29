@@ -166,9 +166,17 @@ pub(crate) fn matvec_batch_step(
     current_chunk: &AtomicI32, ith: usize, nth: usize,
 ) {
     if let Some(p) = repacked {
-        // Buffer layout is dtype-dependent: Q4K → block_q4_Kx8 (1152 B/sb),
-        // Q5K → block_q5_Kx8 (1408 B/sb). The populate_q4k_repacked path
-        // only fills Q4K or Q5K, so any other dtype here is a bug.
+        // Buffer layout is dtype-dependent: Q3K → block_q3_Kx8 (1168 B/sb),
+        // Q4K → block_q4_Kx8 (1152 B/sb), Q5K → block_q5_Kx8 (1408 B/sb).
+        #[cfg(target_arch = "aarch64")]
+        if dtype == matmul::GGML_TYPE_Q3_K {
+            matmul_graph::q3k_gemm_8x8_batch_ws(
+                p.as_ptr(), q8_a, output,
+                n_cols, n_rows, n_pad, output_stride,
+                current_chunk, ith, nth,
+            );
+            return;
+        }
         #[cfg(target_arch = "aarch64")]
         if dtype == matmul::GGML_TYPE_Q5_K {
             matmul_graph::q5k_gemm_8x8_batch_ws(

@@ -208,6 +208,28 @@ pub(crate) fn try_repack_q4k(
     Some(crate::inference::repack::q4k_repack_8x8(weight, n_rows, n_cols))
 }
 
+/// Attempt to repack a Q3K weight matrix into the 8-row interleaved layout.
+/// Returns `None` if the weight is not eligible (non-Q3K dtype, bad shape,
+/// or ARM dotprod missing). Q3K 8x8 is ARM-only (no x86 kernel exists).
+pub(crate) fn try_repack_q3k(
+    #[cfg_attr(not(target_arch = "aarch64"), allow(unused_variables))]
+    weight: *const u8,
+    dtype: u32,
+    n_rows: usize,
+    n_cols: usize,
+) -> Option<Vec<u8>> {
+    if dtype != crate::inference::matmul::GGML_TYPE_Q3_K { return None; }
+    if n_rows % 8 != 0 { return None; }
+    if n_cols % 256 != 0 { return None; }
+    #[cfg(not(target_arch = "aarch64"))]
+    { return None; }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if !q4k_8x8_supported() { return None; }  // same dotprod gate as Q4K/Q5K
+        Some(crate::inference::repack::q3k_repack_8x8(weight, n_rows, n_cols))
+    }
+}
+
 /// Attempt to repack a Q5K weight matrix into the 8-row interleaved layout.
 /// Returns `None` if the weight is not eligible (non-Q5K dtype, bad shape,
 /// or ARM dotprod missing). Q5K 8x8 is ARM-only (no x86 kernel exists).
@@ -230,10 +252,10 @@ pub(crate) fn try_repack_q5k(
     }
 }
 
-/// Try Q4K 8x8 repack, then Q5K 8x8 repack. Returns the repacked buffer for
-/// whichever matches this weight's dtype. The returned bytes use different
-/// layouts (Q4Kx8 = 1152 B/sb, Q5Kx8 = 1408 B/sb); the caller discriminates
-/// by dtype at dispatch time.
+/// Try Q3K, Q4K, or Q5K 8x8 repack. Returns the repacked buffer for whichever
+/// matches this weight's dtype. The returned bytes use different layouts
+/// (Q3Kx8 = 1168 B/sb, Q4Kx8 = 1152 B/sb, Q5Kx8 = 1408 B/sb); the caller
+/// discriminates by dtype at dispatch time.
 pub(crate) fn try_repack_k8x8(
     weight: *const u8,
     dtype: u32,
@@ -245,6 +267,8 @@ pub(crate) fn try_repack_k8x8(
             try_repack_q4k(weight, dtype, n_rows, n_cols),
         d if d == crate::inference::matmul::GGML_TYPE_Q5_K =>
             try_repack_q5k(weight, dtype, n_rows, n_cols),
+        d if d == crate::inference::matmul::GGML_TYPE_Q3_K =>
+            try_repack_q3k(weight, dtype, n_rows, n_cols),
         _ => None,
     }
 }

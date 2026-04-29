@@ -198,6 +198,27 @@ pub unsafe fn q5k_repack_8x8(
     (k().q5k_repack_8x8)(src, dst, n_rows, n_cols)
 }
 
+pub unsafe fn q3k_repack_8x8(
+    src: *const u8, dst: *mut u8, n_rows: i32, n_cols: i32,
+) {
+    (k().q3k_repack_8x8)(src, dst, n_rows, n_cols)
+}
+
+#[cfg(target_arch = "aarch64")]
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn q3k_8x8_q8k_gemm(
+    packed: *const u8,
+    q8_a: *const u8,
+    scratch: *mut u8,
+    out: *mut f32,
+    bs: i32,
+    n: i32,
+    nr: i32,
+    nc: i32,
+) {
+    (k().q3k_8x8_q8k_gemm)(packed, q8_a, scratch, out, bs, n, nr, nc)
+}
+
 #[cfg(target_arch = "aarch64")]
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn q5k_8x8_q8k_matvec(

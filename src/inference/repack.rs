@@ -45,6 +45,36 @@ pub fn q4k_repack_8x8(src: *const u8, n_rows: usize, n_cols: usize) -> Vec<u8> {
     dst
 }
 
+/// Repack `n_rows × n_cols` Q3K weights into 8-row interleaved `block_q3_Kx8`
+/// layout (1168 bytes per superblock × 8-row tile). Matches the layout that
+/// `q3k_8x8_q8k_gemm` (ARM-only) consumes:
+/// - 16 B   : 8 × f16 d (per-row super-block scale)
+/// - 128 B  : 16 sub-blocks × 8 rows × 1 byte signed scale (sub-block-major)
+/// - 1024 B : 8 sub-block-pairs × 128 B of 4-bit signed nibbles
+///
+/// # Requirements
+/// - `n_rows` must be a multiple of 8.
+/// - `n_cols` must be a multiple of 256.
+/// - `olorin::kernels::ffi::init()` must have been called.
+pub fn q3k_repack_8x8(src: *const u8, n_rows: usize, n_cols: usize) -> Vec<u8> {
+    debug_assert!(n_rows % 8 == 0,  "q3k_repack_8x8: n_rows ({n_rows}) must be a multiple of 8");
+    debug_assert!(n_cols % 256 == 0, "q3k_repack_8x8: n_cols ({n_cols}) must be a multiple of 256");
+
+    let nb = n_cols / 256;
+    let tile_bytes = nb * 1168;
+    let n_tiles = n_rows / 8;
+    let mut dst = vec![0u8; n_tiles * tile_bytes];
+    unsafe {
+        ffi_inference::q3k_repack_8x8(
+            src,
+            dst.as_mut_ptr(),
+            n_rows as i32,
+            n_cols as i32,
+        );
+    }
+    dst
+}
+
 /// Repack `n_rows × n_cols` Q5K weights into 8-row interleaved `block_q5_Kx8`
 /// layout (1408 bytes per superblock × 8-row tile). Byte-for-byte match with
 /// llama.cpp `block_q5_Kx8` produced by `make_block_q5_Kx8` (blocklen=4).

@@ -396,4 +396,4 @@ pub use super::matmul_graph_batch::{
 };
 pub use super::matmul_graph_batch_gemm::q4k_gemm_8x8_batch_ws;
 #[cfg(target_arch = "aarch64")]
-pub use super::matmul_graph_batch_gemm::{q6k_gemm_batch_ws, q5k_gemm_batch_ws, q5k_gemm_8x8_batch_ws};
+pub use super::matmul_graph_batch_gemm::{q6k_gemm_batch_ws, q5k_gemm_batch_ws, q5k_gemm_8x8_batch_ws, q3k_gemm_8x8_batch_ws};
