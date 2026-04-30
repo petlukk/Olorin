@@ -171,49 +171,46 @@ pub(super) fn layer_forward_graph_timed(
     }
 
     acc!(t0, t_kv_norm_cache);
-    // ── 5. Attention (split by heads across threads) ─────────────
+    // ── 5. Attention (split by heads across threads, fused kernel) ─
     let t0 = t!();
     {
         let attn_scale = 1.0f32;
         let attn_len = state.cache.attn_len(il);
         let k_ptr = state.cache.k_ptr(il);
         let v_ptr = state.cache.v_ptr(il);
-        let kv_dim = n_kv_heads * head_dim;
-        let stride_kv = kv_dim;
+        let stride_kv = n_kv_heads * head_dim;
         let kv_scratch_stride = state.kv_scratch_stride;
         let attn_scores_stride = state.attn_scores_stride;
+        let qkv_dim = n_heads * head_dim;
 
         // Split heads across threads
         let per = (n_heads + nth - 1) / nth;
         let h_start = ith * per;
         let h_end = ((ith + 1) * per).min(n_heads);
 
+        // attn_fused_batched(n_batch=1): the per-position f16→f32 + dot loop
+        // happens inline in the kernel using f16 cache reads. cache_start is
+        // chosen so the kernel's causal-mask formula (cache_start + qi + 1)
+        // yields valid = attn_len for the single query qi=0.
         for h in h_start..h_end {
             let kv_h = h / gqa_ratio;
-            let q_off = h * head_dim;
-
-            let q_slice_ptr = unsafe { state.q.as_ptr().add(q_off) };
-            let kv_scratch_base = unsafe { state.kv_f32_scratch.as_mut_ptr().add(ith * kv_scratch_stride) };
-            let attn_scores_base = unsafe { state.attn_scores.as_mut_ptr().add(ith * attn_scores_stride) };
-
-            for p in 0..attn_len {
-                let k_offset = p * stride_kv + kv_h * head_dim;
-                let k_src = unsafe { k_ptr.add(k_offset) };
-                unsafe { ffi_inference::f16_to_f32(k_src, kv_scratch_base, head_dim as i32); }
-                let dot = ffi_inference::f32_dot(q_slice_ptr, kv_scratch_base as *const f32, head_dim as i32);
-                unsafe { *attn_scores_base.add(p) = dot; }
-            }
-
-            unsafe { ffi_inference::softmax_f32(attn_scores_base, attn_len as i32, attn_scale); }
-
-            let out_base = unsafe { state.attn_out.as_mut_ptr().add(q_off) };
-            unsafe { std::ptr::write_bytes(out_base, 0, head_dim); }
-            for p in 0..attn_len {
-                let v_offset = p * stride_kv + kv_h * head_dim;
-                let v_src = unsafe { v_ptr.add(v_offset) };
-                unsafe { ffi_inference::f16_to_f32(v_src, kv_scratch_base, head_dim as i32); }
-                let s = unsafe { *attn_scores_base.add(p) };
-                ffi_inference::f32_dot_acc(out_base, kv_scratch_base as *const f32, s, head_dim as i32);
+            unsafe {
+                ffi_inference::attn_fused_batched(
+                    state.q.as_ptr().add(h * head_dim),
+                    k_ptr, v_ptr,
+                    state.attn_out.as_mut_ptr().add(h * head_dim),
+                    state.attn_scores.as_mut_ptr().add(ith * attn_scores_stride),
+                    state.kv_f32_scratch.as_mut_ptr().add(ith * kv_scratch_stride),
+                    head_dim as i32,
+                    qkv_dim as i32,
+                    qkv_dim as i32,
+                    stride_kv as i32,
+                    (kv_h * head_dim) as i32,
+                    attn_len as i32,
+                    1,
+                    (attn_len - 1) as i32,
+                    attn_scale,
+                );
             }
         }
     }
