@@ -10,6 +10,7 @@ mod matmul_graph_batch;
 mod matmul_graph_batch_gemm;
 pub mod repack;
 pub mod dequant;
+mod sample;
 pub mod generate;
 pub mod threadpool;
 mod threadpool_detect;
