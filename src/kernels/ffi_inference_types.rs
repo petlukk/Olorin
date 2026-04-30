@@ -61,8 +61,6 @@ pub type Q5kGemmFn = unsafe extern "C" fn(
     i32,         // nc (weight rows)
 );
 pub type F32ToF16Fn = unsafe extern "C" fn(*const f32, *mut u16, i32);
-pub type F16ToF32Fn = unsafe extern "C" fn(*const u16, *mut f32, i32);
-pub type SoftmaxF32Fn = unsafe extern "C" fn(*mut f32, i32, f32);
 pub type Gemma4RmsnormFn = unsafe extern "C" fn(*const f32, *const f32, *mut f32, i32, f32);
 pub type GeluMulFn = unsafe extern "C" fn(*const f32, *const f32, *mut f32, i32);
 pub type Gemma4RopeFn = unsafe extern "C" fn(*mut f32, *const f32, *const f32, i32, i32);
@@ -75,8 +73,6 @@ pub type Bf16DotMultiInputFn = unsafe extern "C" fn(
 pub type VecAddF32Fn   = unsafe extern "C" fn(*const f32, *const f32, *mut f32, i32);
 pub type VecScaleF32Fn = unsafe extern "C" fn(*const f32, *mut f32, f32, i32);
 pub type VecFmaF32Fn   = unsafe extern "C" fn(*const f32, *const f32, *mut f32, f32, i32);
-pub type F32DotFn      = unsafe extern "C" fn(*const f32, *const f32, i32) -> f32;
-pub type F32DotAccFn   = unsafe extern "C" fn(*mut f32, *const f32, f32, i32);
 pub type BareRmsnormF32Fn = unsafe extern "C" fn(*mut f32, i32, f32);
 pub type SoftcapF32Fn = unsafe extern "C" fn(*mut f32, i32, f32);
 pub type Q4kRepack8x8Fn = unsafe extern "C" fn(

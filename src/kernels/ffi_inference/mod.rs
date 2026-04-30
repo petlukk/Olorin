@@ -21,8 +21,6 @@ pub struct KernelTableInference {
     pub q6k_dot_q8k_4row:          Q6kDot4RowFn,
     pub q6k_dot_q8k_4row_repacked: Q6kDot4RowRepackedFn,
     pub f32_to_f16:                F32ToF16Fn,
-    pub f16_to_f32:            F16ToF32Fn,
-    pub softmax_f32:           SoftmaxF32Fn,
     pub gemma4_rmsnorm:        Gemma4RmsnormFn,
     pub gelu_mul:              GeluMulFn,
     pub gemma4_rope:           Gemma4RopeFn,
@@ -32,8 +30,6 @@ pub struct KernelTableInference {
     pub vec_add_f32:           VecAddF32Fn,
     pub vec_scale_f32:         VecScaleF32Fn,
     pub vec_fma_f32:           VecFmaF32Fn,
-    pub f32_dot:               F32DotFn,
-    pub f32_dot_acc:           F32DotAccFn,
     pub bare_rmsnorm_f32:      BareRmsnormF32Fn,
     pub softcap_f32:           SoftcapF32Fn,
     pub q4k_repack_8x8:          Q4kRepack8x8Fn,
@@ -113,13 +109,11 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
     let q6kd = load("q6k_dot")?;
     let q6k_dot_repacked_lib = load("q6k_dot_repacked")?;
     let f16_conv_lib = load("f16_convert")?;
-    let softmax_lib  = load("softmax")?;
     let gemma4_rmsnorm_lib = load("gemma4_rmsnorm")?;
     let gemma4_gelu_lib    = load("gemma4_gelu")?;
     let gemma4_rope_lib    = load("gemma4_rope")?;
     let bf16_matvec_lib    = load("bf16_matvec")?;
     let vec_ops_lib        = load("vec_ops")?;
-    let attn_ops_lib       = load("attn_ops")?;
     let bare_rmsnorm_lib   = load("bare_rmsnorm")?;
     let softcap_lib        = load("softcap")?;
     let q4k_repack_lib       = load("q4k_repack")?;
@@ -162,8 +156,6 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
             q6k_dot_q8k_4row:          std::mem::transmute(sym(&q6kd, b"q6k_dot_q8k_4row\0")?),
             q6k_dot_q8k_4row_repacked: std::mem::transmute(sym(&q6k_dot_repacked_lib, b"q6k_dot_q8k_4row_repacked\0")?),
             f32_to_f16:     std::mem::transmute(sym(&f16_conv_lib, b"f32_to_f16\0")?),
-            f16_to_f32:     std::mem::transmute(sym(&f16_conv_lib, b"f16_to_f32\0")?),
-            softmax_f32:    std::mem::transmute(sym(&softmax_lib, b"softmax_f32\0")?),
             gemma4_rmsnorm: std::mem::transmute(sym(&gemma4_rmsnorm_lib, b"gemma4_rmsnorm\0")?),
             gelu_mul:       std::mem::transmute(sym(&gemma4_gelu_lib, b"gelu_mul\0")?),
             gemma4_rope:    std::mem::transmute(sym(&gemma4_rope_lib, b"gemma4_rope\0")?),
@@ -173,8 +165,6 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
             vec_add_f32:       std::mem::transmute(sym(&vec_ops_lib, b"vec_add_f32\0")?),
             vec_scale_f32:     std::mem::transmute(sym(&vec_ops_lib, b"vec_scale_f32\0")?),
             vec_fma_f32:       std::mem::transmute(sym(&vec_ops_lib, b"vec_fma_f32\0")?),
-            f32_dot:           std::mem::transmute(sym(&attn_ops_lib, b"f32_dot\0")?),
-            f32_dot_acc:       std::mem::transmute(sym(&attn_ops_lib, b"f32_dot_acc\0")?),
             bare_rmsnorm_f32:  std::mem::transmute(sym(&bare_rmsnorm_lib, b"bare_rmsnorm_f32\0")?),
             softcap_f32:       std::mem::transmute(sym(&softcap_lib, b"softcap_f32\0")?),
             q4k_repack_8x8:          std::mem::transmute(sym(&q4k_repack_lib,       b"q4k_repack_8x8\0")?),
@@ -197,7 +187,7 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
             attn_fused_batched:      std::mem::transmute(sym(&attn_fused_batched_lib, b"attn_fused_batched\0")?),
             libs: {
                 #[allow(unused_mut)]
-                let mut libs = vec![q4kq, q4kd, q3kd, q5kd, q6kd, q6k_dot_repacked_lib, f16_conv_lib, softmax_lib, gemma4_rmsnorm_lib, gemma4_gelu_lib, gemma4_rope_lib, bf16_matvec_lib, vec_ops_lib, attn_ops_lib, bare_rmsnorm_lib, softcap_lib, q4k_repack_lib, q5k_repack_lib, q3k_repack_lib, q4k_dot_8x8_lib, q4k_dot_8x8_dual_lib, q8k_repack_4_lib, q4k_dot_8x8_gemm_lib, attn_fused_batched_lib];
+                let mut libs = vec![q4kq, q4kd, q3kd, q5kd, q6kd, q6k_dot_repacked_lib, f16_conv_lib, gemma4_rmsnorm_lib, gemma4_gelu_lib, gemma4_rope_lib, bf16_matvec_lib, vec_ops_lib, bare_rmsnorm_lib, softcap_lib, q4k_repack_lib, q5k_repack_lib, q3k_repack_lib, q4k_dot_8x8_lib, q4k_dot_8x8_dual_lib, q8k_repack_4_lib, q4k_dot_8x8_gemm_lib, attn_fused_batched_lib];
                 #[cfg(target_arch = "aarch64")]
                 libs.push(q6k_gemm_lib);
                 #[cfg(target_arch = "aarch64")]

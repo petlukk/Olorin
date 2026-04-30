@@ -207,61 +207,10 @@ fn step14_gelu_vs_llama_ref() {
 }
 
 #[test]
-fn step15_softmax_softcap_vs_llama_ref() {
+fn step15_softcap_vs_llama_ref() {
     olorin::kernels::ffi::init().unwrap();
 
-    eprintln!("=== Step 15: Softmax + Softcap vs llama ref ===");
-
-    let n = 16;
-    let attn_scale = 1.0f32;
-    let raw_scores: Vec<f32> = (0..n).map(|i| (i as f32 - 8.0) * 0.5).collect();
-
-    let mut olorin_sm = raw_scores.clone();
-    unsafe {
-        olorin::kernels::ffi_inference::softmax_f32(
-            olorin_sm.as_mut_ptr(), n as i32, attn_scale,
-        );
-    }
-
-    let mut llama_sm = raw_scores.clone();
-    for v in llama_sm.iter_mut() { *v *= attn_scale; }
-    let max_val = llama_sm.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-    let mut sum: f64 = 0.0;
-    for v in llama_sm.iter_mut() {
-        *v = (*v - max_val).exp();
-        sum += *v as f64;
-    }
-    let inv_sum = 1.0 / sum as f32;
-    for v in llama_sm.iter_mut() { *v *= inv_sum; }
-
-    let mut sm_max_abs = 0.0f32;
-    let mut sm_max_rel = 0.0f32;
-    for i in 0..n {
-        let abs_err = (olorin_sm[i] - llama_sm[i]).abs();
-        let rel_err = if llama_sm[i].abs() > 1e-10 { abs_err / llama_sm[i].abs() } else { abs_err };
-        if abs_err > sm_max_abs { sm_max_abs = abs_err; }
-        if rel_err > sm_max_rel { sm_max_rel = rel_err; }
-    }
-    eprintln!("  Softmax (n={n}): max_abs={sm_max_abs:.8} max_rel={sm_max_rel:.8}");
-
-    let n2 = 128;
-    let raw2: Vec<f32> = (0..n2).map(|i| ((i as f32) * 0.137 - 8.0).sin() * 5.0).collect();
-    let mut olorin_sm2 = raw2.clone();
-    unsafe { olorin::kernels::ffi_inference::softmax_f32(olorin_sm2.as_mut_ptr(), n2 as i32, 1.0); }
-
-    let mut llama_sm2 = raw2.clone();
-    let max2 = llama_sm2.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-    let mut sum2: f64 = 0.0;
-    for v in llama_sm2.iter_mut() { *v = (*v - max2).exp(); sum2 += *v as f64; }
-    let inv2 = 1.0 / sum2 as f32;
-    for v in llama_sm2.iter_mut() { *v *= inv2; }
-
-    let mut sm2_max_abs = 0.0f32;
-    for i in 0..n2 {
-        let err = (olorin_sm2[i] - llama_sm2[i]).abs();
-        if err > sm2_max_abs { sm2_max_abs = err; }
-    }
-    eprintln!("  Softmax (n={n2}): max_abs={sm2_max_abs:.8}");
+    eprintln!("=== Step 15: Softcap vs llama ref ===");
 
     let cap = 30.0f32;
     let logit_vals: Vec<f32> = (-10..=10).map(|i| i as f32 * 5.0).collect();
@@ -290,11 +239,9 @@ fn step15_softmax_softcap_vs_llama_ref() {
     let in_range = olorin_sc.iter().all(|&v| v.abs() < cap);
     eprintln!("  Softcap all in (-{cap}, +{cap}): {in_range}");
 
-    assert!(sm_max_abs < 1e-5, "Softmax abs error: {sm_max_abs}");
-    assert!(sm2_max_abs < 1e-5, "Softmax n=128 abs error: {sm2_max_abs}");
     assert!(sc_max_abs < 1e-5, "Softcap abs error: {sc_max_abs}");
     assert!(in_range, "Softcap values out of range");
-    eprintln!("PASS: Softmax + Softcap match llama reference");
+    eprintln!("PASS: Softcap matches llama reference");
 }
 
 #[test]
@@ -348,40 +295,4 @@ fn step16_f32_to_f16_vs_llama() {
         eprintln!("PASS: f32→f16 bit-exact with llama");
     }
 
-    olorin::kernels::ffi::init().unwrap();
-    let mut rt_max_err = 0.0f32;
-    let mut rt_simd_mismatches = 0usize;
-    let rt_vals: Vec<f32> = all_vals.iter().copied()
-        .filter(|&v| v.abs() > 0.001 && v.abs() < 60000.0)
-        .collect();
-    let rt_n = rt_vals.len();
-    for &v in &rt_vals {
-        let h = llama_f32_to_f16(v);
-        let llama_back = olorin::inference::matmul::f16_to_f32_scalar(h);
-        let olorin_back = olorin::inference::matmul::f16_to_f32_scalar(h);
-        let err = (olorin_back - llama_back).abs();
-        let mut simd_back = [0.0f32; 8];
-        let h_arr = [h, h, h, h, h, h, h, h];
-        unsafe {
-            olorin::kernels::ffi_inference::f16_to_f32(
-                h_arr.as_ptr(), simd_back.as_mut_ptr(), 8,
-            );
-        }
-        let simd_err = (simd_back[0] - olorin_back).abs();
-        if simd_err > 0.0 && rt_simd_mismatches < 10 {
-            eprintln!("  SIMD vs scalar mismatch: h=0x{h:04x} scalar={olorin_back:.6} simd={:.6} Δ={simd_err:.8}", simd_back[0]);
-            rt_simd_mismatches += 1;
-        }
-        if err > rt_max_err { rt_max_err = err; }
-    }
-    eprintln!("  f16→f32 scalar round-trip (n={rt_n}) max err: {rt_max_err:.10}");
-    eprintln!("  f16→f32 SIMD mismatches: {rt_simd_mismatches}");
-    if rt_max_err == 0.0 && rt_simd_mismatches == 0 {
-        eprintln!("PASS: f16↔f32 all bit-exact");
-    } else if rt_max_err == 0.0 {
-        eprintln!("PASS: f16→f32 scalar bit-exact, but SIMD has {rt_simd_mismatches} mismatches");
-    } else {
-        eprintln!("WARNING: f16→f32 scalar differs: {rt_max_err}");
-    }
-    assert_eq!(rt_simd_mismatches, 0, "f16→f32 SIMD kernel mismatches scalar");
 }

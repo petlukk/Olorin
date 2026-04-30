@@ -34,10 +34,11 @@ fn to_f16_bits(x: f32) -> u16 {
     (sign | result + half_bit) as u16
 }
 
-/// Compare with tolerance for FMA reduction-order noise. On ARM the fused
-/// kernel is 2-way unrolled while `f32_dot` (used by the reference) is 4-way,
-/// so identical math produces 1-4 ULP-different results. 16 ULP relative +
-/// 1e-6 absolute swallows that without masking real bugs.
+/// Compare with tolerance for FMA reduction-order noise. The fused kernel
+/// uses 2-way unrolled SIMD FMA while this reference uses naive scalar
+/// summation — identical math, different reduction tree, 1-4 ULP-different
+/// results. 16 ULP relative + 1e-6 absolute swallows that without masking
+/// real bugs.
 fn close_f32(a: f32, b: f32) -> bool {
     if a.to_bits() == b.to_bits() {
         return true;
@@ -49,6 +50,8 @@ fn close_f32(a: f32, b: f32) -> bool {
 
 /// Reference attention for one query token against positions 0..attn_len.
 /// K and V caches are f16 (u16 bits), layout: [position * stride_kv + kv_head_offset].
+/// Pure scalar Rust — independent of any Eä kernel except `f16_to_f32_scalar`
+/// (single-element f16→f32 conversion, used by quant kernels for d-scales too).
 unsafe fn reference_attention(
     q: *const f32,
     k_cache: *const u16,
@@ -60,30 +63,49 @@ unsafe fn reference_attention(
     attn_len: i32,
     attn_scale: f32,
 ) {
+    use olorin::inference::matmul::f16_to_f32_scalar;
     let hd = head_dim as usize;
-    let mut scratch = vec![0.0f32; hd];
     let mut scores = vec![0.0f32; attn_len as usize];
 
     // Score phase: dot(q, k[p]) for each position
     for p in 0..attn_len {
-        let k_ptr = k_cache.add((p * stride_kv + kv_head_offset) as usize);
-        ffi_inference::f16_to_f32(k_ptr, scratch.as_mut_ptr(), head_dim);
-        scores[p as usize] = ffi_inference::f32_dot(q, scratch.as_ptr(), head_dim);
+        let k_base = (p * stride_kv + kv_head_offset) as usize;
+        let mut acc = 0.0f32;
+        for d in 0..hd {
+            let kf = f16_to_f32_scalar(*k_cache.add(k_base + d));
+            acc += *q.add(d) * kf;
+        }
+        scores[p as usize] = acc;
     }
 
-    // Softmax with scale
-    ffi_inference::softmax_f32(scores.as_mut_ptr(), attn_len, attn_scale);
+    // Softmax with scale: scale → max → exp(x-max) → normalize
+    for v in scores.iter_mut() {
+        *v *= attn_scale;
+    }
+    let m = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let mut sum = 0.0f64;
+    for v in scores.iter_mut() {
+        *v = (*v - m).exp();
+        sum += *v as f64;
+    }
+    let inv = 1.0f32 / sum as f32;
+    for v in scores.iter_mut() {
+        *v *= inv;
+    }
 
     // Zero output
     for i in 0..hd {
         *out.add(i) = 0.0;
     }
 
-    // Weighted V sum
+    // Weighted V sum: out[d] += scores[p] * V[p][d]
     for p in 0..attn_len {
-        let v_ptr = v_cache.add((p * stride_kv + kv_head_offset) as usize);
-        ffi_inference::f16_to_f32(v_ptr, scratch.as_mut_ptr(), head_dim);
-        ffi_inference::f32_dot_acc(out, scratch.as_ptr(), scores[p as usize], head_dim);
+        let v_base = (p * stride_kv + kv_head_offset) as usize;
+        let s = scores[p as usize];
+        for d in 0..hd {
+            let vf = f16_to_f32_scalar(*v_cache.add(v_base + d));
+            *out.add(d) += s * vf;
+        }
     }
 }
 

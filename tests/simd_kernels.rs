@@ -141,46 +141,6 @@ fn test_vec_ops_odd_sizes() {
     }
 }
 
-// ---- f32_dot ----
-
-#[test]
-fn test_f32_dot() {
-    init();
-    let a: Vec<f32> = (0..256).map(|i| (i as f32) * 0.01).collect();
-    let b: Vec<f32> = (0..256).map(|i| 1.0 - (i as f32) * 0.005).collect();
-    let expected: f32 = a.iter().zip(&b).map(|(x, y)| x * y).sum();
-    let got = ffi_inference::f32_dot(a.as_ptr(), b.as_ptr(), 256);
-    assert!((expected - got).abs() < 0.01, "f32_dot: {expected} vs {got}");
-}
-
-#[test]
-fn test_f32_dot_head_dims() {
-    init();
-    for n in [128, 256, 512] {
-        let a: Vec<f32> = (0..n).map(|i| ((i * 7 + 3) % 100) as f32 * 0.01).collect();
-        let b: Vec<f32> = (0..n).map(|i| ((i * 13 + 5) % 100) as f32 * 0.01).collect();
-        let expected: f32 = a.iter().zip(&b).map(|(x, y)| x * y).sum();
-        let got = ffi_inference::f32_dot(a.as_ptr(), b.as_ptr(), n as i32);
-        assert!((expected - got).abs() / expected.abs().max(1.0) < 1e-4,
-            "f32_dot size {n}: {expected} vs {got}");
-    }
-}
-
-// ---- f32_dot_acc ----
-
-#[test]
-fn test_f32_dot_acc() {
-    init();
-    let mut out = vec![1.0f32; 512];
-    let a: Vec<f32> = (0..512).map(|i| i as f32 * 0.01).collect();
-    let mut expected = vec![1.0f32; 512];
-    for (o, x) in expected.iter_mut().zip(&a) { *o += x * 0.5; }
-    ffi_inference::f32_dot_acc(out.as_mut_ptr(), a.as_ptr(), 0.5, 512);
-    for (i, (e, g)) in expected.iter().zip(&out).enumerate() {
-        assert!((e - g).abs() < 1e-5, "f32_dot_acc mismatch at {i}");
-    }
-}
-
 // ---- bare_rmsnorm_f32 ----
 
 #[test]

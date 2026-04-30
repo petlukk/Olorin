@@ -16,13 +16,3 @@ export func f32_to_f16(src: *restrict f32, dst: *mut u16, n: i32) {
     }
 }
 
-export func f16_to_f32(src: *restrict u16, dst: *mut f32, n: i32) {
-    let sp: *restrict i16 = ptr_as_i16(src)
-    let mut i: i32 = 0
-    while i + 8 <= n {
-        let h: i16x8 = load(sp, i)
-        let v: f32x8 = cvt_f16_f32(h)
-        store(dst, i, v)
-        i = i + 8
-    }
-}

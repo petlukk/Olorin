@@ -104,14 +104,6 @@ pub unsafe fn q5k_gemm(
     (k().q5k_gemm)(weight, q8_a, scratch, out, output_stride, n_inner, nr, nc)
 }
 
-pub unsafe fn f16_to_f32(src: *const u16, dst: *mut f32, n: i32) {
-    (k().f16_to_f32)(src, dst, n)
-}
-
-pub unsafe fn softmax_f32(data: *mut f32, n: i32, scale: f32) {
-    (k().softmax_f32)(data, n, scale)
-}
-
 pub fn gemma4_rmsnorm(x: *const f32, weight: *const f32, out: *mut f32, n: i32, eps: f32) {
     unsafe { (k().gemma4_rmsnorm)(x, weight, out, n, eps) }
 }
@@ -159,14 +151,6 @@ pub fn vec_scale_f32(a: *const f32, out: *mut f32, s: f32, n: i32) {
 
 pub fn vec_fma_f32(a: *const f32, b: *const f32, out: *mut f32, s: f32, n: i32) {
     unsafe { (k().vec_fma_f32)(a, b, out, s, n) }
-}
-
-pub fn f32_dot(a: *const f32, b: *const f32, n: i32) -> f32 {
-    unsafe { (k().f32_dot)(a, b, n) }
-}
-
-pub fn f32_dot_acc(out: *mut f32, a: *const f32, s: f32, n: i32) {
-    unsafe { (k().f32_dot_acc)(out, a, s, n) }
 }
 
 pub fn bare_rmsnorm_f32(x: *mut f32, n: i32, eps: f32) {
