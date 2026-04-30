@@ -46,15 +46,6 @@ pub unsafe fn q3k_dot_q8k(
     (k().q3k_dot_q8k)(q3, q8, bsums, n_blocks, q8_d, pow2)
 }
 
-#[allow(clippy::too_many_arguments)]
-pub unsafe fn q3k_dot_q8k_4row(
-    rw0: *const u8, rw1: *const u8, rw2: *const u8, rw3: *const u8,
-    q8: *const i8, bsums: *const i16,
-    scores: *mut f32, n_blocks: i32, q8_d: *const f32, pow2: *const f32,
-) {
-    (k().q3k_dot_q8k_4row)(rw0, rw1, rw2, rw3, q8, bsums, scores, n_blocks, q8_d, pow2)
-}
-
 pub unsafe fn q5k_dot_q8k(
     q5: *const u8, q8: *const i8, bsums: *const i16,
     n_blocks: i32, q8_d: *const f32, pow2: *const f32,
