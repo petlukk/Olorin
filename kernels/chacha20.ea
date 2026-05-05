@@ -16,7 +16,7 @@ func rotl7(v: i32x4) -> i32x4 {
     return (v .<< splat(7)) .| ((v .>> splat(25)) .& splat(127))
 }
 
-export func chacha20_block(key: *restrict i32, nonce: *restrict i32, counter: i32, out: *restrict mut i32) {
+func chacha20_block(key: *restrict i32, nonce: *restrict i32, counter: i32, out: *restrict mut i32) {
     let row0_init: i32x4 = [1634760805, 857760878, 2036477234, 1797285236]i32x4
     let row1_init: i32x4 = load(key, 0)
     let row2_init: i32x4 = load(key, 4)

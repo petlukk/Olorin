@@ -68,8 +68,7 @@ pub fn q4k_matvec_8x8_batch_ws(
 /// Unlike `q6k_repacked_batch_ws`, this takes a `d_arr_base` pointer into a
 /// Vec<f32> pre-computed at model load by `repack::q6k_precompute_d_arr`.
 /// That moves the per-(quad, blk, row) `f16_to_f32(d)` conversion out of the
-/// hot path — which was previously ~15 ms/decode-step on Gemma 4's output
-/// head. Here we just multiply the pre-computed f32 `d` by the token's
+/// hot path. Here we just multiply the pre-computed f32 `d` by the token's
 /// `q8_d[blk]` and feed the resulting 4-row scale array into the tile kernel.
 ///
 /// Layout contract: `d_arr_base[(quad * n_blocks + blk) * 4 + r]` — contiguous

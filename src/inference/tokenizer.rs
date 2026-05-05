@@ -99,7 +99,6 @@ impl Tokenizer {
         // treating Gemma 4 as SentencePiece Unigram produces different token
         // sequences on rare words (see tests/gemma4_tokenizer_match.rs).
         let is_gemma4_bpe = tok_model == "gemma4";
-        // Keep the Unigram-Viterbi path for plain SentencePiece ("llama" legacy).
         let is_sentencepiece = tok_model == "llama";
 
         let token_strs = match tokens_arr {

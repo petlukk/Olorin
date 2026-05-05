@@ -81,69 +81,6 @@ fn repack_q4k_d_dmin_roundtrip() {
     eprintln!("PASS: d/dmin + quant roundtrip verified for {} rows × {} cols", n_rows, n_cols);
 }
 
-/// Verify scale repacking roundtrip for first tile by decoding the
-/// repacked scales back and comparing to originals.
-#[test]
-fn repack_q4k_scales_roundtrip() {
-    if !Path::new(&model_path()).exists() {
-        eprintln!("SKIP: no model");
-        return;
-    }
-    let gguf = olorin::inference::gguf::GgufFile::open(Path::new(&model_path())).unwrap();
-    let model = olorin::inference::engine::Gemma4Model::from_gguf(&gguf).unwrap();
-    olorin::kernels::ffi::init().unwrap();
-
-    let lw = &model.layers[0];
-    let n_rows = model.ffn_dim[0];
-    let n_cols = model.hidden_dim;
-    let nb = n_cols / 256;
-    let row_bytes = nb * 144;
-
-    let packed = olorin::inference::repack::q4k_repack_8x8(lw.w_gate, n_rows, n_cols);
-
-    // For the first tile, decode scales from both original and repacked
-    // and verify they match.
-    // Original: each block has scales[12] at offset 4..15
-    // We decode all 8 sub-block scale/min pairs per row.
-
-    // Extract original scales for 8 rows at block 0
-    for row in 0..8 {
-        let blk_off = row * row_bytes; // block 0 of each row
-        let scales_raw = unsafe {
-            std::slice::from_raw_parts(lw.wq.add(blk_off + 4), 12)
-        };
-
-        // Decode the 8 scales and 8 mins from standard format
-        let mut orig_sc = [0u8; 8];
-        let mut orig_mn = [0u8; 8];
-        for i in 0..4 {
-            orig_sc[i] = scales_raw[i] & 63;
-            orig_mn[i] = scales_raw[i + 4] & 63;
-        }
-        for i in 4..8 {
-            orig_sc[i] = ((scales_raw[i] & 0xC0) >> 2) | (scales_raw[i + 4] & 0x0F);
-            orig_mn[i] = ((scales_raw[i + 4 - 4 + 4] & 0xC0) >> 2)
-                | ((scales_raw[i + 4] & 0xF0) >> 4);
-        }
-
-        // Now decode from the repacked format
-        // Sub-blocks 0..3 are in the first 48 bytes of scales
-        // Sub-blocks 4..7 are in the next 48 bytes
-        for sb in 0..4 {
-            let o = 32 + sb * 12;
-            let ps = packed[o + row % 4]; // This mapping is complex...
-            // Rather than decode, let's check that encoding is self-consistent:
-            // pack(decode(original)) == repacked
-            // This is already guaranteed by the code matching llama.cpp exactly.
-        }
-
-        // Simpler check: the total size is correct
-        assert_eq!(packed.len(), n_rows * row_bytes);
-    }
-
-    eprintln!("PASS: scale repacking verified for first tile ({} rows × {} cols)", n_rows, n_cols);
-}
-
 /// Roundtrip: repack weights, run repacked matvec, compare to standard matvec.
 #[test]
 fn repack_q4k_matvec_roundtrip() {
@@ -248,7 +185,6 @@ fn repack_q4k_matvec_roundtrip() {
         let km2: u32 = 0x0f0f0f0f;
         let km3: u32 = 0x03030303;
         let mut utmp = [0u32; 32];
-        let q8_qs_u8 = unsafe { std::slice::from_raw_parts(q8_qs.as_ptr() as *const u8, q8_qs.len()) };
 
         for x in 0..n_rows / 8 {
             let mut sumf = [0.0f32; 8];

@@ -6,7 +6,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::{Error, Result};
@@ -134,8 +134,6 @@ fn derive_nonce(seed: &[u8; 12], counter: u32) -> [u8; 12] {
 // ── Vault ─────────────────────────────────────────────────────────────────────
 
 pub struct Vault {
-    #[allow(dead_code)]
-    path: PathBuf,
     file: File,
     header: VaultHeader,
     index: Vec<IndexEntry>,
@@ -179,7 +177,7 @@ impl Vault {
             .open(path)?;
         file.write_all(&header.to_bytes())?;
         file.flush()?;
-        Ok(Self { path: path.to_path_buf(), file, header, index: Vec::new(), key, nonce_seed, searcher: FusedSearcher::new() })
+        Ok(Self { file, header, index: Vec::new(), key, nonce_seed, searcher: FusedSearcher::new() })
     }
 
     fn open_existing(path: &Path, key: [u8; 32]) -> Result<Self> {
@@ -195,7 +193,7 @@ impl Vault {
             file.read_exact(&mut entry_buf)?;
             index.push(IndexEntry::from_bytes(&entry_buf));
         }
-        Ok(Self { path: path.to_path_buf(), file, header, index, key, nonce_seed, searcher: FusedSearcher::new() })
+        Ok(Self { file, header, index, key, nonce_seed, searcher: FusedSearcher::new() })
     }
 
     /// Append a message (role + content), encrypt, and write immediately.

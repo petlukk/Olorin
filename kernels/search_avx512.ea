@@ -7,64 +7,6 @@
 // For dim=256 (eaclaw byte histograms): 16 FMA iterations vs 32.
 // No scalar tail — 256 is divisible by 16.
 
-// ========== batch_dot ==========
-
-#[cfg(x86_64)]
-export func batch_dot(
-    query: *f32,
-    vecs: *f32,
-    dim: i32,
-    n_vecs: i32,
-    out_scores: *mut f32
-) {
-    for v in 0..n_vecs {
-        let base: i32 = v * dim
-        let mut acc: f32x16 = splat(0.0)        for i in 0..dim step 16 {
-            if i + 16 <= dim {
-                let q: f32x16 = load(query, i)
-                let d: f32x16 = load(vecs, base + i)
-                acc = fma(q, d, acc)
-            }
-        }
-        let mut score: f32 = reduce_add(acc)
-        let simd_end: i32 = (dim / 16) * 16
-        for i in simd_end..dim {
-            let qi: f32 = to_f32(query[i])
-            let di: f32 = to_f32(vecs[base + i])
-            score = score + qi * di
-        }
-        out_scores[v] = score
-    }
-}
-
-#[cfg(aarch64)]
-export func batch_dot(
-    query: *f32,
-    vecs: *f32,
-    dim: i32,
-    n_vecs: i32,
-    out_scores: *mut f32
-) {
-    for v in 0..n_vecs {
-        let base: i32 = v * dim
-        let mut acc: f32x4 = splat(0.0)        for i in 0..dim step 4 {
-            if i + 4 <= dim {
-                let q: f32x4 = load(query, i)
-                let d: f32x4 = load(vecs, base + i)
-                acc = fma(q, d, acc)
-            }
-        }
-        let mut score: f32 = reduce_add(acc)
-        let simd_end: i32 = (dim / 4) * 4
-        for i in simd_end..dim {
-            let qi: f32 = to_f32(query[i])
-            let di: f32 = to_f32(vecs[base + i])
-            score = score + qi * di
-        }
-        out_scores[v] = score
-    }
-}
-
 // ========== batch_cosine ==========
 
 #[cfg(x86_64)]
@@ -143,68 +85,6 @@ export func batch_cosine(
     }
 }
 
-// ========== batch_l2 ==========
-
-#[cfg(x86_64)]
-export func batch_l2(
-    query: *f32,
-    vecs: *f32,
-    dim: i32,
-    n_vecs: i32,
-    out_scores: *mut f32
-) {
-    for v in 0..n_vecs {
-        let base: i32 = v * dim
-        let mut acc: f32x16 = splat(0.0)        for i in 0..dim step 16 {
-            if i + 16 <= dim {
-                let q: f32x16 = load(query, i)
-                let d: f32x16 = load(vecs, base + i)
-                let diff: f32x16 = q .- d
-                acc = fma(diff, diff, acc)
-            }
-        }
-        let mut dist: f32 = reduce_add(acc)
-        let simd_end: i32 = (dim / 16) * 16
-        for i in simd_end..dim {
-            let qi: f32 = to_f32(query[i])
-            let di: f32 = to_f32(vecs[base + i])
-            let diff: f32 = qi - di
-            dist = dist + diff * diff
-        }
-        out_scores[v] = dist
-    }
-}
-
-#[cfg(aarch64)]
-export func batch_l2(
-    query: *f32,
-    vecs: *f32,
-    dim: i32,
-    n_vecs: i32,
-    out_scores: *mut f32
-) {
-    for v in 0..n_vecs {
-        let base: i32 = v * dim
-        let mut acc: f32x4 = splat(0.0)        for i in 0..dim step 4 {
-            if i + 4 <= dim {
-                let q: f32x4 = load(query, i)
-                let d: f32x4 = load(vecs, base + i)
-                let diff: f32x4 = q .- d
-                acc = fma(diff, diff, acc)
-            }
-        }
-        let mut dist: f32 = reduce_add(acc)
-        let simd_end: i32 = (dim / 4) * 4
-        for i in simd_end..dim {
-            let qi: f32 = to_f32(query[i])
-            let di: f32 = to_f32(vecs[base + i])
-            let diff: f32 = qi - di
-            dist = dist + diff * diff
-        }
-        out_scores[v] = dist
-    }
-}
-
 // ========== normalize_vectors ==========
 
 #[cfg(x86_64)]
@@ -279,26 +159,6 @@ export func normalize_vectors(
             }
         }
     }
-}
-
-// ========== threshold_filter ==========
-// Scalar — no SIMD widening needed.
-
-export func threshold_filter(
-    scores: *f32,
-    n: i32,
-    threshold: f32,
-    out_indices: *mut i32,
-    out_count: *mut i32
-) {
-    let mut count: i32 = 0
-    for i in 0..n {
-        if scores[i] >= threshold {
-            out_indices[count] = i
-            count = count + 1
-        }
-    }
-    out_count[0] = count
 }
 
 // ========== top_k ==========

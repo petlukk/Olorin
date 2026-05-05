@@ -1,7 +1,7 @@
 //! Tests for ANSI state machine — SGR, cursor movement, erase.
 
 mod common {
-    use olorin::interface::ansi::{Cell, CellAttrs, TermGrid};
+    use olorin::interface::ansi::TermGrid;
 
     pub fn make_grid(cols: u16, rows: u16) -> TermGrid {
         TermGrid::new(cols, rows)
