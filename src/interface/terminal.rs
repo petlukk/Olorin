@@ -62,7 +62,7 @@ pub fn run(model_arg: Option<&str>) {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn print_banner() {
-    println!("[Olorin] v0.6.0 — The Wakeful Mind in Ea");
+    println!("[Olorin] v{} — The Wakeful Mind in Ea", env!("CARGO_PKG_VERSION"));
     println!("Type /help for commands, /quit to exit.");
     println!();
 }

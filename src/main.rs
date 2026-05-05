@@ -11,7 +11,7 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(8080);
 
-    println!("[Olorin] v0.6.0 — The Wakeful Mind in Ea");
+    println!("[Olorin] v{} — The Wakeful Mind in Ea", env!("CARGO_PKG_VERSION"));
 
     // Init SIMD kernels
     ffi::init().expect("kernel init failed");
