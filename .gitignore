@@ -7,3 +7,9 @@
 /*.s
 /*.ll
 /*.o
+
+# Internal docs and Claude Code workspace — local-only, not for remote.
+# README.md remains tracked.
+/CLAUDE.md
+/docs/
+/.claude/
