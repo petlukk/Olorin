@@ -26,7 +26,7 @@ dependencies = [
 
 [[package]]
 name = "olorin"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "libc",
  "libloading",
