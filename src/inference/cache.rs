@@ -1,46 +1,7 @@
 //! KV cache with sliding window + shared layers.
 
 use crate::inference::engine::AttnType;
-
-// ---------------------------------------------------------------------------
-// f32 → f16 bit conversion (inline helper, replaced by kernel in forward.rs)
-// ---------------------------------------------------------------------------
-
-#[inline]
-fn f32_to_f16(x: f32) -> u16 {
-    let bits = x.to_bits();
-    let sign = (bits >> 16) & 0x8000;
-    let exp = ((bits >> 23) & 0xFF) as i32;
-    let mantissa = bits & 0x007F_FFFF;
-
-    if exp == 255 {
-        // Inf / NaN
-        return (sign | 0x7C00 | if mantissa != 0 { 0x0200 } else { 0 }) as u16;
-    }
-
-    let new_exp = exp - 127 + 15;
-
-    if new_exp >= 31 {
-        // Overflow → Inf
-        return (sign | 0x7C00) as u16;
-    }
-
-    if new_exp <= 0 {
-        // Underflow → subnormal or zero
-        if new_exp < -10 {
-            return sign as u16;
-        }
-        let m = mantissa | 0x0080_0000;
-        let shift = 1 - new_exp;
-        let half = (m >> (shift + 13 - 1)) & 1;
-        let result = m >> (shift + 13);
-        return (sign | (result + half)) as u16;
-    }
-
-    let half = (mantissa >> 12) & 1;
-    let result = ((new_exp as u32) << 10) | (mantissa >> 13);
-    (sign | result + half) as u16
-}
+use crate::kernels::ffi_inference;
 
 // ---------------------------------------------------------------------------
 // KvCache
@@ -132,9 +93,17 @@ impl KvCache {
         let kb = &mut self.k[layer];
         let vb = &mut self.v[layer];
 
-        for i in 0..stride {
-            kb[offset + i] = f32_to_f16(k_f32[i]);
-            vb[offset + i] = f32_to_f16(v_f32[i]);
+        unsafe {
+            ffi_inference::f32_to_f16(
+                k_f32.as_ptr(),
+                kb[offset..offset + stride].as_mut_ptr(),
+                stride as i32,
+            );
+            ffi_inference::f32_to_f16(
+                v_f32.as_ptr(),
+                vb[offset..offset + stride].as_mut_ptr(),
+                stride as i32,
+            );
         }
     }
 
@@ -158,9 +127,17 @@ impl KvCache {
             };
             let cache_off = pos * stride;
             let src_off = t * stride;
-            for i in 0..stride {
-                kb[cache_off + i] = f32_to_f16(k_batch[src_off + i]);
-                vb[cache_off + i] = f32_to_f16(v_batch[src_off + i]);
+            unsafe {
+                ffi_inference::f32_to_f16(
+                    k_batch[src_off..src_off + stride].as_ptr(),
+                    kb[cache_off..cache_off + stride].as_mut_ptr(),
+                    stride as i32,
+                );
+                ffi_inference::f32_to_f16(
+                    v_batch[src_off..src_off + stride].as_ptr(),
+                    vb[cache_off..cache_off + stride].as_mut_ptr(),
+                    stride as i32,
+                );
             }
         }
     }

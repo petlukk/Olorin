@@ -104,6 +104,10 @@ pub unsafe fn q5k_gemm(
     (k().q5k_gemm)(weight, q8_a, scratch, out, output_stride, n_inner, nr, nc)
 }
 
+pub unsafe fn f32_to_f16(src: *const f32, dst: *mut u16, n: i32) {
+    (k().f32_to_f16)(src, dst, n)
+}
+
 pub fn gemma4_rmsnorm(x: *const f32, weight: *const f32, out: *mut f32, n: i32, eps: f32) {
     unsafe { (k().gemma4_rmsnorm)(x, weight, out, n, eps) }
 }
