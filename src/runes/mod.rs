@@ -114,3 +114,20 @@ pub fn wrap_rune_result(
     }
     Ok(body)
 }
+
+/// Build the narration prompt that asks the LLM to summarize a rune's
+/// kernel output in 1-2 sentences. Returns `None` when the wrapped result
+/// is blocked by the inbound safety scan — caller should skip narration.
+pub fn build_narration_prompt(
+    rune_name: &str,
+    safety_class: OutputSafety,
+    result: RuneResult,
+) -> Option<String> {
+    wrap_rune_result(rune_name, safety_class, result).ok().map(|wrapped| {
+        format!(
+            "Briefly summarize this analysis in 1-2 sentences for the user. \
+             Do not repeat the raw numbers verbatim; surface what stands out.\n\n\
+             {wrapped}"
+        )
+    })
+}

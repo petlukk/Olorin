@@ -48,7 +48,7 @@ impl DispatchContext {
         let recall_context = match self.pre_inference(input) {
             Err(early) => {
                 if let Some(prompt) = early.followup.clone() {
-                    return self.run_followup_sync(early.text, &prompt);
+                    return self.run_followup_sync(input, early.text, &prompt);
                 }
                 return early;
             }
@@ -133,7 +133,12 @@ impl DispatchContext {
     /// Sync follow-up: run the model with `prompt`, append narration after
     /// `head` (the displayed kernel output). Used by the non-streaming
     /// `dispatch` path so REPL/test callers also see narration.
-    fn run_followup_sync(&mut self, head: String, prompt: &str) -> Response {
+    ///
+    /// On successful narration, persists the turn so it shows up in next-turn
+    /// context: pushes the rune command + narration into `self.messages` and
+    /// vault-saves the narration as `assistant`. (The kernel output is already
+    /// vault-saved as `tool` by `handle_rune`.)
+    fn run_followup_sync(&mut self, input: &str, head: String, prompt: &str) -> Response {
         let Some(engine) = self.engine.as_mut() else {
             return Response::text(head);
         };
@@ -142,12 +147,13 @@ impl DispatchContext {
         match engine.generate(prompt, &system, &no_op) {
             Ok(narr) => {
                 let trimmed = narr.trim();
-                let combined = if trimmed.is_empty() {
-                    head
-                } else {
-                    format!("{head}\n\n{trimmed}")
-                };
-                Response::text(combined)
+                if trimmed.is_empty() {
+                    return Response::text(head);
+                }
+                self.messages.push(handlers::user_message(input));
+                self.messages.push(handlers::assistant_message(trimmed));
+                self.vault_save(b"assistant", trimmed.as_bytes());
+                Response::text(format!("{head}\n\n{trimmed}"))
             }
             Err(e) => {
                 eprintln!("[rune] narration failed: {e}");
@@ -201,25 +207,15 @@ impl DispatchContext {
         self.vault_save(b"tool", body.as_bytes());
 
         // Followup: feed the (wrapped, safety-scanned) rune answer back to the
-        // model for a 1-2 sentence narration. Built only when we have an
-        // engine — no point wrapping if there's nothing to consume it.
-        let followup = if self.engine.is_some() {
-            let scratch = crate::runes::RuneResult {
-                answer: answer,
-                details: None,
-                success: result.success,
-                timing_us,
-            };
-            crate::runes::wrap_rune_result(name, safety_class, scratch).ok().map(|wrapped| {
-                format!(
-                    "Briefly summarize this analysis in 1-2 sentences for the user. \
-                     Do not repeat the raw numbers verbatim; surface what stands out.\n\n\
-                     {wrapped}"
-                )
-            })
-        } else {
-            None
+        // model for a 1-2 sentence narration. Always built; consumer sites in
+        // dispatch / dispatch_streaming gate on engine presence.
+        let scratch = crate::runes::RuneResult {
+            answer,
+            details: None,
+            success: result.success,
+            timing_us,
         };
+        let followup = crate::runes::build_narration_prompt(name, safety_class, scratch);
 
         let resp = Response::text(body);
         match followup {

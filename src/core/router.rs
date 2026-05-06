@@ -184,7 +184,7 @@ impl DispatchContext {
                 }
                 let _ = tx.send(StreamEvent::Token(resp.text.clone()));
                 if let Some(followup) = resp.followup {
-                    self.run_followup_streaming(&resp.text, &followup, &tx);
+                    self.run_followup_streaming(input, &resp.text, &followup, &tx);
                     return;
                 }
                 let _ = tx.send(StreamEvent::Done { full_text: resp.text });
@@ -407,8 +407,14 @@ impl DispatchContext {
     /// kernel output) and stream the model's narration to the user. The
     /// `rune_text` is the displayed kernel output (already sent as a Token);
     /// `prompt` is the LLM-facing prompt that wraps the rune answer.
+    ///
+    /// On successful narration, persists the turn so it shows up in next-turn
+    /// context: pushes the rune command + narration into `self.messages` and
+    /// vault-saves the narration as `assistant`. (The kernel output is already
+    /// vault-saved as `tool` by `handle_rune`.)
     fn run_followup_streaming(
         &mut self,
+        input: &str,
         rune_text: &str,
         prompt: &str,
         tx: &std::sync::mpsc::Sender<StreamEvent>,
@@ -435,10 +441,16 @@ impl DispatchContext {
 
         let narration = engine.generate(prompt, &system, &on_event)
             .unwrap_or_default();
-        let mut full = String::with_capacity(rune_text.len() + narration.len() + 2);
+        let trimmed = narration.trim();
+        if !trimmed.is_empty() {
+            self.messages.push(handlers::user_message(input));
+            self.messages.push(handlers::assistant_message(trimmed));
+            self.vault_save(b"assistant", trimmed.as_bytes());
+        }
+        let mut full = String::with_capacity(rune_text.len() + trimmed.len() + 2);
         full.push_str(rune_text);
         full.push_str("\n\n");
-        full.push_str(&narration);
+        full.push_str(trimmed);
         let _ = tx.send(StreamEvent::Done { full_text: full });
     }
 
