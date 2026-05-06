@@ -46,7 +46,12 @@ impl DispatchContext {
 
         let safety_start = std::time::Instant::now();
         let recall_context = match self.pre_inference(input) {
-            Err(early) => return early,
+            Err(early) => {
+                if let Some(prompt) = early.followup.clone() {
+                    return self.run_followup_sync(early.text, &prompt);
+                }
+                return early;
+            }
             Ok(ctx) => ctx,
         };
         let safety_us = safety_start.elapsed().as_micros() as u64;
@@ -125,6 +130,32 @@ impl DispatchContext {
         }
     }
 
+    /// Sync follow-up: run the model with `prompt`, append narration after
+    /// `head` (the displayed kernel output). Used by the non-streaming
+    /// `dispatch` path so REPL/test callers also see narration.
+    fn run_followup_sync(&mut self, head: String, prompt: &str) -> Response {
+        let Some(engine) = self.engine.as_mut() else {
+            return Response::text(head);
+        };
+        let system = self.system_prompt.clone();
+        let no_op = |_ev: crate::inference::generate::GenEvent| {};
+        match engine.generate(prompt, &system, &no_op) {
+            Ok(narr) => {
+                let trimmed = narr.trim();
+                let combined = if trimmed.is_empty() {
+                    head
+                } else {
+                    format!("{head}\n\n{trimmed}")
+                };
+                Response::text(combined)
+            }
+            Err(e) => {
+                eprintln!("[rune] narration failed: {e}");
+                Response::text(head)
+            }
+        }
+    }
+
     // ── Teleport handling ────────────────────────────────────────────────────
 
     pub(crate) fn handle_teleport(&mut self) -> Response {
@@ -144,29 +175,56 @@ impl DispatchContext {
                 "usage: /rune <name> [args] — try `/rune eacrunch <path.csv>`"
             );
         }
-        match crate::runes::run_rune(name, args) {
-            Some(result) => {
-                let mut body = result.answer;
-                if let Some(d) = result.details {
-                    body.push_str("\n\n---\n");
-                    body.push_str(&d);
-                }
-                body.push_str(&format!("\n[timing: {}µs]", result.timing_us));
-                // Spec requires inbound safety::scan on rune output before it
-                // can reach the LLM turn. Runes classified UntrustedQuoted
-                // (e.g. eacrunch, eacount) echo file-derived bytes, so this
-                // is the last defense before the content enters context.
-                // Runs on every rune path regardless of OutputSafety — the
-                // extra few µs on Trusted output is cheap defense-in-depth.
-                let scan = safety::scan(body.as_bytes());
-                if scan.blocked {
-                    return Response::blocked("Rune output blocked by safety scan.");
-                }
-                self.vault_save(b"user", full.as_bytes());
-                self.vault_save(b"tool", body.as_bytes());
-                Response::text(body)
-            }
-            None => Response::text(format!("unknown rune: {name}")),
+        let Some(rune) = crate::runes::RUNES.iter().find(|r| r.name() == name) else {
+            return Response::text(format!("unknown rune: {name}"));
+        };
+        let result = rune.run(args);
+        let safety_class = rune.output_safety();
+        let answer = result.answer.clone();
+        let timing_us = result.timing_us;
+
+        // Display body for the user — kernel summary + details + timing.
+        let mut body = result.answer;
+        if let Some(d) = result.details {
+            body.push_str("\n\n---\n");
+            body.push_str(&d);
+        }
+        body.push_str(&format!("\n[timing: {timing_us}µs]"));
+        // Inbound safety scan: file-derived bytes are echoed verbatim, so this
+        // is the last defense before content reaches the user (or the LLM via
+        // the followup turn). Runs regardless of OutputSafety — defense-in-depth.
+        let scan = safety::scan(body.as_bytes());
+        if scan.blocked {
+            return Response::blocked("Rune output blocked by safety scan.");
+        }
+        self.vault_save(b"user", full.as_bytes());
+        self.vault_save(b"tool", body.as_bytes());
+
+        // Followup: feed the (wrapped, safety-scanned) rune answer back to the
+        // model for a 1-2 sentence narration. Built only when we have an
+        // engine — no point wrapping if there's nothing to consume it.
+        let followup = if self.engine.is_some() {
+            let scratch = crate::runes::RuneResult {
+                answer: answer,
+                details: None,
+                success: result.success,
+                timing_us,
+            };
+            crate::runes::wrap_rune_result(name, safety_class, scratch).ok().map(|wrapped| {
+                format!(
+                    "Briefly summarize this analysis in 1-2 sentences for the user. \
+                     Do not repeat the raw numbers verbatim; surface what stands out.\n\n\
+                     {wrapped}"
+                )
+            })
+        } else {
+            None
+        };
+
+        let resp = Response::text(body);
+        match followup {
+            Some(p) => resp.with_followup(p),
+            None    => resp,
         }
     }
 

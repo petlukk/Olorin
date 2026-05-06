@@ -27,6 +27,10 @@ use std::path::PathBuf;
 pub struct Response {
     pub text:    String,
     pub blocked: bool,
+    /// If set, dispatch_streaming runs an LLM turn after the response text,
+    /// using this string as the prompt. Used by runes to narrate kernel
+    /// output in 1-2 sentences.
+    pub followup: Option<String>,
 }
 
 /// Events emitted by streaming dispatch.
@@ -43,11 +47,16 @@ pub enum StreamEvent {
 
 impl Response {
     pub(crate) fn text(s: impl Into<String>) -> Self {
-        Self { text: s.into(), blocked: false }
+        Self { text: s.into(), blocked: false, followup: None }
     }
 
     pub(crate) fn blocked(reason: impl Into<String>) -> Self {
-        Self { text: reason.into(), blocked: true }
+        Self { text: reason.into(), blocked: true, followup: None }
+    }
+
+    pub(crate) fn with_followup(mut self, prompt: String) -> Self {
+        self.followup = Some(prompt);
+        self
     }
 }
 
@@ -170,8 +179,13 @@ impl DispatchContext {
             Err(resp) => {
                 if resp.blocked {
                     let _ = tx.send(StreamEvent::Error(resp.text.clone()));
-                } else {
-                    let _ = tx.send(StreamEvent::Token(resp.text.clone()));
+                    let _ = tx.send(StreamEvent::Done { full_text: resp.text });
+                    return;
+                }
+                let _ = tx.send(StreamEvent::Token(resp.text.clone()));
+                if let Some(followup) = resp.followup {
+                    self.run_followup_streaming(&resp.text, &followup, &tx);
+                    return;
                 }
                 let _ = tx.send(StreamEvent::Done { full_text: resp.text });
                 return;
@@ -387,6 +401,45 @@ impl DispatchContext {
         self.vault_save(b"user", input.as_bytes());
         self.vault_save(b"assistant", text.as_bytes());
         self.messages.push(handlers::assistant_message(text));
+    }
+
+    /// Run a follow-up LLM turn after a short-circuit response (e.g. a rune's
+    /// kernel output) and stream the model's narration to the user. The
+    /// `rune_text` is the displayed kernel output (already sent as a Token);
+    /// `prompt` is the LLM-facing prompt that wraps the rune answer.
+    fn run_followup_streaming(
+        &mut self,
+        rune_text: &str,
+        prompt: &str,
+        tx: &std::sync::mpsc::Sender<StreamEvent>,
+    ) {
+        let Some(engine) = self.engine.as_mut() else {
+            let _ = tx.send(StreamEvent::Done { full_text: rune_text.to_string() });
+            return;
+        };
+
+        // Visual separator between kernel output and narration.
+        let _ = tx.send(StreamEvent::Token("\n\n".to_string()));
+
+        let system = self.system_prompt.clone();
+        let tx_ref = tx.clone();
+        let on_event = move |ev: crate::inference::generate::GenEvent| match ev {
+            crate::inference::generate::GenEvent::Token(t) => {
+                if safety::is_chatml_hallucination(t) { return; }
+                let _ = tx_ref.send(StreamEvent::Token(t.to_string()));
+            }
+            crate::inference::generate::GenEvent::Thinking(active) => {
+                let _ = tx_ref.send(StreamEvent::Thinking(active));
+            }
+        };
+
+        let narration = engine.generate(prompt, &system, &on_event)
+            .unwrap_or_default();
+        let mut full = String::with_capacity(rune_text.len() + narration.len() + 2);
+        full.push_str(rune_text);
+        full.push_str("\n\n");
+        full.push_str(&narration);
+        let _ = tx.send(StreamEvent::Done { full_text: full });
     }
 
     fn last_user_text(&self) -> String {
