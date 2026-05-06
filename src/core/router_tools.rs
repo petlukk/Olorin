@@ -20,6 +20,24 @@ use std::time::Instant;
 const FOLLOWUP_CLOSER: &str =
     "Now answer my original question using the tool result above. Do NOT call another tool.";
 
+/// Decode-token cap for a rune-narration call. The model's max_seq_len is
+/// 2048 positions total (prefill + decode).
+///
+/// Gemma 4 has thinking-mode enabled by default — the model emits a
+/// `<|channel>...<channel|>` block of reasoning tokens BEFORE the answer.
+/// Those tokens count against decode but are filtered out of the returned
+/// string in `Engine::generate`. For complex inputs the thinking block
+/// alone can run 400-600 tokens; we set the cap at 768 = ~600 thinking +
+/// ~120 answer + margin to leave headroom for both.
+pub(crate) const NARRATION_DECODE_TOKEN_CAP: usize = 768;
+
+/// Total position budget the rune-narration prompt must fit within: the
+/// model's max_seq_len minus the decode cap, with a small safety margin
+/// for chat-template tokens that get added during `generate` formatting.
+/// Anything over this skips narration with a notice — better than panicking
+/// on `pos < max_seq_len` deep in `rope_slices`.
+pub(crate) const NARRATION_MAX_PROMPT_TOKENS: usize = 2048 - NARRATION_DECODE_TOKEN_CAP - 32;
+
 impl DispatchContext {
     // ── The Olorin Pipe (non-streaming) ──────────────────────────────────────
 
@@ -142,9 +160,24 @@ impl DispatchContext {
         let Some(engine) = self.engine.as_mut() else {
             return Response::text(head);
         };
+        // Use the full system prompt (including the runes tools block).
+        // We tried slimmer narration-specific prompts to save ~150 tokens,
+        // but Gemma 4 emits single-word EOS unless it sees the same
+        // tools-block framing it gets for normal turns. Reliability beats
+        // token savings here.
         let system = self.system_prompt.clone();
+        let prompt_tokens = engine.count_prompt_tokens(prompt, &system);
+        if prompt_tokens > NARRATION_MAX_PROMPT_TOKENS {
+            return Response::text(format!(
+                "{head}\n\n[narration skipped: prompt is {prompt_tokens} tokens, over the {NARRATION_MAX_PROMPT_TOKENS}-token narration budget]"
+            ));
+        }
+        let prior_max = engine.max_tokens;
+        engine.max_tokens = NARRATION_DECODE_TOKEN_CAP;
         let no_op = |_ev: crate::inference::generate::GenEvent| {};
-        match engine.generate(prompt, &system, &no_op) {
+        let result = engine.generate(prompt, &system, &no_op);
+        engine.max_tokens = prior_max;
+        match result {
             Ok(narr) => {
                 let trimmed = narr.trim();
                 if trimmed.is_empty() {

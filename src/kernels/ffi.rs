@@ -26,6 +26,12 @@ type CsvScanFn          = unsafe extern "C" fn(
     *mut i32, *mut i32,
     *mut u8,
 );
+type JsonlStructFn      = unsafe extern "C" fn(
+    *const u8, i32,
+    *mut i32, *mut i32, *mut i32, *mut i32, *mut i32,
+    *mut i32, *mut i32, *mut i32, *mut i32, *mut i32,
+    *mut u8,
+);
 type F32StatsFn         = unsafe extern "C" fn(
     *const f32, i32,
     *mut i32,
@@ -69,6 +75,7 @@ pub struct KernelTable {
     pub scan_safety_fused:        FusedSafetyFn,
     pub classify_intent:          ClassifyIntentFn,
     pub csv_scan:                 CsvScanFn,
+    pub jsonl_struct_scan:        JsonlStructFn,
     pub f32_stats:                F32StatsFn,
     pub eval_expr:                EvalExprFn,
     pub zeroize:                  ZeroizeFn,
@@ -162,6 +169,7 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
     let fused_safety    = load("fused_safety")?;
     let intent_router   = load("intent_router")?;
     let csv_scan_lib    = load("csv_scan")?;
+    let jsonl_struct_lib = load("jsonl_struct")?;
     let f32_stats_lib   = load("f32_stats")?;
     let expr_eval       = load("expr_eval")?;
     let zeroize_lib     = load("zeroize")?;
@@ -205,6 +213,8 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
                 sym(&intent_router, b"classify_intent\0")?),
             csv_scan: std::mem::transmute(
                 sym(&csv_scan_lib, b"csv_scan\0")?),
+            jsonl_struct_scan: std::mem::transmute(
+                sym(&jsonl_struct_lib, b"jsonl_struct_scan\0")?),
             f32_stats: std::mem::transmute(
                 sym(&f32_stats_lib, b"f32_stats\0")?),
             eval_expr: std::mem::transmute(
@@ -235,7 +245,7 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
                 zeroize_lib, search, jl_project_lib,
                 chacha20_lib, chacha20_sv2, pretokenize_lib,
                 ansi_parser_lib, terminal_diff_lib,
-                csv_scan_lib, f32_stats_lib,
+                csv_scan_lib, jsonl_struct_lib, f32_stats_lib,
             ],
         };
         Ok(table)
@@ -371,6 +381,34 @@ pub unsafe fn csv_scan(
     scratch: *mut u8,
 ) {
     (k().csv_scan)(text, len, out_commas, out_newlines, out_n_comma, out_n_newline, scratch);
+}
+
+/// Single-pass JSONL structural scan: writes positions of newlines, quotes,
+/// colons, commas, and backslashes across `text` to five caller-allocated
+/// arrays. Backslash positions allow callers to filter out escaped quotes
+/// (`\"` inside a JSON string is *not* a structural quote).
+///
+/// # Safety
+/// - `text` must point to `len` readable bytes.
+/// - Each `out_*` array must be writable for `len` `i32` elements (worst
+///   case: every byte is a structural character of that type).
+/// - `out_n_*` must each be valid for one writable `i32`.
+/// - `scratch` must be writable for 16 bytes; contents after the call are
+///   unspecified (overwritten once per 16-byte chunk).
+pub unsafe fn jsonl_struct_scan(
+    text: *const u8, len: i32,
+    out_newlines: *mut i32, out_quotes: *mut i32,
+    out_colons: *mut i32,   out_commas: *mut i32, out_backslashes: *mut i32,
+    out_n_newline: *mut i32, out_n_quote: *mut i32,
+    out_n_colon: *mut i32,   out_n_comma: *mut i32, out_n_backslash: *mut i32,
+    scratch: *mut u8,
+) {
+    (k().jsonl_struct_scan)(
+        text, len,
+        out_newlines, out_quotes, out_colons, out_commas, out_backslashes,
+        out_n_newline, out_n_quote, out_n_colon, out_n_comma, out_n_backslash,
+        scratch,
+    );
 }
 
 /// Streaming stats over `len` f32 elements. Writes count, sum, min, max.

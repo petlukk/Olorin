@@ -89,6 +89,15 @@ impl Engine {
         "gemma4-q4k"
     }
 
+    /// Tokenize a prompt the same way `generate` does (chat-template + BOS)
+    /// and return the resulting token count. Used by callers that need to
+    /// budget against `max_seq_len` before invoking generation.
+    pub fn count_prompt_tokens(&self, prompt: &str, system: &str) -> usize {
+        let formatted = format_chat(prompt, system);
+        // +1 for the BOS id that `generate` prepends.
+        1 + self.tokenizer.encode(&formatted).len()
+    }
+
     /// Generate text from a prompt.
     ///
     /// `on_event` is called with every user-visible token and with state

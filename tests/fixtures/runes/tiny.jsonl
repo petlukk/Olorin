@@ -1,0 +1,8 @@
+{"ts":"2026-05-06T08:00:00Z","level":"info","src_ip":"192.168.1.10","status":200,"latency_ms":12.5,"cached":true}
+{"ts":"2026-05-06T08:00:01Z","level":"warn","src_ip":"1.2.3.4","status":404,"latency_ms":3.1,"cached":false}
+{"ts":"2026-05-06T08:00:02Z","level":"info","src_ip":"192.168.1.10","status":200,"latency_ms":8.7,"cached":true}
+{"ts":"2026-05-06T08:00:03Z","level":"error","src_ip":"1.2.3.4","status":500,"latency_ms":420.0,"cached":false}
+{"ts":"2026-05-06T08:00:04Z","level":"info","src_ip":"192.168.1.11","status":200,"latency_ms":15.2,"cached":true}
+{"ts":"2026-05-06T08:00:05Z","level":"warn","src_ip":"1.2.3.4","status":404,"latency_ms":2.8,"cached":false}
+{"ts":"2026-05-06T08:00:06Z","level":"info","src_ip":"192.168.1.10","status":200,"latency_ms":10.4,"cached":true}
+{"ts":"2026-05-06T08:00:07Z","level":"warn","src_ip":"1.2.3.4","status":404,"latency_ms":3.5,"cached":false}

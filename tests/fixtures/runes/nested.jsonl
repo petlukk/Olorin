@@ -1,0 +1,4 @@
+{"id":1,"http":{"status":200,"method":"GET"},"path":"/home"}
+{"id":2,"http":{"status":404,"method":"GET"},"path":"/home"}
+{"id":3,"http":{"status":200,"method":"POST"},"path":"/api"}
+{"id":4,"http":{"status":500,"method":"GET"},"path":"/api"}
