@@ -36,6 +36,77 @@ Every message follows the same path. No sidechannels. No exceptions.
               Response
 ```
 
+## Runes — SIMD tool calls
+
+Runes let Olorin reason over data that is bigger than the model's context
+window. Gemma 4 2B has ~128K tokens of context; a modest bank statement
+can be 50 MB of text. A kernel summarizes the file in sub-second time,
+then the model narrates the summary in one or two plain-English sentences.
+
+Each rune is one SIMD-first kernel + a thin Rust orchestrator. Output
+is wrapped in `<rune_output untrusted="true">...</rune_output>` and
+runs through the inbound safety scan before reaching the LLM turn —
+file-derived bytes are always treated as data, never instructions.
+
+### eacrunch — CSV summarizer
+
+```
+/rune eacrunch ~/Downloads/statement.csv
+```
+
+```
+rows: 1247
+columns: 4
+date (text): 340 unique; top values: 2024-01-15, 2024-02-10, 2024-03-05
+category (text): 8 unique; top values: groceries, food, rent
+amount (number): count=1247, mean=46.70, min=1.00, max=1850.00, sum=58235.00
+merchant (text): 42 unique; top values: Coop, ICA, SL
+```
+
+### eajson — JSON Lines summarizer
+
+```
+/rune eajson ~/Downloads/access.log.jsonl
+```
+
+```
+rows: 1000
+keys: 7 (+12 high-cardinality keys suppressed)
+ts (timestamp): 1000 unique of 1000; range: 2026-05-06T08:00:00Z .. 2026-05-06T08:42:13Z
+status (number): count=1000, mean=232.10, min=200.00, max=503.00, sum=232100.00
+method (text): 4 unique; top values: GET, POST, HEAD
+src_ip (text): 47 unique; top values: 1.2.3.4, 10.0.0.5, 192.168.1.10
+http.user_agent (text): 12 unique; top values: curl/7.68, Mozilla/5.0, Nikto
+cached (bool): true=623, false=377
+MESSAGE (text): 8 unique; top values: GET /index, POST /api/auth, GET /admin
+```
+
+eajson handles real systemd / container / web-server log shapes:
+nested objects flatten to `parent.child` keys, byte-array MESSAGE fields
+(systemd's binary format) decode as UTF-8, ISO-8601 timestamp fields
+report a `min..max` range, and high-cardinality noise (cursors, sequence
+IDs) is suppressed with a count notice. Escape sequences in strings
+(`\"`, `\\`, etc.) are correctly handled by the kernel via a 5th match
+character (backslash) and an odd-run filter in the orchestrator.
+
+### Real public data to try it on
+
+- **Synthetic fixtures** — `tests/fixtures/runes/{tiny.csv,tiny.jsonl}` in this repo. Small, good for a smoke test.
+- **systemd journal** — `journalctl -o json -n 1000 > /tmp/log.jsonl` then `/rune eajson /tmp/log.jsonl` — real local data, no setup.
+- **US Bank Transaction Categories v2** — 68K real transaction descriptions, MIT-licensed (CSV):
+  https://huggingface.co/datasets/DoDataThings/us-bank-transaction-categories-v2
+- **NYC TLC Yellow Taxi trip records** — millions of rows per month, permissive (CSV):
+  https://catalog.data.gov/dataset/2023-yellow-taxi-trip-data
+
+### Limits
+
+- Max input: 4 GB (2 GB for the `csv_scan` / `jsonl_struct` kernels in this version — bumping to i64 is a planned follow-up).
+- Path allowlist: `~` and `/tmp` only. Symlinks escaping the allowlist are rejected at open time.
+- Output cap: 32 KB summary (truncated with a `[...truncated N bytes]` marker at a UTF-8-safe boundary).
+- eacrunch: unquoted CSV only; CRLF line endings tolerated (trailing `\r` trimmed per field).
+- eajson: top-level scalars only — nested objects flatten one level deep (`http.status`); deeper nesting and arrays-of-objects are skipped. Mixed-type keys (number on one line, string on another) collapse to `(mixed)` with no stats. Text top-N capped at 10K cardinality.
+- Narration: the model gets a token budget of ~1248 prompt + 768 decode. Outputs over that skip narration with a clear notice — the kernel summary is shown either way.
+
 ## Architecture
 
 Single crate. No workspace. Two dependencies.
@@ -95,9 +166,9 @@ olorin/
     tools/          20 built-in tools
     recall.rs       VectorStore (JL-projected embeddings)
 
-  kernels/          59 Ea SIMD kernel source files (flat)
+  kernels/          64 Ea SIMD kernel source files (flat) — 42 logical kernels with ARM variants
   web/chat.html     Chat UI (Catppuccin themed, embedded in binary)
-  tests/            33 test files, 213 tests
+  tests/            60 test files, 318 tests
 ```
 
 ## Gemma 4 E2B Inference
@@ -180,8 +251,9 @@ content never exists as plaintext.
 
 ## Kernel Infrastructure
 
-59 Ea SIMD kernel source files compiled by `build.rs` into shared objects
-(ARM NEON + dotprod on aarch64, SSE/AVX2 on x86_64).
+64 Ea SIMD kernel source files (42 logical kernels with ARM variants)
+compiled by `build.rs` into shared objects (ARM NEON + dotprod on
+aarch64, SSE/AVX2 on x86_64).
 
 Kernels are embedded in the binary via `include_bytes!` and extracted to
 `~/.olorin/lib/{version}/` on first run. Version is a content hash.
@@ -194,6 +266,8 @@ Key kernels:
 - `bf16_matvec_arm.ea` — BF16 dot with 4-token register tile
 - `fused_safety.ea` — Single-pass injection + leak detection
 - `chacha20_search_v2.ea` — Decrypt-and-search in SIMD registers
+- `csv_scan.ea` — CSV structural scan (commas + newlines) for runes
+- `jsonl_struct.ea` — JSON Lines structural scan (5-bit mask: newlines/quotes/colons/commas/backslashes)
 
 ## Building
 
@@ -236,48 +310,9 @@ for cloud inference as fallback.
 
 | Metric | Value |
 |---|---|
-| Rust source | 14,347 lines |
-| Ea kernel source | 11,000 lines (59 files) |
-| Test lines | 5,552 (33 files, 213 tests) |
+| Rust source | 17,660 lines |
+| Ea kernel source | 12,568 lines (64 files, 42 logical kernels) |
+| Test lines | 9,466 (60 files, 318 tests) |
 | Dependencies | 2 (libc, libloading) |
-| Release binary (ARM) | 3.4 MB (all kernels embedded) |
+| Release binary (ARM) | 3.8 MB (all kernels embedded) |
 | Max file size | 500 lines (enforced) |
-
-## Runes — SIMD tool calls
-
-Runes let Olorin reason over data that is bigger than the model's context
-window. Gemma 4 2B has ~128K tokens of context; a modest bank statement
-can be 50 MB of text. A kernel summarizes the file in sub-second time,
-then the model narrates the summary in one or two plain-English sentences.
-
-### Try it
-
-```
-/rune eacrunch ~/Downloads/statement.csv
-```
-
-Sample output:
-
-```
-rows: 1247
-columns: 4
-date (text): 340 unique; top values: 2024-01-15, 2024-02-10, 2024-03-05
-category (text): 8 unique; top values: groceries, food, rent
-amount (number): count=1247, mean=46.70, min=1.00, max=1850.00, sum=58235.00
-merchant (text): 42 unique; top values: Coop, ICA, SL
-```
-
-### Real public data to try it on
-
-- **Synthetic fixture** — `tests/fixtures/runes/tiny.csv` in this repo. 10 rows, good for a smoke test.
-- **US Bank Transaction Categories v2** — 68K real transaction descriptions, MIT-licensed:
-  https://huggingface.co/datasets/DoDataThings/us-bank-transaction-categories-v2
-- **NYC TLC Yellow Taxi trip records** — millions of rows per month, permissive:
-  https://catalog.data.gov/dataset/2023-yellow-taxi-trip-data
-
-### Limits (MVP)
-
-- Max input: 4 GB (2 GB for `csv_scan` in this MVP — bumping to i64 is a planned follow-up).
-- Path allowlist: `~` and `/tmp` only. Symlinks escaping the allowlist are rejected at open time.
-- Output cap: 32 KB summary (truncated with a `[...truncated N bytes]` marker at a UTF-8-safe boundary).
-- Unquoted CSV only; CRLF line endings are tolerated (trailing `\r` trimmed per field).
