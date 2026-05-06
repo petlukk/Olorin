@@ -116,18 +116,39 @@ pub fn wrap_rune_result(
 }
 
 /// Build the narration prompt that asks the LLM to summarize a rune's
-/// kernel output in 1-2 sentences. Returns `None` when the wrapped result
-/// is blocked by the inbound safety scan — caller should skip narration.
+/// kernel output in 1-2 sentences.
+///
+/// Returns `None` when the answer is blocked by the inbound safety scan —
+/// caller should skip narration.
+///
+/// Format: textbook instruction-data shape (data-then-question), with NO
+/// `<rune_output untrusted="true">...</rune_output>` wrapping. The wrapping
+/// exists for prompt-injection defense in multi-turn contexts where the
+/// model would otherwise have to distinguish trusted instructions from
+/// file-derived content. For a narration follow-up there's only one piece
+/// of content, the safety scan has already blocked injection patterns
+/// directly, and the wrapping just pushes Gemma 4 off its trained
+/// "instruction → analysis → answer" pattern (empirically: emits EOS
+/// immediately for some prompt shapes, particularly when the wrapped
+/// content already looks like a complete analysis).
+///
+/// `safety_class` is currently unused for narration — both Trusted and
+/// UntrustedQuoted use the same plain-text shape — but it's kept in the
+/// signature for callers that need the distinction in other contexts.
 pub fn build_narration_prompt(
     rune_name: &str,
-    safety_class: OutputSafety,
+    _safety_class: OutputSafety,
     result: RuneResult,
 ) -> Option<String> {
-    wrap_rune_result(rune_name, safety_class, result).ok().map(|wrapped| {
-        format!(
-            "Briefly summarize this analysis in 1-2 sentences for the user. \
-             Do not repeat the raw numbers verbatim; surface what stands out.\n\n\
-             {wrapped}"
-        )
-    })
+    let scan = safety::scan(result.answer.as_bytes());
+    if scan.blocked {
+        return None;
+    }
+    Some(format!(
+        "Here is the output of the {rune_name} analysis tool:\n\n\
+         {}\n\n\
+         In 1-2 plain-English sentences, tell me what stands out about this \
+         data. Do not repeat the raw numbers verbatim; surface insights.",
+        result.answer
+    ))
 }

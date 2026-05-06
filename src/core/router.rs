@@ -423,11 +423,9 @@ impl DispatchContext {
             let _ = tx.send(StreamEvent::Done { full_text: rune_text.to_string() });
             return;
         };
-        // Full system prompt (see run_followup_sync). The slim/empty
-        // narration system prompt empirically broke generation on Gemma 4;
-        // reliability over token savings.
-        let system = self.system_prompt.clone();
-        let prompt_tokens = engine.count_prompt_tokens(prompt, &system);
+        // Narration-specific system prompt; see run_followup_sync.
+        let system = crate::core::router_tools::NARRATION_SYSTEM_PROMPT;
+        let prompt_tokens = engine.count_prompt_tokens(prompt, system);
         let cap = crate::core::router_tools::NARRATION_MAX_PROMPT_TOKENS;
         if prompt_tokens > cap {
             let notice = format!(
@@ -456,7 +454,7 @@ impl DispatchContext {
 
         let prior_max = engine.max_tokens;
         engine.max_tokens = crate::core::router_tools::NARRATION_DECODE_TOKEN_CAP;
-        let narration = engine.generate(prompt, &system, &on_event)
+        let narration = engine.generate(prompt, system, &on_event)
             .unwrap_or_default();
         engine.max_tokens = prior_max;
         let trimmed = narration.trim();

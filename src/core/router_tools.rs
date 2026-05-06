@@ -31,6 +31,21 @@ const FOLLOWUP_CLOSER: &str =
 /// ~120 answer + margin to leave headroom for both.
 pub(crate) const NARRATION_DECODE_TOKEN_CAP: usize = 768;
 
+/// System prompt for narration calls. Narration is a focused
+/// analyze-and-summarize task, not a tool-dispatch turn — using the full
+/// `runes_prompt_block` (with tools-block + "only call a tool when..."
+/// framing) made Gemma 4 emit EOS immediately after seeing the rune
+/// output (model interprets "tool already called → conversation done").
+///
+/// This narration-specific role grounds the model in "data analyst
+/// summarizing tool output" without the tool-dispatch baggage. Clean
+/// instruction-data shape with this system prompt empirically reproduces
+/// reliable narrations on both x86 and Pi 5.
+pub(crate) const NARRATION_SYSTEM_PROMPT: &str =
+    "You are a helpful data analyst. Read the user's tool output and respond \
+     with 1-2 plain-English sentences highlighting what stands out. \
+     Avoid repeating raw numbers verbatim.";
+
 /// Total position budget the rune-narration prompt must fit within: the
 /// model's max_seq_len minus the decode cap, with a small safety margin
 /// for chat-template tokens that get added during `generate` formatting.
@@ -160,13 +175,12 @@ impl DispatchContext {
         let Some(engine) = self.engine.as_mut() else {
             return Response::text(head);
         };
-        // Use the full system prompt (including the runes tools block).
-        // We tried slimmer narration-specific prompts to save ~150 tokens,
-        // but Gemma 4 emits single-word EOS unless it sees the same
-        // tools-block framing it gets for normal turns. Reliability beats
-        // token savings here.
-        let system = self.system_prompt.clone();
-        let prompt_tokens = engine.count_prompt_tokens(prompt, &system);
+        // Narration-specific system prompt (analyst role, no tools-block).
+        // The full runes prompt block conditions Gemma 4 to "decide whether
+        // to call a tool, then if no tool needed, emit EOS" — which is the
+        // wrong framing for a follow-up summarization. See the const doc.
+        let system = NARRATION_SYSTEM_PROMPT;
+        let prompt_tokens = engine.count_prompt_tokens(prompt, system);
         if prompt_tokens > NARRATION_MAX_PROMPT_TOKENS {
             return Response::text(format!(
                 "{head}\n\n[narration skipped: prompt is {prompt_tokens} tokens, over the {NARRATION_MAX_PROMPT_TOKENS}-token narration budget]"
@@ -175,7 +189,7 @@ impl DispatchContext {
         let prior_max = engine.max_tokens;
         engine.max_tokens = NARRATION_DECODE_TOKEN_CAP;
         let no_op = |_ev: crate::inference::generate::GenEvent| {};
-        let result = engine.generate(prompt, &system, &no_op);
+        let result = engine.generate(prompt, system, &no_op);
         engine.max_tokens = prior_max;
         match result {
             Ok(narr) => {
