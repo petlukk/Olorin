@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use crate::error::{Error, Result};
+use crate::platform::mmap::{map_file_readonly, MapView};
 
 const GGUF_MAGIC: u32 = 0x4655_4747; // "GGUF" as little-endian u32
 const ALIGNMENT: u64 = 32;
@@ -43,30 +44,7 @@ pub struct GgufFile {
     /// Lets requant tools byte-copy the metadata range without re-serializing.
     pub meta_end: u64,
     pub data_offset: u64,
-    mmap: MmapBuf,
-}
-
-/// Owned mmap region. Unmapped on Drop.
-struct MmapBuf {
-    ptr: *mut u8,
-    len: usize,
-}
-
-unsafe impl Send for MmapBuf {}
-unsafe impl Sync for MmapBuf {}
-
-impl MmapBuf {
-    fn as_slice(&self) -> &[u8] {
-        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
-    }
-}
-
-impl Drop for MmapBuf {
-    fn drop(&mut self) {
-        if !self.ptr.is_null() && self.len > 0 {
-            unsafe { libc::munmap(self.ptr as *mut libc::c_void, self.len); }
-        }
-    }
+    mmap: MapView,
 }
 
 impl std::fmt::Debug for GgufFile {
@@ -76,7 +54,7 @@ impl std::fmt::Debug for GgufFile {
             .field("n_tensors", &self.tensors.len())
             .field("n_metadata", &self.metadata.len())
             .field("data_offset", &self.data_offset)
-            .field("mmap_len", &self.mmap.len)
+            .field("mmap_len", &self.mmap.len())
             .finish()
     }
 }
@@ -265,38 +243,9 @@ fn tensor_byte_size(dims: &[u64], dtype: u32) -> Result<usize> {
 }
 
 impl GgufFile {
-    fn mmap_file(path: &std::path::Path) -> Result<MmapBuf> {
-        use std::os::unix::io::AsRawFd;
-        let file = std::fs::File::open(path)
-            .map_err(|e| Error::Inference(format!("open {}: {e}", path.display())))?;
-        let len = file.metadata()
-            .map_err(|e| Error::Inference(format!("stat {}: {e}", path.display())))?
-            .len() as usize;
-        if len == 0 {
-            return Err(Error::Inference("empty GGUF file".into()));
-        }
-        let ptr = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                len,
-                libc::PROT_READ,
-                libc::MAP_PRIVATE,
-                file.as_raw_fd(),
-                0,
-            )
-        };
-        if ptr == libc::MAP_FAILED {
-            return Err(Error::Inference(format!(
-                "mmap {} ({len} bytes): {}",
-                path.display(),
-                std::io::Error::last_os_error(),
-            )));
-        }
-        Ok(MmapBuf { ptr: ptr as *mut u8, len })
-    }
-
     pub fn open(path: &std::path::Path) -> Result<Self> {
-        let mmap = Self::mmap_file(path)?;
+        let mmap = map_file_readonly(path)
+            .map_err(|e| Error::Inference(format!("mmap {}: {e}", path.display())))?;
         let raw = mmap.as_slice();
         if raw.len() < 24 {
             return Err(Error::Inference("file too small for GGUF header".into()));
