@@ -13,13 +13,21 @@ use crate::core::router::{DispatchContext, Response};
 /// `strict`: when true, the LLM is disabled — no model is loaded and
 /// dispatch refuses to fall through to inference. See
 /// `DispatchContext::new_strict` for details.
-pub fn run(model_arg: Option<&str>, strict: bool) {
+/// `audit_path`: when Some, every dispatch turn writes JSON Lines events
+/// to that file (append mode). See `core::audit`.
+pub fn run(model_arg: Option<&str>, strict: bool, audit_path: Option<&str>) {
     let api_key = std::env::var("ANTHROPIC_API_KEY").ok();
     let mut ctx = if strict {
         DispatchContext::new_strict(model_arg)
     } else {
         DispatchContext::new(api_key, model_arg)
     };
+    if let Some(path) = audit_path {
+        match crate::core::audit::AuditLog::open(std::path::Path::new(path)) {
+            Ok(log) => { ctx = ctx.with_audit(log); }
+            Err(e) => eprintln!("[Olorin] audit: failed to open {path}: {e} — continuing without audit"),
+        }
+    }
 
     print_banner();
 

@@ -32,13 +32,23 @@ pub fn get_chat_html() -> String {
 /// `strict`: when true, the underlying DispatchContext is built without a
 /// model — the web UI's chat will refuse LLM fallback for any input the
 /// deterministic paths don't match.
-pub fn run(port: u16, model_arg: Option<&str>, strict: bool) {
+/// `audit_path`: when Some, every dispatch turn writes JSON Lines events
+/// to that file (append mode). Concurrent web requests are serialized by
+/// the AuditLog's internal mutex so the JSONL stream stays valid.
+pub fn run(port: u16, model_arg: Option<&str>, strict: bool, audit_path: Option<&str>) {
     let api_key = std::env::var("ANTHROPIC_API_KEY").ok();
-    let ctx = Arc::new(Mutex::new(if strict {
+    let mut built = if strict {
         DispatchContext::new_strict(model_arg)
     } else {
         DispatchContext::new(api_key, model_arg)
-    }));
+    };
+    if let Some(path) = audit_path {
+        match crate::core::audit::AuditLog::open(std::path::Path::new(path)) {
+            Ok(log) => { built = built.with_audit(log); }
+            Err(e) => eprintln!("[Olorin] audit: failed to open {path}: {e} — continuing without audit"),
+        }
+    }
+    let ctx = Arc::new(Mutex::new(built));
     let teleported = Arc::new(AtomicBool::new(false));
 
     // Wire the server's AtomicBool into DispatchContext so whatsapp.rs can set it

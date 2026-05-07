@@ -9,3 +9,4 @@ pub mod dispatch;
 pub mod handlers;
 pub mod tool_parse;
 pub mod llm;
+pub mod audit;

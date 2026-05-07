@@ -86,6 +86,11 @@ pub struct DispatchContext {
     /// can produce output. The binary never opens the GGUF — startup drops
     /// from ~25s to ~200ms.
     pub(crate) strict: bool,
+    /// Optional audit log. When set, every dispatch turn emits two
+    /// JSON-Lines events to the file: `input` (length + ts) and a
+    /// dispatch-result event (phase + timing). See `core::audit` and
+    /// the `--audit` CLI flag.
+    pub(crate) audit: Option<std::sync::Arc<crate::core::audit::AuditLog>>,
 }
 
 impl DispatchContext {
@@ -136,6 +141,7 @@ impl DispatchContext {
             teleported:        false,
             server_teleported: None,
             strict,
+            audit: None,
         };
         if !strict {
             ctx.load_api_key_from_vault();
@@ -172,6 +178,53 @@ impl DispatchContext {
             .ok()
     }
 
+    /// Attach an audit log. Every dispatch turn after this point emits
+    /// JSON Lines events to the log's file. Returns self for builder
+    /// chaining: `DispatchContext::new(...).with_audit(log)`.
+    pub fn with_audit(mut self, log: crate::core::audit::AuditLog) -> Self {
+        self.audit = Some(std::sync::Arc::new(log));
+        self
+    }
+
+    /// Emit the per-turn `input` event and return the new turn id. Used
+    /// by both `dispatch` (sync) and `dispatch_streaming` at entry.
+    /// Returns -1 when no audit log is attached (turn id is unused in
+    /// that case; callers gate on the audit Option themselves).
+    pub(crate) fn audit_input(&self, input: &str) -> i32 {
+        let Some(a) = &self.audit else { return -1; };
+        let turn = a.next_turn();
+        a.emit(turn, "input", &[
+            ("input_len", crate::core::audit::AuditValue::I64(input.len() as i64)),
+        ]);
+        turn
+    }
+
+    /// Emit the per-turn dispatch-result event with phase + wall_us,
+    /// plus any phase-specific extras.
+    pub(crate) fn audit_result(
+        &self,
+        turn: i32,
+        start: std::time::Instant,
+        phase: &str,
+        extras: &[(&str, crate::core::audit::AuditValue<'_>)],
+    ) {
+        let Some(a) = &self.audit else { return; };
+        if turn < 0 { return; }
+        let wall_us = start.elapsed().as_micros() as i64;
+        // Append wall_us to the user-supplied extras without per-call alloc
+        // overhead in the no-extras case.
+        if extras.is_empty() {
+            a.emit(turn, phase, &[
+                ("wall_us", crate::core::audit::AuditValue::I64(wall_us)),
+            ]);
+        } else {
+            let mut fields: Vec<(&str, crate::core::audit::AuditValue<'_>)> = Vec::with_capacity(extras.len() + 1);
+            fields.push(("wall_us", crate::core::audit::AuditValue::I64(wall_us)));
+            fields.extend_from_slice(extras);
+            a.emit(turn, phase, &fields);
+        }
+    }
+
     /// Create with a custom system prompt.
     pub fn with_system_prompt(mut self, prompt: &str) -> Self {
         let runes_block = crate::runes::runes_prompt_block();
@@ -203,9 +256,13 @@ impl DispatchContext {
             return;
         }
 
+        let audit_turn = self.audit_input(input);
+        let audit_start = std::time::Instant::now();
+
         // ── Teleport: handle specially for streaming QR + status ─────
         let (cmd_id, _) = crate::core::dispatch::match_command(input.as_bytes());
         if cmd_id == crate::core::dispatch::CMD_TELEPORT {
+            self.audit_result(audit_turn, audit_start, "teleport", &[]);
             crate::interface::whatsapp::teleport_loop_streaming(self, tx);
             return;
         }
@@ -213,6 +270,7 @@ impl DispatchContext {
         let recall_context = match self.pre_inference(input) {
             Err(resp) => {
                 if resp.blocked {
+                    self.audit_result(audit_turn, audit_start, "blocked", &[]);
                     let _ = tx.send(StreamEvent::Error(resp.text.clone()));
                     let _ = tx.send(StreamEvent::Done { full_text: resp.text });
                     return;
@@ -220,12 +278,16 @@ impl DispatchContext {
                 let _ = tx.send(StreamEvent::Token(resp.text.clone()));
                 if let Some(followup) = resp.followup {
                     if self.strict {
+                        self.audit_result(audit_turn, audit_start, "rune_strict_no_narration", &[]);
                         let _ = tx.send(StreamEvent::Done { full_text: resp.text });
                         return;
                     }
+                    self.audit_result(audit_turn, audit_start, "rune_with_narration",
+                        &[("narration", crate::core::audit::AuditValue::Bool(true))]);
                     self.run_followup_streaming(input, &resp.text, &followup, &tx);
                     return;
                 }
+                self.audit_result(audit_turn, audit_start, "command", &[]);
                 let _ = tx.send(StreamEvent::Done { full_text: resp.text });
                 return;
             }
@@ -234,6 +296,7 @@ impl DispatchContext {
 
         // ── Strict mode: refuse LLM fallback ─────────────────────────
         if self.strict {
+            self.audit_result(audit_turn, audit_start, "strict_refused", &[]);
             let msg = STRICT_REFUSAL.to_string();
             let _ = tx.send(StreamEvent::Token(msg.clone()));
             let _ = tx.send(StreamEvent::Done { full_text: msg });
@@ -241,6 +304,7 @@ impl DispatchContext {
         }
 
         // ── Streaming Inference ──────────────────────────────────────
+        self.audit_result(audit_turn, audit_start, "llm_start", &[]);
         self.messages.push(handlers::user_message(input));
 
         let system = self.system_prompt.clone();

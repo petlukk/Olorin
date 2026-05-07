@@ -41,6 +41,23 @@ recall). Useful for fast CLI use (`./olorin --strict` starts in ~25ms
 vs ~25s with the model) and for security-conscious deployments that
 need a categorical "this binary will never call an LLM" guarantee.
 
+`--audit <path>` writes a JSON Lines log of every dispatch turn:
+
+```
+{"ts_ms":1778136026682,"turn":1,"phase":"input","input_len":5}
+{"ts_ms":1778136026682,"turn":1,"phase":"command","wall_us":6}
+{"ts_ms":1778136026682,"turn":2,"phase":"input","input_len":28}
+{"ts_ms":1778136026682,"turn":2,"phase":"rune_with_narration","wall_us":107,"narration":true}
+{"ts_ms":1778136026682,"turn":3,"phase":"input","input_len":11}
+{"ts_ms":1778136026682,"turn":3,"phase":"strict_refused","wall_us":8}
+```
+
+Two events per turn (input received + dispatch result with phase + timing).
+Captures only metadata — input lengths, phase names, microsecond timing —
+not the input text or rune output content. The log itself never leaks
+the data it's meant to protect. Combine with `--strict` for a
+provable "this binary did/didn't invoke an LLM" record.
+
 ## The Olorin Pipe
 
 LLM is the last step, not the first. Every message walks this dispatch

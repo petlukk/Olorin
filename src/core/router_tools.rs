@@ -77,16 +77,24 @@ impl DispatchContext {
             return Response::text("");
         }
 
+        let audit_turn = self.audit_input(input);
+        let audit_start = std::time::Instant::now();
+
         let safety_start = std::time::Instant::now();
         let recall_context = match self.pre_inference(input) {
             Err(early) => {
                 if let Some(prompt) = early.followup.clone() {
                     if self.strict {
                         // No narration in strict mode — kernel output only.
+                        self.audit_result(audit_turn, audit_start, "rune_strict_no_narration", &[]);
                         return Response::text(early.text);
                     }
+                    self.audit_result(audit_turn, audit_start, "rune_with_narration",
+                        &[("narration", crate::core::audit::AuditValue::Bool(true))]);
                     return self.run_followup_sync(input, early.text, &prompt);
                 }
+                let phase = if early.blocked { "blocked" } else { "command" };
+                self.audit_result(audit_turn, audit_start, phase, &[]);
                 return early;
             }
             Ok(ctx) => ctx,
@@ -95,9 +103,11 @@ impl DispatchContext {
 
         // ── Strict mode: refuse LLM fallback ─────────────────────────
         if self.strict {
+            self.audit_result(audit_turn, audit_start, "strict_refused", &[]);
             return Response::text(crate::core::router::STRICT_REFUSAL);
         }
 
+        self.audit_result(audit_turn, audit_start, "llm_start", &[]);
         self.messages.push(handlers::user_message(input));
         let response = self.run_inference(&recall_context);
 
