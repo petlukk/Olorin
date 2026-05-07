@@ -13,6 +13,7 @@ pub mod storage;
 pub mod interface;
 pub mod tools;
 pub mod kernels;
+pub mod platform;
 pub mod recall;
 pub mod runes;
 
