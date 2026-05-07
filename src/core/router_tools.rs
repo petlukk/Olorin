@@ -81,6 +81,10 @@ impl DispatchContext {
         let recall_context = match self.pre_inference(input) {
             Err(early) => {
                 if let Some(prompt) = early.followup.clone() {
+                    if self.strict {
+                        // No narration in strict mode — kernel output only.
+                        return Response::text(early.text);
+                    }
                     return self.run_followup_sync(input, early.text, &prompt);
                 }
                 return early;
@@ -88,6 +92,11 @@ impl DispatchContext {
             Ok(ctx) => ctx,
         };
         let safety_us = safety_start.elapsed().as_micros() as u64;
+
+        // ── Strict mode: refuse LLM fallback ─────────────────────────
+        if self.strict {
+            return Response::text(crate::core::router::STRICT_REFUSAL);
+        }
 
         self.messages.push(handlers::user_message(input));
         let response = self.run_inference(&recall_context);
@@ -349,7 +358,12 @@ impl DispatchContext {
     // ── Help text ────────────────────────────────────────────────────────────
 
     pub(crate) fn help_text(&self) -> String {
-        "\
+        let mode_line = if self.strict {
+            "\nMode: strict (LLM disabled — only deterministic paths fire)\n"
+        } else {
+            ""
+        };
+        format!("\
 Commands:
   /help    /quit    /tools   /clear   /model   /profile
 
@@ -362,9 +376,10 @@ Tools:
   /recall <query>  /teleport
 
 Runes (SIMD tool calls):
-  /rune eacrunch <csv>   — summarize a CSV via SIMD
-
-Agent: Olorin".to_string()
+  /rune eacrunch <csv>     — summarize a CSV via SIMD
+  /rune eajson <jsonl>     — summarize a JSON Lines file via SIMD
+{mode_line}
+Agent: Olorin")
     }
 
     // ── Post-inference tool-call wiring ──────────────────────────────────────

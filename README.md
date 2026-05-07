@@ -25,12 +25,19 @@ in plain English.
 ./olorin                                              # interactive REPL
 echo '/rune eajson ~/access.log.jsonl' | ./olorin     # one-shot summarization
 ./olorin --serve                                      # HTTP + web UI on :8080
+./olorin --strict                                     # LLM disabled (~25ms startup)
 ```
 
 The `/rune` commands ([Runes](#runes--simd-tool-calls)) are where Olorin's
 SIMD-first architecture shines. They run a kernel pass over a file
 (milliseconds for MBs of data) and the model narrates the result in 1-2
 sentences. No Python, no pandas, no cloud.
+
+`--strict` disables the LLM entirely: no model load, no narration, only
+deterministic dispatch (slash commands, intent router, kernels, runes,
+recall). Useful for fast CLI use (`./olorin --strict` starts in ~25ms
+vs ~25s with the model) and for security-conscious deployments that
+need a categorical "this binary will never call an LLM" guarantee.
 
 ## The Olorin Pipe
 

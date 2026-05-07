@@ -23,6 +23,13 @@ use std::path::PathBuf;
 
 // ── Public types ─────────────────────────────────────────────────────────────
 
+/// Message returned when strict mode rejects an LLM fallback. Public so
+/// tests can assert against it without duplicating the string.
+pub const STRICT_REFUSAL: &str =
+    "Strict mode: no deterministic path matched. The LLM is disabled in this \
+     binary. Try /help to see available commands, or /tools and /rune for \
+     deterministic operations.";
+
 /// Response from the dispatch pipeline.
 pub struct Response {
     pub text:    String,
@@ -73,6 +80,12 @@ pub struct DispatchContext {
     pub(crate) _max_turns:    usize,
     pub teleported:            bool,
     pub(crate) server_teleported: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// When true, the LLM is disabled entirely. No model load, no Anthropic
+    /// fallback, no narration. Dispatch refuses to fall through to inference;
+    /// only deterministic paths (safety, slash, intent, kernel/rune, recall)
+    /// can produce output. The binary never opens the GGUF — startup drops
+    /// from ~25s to ~200ms.
+    pub(crate) strict: bool,
 }
 
 impl DispatchContext {
@@ -80,9 +93,28 @@ impl DispatchContext {
     /// `api_key`: optional Anthropic API key for cloud inference.
     /// `model_arg`: optional model selector ("gemma4" alias or path).
     pub fn new(api_key: Option<String>, model_arg: Option<&str>) -> Self {
-        let anthropic = api_key.map(AnthropicClient::new);
+        Self::build(api_key, model_arg, false)
+    }
+
+    /// Create a strict dispatch context. The LLM is disabled entirely:
+    /// no model is loaded, the Anthropic client is not initialized, and
+    /// dispatch refuses to fall through to inference. Only deterministic
+    /// paths (safety scan, slash commands, intent router, kernel/rune
+    /// dispatch, vault recall) can produce output.
+    ///
+    /// Useful for CLI-style use where the user only wants tools and runes,
+    /// or for security-conscious deployments that need a categorical
+    /// "this binary will never call an LLM" guarantee. Startup drops from
+    /// ~25s (model load) to ~200ms (kernel extract + vault open).
+    pub fn new_strict(model_arg: Option<&str>) -> Self {
+        let _ = model_arg; // accepted for symmetry with `new`; ignored.
+        Self::build(None, None, true)
+    }
+
+    fn build(api_key: Option<String>, model_arg: Option<&str>, strict: bool) -> Self {
+        let anthropic = if strict { None } else { api_key.map(AnthropicClient::new) };
         let vault = Self::open_vault();
-        let engine = Self::load_engine(model_arg);
+        let engine = if strict { None } else { Self::load_engine(model_arg) };
         let mut ctx = Self {
             messages:      Vec::new(),
             recall:        VectorStore::new(1024),
@@ -103,8 +135,11 @@ impl DispatchContext {
             _max_turns:    8,
             teleported:        false,
             server_teleported: None,
+            strict,
         };
-        ctx.load_api_key_from_vault();
+        if !strict {
+            ctx.load_api_key_from_vault();
+        }
         ctx
     }
 
@@ -184,6 +219,10 @@ impl DispatchContext {
                 }
                 let _ = tx.send(StreamEvent::Token(resp.text.clone()));
                 if let Some(followup) = resp.followup {
+                    if self.strict {
+                        let _ = tx.send(StreamEvent::Done { full_text: resp.text });
+                        return;
+                    }
                     self.run_followup_streaming(input, &resp.text, &followup, &tx);
                     return;
                 }
@@ -192,6 +231,14 @@ impl DispatchContext {
             }
             Ok(ctx) => ctx,
         };
+
+        // ── Strict mode: refuse LLM fallback ─────────────────────────
+        if self.strict {
+            let msg = STRICT_REFUSAL.to_string();
+            let _ = tx.send(StreamEvent::Token(msg.clone()));
+            let _ = tx.send(StreamEvent::Done { full_text: msg });
+            return;
+        }
 
         // ── Streaming Inference ──────────────────────────────────────
         self.messages.push(handlers::user_message(input));

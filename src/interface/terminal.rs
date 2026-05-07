@@ -9,9 +9,17 @@ use crate::core::router::{DispatchContext, Response};
 // ── REPL entry point ──────────────────────────────────────────────────────────
 
 /// Run the interactive REPL. Blocks until /quit or EOF.
-pub fn run(model_arg: Option<&str>) {
+///
+/// `strict`: when true, the LLM is disabled — no model is loaded and
+/// dispatch refuses to fall through to inference. See
+/// `DispatchContext::new_strict` for details.
+pub fn run(model_arg: Option<&str>, strict: bool) {
     let api_key = std::env::var("ANTHROPIC_API_KEY").ok();
-    let mut ctx = DispatchContext::new(api_key, model_arg);
+    let mut ctx = if strict {
+        DispatchContext::new_strict(model_arg)
+    } else {
+        DispatchContext::new(api_key, model_arg)
+    };
 
     print_banner();
 

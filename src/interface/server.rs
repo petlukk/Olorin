@@ -28,9 +28,17 @@ pub fn get_chat_html() -> String {
 // ── Web server ────────────────────────────────────────────────────────────────
 
 /// Start the web server. Blocks until killed.
-pub fn run(port: u16, model_arg: Option<&str>) {
+///
+/// `strict`: when true, the underlying DispatchContext is built without a
+/// model — the web UI's chat will refuse LLM fallback for any input the
+/// deterministic paths don't match.
+pub fn run(port: u16, model_arg: Option<&str>, strict: bool) {
     let api_key = std::env::var("ANTHROPIC_API_KEY").ok();
-    let ctx = Arc::new(Mutex::new(DispatchContext::new(api_key, model_arg)));
+    let ctx = Arc::new(Mutex::new(if strict {
+        DispatchContext::new_strict(model_arg)
+    } else {
+        DispatchContext::new(api_key, model_arg)
+    }));
     let teleported = Arc::new(AtomicBool::new(false));
 
     // Wire the server's AtomicBool into DispatchContext so whatsapp.rs can set it

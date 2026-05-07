@@ -6,12 +6,16 @@ fn main() {
 
     let serve    = args.contains(&"--serve".into());
     let whatsapp = args.contains(&"--whatsapp".into());
+    let strict   = args.contains(&"--strict".into());
     let model_arg = get_opt(&args, "--model");
     let port: u16 = get_opt(&args, "--port")
         .and_then(|s| s.parse().ok())
         .unwrap_or(8080);
 
     println!("[Olorin] v{} — The Wakeful Mind in Ea", env!("CARGO_PKG_VERSION"));
+    if strict {
+        println!("[Olorin] strict mode: LLM disabled, deterministic dispatch only.");
+    }
 
     // Init SIMD kernels
     ffi::init().expect("kernel init failed");
@@ -23,11 +27,11 @@ fn main() {
     std::fs::create_dir_all(olorin_home.join("models")).ok();
 
     if serve {
-        interface::server::run(port, model_arg);
+        interface::server::run(port, model_arg, strict);
     } else if whatsapp {
         interface::whatsapp::run_whatsapp(model_arg);
     } else {
-        interface::terminal::run(model_arg);
+        interface::terminal::run(model_arg, strict);
     }
 }
 
