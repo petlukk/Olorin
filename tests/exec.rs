@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use olorin::interface::exec::{run, shell, spawn};
 
 #[test]
