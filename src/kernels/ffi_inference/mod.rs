@@ -87,7 +87,7 @@ fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String
     // Try I8MM variant first on ARM, fall back to base
     #[allow(unused_variables)]
     let load_best = |name: &str| -> Result<Library, String> {
-        #[cfg(target_arch = "aarch64")]
+        #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
         {
             // HWCAP2 = 26, HWCAP2_I8MM = (1 << 13)
             let has_i8mm = unsafe { libc::getauxval(26) & (1 << 13) != 0 };
