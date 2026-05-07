@@ -9,10 +9,17 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering,
 use std::sync::{Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 
+use crate::platform::futex::{wait as futex_wait, wake_all as futex_wake_all};
+
 // Thread-count / cache-size detection lives in its own module to keep this
 // file focused on the threadpool primitives. Re-exported so external callers
 // keep the `threadpool::detect_*` path.
 pub use super::threadpool_detect::{detect_prefill_ubatch, detect_thread_count};
+
+/// Diagnostic re-export: total `futex_wait` invocations since process start.
+pub fn futex_wait_call_count() -> usize {
+    crate::platform::futex::wait_call_count()
+}
 
 
 // ---------------------------------------------------------------------------
@@ -78,56 +85,6 @@ impl SpinBarrier {
             futex_wait(&self.n_barrier_passed, old_passed);
         }
         fence(Ordering::SeqCst);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Linux futex wrappers — direct syscall via libc, no new deps.
-// ---------------------------------------------------------------------------
-
-const FUTEX_WAIT: libc::c_int = 0;
-const FUTEX_WAKE: libc::c_int = 1;
-const FUTEX_PRIVATE_FLAG: libc::c_int = 128;
-const FUTEX_WAIT_PRIVATE: libc::c_int = FUTEX_WAIT | FUTEX_PRIVATE_FLAG;
-const FUTEX_WAKE_PRIVATE: libc::c_int = FUTEX_WAKE | FUTEX_PRIVATE_FLAG;
-
-static FUTEX_WAIT_CALLS: AtomicUsize = AtomicUsize::new(0);
-
-/// Diagnostic: total `futex_wait` invocations since process start. Used by
-/// the preemption-robustness test to assert the slow path was taken.
-pub fn futex_wait_call_count() -> usize {
-    FUTEX_WAIT_CALLS.load(Ordering::Relaxed)
-}
-
-/// Block until `*addr != expected` or a wake arrives. Returns promptly on
-/// EAGAIN (value already changed) / EINTR (signal); the caller re-checks
-/// the condition in a loop.
-#[inline(never)]
-fn futex_wait(addr: &AtomicU32, expected: u32) {
-    FUTEX_WAIT_CALLS.fetch_add(1, Ordering::Relaxed);
-    let ptr = addr as *const AtomicU32 as *const u32;
-    unsafe {
-        libc::syscall(
-            libc::SYS_futex,
-            ptr,
-            FUTEX_WAIT_PRIVATE,
-            expected as libc::c_int,
-            std::ptr::null::<libc::timespec>(),
-        );
-    }
-}
-
-/// Wake all waiters blocked on `addr`.
-#[inline(never)]
-fn futex_wake_all(addr: &AtomicU32) {
-    let ptr = addr as *const AtomicU32 as *const u32;
-    unsafe {
-        libc::syscall(
-            libc::SYS_futex,
-            ptr,
-            FUTEX_WAKE_PRIVATE,
-            i32::MAX,
-        );
     }
 }
 

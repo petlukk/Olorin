@@ -2,5 +2,6 @@
 //! inference layers. Each submodule exposes a thin cross-platform
 //! free-function API and gates the actual syscall behind cfg.
 
+pub mod futex;
 pub mod lock;
 pub mod mmap;
