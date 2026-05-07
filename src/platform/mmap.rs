@@ -5,7 +5,9 @@
 //! Windows: `CreateFileW` + `CreateFileMappingW` + `MapViewOfFile` —
 //! lands in a follow-up commit alongside the other Windows backends.
 
+#[cfg(unix)]
 use std::io;
+#[cfg(unix)]
 use std::path::Path;
 
 pub struct MapView {
