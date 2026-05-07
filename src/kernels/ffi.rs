@@ -37,6 +37,11 @@ type F32StatsFn         = unsafe extern "C" fn(
     *mut i32,
     *mut f32, *mut f32, *mut f32,
 );
+type F64StatsFn         = unsafe extern "C" fn(
+    *const f64, i32,
+    *mut i32,
+    *mut f64, *mut f64, *mut f64,
+);
 type EvalExprFn         = unsafe extern "C" fn(*const u8, i32, *mut i64, *mut i32, *mut i64, *mut i32);
 type ZeroizeFn          = unsafe extern "C" fn(*mut u8, i32);
 type AnsiClassifyFn     = unsafe extern "C" fn(*const u8, *mut u8, i32);
@@ -77,6 +82,7 @@ pub struct KernelTable {
     pub csv_scan:                 CsvScanFn,
     pub jsonl_struct_scan:        JsonlStructFn,
     pub f32_stats:                F32StatsFn,
+    pub f64_stats:                F64StatsFn,
     pub eval_expr:                EvalExprFn,
     pub zeroize:                  ZeroizeFn,
     pub batch_cosine:             BatchCosineFn,
@@ -171,6 +177,7 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
     let csv_scan_lib    = load("csv_scan")?;
     let jsonl_struct_lib = load("jsonl_struct")?;
     let f32_stats_lib   = load("f32_stats")?;
+    let f64_stats_lib   = load("f64_stats")?;
     let expr_eval       = load("expr_eval")?;
     let zeroize_lib     = load("zeroize")?;
     let jl_project_lib  = load("jl_project")?;
@@ -217,6 +224,8 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
                 sym(&jsonl_struct_lib, b"jsonl_struct_scan\0")?),
             f32_stats: std::mem::transmute(
                 sym(&f32_stats_lib, b"f32_stats\0")?),
+            f64_stats: std::mem::transmute(
+                sym(&f64_stats_lib, b"f64_stats\0")?),
             eval_expr: std::mem::transmute(
                 sym(&expr_eval, b"eval_expr\0")?),
             zeroize: std::mem::transmute(
@@ -245,7 +254,7 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
                 zeroize_lib, search, jl_project_lib,
                 chacha20_lib, chacha20_sv2, pretokenize_lib,
                 ansi_parser_lib, terminal_diff_lib,
-                csv_scan_lib, jsonl_struct_lib, f32_stats_lib,
+                csv_scan_lib, jsonl_struct_lib, f32_stats_lib, f64_stats_lib,
             ],
         };
         Ok(table)
@@ -425,6 +434,22 @@ pub unsafe fn f32_stats(
     out_sum: *mut f32, out_min: *mut f32, out_max: *mut f32,
 ) {
     (k().f32_stats)(data, len, out_count, out_sum, out_min, out_max);
+}
+
+/// f64 streaming stats — the double-precision counterpart to `f32_stats`.
+/// Used by eaparquet for INT64 statistics aggregation where f32's
+/// 24-bit mantissa would lose precision on large integer values.
+///
+/// # Safety
+/// Same as `f32_stats`: data must be valid for `len` reads (or len==0,
+/// in which case data is not dereferenced); the four out pointers must
+/// each be valid for one write.
+pub unsafe fn f64_stats(
+    data: *const f64, len: i32,
+    out_count: *mut i32,
+    out_sum: *mut f64, out_min: *mut f64, out_max: *mut f64,
+) {
+    (k().f64_stats)(data, len, out_count, out_sum, out_min, out_max);
 }
 
 /// SIMD-accelerated ANSI byte classification.

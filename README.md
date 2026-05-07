@@ -124,6 +124,37 @@ IDs) is suppressed with a count notice. Escape sequences in strings
 (`\"`, `\\`, etc.) are correctly handled by the kernel via a 5th match
 character (backslash) and an odd-run filter in the orchestrator.
 
+### eaparquet — Parquet metadata summarizer
+
+```
+/rune eaparquet ~/data/transactions.parquet
+```
+
+```
+rows: 10000000
+columns: 4 (across 78 row groups)
+id (number): values=10000000, min=1, max=10000000, nulls=0
+category (text): values=10000000, nulls=12 [byte-array column; min/max not decoded]
+amount (number): values=10000000, min=0.50, max=9999.99, nulls=0
+is_recurring (bool): values=10000000, nulls=0
+```
+
+Reads only the file footer — Parquet writers pre-compute per-column
+min/max/null_count at write time and store them in the metadata. The
+rune walks the footer (Thrift compact decoder, scalar — no SIMD path
+exists for variable-length encodings) and aggregates per-column
+statistics across row groups via the `f64_stats` SIMD kernel. For a
+file with N row groups and C columns, that's `3*C` kernel calls
+each doing an N-element f64x2 reduction — real SIMD work that scales
+with file size.
+
+**Limit**: column-data SIMD decoding (PLAIN/RLE/dictionary encoding +
+snappy/gzip/zstd decompression) is out of scope for v1. Statistics
+must be present in the file metadata (most modern writers include
+them by default). Primitive types only: BOOLEAN/INT32/INT64/FLOAT/DOUBLE
+get min/max; BYTE_ARRAY (strings) and INT96 (legacy timestamp) are
+reported by type but their stats are left absent.
+
 ### Real public data to try it on
 
 - **Synthetic fixtures** — `tests/fixtures/runes/{tiny.csv,tiny.jsonl}` in this repo. Small, good for a smoke test.
@@ -140,6 +171,7 @@ character (backslash) and an odd-run filter in the orchestrator.
 - Output cap: 32 KB summary (truncated with a `[...truncated N bytes]` marker at a UTF-8-safe boundary).
 - eacrunch: unquoted CSV only; CRLF line endings tolerated (trailing `\r` trimmed per field).
 - eajson: top-level scalars only — nested objects flatten one level deep (`http.status`); deeper nesting and arrays-of-objects are skipped. Mixed-type keys (number on one line, string on another) collapse to `(mixed)` with no stats. Text top-N capped at 10K cardinality.
+- eaparquet: metadata-only — column data is never decoded. Statistics must be present in the file footer (most modern writers include them). BYTE_ARRAY (string) and INT96 (legacy timestamp) min/max are not decoded. Flat schemas only; nested groups (LIST/MAP/STRUCT children) are skipped from the column list.
 - Narration: the model gets a token budget of ~1248 prompt + 768 decode. Outputs over that skip narration with a clear notice — the kernel summary is shown either way.
 
 ## Architecture

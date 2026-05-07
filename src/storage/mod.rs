@@ -4,4 +4,5 @@ pub mod search;
 pub mod secure;
 pub mod json;
 pub mod jsonl_parse;
+pub mod parquet;
 mod key;

@@ -1,0 +1,62 @@
+// One-pass streaming stats over an f64 array. Out params receive the
+// final count, sum, min, max.
+//
+// Mirror of f32_stats with double precision. Used by eaparquet for
+// aggregating per-column min/max/null_count across row groups, where
+// INT64 statistics can hold values larger than f32's 24-bit mantissa
+// allows losslessly.
+//
+// Empty input zeros all four outputs and returns without touching the
+// data pointer.
+//
+// SIMD strategy: f64x2 accumulators (NEON float64x2_t / SSE2 __m128d)
+// for sum/min/max, updated lane-wise across 2-at-a-time chunks;
+// horizontal reduce at the end via reduce_add / reduce_min / reduce_max.
+// Cross-arch — same shape as f32_stats just with twice the precision.
+
+export func f64_stats(data: *f64, len: i32, out_count: *mut i32, out_sum: *mut f64, out_min: *mut f64, out_max: *mut f64) {
+    out_count[0] = 0
+    out_sum[0]   = 0.0
+    out_min[0]   = 0.0
+    out_max[0]   = 0.0
+    if len < 1 {
+        return
+    }
+
+    let first: f64 = data[0]
+    let mut v_sum: f64x2 = splat(0.0)
+    let mut v_min: f64x2 = splat(first)
+    let mut v_max: f64x2 = splat(first)
+
+    let n_full: i32 = (len / 2) * 2
+    let mut i: i32 = 0
+    while i < n_full {
+        let v: f64x2 = load(data, i)
+        v_sum = v_sum .+ v
+        v_min = min(v_min, v)
+        v_max = max(v_max, v)
+        i = i + 2
+    }
+
+    let mut s:  f64 = reduce_add(v_sum)
+    let mut mn: f64 = reduce_min(v_min)
+    let mut mx: f64 = reduce_max(v_max)
+
+    // Scalar tail (< 2 remaining)
+    while i < len {
+        let v: f64 = data[i]
+        s = s + v
+        if v < mn {
+            mn = v
+        }
+        if v > mx {
+            mx = v
+        }
+        i = i + 1
+    }
+
+    out_count[0] = len
+    out_sum[0]   = s
+    out_min[0]   = mn
+    out_max[0]   = mx
+}
