@@ -14,8 +14,10 @@ in plain English.
 - **Deterministic** — Same input produces the same kernel output, every
   time. The LLM is only invoked to phrase what the kernels already
   computed; it doesn't invent facts.
-- **Fast** — SIMD kernels summarize MB-scale data in milliseconds.
-  Pandas-class throughput with zero Python startup tax. See [#performance](#performance) and the eajson example below.
+- **Fast** — SIMD kernels summarize MB-scale data in milliseconds. On
+  a 100K-row transactions CSV: **eacrunch in 50 ms vs pandas in 580 ms
+  (11× faster end-to-end)**, using 4× less RAM. See
+  [`benchmarks/results.md`](benchmarks/results.md) for the full numbers.
 - **Honest scope** — Single binary, two dependencies (libc + libloading),
   3.8 MB release on ARM. Runs on a Raspberry Pi 5.
 
@@ -218,6 +220,23 @@ All compute in Ea SIMD kernels. Q4K 8x8 repacked GEMV for decode,
 work-stealing GEMM for prefill. Hot-vocab (32K logits) for fast sampling.
 
 ## Performance
+
+### Runes vs pandas (x86 WSL, transactions CSV)
+
+| Rows | File | eacrunch (`--strict`) | pandas | Speedup |
+|------|------|----------------------:|-------:|--------:|
+| 10,000 | 341 KB | **0.02 s** | 0.56 s | **28×** |
+| 100,000 | 3.4 MB | **0.05 s** | 0.58 s | **11×** |
+| 1,000,000 | 34 MB | **0.45 s** | 0.87 s | **1.9×** |
+
+Cold-start one-shot wall-clock — pandas's ~500 ms Python+import startup
+dominates at small sizes; at 1M rows pandas finally amortizes its
+overhead and the gap narrows. eacrunch uses 1-4× less RAM at small
+sizes (no full DataFrame materialization). Reproduce with
+`bash benchmarks/bench.sh`; full commentary + caveats in
+[`benchmarks/results.md`](benchmarks/results.md).
+
+### Gemma 4 inference
 
 Measured on Raspberry Pi 5 (4 cores, LPDDR4X):
 
