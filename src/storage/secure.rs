@@ -4,6 +4,7 @@
 //! swap and SIMD-zeroed on drop via the Eä `zeroize` kernel.
 
 use crate::kernels::ffi;
+use crate::platform::lock::{lock_pages, unlock_pages};
 
 /// Fixed-size secure buffer. Memory is mlock'd and SIMD-zeroed on Drop.
 pub struct SecureBuffer {
@@ -20,8 +21,7 @@ impl SecureBuffer {
         if ptr.is_null() {
             std::alloc::handle_alloc_error(layout);
         }
-        // Lock pages — best effort (may fail without CAP_IPC_LOCK).
-        unsafe { libc::mlock(ptr as *const libc::c_void, len); }
+        lock_pages(ptr, len);
         Self { ptr, len }
     }
 
@@ -51,7 +51,7 @@ impl Drop for SecureBuffer {
         if self.len > 0 {
             unsafe {
                 ffi::zeroize(self.ptr, self.len as i32);
-                libc::munlock(self.ptr as *const libc::c_void, self.len);
+                unlock_pages(self.ptr, self.len);
                 let layout = std::alloc::Layout::from_size_align_unchecked(self.len, 16);
                 std::alloc::dealloc(self.ptr, layout);
             }
