@@ -8,7 +8,6 @@ use crate::core::safety;
 use crate::inference::generate::Engine;
 use crate::recall::VectorStore;
 use crate::storage::vault::Vault;
-use std::path::PathBuf;
 
 // ── Public types ─────────────────────────────────────────────────────────────
 
@@ -128,10 +127,11 @@ impl DispatchContext {
     }
 
     fn open_vault() -> Option<Vault> {
-        let home = std::env::var("HOME")
-            .map_err(|e| eprintln!("[vault] HOME unset, persistence disabled: {e}"))
-            .ok()?;
-        let vault_dir = PathBuf::from(home).join(".olorin").join("vault").join("default");
+        let home = crate::home_dir().or_else(|| {
+            eprintln!("[vault] home unset, persistence disabled");
+            None
+        })?;
+        let vault_dir = home.join(".olorin").join("vault").join("default");
         std::fs::create_dir_all(&vault_dir)
             .map_err(|e| eprintln!("[vault] mkdir {} failed, persistence disabled: {e}", vault_dir.display()))
             .ok()?;

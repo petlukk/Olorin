@@ -32,9 +32,7 @@ impl Rune for Eaparquet {
         if path.is_empty() {
             return refusal(t0, "usage: eaparquet <path.parquet>");
         }
-        let home = std::env::var("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("/tmp"));
+        let home = crate::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
         let resolved = match resolve_path(path, &home) {
             Ok(p) => p,
             Err(PathError::OutsideAllowlist) =>

@@ -25,7 +25,7 @@ fn main() {
     ffi::init().expect("kernel init failed");
 
     // Setup directories
-    let home        = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default());
+    let home        = olorin::home_dir().unwrap_or_default();
     let olorin_home = home.join(".olorin");
     std::fs::create_dir_all(olorin_home.join("vault")).ok();
     std::fs::create_dir_all(olorin_home.join("models")).ok();

@@ -17,6 +17,4 @@ pub mod platform;
 pub mod recall;
 pub mod runes;
 
-pub fn home_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from(std::env::var("HOME").expect("HOME not set"))
-}
+pub use platform::home::home_dir;
