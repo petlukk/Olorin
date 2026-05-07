@@ -112,18 +112,12 @@ pub fn handle_term_stream(stream: &mut std::net::TcpStream, id: u32) {
 
     let _ = stream.set_read_timeout(None);
 
-    let mut pollfd = libc::pollfd {
-        fd: session.lock().unwrap().master_fd(),
-        events: libc::POLLIN,
-        revents: 0,
-    };
-
     let mut prev_cursor: (u16, u16) = (0, 0);
-    eprintln!("[term-stream] starting SSE loop for session {id}, fd={}", pollfd.fd);
+    eprintln!("[term-stream] starting SSE loop for session {id}");
     loop {
-        let ret = unsafe { libc::poll(&mut pollfd, 1, 16) };
+        let readable = session.lock().unwrap().wait_readable(16);
 
-        if ret > 0 && pollfd.revents & libc::POLLIN != 0 {
+        if readable {
             let mut s = session.lock().unwrap();
             let dirty: Vec<u8> = s.read_and_apply().to_vec();
             let dirty_count = dirty.iter().filter(|&&d| d != 0).count();
@@ -180,12 +174,6 @@ pub fn handle_term_stream(stream: &mut std::net::TcpStream, id: u32) {
                 let _ = stream.flush();
                 break;
             }
-        }
-
-        if ret < 0 { break; }
-
-        if pollfd.revents & (libc::POLLHUP | libc::POLLERR) != 0 {
-            break;
         }
     }
 }
