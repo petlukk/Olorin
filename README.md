@@ -348,7 +348,54 @@ content never exists as plaintext.
 | `/define <word>` | Dictionary lookup |
 | `/summarize <text>` | Text summarization |
 | `/remind <time> <msg>` | Reminder |
-| `/teleport <query>` | Vault search + decrypt |
+| `/teleport` | Bridge the current session to WhatsApp via QR pairing |
+
+## Interfaces
+
+Three ways to talk to the same `DispatchContext`. All three walk the
+same Olorin Pipe — same SIMD kernels, same vault, same audit log.
+
+### Terminal REPL (default)
+
+```
+./olorin                            # interactive, with model
+./olorin --strict                   # interactive, no model (~25 ms startup)
+./olorin --strict --audit log.jsonl # interactive, no model, audited
+```
+
+Reads stdin line-by-line, prints responses to stdout. Use `/quit` or Ctrl-D
+to exit. Slash commands, runes, intent router all work the same as in
+the other interfaces.
+
+### Web UI
+
+```
+./olorin --serve            # listens on 127.0.0.1:8080
+./olorin --serve --port 9000
+OLORIN_BIND=0.0.0.0 ./olorin --serve   # bind to all interfaces (LAN access)
+```
+
+Open `http://127.0.0.1:8080` in a browser. The chat UI (Catppuccin-themed,
+embedded in the binary at compile time via `include_bytes!`) streams
+responses token-by-token via TCP_NODELAY SSE. **The web UI is not a
+separate code path** — it uses the same `dispatch_streaming` that powers
+the terminal, which means the same SIMD kernels, the same rune
+narration, the same `--strict` and `--audit` semantics. Concurrent
+browser tabs serialize through a `Mutex<DispatchContext>` so the audit
+log stays consistent.
+
+### WhatsApp (`/teleport`)
+
+```
+./olorin --serve              # then in the web UI / terminal: /teleport
+```
+
+`/teleport` launches a Go-based WhatsApp bridge as a subprocess. It
+prints a QR code to the terminal (or shows it in the web UI); scan
+with WhatsApp on your phone, and from then on any message you send
+to the linked number gets dispatched through the same Olorin Pipe.
+Replies go back to your phone as WhatsApp messages. Useful for "talk
+to your local Olorin from anywhere with a phone signal."
 
 ## Kernel Infrastructure
 
