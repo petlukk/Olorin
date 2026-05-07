@@ -1,12 +1,12 @@
-//! PTY session — openpty + fork/exec bash with SIMD-accelerated I/O.
+//! PTY session — cross-platform. The platform-specific bits (openpty
+//! vs ConPTY, raw fd vs HANDLE, poll vs WaitForSingleObject) live behind
+//! the `PtyBackend` trait; this file owns the SIMD ANSI pipeline, the
+//! safety-line buffer, the ShellGuard, and the cell grid.
 //!
-//! Each PtySession owns a master fd, child process, cell grid, and scratch
-//! buffers. `read_and_apply()` reads from the PTY, runs the ANSI pipeline,
-//! and returns a dirty bitmap for diffing.
-//!
-//! Security: all input goes through `write_guarded()` which buffers bytes
-//! until a newline, then runs `fused_safety.ea` + `ShellGuard` before
-//! sending the line to bash. Raw control bytes bypass the guard.
+//! Security: input from the web-terminal goes through `write_guarded`,
+//! which buffers bytes until a newline, then runs `fused_safety.ea` +
+//! `ShellGuard` before sending the line to the backend. Raw control
+//! bytes bypass the guard so interactive programs work normally.
 
 use crate::interface::ansi::{Cell, TermGrid};
 use crate::core::shell_guard::{ShellGuard, load_shell_policy};
@@ -14,10 +14,21 @@ use crate::core::safety;
 use crate::kernels::ffi;
 use std::io;
 
-/// A live PTY session with its own bash process and terminal state.
+pub trait PtyBackend: Send + Sync {
+    fn read(&self, buf: &mut [u8]) -> io::Result<usize>;
+    fn write(&self, data: &[u8]);
+    fn resize(&self, cols: u16, rows: u16);
+    fn child_alive(&self) -> bool;
+    fn wait_readable(&self, timeout_ms: i32) -> bool;
+}
+
+#[cfg(unix)]
+pub fn default_backend(cols: u16, rows: u16) -> io::Result<Box<dyn PtyBackend>> {
+    super::pty_unix::open(cols, rows).map(|b| Box::new(b) as Box<dyn PtyBackend>)
+}
+
 pub struct PtySession {
-    master_fd: i32,
-    child_pid: i32,
+    backend: Box<dyn PtyBackend>,
     grid: TermGrid,
     prev_cells: Vec<Cell>,
     scan_buf: Vec<u8>,
@@ -28,70 +39,11 @@ pub struct PtySession {
 }
 
 impl PtySession {
-    /// Open a new PTY, fork bash, set window size.
     pub fn new(cols: u16, rows: u16) -> io::Result<Self> {
-        let mut master: i32 = 0;
-        let mut slave: i32 = 0;
-
-        let ret = unsafe {
-            libc::openpty(
-                &mut master, &mut slave,
-                std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(),
-            )
-        };
-        if ret != 0 {
-            return Err(io::Error::last_os_error());
-        }
-
-        // Set window size on the slave
-        let ws = libc::winsize {
-            ws_row: rows,
-            ws_col: cols,
-            ws_xpixel: 0,
-            ws_ypixel: 0,
-        };
-        unsafe { libc::ioctl(slave, libc::TIOCSWINSZ, &ws) };
-
-        let pid = unsafe { libc::fork() };
-        if pid < 0 {
-            unsafe { libc::close(master); libc::close(slave); }
-            return Err(io::Error::last_os_error());
-        }
-
-        if pid == 0 {
-            // Child
-            unsafe {
-                libc::close(master);
-                libc::setsid();
-                libc::ioctl(slave, libc::TIOCSCTTY, 0i32);
-                libc::dup2(slave, 0);
-                libc::dup2(slave, 1);
-                libc::dup2(slave, 2);
-                if slave > 2 { libc::close(slave); }
-
-                // Set TERM so bash knows we support colors
-                let term = b"TERM=xterm-256color\0".as_ptr() as *const libc::c_char;
-                libc::putenv(term as *mut libc::c_char);
-
-                let shell = b"/bin/bash\0".as_ptr() as *const libc::c_char;
-                let login = b"--login\0".as_ptr() as *const libc::c_char;
-                let argv: [*const libc::c_char; 3] = [shell, login, std::ptr::null()];
-                libc::execvp(shell, argv.as_ptr());
-                libc::_exit(127);
-            }
-        }
-
-        // Parent — close slave, set master non-blocking
-        unsafe { libc::close(slave); }
-        unsafe {
-            let flags = libc::fcntl(master, libc::F_GETFL);
-            libc::fcntl(master, libc::F_SETFL, flags | libc::O_NONBLOCK);
-        }
-
+        let backend = default_backend(cols, rows)?;
         let n_cells = cols as usize * rows as usize;
         Ok(Self {
-            master_fd: master,
-            child_pid: pid,
+            backend,
             grid: TermGrid::new(cols, rows),
             prev_cells: vec![Cell::default(); n_cells],
             scan_buf: vec![0u8; 8192],
@@ -107,99 +59,75 @@ impl PtySession {
     }
 
     pub fn child_alive(&self) -> bool {
-        let mut status: i32 = 0;
-        let r = unsafe { libc::waitpid(self.child_pid, &mut status, libc::WNOHANG) };
-        r == 0
+        self.backend.child_alive()
+    }
+
+    pub fn wait_readable(&self, timeout_ms: i32) -> bool {
+        self.backend.wait_readable(timeout_ms)
     }
 
     /// Guarded write: buffers input until newline, then scans with
-    /// `fused_safety.ea` + `ShellGuard` before sending to PTY.
+    /// `fused_safety.ea` + `ShellGuard` before sending to the backend.
     /// Raw control bytes (Ctrl-C, arrows, tab, ESC) pass through directly.
     /// Returns Ok(()) if sent, Err(reason) if blocked.
     pub fn write_guarded(&mut self, data: &[u8]) -> Result<(), String> {
         for &b in data {
             match b {
-                // Enter — safety-check the buffered line, then send \r
-                // (chars were already sent individually for echo)
                 b'\r' | b'\n' => {
                     if !self.line_buf.is_empty() {
                         let line = String::from_utf8_lossy(&self.line_buf).to_string();
 
-                        // 1. SIMD safety scan (injection + leak detection)
                         let scan = safety::scan(line.as_bytes());
                         if scan.blocked {
                             let reason = scan.details.first()
                                 .map(|w| w.pattern)
                                 .unwrap_or("safety violation");
                             self.line_buf.clear();
-                            // Ctrl-U to kill the line bash already has, then Ctrl-C
-                            self.write_raw(&[0x15, 0x03]);
+                            // Ctrl-U then Ctrl-C — kill the line bash already echoed
+                            self.backend.write(&[0x15, 0x03]);
                             return Err(format!("blocked by safety scan: {reason}"));
                         }
 
-                        // 2. Shell guard (destructive command classification)
                         if let Err(e) = self.guard.check(&line) {
                             self.line_buf.clear();
-                            self.write_raw(&[0x15, 0x03]);
+                            self.backend.write(&[0x15, 0x03]);
                             return Err(e);
                         }
 
-                        // Passed both gates — send newline only
-                        self.write_raw(&[b'\r']);
+                        self.backend.write(&[b'\r']);
                         self.line_buf.clear();
                     } else {
-                        self.write_raw(&[b'\r']);
+                        self.backend.write(&[b'\r']);
                     }
                 }
-                // Backspace — pop from line buffer
                 0x7f | 0x08 => {
                     self.line_buf.pop();
-                    self.write_raw(&[b]);
+                    self.backend.write(&[b]);
                 }
-                // Raw control (Ctrl-A..F, tab, VT, FF, Ctrl-N..Ctrl-Z) — pass through
                 0x01..=0x06 | 0x09 | 0x0b..=0x0c | 0x0e..=0x1a => {
-                    self.write_raw(&[b]);
+                    self.backend.write(&[b]);
                 }
-                // ESC — pass through directly
                 0x1b => {
-                    self.write_raw(&[b]);
+                    self.backend.write(&[b]);
                 }
-                // Printable — accumulate in line buffer + echo to PTY
                 _ => {
                     self.line_buf.push(b);
-                    self.write_raw(&[b]);
+                    self.backend.write(&[b]);
                 }
             }
         }
         Ok(())
     }
 
-    /// Write raw bytes to the PTY — bypasses safety guard.
-    /// Public so integration tests can drive the PTY directly.
-    pub fn write_bytes(&mut self, data: &[u8]) {
-        self.write_raw(data);
+    /// Write raw bytes directly — bypasses the safety guard. Public so
+    /// integration tests can drive the PTY.
+    pub fn write_bytes(&self, data: &[u8]) {
+        self.backend.write(data);
     }
 
-    /// Write raw bytes to the PTY master fd.
-    fn write_raw(&self, data: &[u8]) {
-        let mut written = 0;
-        while written < data.len() {
-            let n = unsafe {
-                libc::write(
-                    self.master_fd,
-                    data[written..].as_ptr() as *const libc::c_void,
-                    data.len() - written,
-                )
-            };
-            if n <= 0 { break; }
-            written += n as usize;
-        }
-    }
-
-    /// Read from PTY, run ANSI pipeline, return dirty cell bitmap.
-    /// Each byte in the returned slice is 1 if that cell changed, 0 otherwise.
+    /// Read all available bytes from the backend, run them through the
+    /// ANSI pipeline, and return a dirty-cell bitmap for diffing.
     pub fn read_and_apply(&mut self) -> &[u8] {
-        // Snapshot current grid into prev
         self.prev_cells.copy_from_slice(unsafe {
             std::slice::from_raw_parts(
                 self.grid.cells_ptr() as *const Cell,
@@ -207,39 +135,31 @@ impl PtySession {
             )
         });
 
-        // Read all available data from PTY (non-blocking)
         let mut total_read = 0;
         loop {
-            let n = unsafe {
-                libc::read(
-                    self.master_fd,
-                    self.read_buf[total_read..].as_mut_ptr() as *mut libc::c_void,
-                    self.read_buf.len() - total_read,
-                )
-            };
-            if n <= 0 { break; }
-            total_read += n as usize;
+            let n = self.backend
+                .read(&mut self.read_buf[total_read..])
+                .unwrap_or(0);
+            if n == 0 { break; }
+            total_read += n;
             if total_read >= self.read_buf.len() { break; }
         }
 
-        eprintln!("[pty] read {total_read} bytes from master fd");
+        eprintln!("[pty] read {total_read} bytes from backend");
         if total_read == 0 {
             for d in &mut self.dirty_buf { *d = 0; }
             return &self.dirty_buf;
         }
 
-        // Grow scan_buf if needed
         if self.scan_buf.len() < total_read {
             self.scan_buf.resize(total_read, 0);
         }
 
-        // Feed through ANSI state machine (SIMD classifier + Rust interpreter)
         let cursor_before = self.grid.cursor();
         self.grid.feed(&self.read_buf[..total_read], &mut self.scan_buf);
         let cursor_after = self.grid.cursor();
         eprintln!("[pty] cursor: {:?} -> {:?}", cursor_before, cursor_after);
 
-        // SIMD diff: compare prev vs current grid
         let n_cells = self.grid.cell_count();
         unsafe {
             ffi::terminal_diff(
@@ -253,37 +173,12 @@ impl PtySession {
         &self.dirty_buf
     }
 
-    /// Resize the PTY and re-allocate terminal grid + buffers.
     pub fn resize(&mut self, cols: u16, rows: u16) {
-        let ws = libc::winsize {
-            ws_row: rows,
-            ws_col: cols,
-            ws_xpixel: 0,
-            ws_ypixel: 0,
-        };
-        unsafe {
-            libc::ioctl(self.master_fd, libc::TIOCSWINSZ, &ws);
-            libc::kill(self.child_pid, libc::SIGWINCH);
-        }
+        self.backend.resize(cols, rows);
 
         self.grid = TermGrid::new(cols, rows);
         let n_cells = cols as usize * rows as usize;
         self.prev_cells = vec![Cell::default(); n_cells];
         self.dirty_buf = vec![0u8; n_cells];
-    }
-
-    /// Get the master fd for polling.
-    pub fn master_fd(&self) -> i32 {
-        self.master_fd
-    }
-}
-
-impl Drop for PtySession {
-    fn drop(&mut self) {
-        unsafe {
-            libc::kill(self.child_pid, libc::SIGTERM);
-            libc::close(self.master_fd);
-            libc::waitpid(self.child_pid, std::ptr::null_mut(), libc::WNOHANG);
-        }
     }
 }

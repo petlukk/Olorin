@@ -7,4 +7,6 @@ pub mod spawner;
 pub mod spawner_unix;
 pub mod exec;
 pub mod pty;
+#[cfg(unix)]
+pub mod pty_unix;
 pub mod ansi;
