@@ -14,8 +14,13 @@ pub fn run(args: &str) -> ToolResult {
         return ToolResult { output: format!("blocked: {e}"), success: false };
     }
 
-    let output = std::process::Command::new("sh")
-        .args(["-c", cmd])
+    #[cfg(unix)]
+    let (program, flag) = ("sh", "-c");
+    #[cfg(windows)]
+    let (program, flag) = ("cmd", "/C");
+
+    let output = std::process::Command::new(program)
+        .args([flag, cmd])
         .output();
 
     match output {
