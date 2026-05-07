@@ -3,3 +3,4 @@
 //! free-function API and gates the actual syscall behind cfg.
 
 pub mod lock;
+pub mod mmap;
