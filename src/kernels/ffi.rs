@@ -131,9 +131,9 @@ pub fn init() -> Result<(), String> {
 
 /// Return the versioned kernel directory path.
 pub fn kernel_dir() -> Result<PathBuf, String> {
-    let home = std::env::var("HOME")
-        .map_err(|_| "HOME not set".to_string())?;
-    Ok(PathBuf::from(home)
+    let home = crate::home_dir()
+        .ok_or_else(|| "home directory not found".to_string())?;
+    Ok(home
         .join(".olorin")
         .join("lib")
         .join(embedded::VERSION))

@@ -298,8 +298,8 @@ const GEMMA4_CANDIDATES: &[&str] = &[
 ];
 
 fn models_dir() -> Option<PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    let dir = Path::new(&home).join(".olorin/models");
+    let home = crate::home_dir()?;
+    let dir = home.join(".olorin/models");
     dir.is_dir().then_some(dir)
 }
 
@@ -322,8 +322,8 @@ pub fn available_models() -> Vec<String> {
 
 /// Resolve model path from CLI argument or auto-detect.
 pub fn resolve_model(arg: Option<&str>) -> Option<PathBuf> {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let olorin_models = Path::new(&home).join(".olorin/models");
+    let home = crate::home_dir().unwrap_or_default();
+    let olorin_models = home.join(".olorin/models");
     match arg {
         Some("gemma4") | None => find_model(),
         Some(name) => {

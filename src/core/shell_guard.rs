@@ -309,8 +309,8 @@ pub fn load_shell_policy() -> ShellPolicy {
             }
         };
     }
-    let home = std::env::var("HOME").unwrap_or_default();
-    let path = std::path::PathBuf::from(home).join(".olorin").join("shell_policy");
+    let home = crate::home_dir().unwrap_or_default();
+    let path = home.join(".olorin").join("shell_policy");
     if let Ok(content) = std::fs::read_to_string(&path) {
         return match content.trim().to_lowercase().as_str() {
             "open" => ShellPolicy::Open,

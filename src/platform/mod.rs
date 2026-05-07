@@ -3,5 +3,6 @@
 //! free-function API and gates the actual syscall behind cfg.
 
 pub mod futex;
+pub mod home;
 pub mod lock;
 pub mod mmap;

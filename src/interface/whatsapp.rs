@@ -49,8 +49,11 @@ fn spawn_bridge() -> Result<Box<dyn ChildProcess>, String> {
         ));
     }
 
-    let home = std::env::var("HOME").unwrap_or_default();
-    let session_dir = format!("{home}/.olorin/wa_session");
+    let session_dir = crate::home_dir()
+        .unwrap_or_default()
+        .join(".olorin/wa_session")
+        .to_string_lossy()
+        .into_owned();
     std::fs::create_dir_all(&session_dir).ok();
 
     default_spawner()
@@ -327,17 +330,22 @@ fn wa_message_loop(
 }
 
 fn find_bridge() -> String {
+    #[cfg(windows)]
+    const BRIDGE_REL: &str = "bridge/wa-bridge.exe";
+    #[cfg(not(windows))]
+    const BRIDGE_REL: &str = "bridge/wa-bridge";
+
     if let Ok(p) = std::env::var("OLORIN_BRIDGE") {
         return p;
     }
     if let Ok(exe) = std::env::current_exe() {
         let candidate = exe
             .parent()
-            .map(|p| p.join("bridge/wa-bridge"))
+            .map(|p| p.join(BRIDGE_REL))
             .unwrap_or_default();
         if candidate.exists() {
             return candidate.to_string_lossy().into_owned();
         }
     }
-    "bridge/wa-bridge".to_string()
+    BRIDGE_REL.to_string()
 }
