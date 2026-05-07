@@ -77,7 +77,7 @@ pub fn init_from(lib_dir: &Path) -> Result<(), String> {
 
 fn load_inference_kernels(lib_dir: &Path) -> Result<KernelTableInference, String> {
     let load = |name: &str| -> Result<Library, String> {
-        let path = lib_dir.join(format!("lib{name}.so"));
+        let path = lib_dir.join(super::dynlib_filename(name));
         unsafe {
             Library::new(&path)
                 .map_err(|e| format!("failed to load {}: {e}", path.display()))

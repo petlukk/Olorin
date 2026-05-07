@@ -38,6 +38,15 @@ fn main() {
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let target = std::env::var("TARGET").unwrap_or_default();
     let is_arm = target.starts_with("aarch64");
+    let dynlib_filename = |stem: &str| -> String {
+        if target.contains("windows") {
+            format!("{stem}.dll")
+        } else if target.contains("darwin") {
+            format!("lib{stem}.dylib")
+        } else {
+            format!("lib{stem}.so")
+        }
+    };
 
     println!("cargo:rerun-if-changed=kernels");
 
@@ -104,7 +113,7 @@ fn main() {
         } else {
             src.stem.strip_suffix("_arm").unwrap_or(&src.stem).to_string()
         };
-        let so_path = out_dir.join(format!("lib{out_stem}.so"));
+        let so_path = out_dir.join(dynlib_filename(&out_stem));
 
         let mut cmd = Command::new(&ea);
         cmd.arg(&src.path)
@@ -135,7 +144,7 @@ fn main() {
             .unwrap_or_else(|e| panic!("cannot read {}: {e}", abs.display()));
         bytes.hash(&mut hasher);
 
-        compiled.push((out_stem.to_string(), format!("lib{out_stem}.so"), abs));
+        compiled.push((out_stem.to_string(), dynlib_filename(&out_stem), abs));
     }
 
     // Deduplicate by output stem
