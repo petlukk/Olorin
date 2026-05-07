@@ -1,19 +1,41 @@
 # Olorin
 
-> The Wakeful Mind in Ea
+> Deterministic SIMD analyst with LLM narration
 
-Single-binary AI agent. Gemma 4 E2B inference via Ea SIMD kernels,
-encrypted vault, 20 tools, Web UI and WhatsApp bridge. Two dependencies.
+Olorin is built around one principle: **SIMD kernels and tools do the real
+work; the language model is a presentation layer, not an answer engine.**
+That makes it categorically different from chat-first agents — Olorin's
+job is to give you reproducible analysis, then let the model phrase it
+in plain English.
+
+## Why Olorin?
+
+- **Local** — Your data never leaves the machine. ChaCha20-encrypted at rest.
+- **Deterministic** — Same input produces the same kernel output, every
+  time. The LLM is only invoked to phrase what the kernels already
+  computed; it doesn't invent facts.
+- **Fast** — SIMD kernels summarize MB-scale data in milliseconds.
+  Pandas-class throughput with zero Python startup tax. See [#performance](#performance) and the eajson example below.
+- **Honest scope** — Single binary, two dependencies (libc + libloading),
+  3.8 MB release on ARM. Runs on a Raspberry Pi 5.
+
+## Try it
 
 ```
-./olorin --model ~/.olorin/models/gemma-4-e2b-it-Q4_K_M.gguf --serve
-./olorin --model ~/.olorin/models/gemma-4-e2b-it-Q4_K_M.gguf --interactive
-./olorin --serve --whatsapp
+./olorin                                              # interactive REPL
+echo '/rune eajson ~/access.log.jsonl' | ./olorin     # one-shot summarization
+./olorin --serve                                      # HTTP + web UI on :8080
 ```
+
+The `/rune` commands ([Runes](#runes--simd-tool-calls)) are where Olorin's
+SIMD-first architecture shines. They run a kernel pass over a file
+(milliseconds for MBs of data) and the model narrates the result in 1-2
+sentences. No Python, no pandas, no cloud.
 
 ## The Olorin Pipe
 
-Every message follows the same path. No sidechannels. No exceptions.
+LLM is the last step, not the first. Every message walks this dispatch
+order; the model only fires if no deterministic path matched.
 
 ```
          REPL / Web UI / WhatsApp
@@ -21,12 +43,12 @@ Every message follows the same path. No sidechannels. No exceptions.
                    v
         core::router::dispatch()
                    |
-        1. Safety Scan ---------> BLOCK
-        2. Slash Command? ------> /tools direct
-        3. Intent Router? ------> kernel (calc/time/cpu)
-        4. Recall --------------> session + vault search
-           (sanitized input only, never raw)
-        5. Inference -----------> Gemma 4 local or Anthropic cloud
+        1. Safety Scan ---------> BLOCK            \
+        2. Slash Command? ------> /tools direct     |  deterministic
+        3. Intent Router? ------> kernel match      |  paths first
+        4. Recall --------------> session + vault   |
+           (sanitized input only)                  /
+        5. LLM (last resort) ---> Gemma 4 local or Anthropic cloud
         6. Output Guard --------> truncate/block
                    |
                    v
@@ -35,6 +57,10 @@ Every message follows the same path. No sidechannels. No exceptions.
                    v
               Response
 ```
+
+Steps 1–4 are pure SIMD kernels and tool dispatch — no LLM involvement.
+Step 5 only fires when nothing else matched; most rune calls and tool
+invocations never touch the model.
 
 ## Runes — SIMD tool calls
 
