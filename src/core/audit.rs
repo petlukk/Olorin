@@ -1,17 +1,6 @@
-//! Audit log — append-only JSON Lines record of every dispatch step.
-//!
-//! Enabled by `--audit <path>` on the command line. Each event is one
-//! JSON object on its own line: `{"ts_ms":...,"turn":...,"phase":"...",...}`.
-//! Events are written in order with a `Mutex<File>` serializing across
-//! threads so the JSONL stream stays valid even under concurrent
-//! server-mode dispatches.
-//!
-//! Goal: a privacy-conscious user can read this file and see exactly
-//! what Olorin did with their data — which kernels ran, which paths
-//! matched, where (and whether) the LLM was invoked. The file does NOT
-//! capture user text or rune output content, only metadata: lengths,
-//! match names, timing, blocked/not-blocked. That keeps the audit log
-//! itself from leaking the data it's meant to protect.
+//! Append-only JSON Lines dispatch log. Captures metadata only (lengths,
+//! phase names, timing) — no user text or rune content. Mutex-serialized
+//! so the stream stays valid under concurrent server dispatches.
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;

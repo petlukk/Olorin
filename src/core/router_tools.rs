@@ -1,8 +1,4 @@
-//! Tool and command handling for the Olorin Pipe.
-//!
-//! Handles slash commands (/help, /tools, /clear, etc.), tool execution,
-//! intent-based tool dispatch, and post-inference tool-call wiring.
-//! Split from router.rs for the 500-line rule.
+//! Slash commands, tools, runes, and tool-call wiring. Split from router.rs.
 
 use crate::core::dispatch;
 use crate::core::handlers;
@@ -13,64 +9,26 @@ use crate::core::router::{DispatchContext, Response, StreamEvent};
 use crate::storage::json;
 use std::time::Instant;
 
-/// Shared closer for the tool-call follow-up prompt. Both the local and
-/// cloud tool-call paths append this after the tool result so the model
-/// is nudged to answer the original question without chaining tool calls.
-/// Kept as a const to prevent drift between the two paths.
+/// Closer for tool-call follow-ups; nudges the model past the tool result.
 const FOLLOWUP_CLOSER: &str =
     "Now answer my original question using the tool result above. Do NOT call another tool.";
 
-/// Decode-token cap for a rune-narration call. The model's max_seq_len is
-/// 2048 positions total (prefill + decode).
-///
-/// Gemma 4 has thinking-mode enabled by default — the model emits a
-/// `<|channel>...<channel|>` block of reasoning tokens BEFORE the answer.
-/// Those tokens count against decode but are filtered out of the returned
-/// string in `Engine::generate`. For complex inputs the thinking block
-/// alone can run 400-600 tokens; we set the cap at 768 = ~600 thinking +
-/// ~120 answer + margin to leave headroom for both.
+/// 768 = ~600 thinking + ~120 answer + margin. Gemma 4's thinking-mode
+/// tokens count against decode but get filtered out of the returned string,
+/// so we need headroom for both.
 pub(crate) const NARRATION_DECODE_TOKEN_CAP: usize = 768;
 
-/// System prompt for narration calls. Narration is a focused
-/// analyze-and-summarize task, not a tool-dispatch turn — using the full
-/// `runes_prompt_block` (with tools-block + "only call a tool when..."
-/// framing) made Gemma 4 emit EOS immediately after seeing the rune
-/// output (model interprets "tool already called → conversation done").
-///
-/// This narration-specific role grounds the model in "data analyst
-/// summarizing tool output" without the tool-dispatch baggage. Clean
-/// instruction-data shape with this system prompt empirically reproduces
-/// reliable narrations on both x86 and Pi 5.
+/// Analyst-role system. The full runes_prompt_block (with tools framing)
+/// makes Gemma 4 emit EOS immediately for narration follow-ups.
 pub(crate) const NARRATION_SYSTEM_PROMPT: &str =
     "You are a helpful data analyst. Read the user's tool output and respond \
      with 1-2 plain-English sentences highlighting what stands out. \
      Avoid repeating raw numbers verbatim.";
 
-/// Total position budget the rune-narration prompt must fit within: the
-/// model's max_seq_len minus the decode cap, with a small safety margin
-/// for chat-template tokens that get added during `generate` formatting.
-/// Anything over this skips narration with a notice — better than panicking
-/// on `pos < max_seq_len` deep in `rope_slices`.
+/// max_seq_len(2048) − decode_cap(768) − chat-template margin(32).
 pub(crate) const NARRATION_MAX_PROMPT_TOKENS: usize = 2048 - NARRATION_DECODE_TOKEN_CAP - 32;
 
 impl DispatchContext {
-    // ── The Olorin Pipe (non-streaming) ──────────────────────────────────────
-
-    /// The Olorin Pipe — process a single input through the pipeline.
-    ///
-    /// ```text
-    /// raw input
-    ///     |
-    ///     +- 1. Safety Scan (inbound) → BLOCK if dangerous
-    ///     +- 2. Slash Command? → tools direct
-    ///     +- 3. Intent Router → kernel (calc/time/cpu/weather)
-    ///     +- 4. Recall → vault context
-    ///     +- 5. Inference → generate tokens
-    ///     +- 6. Leak Scan (outbound) + ChatML Trim
-    ///     |
-    ///     v
-    /// Response → vault save
-    /// ```
     pub fn dispatch(&mut self, input: &str) -> Response {
         let input = input.trim();
         if input.is_empty() {
@@ -182,22 +140,11 @@ impl DispatchContext {
         }
     }
 
-    /// Sync follow-up: run the model with `prompt`, append narration after
-    /// `head` (the displayed kernel output). Used by the non-streaming
-    /// `dispatch` path so REPL/test callers also see narration.
-    ///
-    /// On successful narration, persists the turn so it shows up in next-turn
-    /// context: pushes the rune command + narration into `self.messages` and
-    /// vault-saves the narration as `assistant`. (The kernel output is already
-    /// vault-saved as `tool` by `handle_rune`.)
+    /// Sync narration after a rune's kernel output; persists the turn on success.
     fn run_followup_sync(&mut self, input: &str, head: String, prompt: &str) -> Response {
         let Some(engine) = self.engine.as_mut() else {
             return Response::text(head);
         };
-        // Narration-specific system prompt (analyst role, no tools-block).
-        // The full runes prompt block conditions Gemma 4 to "decide whether
-        // to call a tool, then if no tool needed, emit EOS" — which is the
-        // wrong framing for a follow-up summarization. See the const doc.
         let system = NARRATION_SYSTEM_PROMPT;
         let prompt_tokens = engine.count_prompt_tokens(prompt, system);
         if prompt_tokens > NARRATION_MAX_PROMPT_TOKENS {
@@ -262,9 +209,7 @@ impl DispatchContext {
             body.push_str(&d);
         }
         body.push_str(&format!("\n[timing: {timing_us}µs]"));
-        // Inbound safety scan: file-derived bytes are echoed verbatim, so this
-        // is the last defense before content reaches the user (or the LLM via
-        // the followup turn). Runs regardless of OutputSafety — defense-in-depth.
+        // Inbound safety scan on file-derived bytes (defense-in-depth).
         let scan = safety::scan(body.as_bytes());
         if scan.blocked {
             return Response::blocked("Rune output blocked by safety scan.");
@@ -272,9 +217,7 @@ impl DispatchContext {
         self.vault_save(b"user", full.as_bytes());
         self.vault_save(b"tool", body.as_bytes());
 
-        // Followup: feed the (wrapped, safety-scanned) rune answer back to the
-        // model for a 1-2 sentence narration. Always built; consumer sites in
-        // dispatch / dispatch_streaming gate on engine presence.
+        // Followup is always built; consumers gate on engine presence.
         let scratch = crate::runes::RuneResult {
             answer,
             details: None,

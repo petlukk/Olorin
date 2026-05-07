@@ -1,4 +1,5 @@
 pub mod router;
+mod router_streaming;
 mod router_tools;
 mod router_config;
 pub mod session;

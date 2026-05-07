@@ -1,7 +1,5 @@
-//! Web server + WhatsApp bridge — synchronous, thread-per-connection.
-//!
-//! Serves chat.html on GET /, dispatches POST /api/generate through the Pipe,
-//! and spawns the WhatsApp bridge as a subprocess communicating via JSONL.
+//! Web server — synchronous, thread-per-connection. Serves chat.html and
+//! dispatches POST /api/generate through the Pipe.
 
 use std::io::{Read, Write};
 use std::fmt::Write as FmtWrite;
@@ -27,14 +25,6 @@ pub fn get_chat_html() -> String {
 
 // ── Web server ────────────────────────────────────────────────────────────────
 
-/// Start the web server. Blocks until killed.
-///
-/// `strict`: when true, the underlying DispatchContext is built without a
-/// model — the web UI's chat will refuse LLM fallback for any input the
-/// deterministic paths don't match.
-/// `audit_path`: when Some, every dispatch turn writes JSON Lines events
-/// to that file (append mode). Concurrent web requests are serialized by
-/// the AuditLog's internal mutex so the JSONL stream stays valid.
 pub fn run(port: u16, model_arg: Option<&str>, strict: bool, audit_path: Option<&str>) {
     let api_key = std::env::var("ANTHROPIC_API_KEY").ok();
     let mut built = if strict {
@@ -50,8 +40,6 @@ pub fn run(port: u16, model_arg: Option<&str>, strict: bool, audit_path: Option<
     }
     let ctx = Arc::new(Mutex::new(built));
     let teleported = Arc::new(AtomicBool::new(false));
-
-    // Wire the server's AtomicBool into DispatchContext so whatsapp.rs can set it
     ctx.lock().unwrap_or_else(|e| e.into_inner()).server_teleported = Some(teleported.clone());
 
     let bind_host = std::env::var("OLORIN_BIND").unwrap_or_else(|_| "127.0.0.1".to_string());
@@ -79,7 +67,6 @@ pub fn run(port: u16, model_arg: Option<&str>, strict: bool, audit_path: Option<
 }
 
 fn handle_connection(stream: &mut std::net::TcpStream, ctx: Arc<Mutex<DispatchContext>>, teleported: &AtomicBool) {
-    // Read until \r\n\r\n
     let mut buf = [0u8; 8192];
     let mut n = 0;
     loop {
@@ -106,7 +93,6 @@ fn handle_connection(stream: &mut std::net::TcpStream, ctx: Arc<Mutex<DispatchCo
     let method = parts.next().unwrap_or("");
     let path   = parts.next().unwrap_or("/");
 
-    // Strip query string
     let path = path.split('?').next().unwrap_or("/");
 
     match (method, path) {
@@ -229,7 +215,6 @@ fn handle_generate(
     let body_str   = std::str::from_utf8(&body_bytes).unwrap_or("");
     let prompt     = extract_json_string(body_str, "prompt").unwrap_or_default();
 
-    // Apply per-request inference params
     {
         let mut c = ctx.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(engine) = &mut c.engine {
@@ -251,7 +236,6 @@ fn handle_generate(
         }
     }
 
-    // SSE headers
     let _ = write!(
         stream,
         "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\n\

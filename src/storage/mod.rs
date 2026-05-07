@@ -5,4 +5,5 @@ pub mod secure;
 pub mod json;
 pub mod jsonl_parse;
 pub mod parquet;
+mod thrift_compact;
 mod key;

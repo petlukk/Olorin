@@ -1,26 +1,9 @@
-//! eaparquet — Parquet metadata summarizer.
+//! eaparquet — Parquet footer summarizer. Reads metadata only (never
+//! decodes column data) and aggregates per-column stats via f64_stats.
 //!
-//! Reads the file footer (Thrift compact encoded `FileMetaData`) and reports
-//! per-column type + statistics aggregated across row groups. Never decodes
-//! column data — Parquet writers pre-compute per-column min/max/null_count
-//! at write time and store them in the metadata, so the rune just walks the
-//! footer and aggregates.
-//!
-//! That's why this rune is so cheap: a 100MB Parquet file's footer is
-//! typically a few KB, and we never touch the data pages. Compare to
-//! `pyarrow.parquet.read_table().describe()` which materializes the entire
-//! table before computing stats.
-//!
-//! Limits (v1):
-//! - Primitive physical types only: BOOLEAN, INT32, INT64, FLOAT, DOUBLE
-//!   produce numeric stats. BYTE_ARRAY (strings) and INT96 (legacy
-//!   timestamps) are reported by type but stats are left absent — string
-//!   stats need encoding-aware byte interpretation; INT96 is being phased
-//!   out by parquet writers anyway.
-//! - Flat schemas only — nested groups (LIST/MAP/STRUCT children) are
-//!   skipped from the column list.
-//! - Statistics must be present in the file. Older writers without stats
-//!   produce columns with no min/max but still report row counts.
+//! Limits: primitive types only (BOOLEAN/INT32/INT64/FLOAT/DOUBLE get
+//! min/max; BYTE_ARRAY/INT96 are reported but stats are left absent).
+//! Flat schemas only. File-metadata statistics must be present.
 
 use super::{Rune, RuneResult, OutputSafety};
 use super::common::{resolve_path, open_capped, truncate_answer, PathError};

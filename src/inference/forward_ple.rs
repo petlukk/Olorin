@@ -72,7 +72,7 @@ pub fn prepare_ple_into(
 /// Buffers (all indexed by token t):
 ///   - `batch_x[t * hd .. (t+1) * hd]`           — input (embedded+scaled)
 ///   - `batch_ple_signal[t * total ..]`          — output (raw signal, then combined)
-///   - `proj_scratch[t * total ..]`              — temporary projection
+///   - `proj_scratch[t * total ..]`              — projection scratch
 ///
 /// Bit-exact with calling `prepare_ple_into` sequentially per token, because
 /// each (token, row) dot product uses the same column-reduction sequence
