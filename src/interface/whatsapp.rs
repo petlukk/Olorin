@@ -1,7 +1,7 @@
 //! WhatsApp bridge — subprocess communicating via JSONL.
 
 use crate::core::router::{DispatchContext, Response, StreamEvent};
-use crate::interface::exec;
+use crate::interface::spawner::{default_spawner, ChildProcess};
 use crate::interface::server::{extract_json_string, escape_json};
 
 /// Sentinel returned by strip_trigger for the /teleport command.
@@ -39,8 +39,8 @@ pub fn strip_trigger(text: &str) -> Option<&str> {
     None
 }
 
-/// Spawn the bridge subprocess. Returns the Child on success.
-fn spawn_bridge() -> Result<exec::Child, String> {
+/// Spawn the bridge subprocess. Returns the child on success.
+fn spawn_bridge() -> Result<Box<dyn ChildProcess>, String> {
     let bridge_path = find_bridge();
     if !std::path::Path::new(&bridge_path).exists() {
         return Err(format!(
@@ -53,14 +53,15 @@ fn spawn_bridge() -> Result<exec::Child, String> {
     let session_dir = format!("{home}/.olorin/wa_session");
     std::fs::create_dir_all(&session_dir).ok();
 
-    exec::spawn(&[&bridge_path, "--session-dir", &session_dir])
+    default_spawner()
+        .spawn(&[&bridge_path, "--session-dir", &session_dir])
         .map_err(|e| format!("Failed to start WhatsApp bridge: {e}"))
 }
 
 /// Handle a single inbound message from the bridge. Returns true if the
 /// loop should exit (i.e., /teleport received).
 fn handle_wa_message(
-    child: &exec::Child,
+    child: &dyn ChildProcess,
     text: &str,
     jid: &str,
     ctx: &mut DispatchContext,
@@ -120,7 +121,7 @@ pub fn teleport_loop(ctx: &mut DispatchContext) -> Response {
         Err(msg) => return Response::text(msg),
     };
 
-    eprintln!("[olorin] WhatsApp bridge started (pid={})", child.pid);
+    eprintln!("[olorin] WhatsApp bridge started (pid={})", child.id());
     set_teleported(ctx);
 
     let mut line_buf = String::new();
@@ -141,7 +142,7 @@ pub fn teleport_loop(ctx: &mut DispatchContext) -> Response {
                 let text = extract_json_string(&line_buf, "text").unwrap_or_default();
                 let jid = extract_json_string(&line_buf, "jid").unwrap_or_default();
                 if text.is_empty() || jid.is_empty() { continue; }
-                if handle_wa_message(&child, &text, &jid, ctx) { break; }
+                if handle_wa_message(&*child, &text, &jid, ctx) { break; }
             }
             _ => {}
         }
@@ -174,7 +175,7 @@ pub fn teleport_loop_streaming(
         }
     };
 
-    eprintln!("[olorin] WhatsApp bridge started (pid={})", child.pid);
+    eprintln!("[olorin] WhatsApp bridge started (pid={})", child.id());
     set_teleported(ctx);
 
     let _ = tx.send(StreamEvent::Token(
@@ -223,7 +224,7 @@ pub fn teleport_loop_streaming(
                 let text = extract_json_string(&line_buf, "text").unwrap_or_default();
                 let jid = extract_json_string(&line_buf, "jid").unwrap_or_default();
                 if !text.is_empty() && !jid.is_empty() {
-                    if handle_wa_message(&child, &text, &jid, ctx) {
+                    if handle_wa_message(&*child, &text, &jid, ctx) {
                         clear_teleported(ctx);
                         let msg = "Olorin has returned from WhatsApp.".to_string();
                         let _ = tx.send(StreamEvent::Token(msg.clone()));
@@ -257,7 +258,7 @@ pub fn teleport_loop_streaming(
             let jid = extract_json_string(&line_buf, "jid").unwrap_or_default();
             eprintln!("[olorin] WA msg: jid={jid} text={text}");
             if text.is_empty() || jid.is_empty() { continue; }
-            if handle_wa_message(&child, &text, &jid, ctx) { break; }
+            if handle_wa_message(&*child, &text, &jid, ctx) { break; }
         }
     }
 
@@ -266,13 +267,7 @@ pub fn teleport_loop_streaming(
 
 /// Start the WhatsApp bridge as standalone (--whatsapp flag).
 pub fn run_whatsapp(model_arg: Option<&str>) {
-    let bridge_path = find_bridge();
-
-    let home = std::env::var("HOME").unwrap_or_default();
-    let session_dir = format!("{home}/.olorin/wa_session");
-    std::fs::create_dir_all(&session_dir).ok();
-
-    let child = match exec::spawn(&[&bridge_path, "--session-dir", &session_dir]) {
+    let child = match spawn_bridge() {
         Ok(c) => c,
         Err(e) => {
             eprintln!("[olorin] failed to start WhatsApp bridge: {e}");
@@ -285,45 +280,25 @@ pub fn run_whatsapp(model_arg: Option<&str>) {
         DispatchContext::new(api_key, model_arg),
     ));
 
-    eprintln!("[olorin] WhatsApp bridge started (pid={})", child.pid);
+    eprintln!("[olorin] WhatsApp bridge started (pid={})", child.id());
     eprintln!("[olorin] Waiting for bridge connection...");
 
-    let pid = child.pid;
-    let stdout_fd = child.stdout_fd;
-    let stdin_fd = child.stdin_fd;
-    std::mem::forget(child);
-
-    wa_message_loop(stdout_fd, stdin_fd, pid, ctx);
+    wa_message_loop(child, ctx);
 }
 
 fn wa_message_loop(
-    stdout_fd: i32,
-    stdin_fd: i32,
-    pid: i32,
+    child: Box<dyn ChildProcess>,
     ctx: std::sync::Arc<std::sync::Mutex<DispatchContext>>,
 ) {
     let mut line_buf = String::new();
-    let mut byte = [0u8; 1];
 
     loop {
         line_buf.clear();
-        loop {
-            let n = unsafe {
-                libc::read(stdout_fd, byte.as_mut_ptr() as *mut libc::c_void, 1)
-            };
-            if n <= 0 {
-                eprintln!("[olorin] Bridge stdout closed.");
-                unsafe {
-                    libc::waitpid(pid, std::ptr::null_mut(), 0);
-                    libc::close(stdout_fd);
-                    libc::close(stdin_fd);
-                }
-                return;
-            }
-            if byte[0] == b'\n' { break; }
-            line_buf.push(byte[0] as char);
+        if child.read_line(&mut line_buf).unwrap_or(0) == 0 {
+            eprintln!("[olorin] Bridge stdout closed.");
+            let _ = child.wait();
+            return;
         }
-
         if line_buf.is_empty() { continue; }
 
         let msg_type = extract_json_string(&line_buf, "type").unwrap_or_default();
@@ -344,20 +319,7 @@ fn wa_message_loop(
                     escape_json(&jid),
                     escape_json(&response.text)
                 );
-                let bytes = format!("{reply}\n");
-                let bytes = bytes.as_bytes();
-                let mut written = 0;
-                while written < bytes.len() {
-                    let n = unsafe {
-                        libc::write(
-                            stdin_fd,
-                            bytes[written..].as_ptr() as *const libc::c_void,
-                            bytes.len() - written,
-                        )
-                    };
-                    if n <= 0 { break; }
-                    written += n as usize;
-                }
+                let _ = child.write_line(&reply);
             }
             _ => {}
         }

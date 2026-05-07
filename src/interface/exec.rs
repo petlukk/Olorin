@@ -7,14 +7,9 @@
 use std::ffi::CString;
 use std::io;
 
-// ── One-shot run ──────────────────────────────────────────────────────────────
+pub use super::spawner::Output;
 
-/// Output from a completed child process.
-pub struct Output {
-    pub stdout:    Vec<u8>,
-    pub stderr:    Vec<u8>,
-    pub exit_code: i32,
-}
+// ── One-shot run ──────────────────────────────────────────────────────────────
 
 /// Run a command, capture stdout+stderr, wait for completion.
 /// `argv[0]` is the program, rest are arguments.
