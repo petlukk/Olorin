@@ -27,6 +27,11 @@ pub fn default_backend(cols: u16, rows: u16) -> io::Result<Box<dyn PtyBackend>> 
     super::pty_unix::open(cols, rows).map(|b| Box::new(b) as Box<dyn PtyBackend>)
 }
 
+#[cfg(windows)]
+pub fn default_backend(cols: u16, rows: u16) -> io::Result<Box<dyn PtyBackend>> {
+    super::pty_windows::open(cols, rows).map(|b| Box::new(b) as Box<dyn PtyBackend>)
+}
+
 pub struct PtySession {
     backend: Box<dyn PtyBackend>,
     grid: TermGrid,
