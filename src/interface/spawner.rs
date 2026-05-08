@@ -2,8 +2,8 @@
 //! and long-lived `spawn` returning a line-oriented `ChildProcess`.
 //!
 //! Unix backend lives in `spawner_unix.rs` (raw fork+exec via `exec.rs`).
-//! Windows backend lands in a follow-up commit (`spawner_windows.rs`,
-//! `CreateProcessW` + pipe handles).
+//! Windows backend lives in `spawner_windows.rs` (`std::process::Command`
+//! over `CreateProcessW`).
 
 use std::io;
 
@@ -29,4 +29,9 @@ pub trait ChildProcess: Send + Sync {
 #[cfg(unix)]
 pub fn default_spawner() -> Box<dyn Spawner> {
     Box::new(super::spawner_unix::UnixSpawner)
+}
+
+#[cfg(windows)]
+pub fn default_spawner() -> Box<dyn Spawner> {
+    Box::new(super::spawner_windows::WindowsSpawner)
 }

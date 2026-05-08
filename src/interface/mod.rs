@@ -5,6 +5,8 @@ pub mod term_stream;
 pub mod spawner;
 #[cfg(unix)]
 pub mod spawner_unix;
+#[cfg(windows)]
+pub mod spawner_windows;
 #[cfg(unix)]
 pub mod exec;
 pub mod pty;
