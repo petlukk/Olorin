@@ -3,3 +3,6 @@ linker = "aarch64-linux-gnu-gcc"
 
 [target.x86_64-pc-windows-gnu]
 linker = "x86_64-w64-mingw32-gcc"
+# Match Linux's 8 MB main-thread stack. Windows defaults to 1 MB, which
+# the forward pass busts on the first prompt (stack-resident KV scratch).
+rustflags = ["-C", "link-arg=-Wl,--stack,8388608"]
