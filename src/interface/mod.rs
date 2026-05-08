@@ -12,4 +12,6 @@ pub mod exec;
 pub mod pty;
 #[cfg(unix)]
 pub mod pty_unix;
+#[cfg(windows)]
+pub mod pty_windows;
 pub mod ansi;
