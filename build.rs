@@ -38,6 +38,7 @@ fn main() {
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let target = std::env::var("TARGET").unwrap_or_default();
     let is_arm = target.starts_with("aarch64");
+    let is_windows = target.contains("windows");
     let dynlib_filename = |stem: &str| -> String {
         if target.contains("windows") {
             format!("{stem}.dll")
@@ -129,6 +130,14 @@ fn main() {
                 cmd.arg("--i8mm");
             }
             cmd.env("CC", "aarch64-linux-gnu-gcc");
+        } else if is_windows {
+            // Tell ea to emit COFF + link via mingw-w64 (when host is Linux).
+            // x86-64-v3 = SSSE3+SSE4.2+AVX2+BMI+FMA+F16C — matches what
+            // Olorin's _avx2 kernels assume; without an explicit --target,
+            // ea's cross-compile path falls back to "generic" (SSE2 only)
+            // and SSSE3 intrinsics like pmaddubsw fail to select.
+            cmd.arg(format!("--target-triple={target}"));
+            cmd.arg("--target=x86-64-v3");
         }
 
         let output = cmd.output()
