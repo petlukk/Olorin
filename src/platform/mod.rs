@@ -4,6 +4,7 @@
 
 pub mod futex;
 pub mod home;
+pub mod hwid;
 pub mod lock;
 pub mod mmap;
 pub mod sysinfo;
