@@ -118,6 +118,12 @@ pub fn handle_term_stream(stream: &mut std::net::TcpStream, id: u32) {
         let readable = session.lock().unwrap().wait_readable(16);
 
         if readable {
+            // Brief grace period so ConPTY's burst of small VT escape
+            // sequences (cursor positioning, color changes) coalesces
+            // into one SSE frame instead of hundreds. Below the 16ms
+            // perception threshold so it's not felt as latency.
+            std::thread::sleep(std::time::Duration::from_millis(5));
+
             let mut s = session.lock().unwrap();
             let dirty: Vec<u8> = s.read_and_apply().to_vec();
             let dirty_count = dirty.iter().filter(|&&d| d != 0).count();
