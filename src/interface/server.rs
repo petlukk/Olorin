@@ -350,72 +350,22 @@ fn handle_command(
 // ── System info ───────────────────────────────────────────────────────────────
 
 pub fn build_system_json(recall_level: usize, config_json: &str) -> String {
-    let (mem_used, mem_total) = read_memory().unwrap_or((0, 0));
-    let uptime   = read_uptime().unwrap_or(0);
-    let os       = std::env::consts::OS;
-    let arch     = std::env::consts::ARCH;
-    let cpu_temp = match read_cpu_temp() {
+    use crate::platform::sysinfo;
+    let (mem_used, mem_total) = sysinfo::memory_usage_mb().unwrap_or((0, 0));
+    let uptime      = sysinfo::uptime_seconds().unwrap_or(0);
+    let os          = std::env::consts::OS;
+    let arch        = std::env::consts::ARCH;
+    let cpu_temp    = match sysinfo::cpu_temp_c() {
         Some(t) => t.to_string(),
         None    => "null".to_string(),
     };
-    let cpu_percent = read_cpu_percent().unwrap_or(0);
+    let cpu_percent = sysinfo::cpu_percent().unwrap_or(0);
     format!(
         "{{\"cpu_percent\":{cpu_percent},\"cpu_temp\":{cpu_temp},\
          \"memory_used_mb\":{mem_used},\"memory_total_mb\":{mem_total},\
          \"os\":\"{os}\",\"arch\":\"{arch}\",\"uptime_seconds\":{uptime},\
          \"recall_level\":{recall_level},\"config\":{config_json}}}"
     )
-}
-
-fn read_memory() -> Option<(u64, u64)> {
-    let s = std::fs::read_to_string("/proc/meminfo").ok()?;
-    let mut total_kb = 0u64;
-    let mut avail_kb = 0u64;
-    for line in s.lines() {
-        if line.starts_with("MemTotal:") {
-            total_kb = line.split_whitespace().nth(1)?.parse().ok()?;
-        } else if line.starts_with("MemAvailable:") {
-            avail_kb = line.split_whitespace().nth(1)?.parse().ok()?;
-        }
-    }
-    Some((total_kb / 1024 - avail_kb / 1024, total_kb / 1024))
-}
-
-fn read_cpu_temp() -> Option<u32> {
-    let s = std::fs::read_to_string("/sys/class/thermal/thermal_zone0/temp").ok()?;
-    Some(s.trim().parse::<u32>().ok()? / 1000)
-}
-
-fn parse_proc_stat() -> Option<(u64, u64)> {
-    let s = std::fs::read_to_string("/proc/stat").ok()?;
-    let line = s.lines().find(|l| l.starts_with("cpu "))?;
-    let vals: Vec<u64> = line.split_whitespace().skip(1)
-        .filter_map(|v| v.parse().ok()).collect();
-    if vals.len() < 4 { return None; }
-    let total: u64 = vals.iter().sum();
-    let idle = vals[3];
-    Some((total, idle))
-}
-
-fn read_cpu_percent() -> Option<u32> {
-    use std::sync::Mutex;
-    static PREV: Mutex<(u64, u64, u32)> = Mutex::new((0, 0, 0));
-    let (t2, i2) = parse_proc_stat()?;
-    let mut prev = PREV.lock().ok()?;
-    let (t1, i1, last_pct) = *prev;
-    let dt = t2.saturating_sub(t1);
-    let di = i2.saturating_sub(i1);
-    *prev = if dt > 0 {
-        (t2, i2, (100 * (dt - di) / dt) as u32)
-    } else {
-        (t2, i2, last_pct)
-    };
-    Some(prev.2)
-}
-
-fn read_uptime() -> Option<u64> {
-    let s = std::fs::read_to_string("/proc/uptime").ok()?;
-    Some(s.split_whitespace().next()?.parse::<f64>().ok()? as u64)
 }
 
 // ── JSON helpers ──────────────────────────────────────────────────────────────
