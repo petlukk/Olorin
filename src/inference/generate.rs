@@ -273,17 +273,22 @@ use super::sample::{sample, xorshift_seed};
 
 /// Find a GGUF model in standard locations. Prefers gemma4 if present.
 pub fn find_model() -> Option<PathBuf> {
-    let dir = models_dir()?;
-    for candidate in GEMMA4_CANDIDATES {
-        let p = dir.join(candidate);
-        if p.exists() {
-            return Some(p);
+    for dir in model_search_dirs() {
+        for candidate in GEMMA4_CANDIDATES {
+            let p = dir.join(candidate);
+            if p.exists() {
+                return Some(p);
+            }
+        }
+        if let Some(any) = std::fs::read_dir(&dir).ok()?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .find(|p| p.extension().map(|e| e == "gguf").unwrap_or(false))
+        {
+            return Some(any);
         }
     }
-    std::fs::read_dir(&dir).ok()?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .find(|p| p.extension().map(|e| e == "gguf").unwrap_or(false))
+    None
 }
 
 /// gemma4 gguf preference order:
@@ -297,38 +302,50 @@ const GEMMA4_CANDIDATES: &[&str] = &[
     "gemma-4-e2b-it-Q4_K_M.gguf",
 ];
 
-fn models_dir() -> Option<PathBuf> {
-    let home = crate::home_dir()?;
-    let dir = home.join(".olorin/models");
-    dir.is_dir().then_some(dir)
+/// Search paths for GGUF models, in priority order:
+/// 1. `<exe-dir>/models/` — next to the binary; portable deployments.
+/// 2. `~/.olorin/models/` — per-user, the XDG-style location.
+fn model_search_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            let d = parent.join("models");
+            if d.is_dir() { dirs.push(d); }
+        }
+    }
+    if let Some(home) = crate::home_dir() {
+        let d = home.join(".olorin/models");
+        if d.is_dir() { dirs.push(d); }
+    }
+    dirs
 }
 
-/// List all .gguf files in ~/.olorin/models/ — stem names only.
+/// List all .gguf files across `model_search_dirs()` — stem names only.
+/// First-match-wins on duplicate stems (exe-dir shadows ~/.olorin).
 pub fn available_models() -> Vec<String> {
-    let dir = match models_dir() {
-        Some(d) => d,
-        None => return Vec::new(),
-    };
-    let mut names: Vec<String> = std::fs::read_dir(&dir)
-        .into_iter()
-        .flatten()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map(|x| x == "gguf").unwrap_or(false))
-        .filter_map(|e| e.path().file_stem().map(|s| s.to_string_lossy().into_owned()))
-        .collect();
+    let mut names: Vec<String> = Vec::new();
+    for dir in model_search_dirs() {
+        for entry in std::fs::read_dir(&dir).into_iter().flatten().filter_map(|e| e.ok()) {
+            if entry.path().extension().map(|x| x == "gguf").unwrap_or(false) {
+                if let Some(stem) = entry.path().file_stem().map(|s| s.to_string_lossy().into_owned()) {
+                    if !names.contains(&stem) { names.push(stem); }
+                }
+            }
+        }
+    }
     names.sort();
     names
 }
 
 /// Resolve model path from CLI argument or auto-detect.
 pub fn resolve_model(arg: Option<&str>) -> Option<PathBuf> {
-    let home = crate::home_dir().unwrap_or_default();
-    let olorin_models = home.join(".olorin/models");
     match arg {
         Some("gemma4") | None => find_model(),
         Some(name) => {
-            let stem_path = olorin_models.join(format!("{name}.gguf"));
-            if stem_path.exists() { return Some(stem_path); }
+            for dir in model_search_dirs() {
+                let stem_path = dir.join(format!("{name}.gguf"));
+                if stem_path.exists() { return Some(stem_path); }
+            }
             let p = PathBuf::from(name);
             p.exists().then_some(p)
         }
