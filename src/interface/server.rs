@@ -60,9 +60,14 @@ pub fn run(port: u16, model_arg: Option<&str>, strict: bool, audit_path: Option<
         let ctx = ctx.clone();
         let teleported = teleported.clone();
 
-        std::thread::spawn(move || {
-            handle_connection(&mut stream, ctx, &teleported);
-        });
+        // 16 MB matches the main thread's PE stack reserve. The
+        // dispatch path nested below this can hit the forward pass,
+        // which busts std::thread's 2 MB default on Windows.
+        let _ = std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(move || {
+                handle_connection(&mut stream, ctx, &teleported);
+            });
     }
 }
 
@@ -253,10 +258,15 @@ fn handle_generate(
 
     let ctx_clone = ctx.clone();
     let prompt_owned = prompt.to_string();
-    let sender = std::thread::spawn(move || {
-        let mut guard = ctx_clone.lock().unwrap_or_else(|e| e.into_inner());
-        guard.dispatch_streaming(&prompt_owned, tx);
-    });
+    // Forward-pass-bearing thread — needs the same 16 MB the main
+    // thread has (Windows default 2 MB busts on Win64 ABI overhead).
+    let sender = std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            let mut guard = ctx_clone.lock().unwrap_or_else(|e| e.into_inner());
+            guard.dispatch_streaming(&prompt_owned, tx);
+        })
+        .expect("failed to spawn dispatch thread");
 
     let mut token_count: u64 = 0;
     let mut decode_start: Option<std::time::Instant> = None;
