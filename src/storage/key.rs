@@ -1,6 +1,6 @@
 //! Vault key derivation and hashing helpers.
 //!
-//! Key: XOR-obfuscated seed ^ hardware_id (from /etc/machine-id).
+//! Key: XOR-obfuscated seed ^ hardware_id (from `platform::hwid`).
 //! Histogram: byte-frequency index for encrypted search.
 //! xxHash64: fast non-crypto hash for integrity checks.
 
@@ -26,10 +26,8 @@ const OBFUSCATED_SEED: [u8; 32] = {
 
 /// Read hardware identifier for key binding.
 fn hardware_id() -> [u8; 32] {
-    let raw = std::fs::read_to_string("/sys/class/dmi/id/product_uuid")
-        .or_else(|_| std::fs::read_to_string("/etc/machine-id"))
-        .or_else(|_| std::fs::read_to_string("/etc/hostname"))
-        .unwrap_or_else(|_| "olorin-fallback-id".to_string());
+    let raw = crate::platform::hwid::machine_id()
+        .unwrap_or_else(|| "olorin-fallback-id".to_string());
     let mut id = [0u8; 32];
     let bytes = raw.trim().as_bytes();
     for (i, &b) in bytes.iter().enumerate() {
