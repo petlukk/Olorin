@@ -32,6 +32,7 @@ type JsonlStructFn      = unsafe extern "C" fn(
     *mut i32, *mut i32, *mut i32, *mut i32, *mut i32,
     *mut u8,
 );
+type LogLevelScanFn     = unsafe extern "C" fn(*const u8, i32, *mut i32);
 type F32StatsFn         = unsafe extern "C" fn(
     *const f32, i32,
     *mut i32,
@@ -81,6 +82,7 @@ pub struct KernelTable {
     pub classify_intent:          ClassifyIntentFn,
     pub csv_scan:                 CsvScanFn,
     pub jsonl_struct_scan:        JsonlStructFn,
+    pub log_level_scan:           LogLevelScanFn,
     pub f32_stats:                F32StatsFn,
     pub f64_stats:                F64StatsFn,
     pub eval_expr:                EvalExprFn,
@@ -176,6 +178,7 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
     let intent_router   = load("intent_router")?;
     let csv_scan_lib    = load("csv_scan")?;
     let jsonl_struct_lib = load("jsonl_struct")?;
+    let log_level_scan_lib = load("log_level_scan")?;
     let f32_stats_lib   = load("f32_stats")?;
     let f64_stats_lib   = load("f64_stats")?;
     let expr_eval       = load("expr_eval")?;
@@ -222,6 +225,8 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
                 sym(&csv_scan_lib, b"csv_scan\0")?),
             jsonl_struct_scan: std::mem::transmute(
                 sym(&jsonl_struct_lib, b"jsonl_struct_scan\0")?),
+            log_level_scan: std::mem::transmute(
+                sym(&log_level_scan_lib, b"log_level_scan\0")?),
             f32_stats: std::mem::transmute(
                 sym(&f32_stats_lib, b"f32_stats\0")?),
             f64_stats: std::mem::transmute(
@@ -254,7 +259,8 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
                 zeroize_lib, search, jl_project_lib,
                 chacha20_lib, chacha20_sv2, pretokenize_lib,
                 ansi_parser_lib, terminal_diff_lib,
-                csv_scan_lib, jsonl_struct_lib, f32_stats_lib, f64_stats_lib,
+                csv_scan_lib, jsonl_struct_lib, log_level_scan_lib,
+                f32_stats_lib, f64_stats_lib,
             ],
         };
         Ok(table)
@@ -418,6 +424,21 @@ pub unsafe fn jsonl_struct_scan(
         out_n_newline, out_n_quote, out_n_colon, out_n_comma, out_n_backslash,
         scratch,
     );
+}
+
+/// Multi-keyword severity scanner. Counts word-bounded occurrences of
+/// DEBUG, INFO, WARN, ERROR, FATAL plus newline bytes in `text`. Word
+/// boundary = bounded by one of: space, tab, newline, CR, '[', ']',
+/// '"', ':'. Start/end of buffer count as implicit delimiters.
+///
+/// # Safety
+/// - `text` must point to `len` readable bytes.
+/// - `out_counts` must be valid for **six** writable `i32` elements; the
+///   kernel writes [DEBUG, INFO, WARN, ERROR, FATAL, NEWLINES] in that
+///   order and always zeroes all six before counting (safe to call with
+///   `len == 0`).
+pub unsafe fn log_level_scan(text: *const u8, len: i32, out_counts: *mut i32) {
+    (k().log_level_scan)(text, len, out_counts);
 }
 
 /// Streaming stats over `len` f32 elements. Writes count, sum, min, max.
