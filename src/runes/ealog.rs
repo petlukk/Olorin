@@ -1,12 +1,17 @@
 //! ealog — Multi-keyword severity scanner for log files. Counts
 //! word-bounded DEBUG / INFO / WARN / ERROR / FATAL occurrences and
-//! the line count via a single SIMD pass.
+//! the line count via a single SIMD pass, plus records byte offsets
+//! of the first N ERROR / FATAL matches so the rune can surface
+//! sample lines for the LLM to narrate.
 
 use super::{Rune, RuneResult, OutputSafety};
 use super::common::{resolve_path, open_capped, truncate_answer, PathError};
 use crate::kernels::ffi;
 use std::path::PathBuf;
 use std::time::Instant;
+
+const MAX_HIGH_SEVERITY_SAMPLES: usize = 5;
+const SAMPLE_LINE_TRUNCATE: usize = 160;
 
 pub struct Ealog;
 pub const RUNE: Ealog = Ealog;
@@ -67,8 +72,16 @@ fn refusal(t0: Instant, msg: &str) -> RuneResult {
 fn scan_and_format(bytes: &[u8]) -> String {
     let t_scan = Instant::now();
     let mut counts = [0i32; 6];
+    let mut positions = [0i32; MAX_HIGH_SEVERITY_SAMPLES];
+    let mut n_pos = 0i32;
+    let mut scratch = [0u8; 16];
     unsafe {
-        ffi::log_level_scan(bytes.as_ptr(), bytes.len() as i32, counts.as_mut_ptr());
+        ffi::log_level_scan(
+            bytes.as_ptr(), bytes.len() as i32,
+            counts.as_mut_ptr(),
+            positions.as_mut_ptr(), MAX_HIGH_SEVERITY_SAMPLES as i32, &mut n_pos,
+            scratch.as_mut_ptr(),
+        );
     }
     let scan_us = t_scan.elapsed().as_micros();
 
@@ -102,7 +115,39 @@ fn scan_and_format(bytes: &[u8]) -> String {
     if total == 0 {
         out.push_str("  (no severity keywords found — file may not be a log)\n");
     }
+
+    let sample_count = n_pos as usize;
+    if sample_count > 0 {
+        out.push('\n');
+        out.push_str("high-severity sample:\n");
+        for &offset in &positions[..sample_count] {
+            let (line_num, line) = extract_line_at(bytes, offset as usize);
+            let display = truncate_line(line);
+            out.push_str(&format!("  L{line_num}: {display}\n"));
+        }
+    }
     out
+}
+
+fn extract_line_at(bytes: &[u8], offset: usize) -> (usize, &[u8]) {
+    let start = bytes[..offset].iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+    let end = bytes[offset..].iter().position(|&b| b == b'\n').map_or(bytes.len(), |i| offset + i);
+    let line_num = bytes[..start].iter().filter(|&&b| b == b'\n').count() + 1;
+    (line_num, &bytes[start..end])
+}
+
+fn truncate_line(line: &[u8]) -> String {
+    let s = String::from_utf8_lossy(line);
+    let trimmed = s.trim_end_matches('\r');
+    if trimmed.len() > SAMPLE_LINE_TRUNCATE {
+        let cut = (0..=SAMPLE_LINE_TRUNCATE)
+            .rev()
+            .find(|&i| trimmed.is_char_boundary(i))
+            .unwrap_or(0);
+        format!("{}…", &trimmed[..cut])
+    } else {
+        trimmed.to_string()
+    }
 }
 
 fn fmt_level(name: &str, count: u64, total: u64) -> String {
