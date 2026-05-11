@@ -1,6 +1,7 @@
 pub mod ffi;
 pub mod ffi_inference;
 pub mod ffi_inference_types;
+pub mod loader;
 
 /// Platform-native dynamic-library filename for a kernel stem.
 /// `command_router` becomes `libcommand_router.so` on Linux,
