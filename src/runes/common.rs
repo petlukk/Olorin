@@ -71,9 +71,19 @@ pub fn open_capped(path: &Path, home: &Path) -> Result<Vec<u8>, PathError> {
 
     // Canonicalize now that we know the file exists, and re-check the
     // allowlist on the real path to catch symlink traversal.
+    //
+    // Windows: std::fs::canonicalize returns the verbatim/extended-length
+    // form (\\?\C:\...). std::path::Path::starts_with treats that as a
+    // distinct prefix from a non-verbatim path, so we have to canonicalize
+    // `home` too so both sides carry the same prefix on Windows. On Unix
+    // canonicalize just resolves symlinks — no prefix change — so this
+    // is harmless there too.
     let canonical = std::fs::canonicalize(path)
         .map_err(|e| PathError::Io(e.to_string()))?;
-    let allowed = canonical.starts_with(home) || canonical.starts_with("/tmp");
+    let canonical_home = std::fs::canonicalize(home)
+        .unwrap_or_else(|_| home.to_path_buf());
+    let allowed = canonical.starts_with(&canonical_home)
+        || canonical.starts_with("/tmp");
     if !allowed {
         return Err(PathError::OutsideAllowlist);
     }
