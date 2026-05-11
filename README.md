@@ -172,10 +172,52 @@ them by default). Primitive types only: BOOLEAN/INT32/INT64/FLOAT/DOUBLE
 get min/max; BYTE_ARRAY (strings) and INT96 (legacy timestamp) are
 reported by type but their stats are left absent.
 
+### ealog — log severity scanner
+
+```
+/rune ealog ~/var/log/app.log
+```
+
+```
+bytes:   1.2 GB
+lines:   47123891
+format:  plaintext
+scan:    162 ms
+
+severity:
+  DEBUG       1234567  ( 2.62%)
+  INFO       44000000  (93.38%)
+  WARN         789012  ( 1.67%)
+  ERROR         23456  ( 0.05%)
+  FATAL            12  ( 0.00%)
+
+high-severity sample:
+  L42179:    FATAL bootstrap: cannot bind 0.0.0.0:443: address in use
+  L8129441:  ERROR upstream: timeout reading from backend (5s)
+  L8129502:  ERROR upstream: timeout reading from backend (5s)
+```
+
+Counts word-bounded `DEBUG / INFO / WARN / ERROR / FATAL` occurrences,
+the total line count, and records byte offsets of up to 5
+ERROR/FATAL matches — all in one SIMD pass through the file.
+Word boundary check (delimited by space, tab, newline, CR, `[`, `]`,
+`"`, `:`) catches the common formats — plaintext (`[INFO] ...`),
+JSONL (`"level":"ERROR"`), and systemd (`Jan 01 12:00 host: INFO`) —
+without false positives on identifiers like `ERROR_HANDLER`.
+
+The kernel is cross-arch in a single `.ea` source: it avoids the
+`movemask` primitive (x86-only) in favor of `select` + integer
+`reduce_add` over a 0x01-where-match lane mask. Position recording
+uses the same store-to-scratch + scalar-walk pattern as
+`csv_scan` / `jsonl_struct`. **Measured 0.70 GB/s on Ryzen 7700X
+WSL2, 0.43 GB/s on Pi 5 Cortex-A76 NEON**, identical bit-exact
+counts across both architectures.
+
 ### Real public data to try it on
 
 - **Synthetic fixtures** — `tests/fixtures/runes/{tiny.csv,tiny.jsonl}` in this repo. Small, good for a smoke test.
 - **systemd journal** — `journalctl -o json -n 1000 > /tmp/log.jsonl` then `/rune eajson /tmp/log.jsonl` — real local data, no setup.
+- **nginx / app logs** — point `/rune ealog` at any access log or app log on disk for a severity histogram + first 5 high-severity samples in milliseconds.
 - **US Bank Transaction Categories v2** — 68K real transaction descriptions, MIT-licensed (CSV):
   https://huggingface.co/datasets/DoDataThings/us-bank-transaction-categories-v2
 - **NYC TLC Yellow Taxi trip records** — millions of rows per month, permissive (CSV):
@@ -189,6 +231,7 @@ reported by type but their stats are left absent.
 - eacrunch: unquoted CSV only; CRLF line endings tolerated (trailing `\r` trimmed per field).
 - eajson: top-level scalars only — nested objects flatten one level deep (`http.status`); deeper nesting and arrays-of-objects are skipped. Mixed-type keys (number on one line, string on another) collapse to `(mixed)` with no stats. Text top-N capped at 10K cardinality.
 - eaparquet: metadata-only — column data is never decoded. Statistics must be present in the file footer (most modern writers include them). BYTE_ARRAY (string) and INT96 (legacy timestamp) min/max are not decoded. Flat schemas only; nested groups (LIST/MAP/STRUCT children) are skipped from the column list.
+- ealog: severity keywords matched case-sensitively in upper-case form (`DEBUG/INFO/WARN/ERROR/FATAL`) bounded by `space/tab/newline/CR/[/]/"/:` only. Lowercase `info`/`warn` and embedded mentions inside JSON string payloads are intentionally not counted. Sample buffer caps at 5 lines; counts remain accurate past that.
 - Narration: the model gets a token budget of ~1248 prompt + 768 decode. Outputs over that skip narration with a clear notice — the kernel summary is shown either way.
 
 ## Architecture
@@ -416,6 +459,7 @@ Key kernels:
 - `chacha20_search_v2.ea` — Decrypt-and-search in SIMD registers
 - `csv_scan.ea` — CSV structural scan (commas + newlines) for runes
 - `jsonl_struct.ea` — JSON Lines structural scan (5-bit mask: newlines/quotes/colons/commas/backslashes)
+- `log_level_scan.ea` — Multi-keyword severity scan with word boundaries + line count + ERROR/FATAL position recording (cross-arch, no `_arm.ea` variant)
 
 ## Building
 
