@@ -32,7 +32,12 @@ type JsonlStructFn      = unsafe extern "C" fn(
     *mut i32, *mut i32, *mut i32, *mut i32, *mut i32,
     *mut u8,
 );
-type LogLevelScanFn     = unsafe extern "C" fn(*const u8, i32, *mut i32);
+type LogLevelScanFn     = unsafe extern "C" fn(
+    *const u8, i32,
+    *mut i32,
+    *mut i32, i32, *mut i32,
+    *mut u8,
+);
 type F32StatsFn         = unsafe extern "C" fn(
     *const f32, i32,
     *mut i32,
@@ -427,9 +432,11 @@ pub unsafe fn jsonl_struct_scan(
 }
 
 /// Multi-keyword severity scanner. Counts word-bounded occurrences of
-/// DEBUG, INFO, WARN, ERROR, FATAL plus newline bytes in `text`. Word
-/// boundary = bounded by one of: space, tab, newline, CR, '[', ']',
-/// '"', ':'. Start/end of buffer count as implicit delimiters.
+/// DEBUG, INFO, WARN, ERROR, FATAL plus newline bytes in `text`, and
+/// optionally records the byte offsets of valid ERROR / FATAL matches
+/// (in scan order, capped at `max_positions`). Word boundary = bounded
+/// by one of: space, tab, newline, CR, '[', ']', '"', ':'. Start/end of
+/// buffer count as implicit delimiters.
 ///
 /// # Safety
 /// - `text` must point to `len` readable bytes.
@@ -437,8 +444,26 @@ pub unsafe fn jsonl_struct_scan(
 ///   kernel writes [DEBUG, INFO, WARN, ERROR, FATAL, NEWLINES] in that
 ///   order and always zeroes all six before counting (safe to call with
 ///   `len == 0`).
-pub unsafe fn log_level_scan(text: *const u8, len: i32, out_counts: *mut i32) {
-    (k().log_level_scan)(text, len, out_counts);
+/// - `out_positions` must be valid for `max_positions` writable `i32`
+///   elements. May be dangling when `max_positions == 0`.
+/// - `out_n_positions` must be valid for one writable `i32`; the kernel
+///   zeroes it before counting and writes the final number of recorded
+///   positions (`<= max_positions`).
+/// - `scratch` must be writable for 16 bytes; contents after the call
+///   are unspecified. Touched only when `max_positions > 0`, but must
+///   still be a valid pointer in that branch.
+pub unsafe fn log_level_scan(
+    text: *const u8, len: i32,
+    out_counts: *mut i32,
+    out_positions: *mut i32, max_positions: i32, out_n_positions: *mut i32,
+    scratch: *mut u8,
+) {
+    (k().log_level_scan)(
+        text, len,
+        out_counts,
+        out_positions, max_positions, out_n_positions,
+        scratch,
+    );
 }
 
 /// Streaming stats over `len` f32 elements. Writes count, sum, min, max.

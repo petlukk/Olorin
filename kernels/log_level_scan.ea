@@ -1,6 +1,8 @@
 // Multi-keyword log-severity scanner. Counts word-bounded occurrences of
 // DEBUG, INFO, WARN, ERROR, FATAL across a byte buffer plus the total
-// newline byte count (used for line-count reporting).
+// newline byte count (used for line-count reporting), and optionally
+// records positions of valid ERROR / FATAL matches into a caller-sized
+// buffer (capped at `max_positions`).
 //
 // Word boundary = preceded AND followed by one of: space, tab, newline,
 // CR, '[', ']', '"', ':'. Start-of-file and end-of-file count as
@@ -14,14 +16,26 @@
 // 0x01 where K starts at lane position AND the bounding bytes are
 // delimiters, 0x00 otherwise. reduce_add summed into the keyword's
 // running counter. Newlines counted via the same select/reduce_add idiom
-// on c0 (the anchored byte view) — every byte gets exactly one chance.
+// on c0 (the anchored byte view).
+//
+// Position recording (only when `max_positions > 0`): the OR of the
+// ERROR and FATAL lane masks is reduced to detect "any high-severity
+// match in this chunk"; if non-zero, the mask is stored to scratch and
+// the 16 lanes scalar-walked to append positions. Position output
+// saturates at `max_positions` — counts remain accurate past that
+// point.
 //
 // Scalar prologue/epilogue handle the head (positions 0..16, where
 // text[i-1] would underflow) and the tail (positions where text[i+20]
 // would overflow). Scalar branch also handles buffers too small for a
 // SIMD chunk.
 //
-// out_counts[0..6] = [DEBUG, INFO, WARN, ERROR, FATAL, NEWLINES].
+// out_counts[0..6]  = [DEBUG, INFO, WARN, ERROR, FATAL, NEWLINES].
+// out_positions     = ERROR/FATAL match offsets, in scan order.
+// out_n_positions[0] = number of positions written (<= max_positions).
+// scratch (16 bytes) holds the per-chunk OR mask; contents after the
+// call are unspecified. Required only when max_positions > 0; callers
+// uninterested in positions may pass any 16-byte writable buffer.
 
 func is_delim_byte(b: i32) -> i32 {
     if b == 32 { return 1 }
@@ -35,7 +49,16 @@ func is_delim_byte(b: i32) -> i32 {
     return 0
 }
 
-func scan_pos(text: *u8, p: i32, len: i32, counters: *mut i32) {
+func record_high(p: i32, positions: *mut i32, max_positions: i32, n_positions: *mut i32) {
+    if max_positions <= 0 { return }
+    let cur: i32 = n_positions[0]
+    if cur < max_positions {
+        positions[cur] = p
+        n_positions[0] = cur + 1
+    }
+}
+
+func scan_pos(text: *u8, p: i32, len: i32, counters: *mut i32, positions: *mut i32, max_positions: i32, n_positions: *mut i32) {
     if p > 0 {
         if is_delim_byte(to_i32(text[p - 1])) == 0 { return }
     }
@@ -60,20 +83,24 @@ func scan_pos(text: *u8, p: i32, len: i32, counters: *mut i32) {
         if b0 == 69 && b1 == 82 && b2 == 82 && b3 == 79 && b4 == 82 {
             if p + 5 == len {
                 counters[3] = counters[3] + 1
+                record_high(p, positions, max_positions, n_positions)
                 return
             }
             if is_delim_byte(to_i32(text[p + 5])) == 1 {
                 counters[3] = counters[3] + 1
+                record_high(p, positions, max_positions, n_positions)
                 return
             }
         }
         if b0 == 70 && b1 == 65 && b2 == 84 && b3 == 65 && b4 == 76 {
             if p + 5 == len {
                 counters[4] = counters[4] + 1
+                record_high(p, positions, max_positions, n_positions)
                 return
             }
             if is_delim_byte(to_i32(text[p + 5])) == 1 {
                 counters[4] = counters[4] + 1
+                record_high(p, positions, max_positions, n_positions)
                 return
             }
         }
@@ -113,13 +140,14 @@ func scan_pos(text: *u8, p: i32, len: i32, counters: *mut i32) {
     }
 }
 
-export func log_level_scan(text: *u8, len: i32, out_counts: *mut i32) {
+export func log_level_scan(text: *u8, len: i32, out_counts: *mut i32, out_positions: *mut i32, max_positions: i32, out_n_positions: *mut i32, scratch: *mut u8) {
     out_counts[0] = 0
     out_counts[1] = 0
     out_counts[2] = 0
     out_counts[3] = 0
     out_counts[4] = 0
     out_counts[5] = 0
+    out_n_positions[0] = 0
 
     if len <= 0 { return }
 
@@ -130,7 +158,7 @@ export func log_level_scan(text: *u8, len: i32, out_counts: *mut i32) {
         let mut p: i32 = 0
         while p < len {
             if to_i32(text[p]) == 10 { out_counts[5] = out_counts[5] + 1 }
-            scan_pos(text, p, len, out_counts)
+            scan_pos(text, p, len, out_counts, out_positions, max_positions, out_n_positions)
             p = p + 1
         }
         return
@@ -174,7 +202,7 @@ export func log_level_scan(text: *u8, len: i32, out_counts: *mut i32) {
     let mut p: i32 = 0
     while p < 16 {
         if to_i32(text[p]) == 10 { c_nl = c_nl + 1 }
-        scan_pos(text, p, len, out_counts)
+        scan_pos(text, p, len, out_counts, out_positions, max_positions, out_n_positions)
         p = p + 1
     }
 
@@ -266,6 +294,29 @@ export func log_level_scan(text: *u8, len: i32, out_counts: *mut i32) {
         let nl: u8x16 = select(c0 .== v_lf, v_one, v_zero)
         c_nl = c_nl + to_i32(reduce_add(nl))
 
+        // Position recording: union the two high-severity masks. The
+        // reduce_add early-out keeps the no-match common case scratch-free.
+        if max_positions > 0 {
+            if out_n_positions[0] < max_positions {
+                let valid_high: u8x16 = valid_ERROR .| valid_FATAL
+                let high_count: i32 = to_i32(reduce_add(valid_high))
+                if high_count > 0 {
+                    store(scratch, 0, valid_high)
+                    let mut j: i32 = 0
+                    while j < 16 {
+                        if to_i32(scratch[j]) == 1 {
+                            let cur: i32 = out_n_positions[0]
+                            if cur < max_positions {
+                                out_positions[cur] = i + j
+                                out_n_positions[0] = cur + 1
+                            }
+                        }
+                        j = j + 1
+                    }
+                }
+            }
+        }
+
         i = i + 16
     }
 
@@ -274,7 +325,7 @@ export func log_level_scan(text: *u8, len: i32, out_counts: *mut i32) {
     p = i
     while p < len {
         if to_i32(text[p]) == 10 { c_nl = c_nl + 1 }
-        scan_pos(text, p, len, out_counts)
+        scan_pos(text, p, len, out_counts, out_positions, max_positions, out_n_positions)
         p = p + 1
     }
 
