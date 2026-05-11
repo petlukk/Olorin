@@ -4,7 +4,7 @@
 //! on first run. Call `init()` once at startup before using any kernel function.
 
 use libloading::{Library, Symbol};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::OnceLock;
 
 pub mod embedded {
@@ -136,38 +136,7 @@ pub fn init() -> Result<(), String> {
     Ok(())
 }
 
-/// Return the versioned kernel directory path.
-pub fn kernel_dir() -> Result<PathBuf, String> {
-    let home = crate::home_dir()
-        .ok_or_else(|| "home directory not found".to_string())?;
-    Ok(home
-        .join(".olorin")
-        .join("lib")
-        .join(embedded::VERSION))
-}
-
-fn extract_kernels() -> Result<PathBuf, String> {
-    let dir = kernel_dir()?;
-    let marker = dir.join(".extracted");
-    if marker.exists() {
-        return Ok(dir);
-    }
-
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("failed to create {}: {e}", dir.display()))?;
-
-    for (_id, filename, bytes) in embedded::FILES {
-        let path = dir.join(filename);
-        std::fs::write(&path, bytes)
-            .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
-    }
-
-    std::fs::write(&marker, embedded::VERSION)
-        .map_err(|e| format!("failed to write marker: {e}"))?;
-
-    eprintln!("olorin: extracted kernels to {}", dir.display());
-    Ok(dir)
-}
+pub use super::loader::{extract_kernels, kernel_dir};
 
 fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
     let load = |name: &str| -> Result<Library, String> {
