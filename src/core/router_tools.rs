@@ -203,13 +203,10 @@ impl DispatchContext {
         let timing_us = result.timing_us;
         let structured = result.structured;
 
-        // Display body: when the rune emitted structured (JSON) output,
-        // the user explicitly asked for machine-readable output via
-        // `--json`. Print the JSON verbatim — no details, no timing
-        // footer (would break JSONL parseability), no `<rune_output>`
-        // wrapping. The safety scan still runs on the raw bytes so
-        // injection patterns inside file-derived JSON string values are
-        // blocked.
+        // Structured (JSON) output: emit verbatim — no `<rune_output>`
+        // wrap, no `[timing: …]` footer (both would break JSONL), no
+        // narration (defeats the user's --json intent). Safety scan
+        // still runs on the raw bytes.
         let body = if structured {
             result.answer
         } else {
@@ -221,26 +218,17 @@ impl DispatchContext {
             b.push_str(&format!("\n[timing: {timing_us}µs]"));
             b
         };
-        let scan = safety::scan(body.as_bytes());
-        if scan.blocked {
+        if safety::scan(body.as_bytes()).blocked {
             return Response::blocked("Rune output blocked by safety scan.");
         }
         self.vault_save(b"user", full.as_bytes());
         self.vault_save(b"tool", body.as_bytes());
 
-        // Followup is always built; consumers gate on engine presence.
-        // Structured (JSON) output skips narration — the caller wanted
-        // machine output, narrating it to plain English defeats the
-        // purpose and burns decode tokens.
         let scratch = crate::runes::RuneResult {
-            answer,
-            details: None,
-            success: result.success,
-            timing_us,
-            structured,
+            answer, details: None,
+            success: result.success, timing_us, structured,
         };
         let followup = crate::runes::build_narration_prompt(name, safety_class, scratch);
-
         let resp = Response::text(body);
         match followup {
             Some(p) => resp.with_followup(p),
