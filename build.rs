@@ -203,7 +203,7 @@ fn main() {
         .unwrap_or_else(|e| panic!("cannot write embedded_kernels.rs: {e}"));
 
     // ── Rune auto-discovery ───────────────────────────────────────────
-    // Scans src/runes/*.rs (excluding mod.rs, common.rs). For each file,
+    // Scans src/runes/*.rs (excluding mod.rs, common.rs, output.rs). For each file,
     // verify it exports `pub const RUNE` (grep-parse, no syntactic Rust
     // analysis); emit runes_registry.rs into OUT_DIR.
     let runes_dir = Path::new(&manifest_dir).join("src/runes");
@@ -213,7 +213,7 @@ fn main() {
             let entry = entry.unwrap();
             let name = entry.file_name().to_string_lossy().to_string();
             if !name.ends_with(".rs") { continue; }
-            if name == "mod.rs" || name == "common.rs" { continue; }
+            if name == "mod.rs" || name == "common.rs" || name == "output.rs" { continue; }
             let stem = name.strip_suffix(".rs").unwrap();
             let contents = fs::read_to_string(entry.path()).unwrap_or_default();
             if !contents.contains("pub const RUNE") {

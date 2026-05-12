@@ -7,6 +7,7 @@ use std::sync::OnceLock;
 use crate::core::safety;
 
 pub mod common;
+pub mod output;
 
 /// Output safety classification for a rune's `answer` field.
 /// Declared per-rune, never computed at runtime.
