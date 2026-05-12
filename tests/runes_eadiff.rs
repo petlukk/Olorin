@@ -200,6 +200,141 @@ fn eadiff_bool_field_emits_paired_deltas() {
 }
 
 #[test]
+fn eadiff_timestamp_field_emits_range_shift_seconds() {
+    // v0.9.3 addition: alongside unique_delta, Timestamp diff now emits
+    // min_shift_s / max_shift_s as signed second-deltas. The range
+    // moving forward by exactly one day (86400 s) is the cleanest test.
+    olorin::kernels::ffi::init().unwrap();
+    let mut a = RuneOutput::new("eajson", 1);
+    let mut b = RuneOutput::new("eajson", 1);
+    a.fields.push(FieldStats {
+        name: "ts".into(), kind: FieldKind::Timestamp, count: 100,
+        null_count: None, numeric: None, text: None, bool: None,
+        timestamp: Some(olorin::runes::output::TimestampStats {
+            min: "2026-05-10T00:00:00Z".into(),
+            max: "2026-05-10T12:00:00Z".into(),
+            unique: 100,
+        }),
+    });
+    b.fields.push(FieldStats {
+        name: "ts".into(), kind: FieldKind::Timestamp, count: 100,
+        null_count: None, numeric: None, text: None, bool: None,
+        timestamp: Some(olorin::runes::output::TimestampStats {
+            min: "2026-05-11T00:00:00Z".into(),
+            max: "2026-05-11T12:00:00Z".into(),
+            unique: 100,
+        }),
+    });
+    let pa = write_runeoutput("olorin_eadiff_ts_shift_a.json", &a);
+    let pb = write_runeoutput("olorin_eadiff_ts_shift_b.json", &b);
+
+    let result = run_rune("eadiff", &format!("--json {pa} {pb}")).unwrap();
+    let out = parse_answer(&result.answer);
+    let by_name: std::collections::HashMap<&str, f64> = out.fields.iter()
+        .filter_map(|f| f.numeric.as_ref().map(|n| (f.name.as_str(), n.mean)))
+        .collect();
+    assert_eq!(by_name.get("ts.min_shift_s"), Some(&86400.0),
+        "min shifted forward 1 day: {by_name:?}");
+    assert_eq!(by_name.get("ts.max_shift_s"), Some(&86400.0),
+        "max shifted forward 1 day: {by_name:?}");
+    // Unique unchanged → unique_delta omitted (the v2 behavior is "skip
+    // zero deltas"; we don't want noise in the output).
+    assert!(!by_name.contains_key("ts.unique_delta"),
+        "unique unchanged, no unique_delta expected");
+    let _ = std::fs::remove_file(&pa);
+    let _ = std::fs::remove_file(&pb);
+}
+
+#[test]
+fn eadiff_timestamp_invalid_iso_skips_shift_gracefully() {
+    // Garbage min/max strings: the unique_delta still works, but the
+    // shift fields silently omit (no crash, no fake values).
+    olorin::kernels::ffi::init().unwrap();
+    let mut a = RuneOutput::new("eajson", 1);
+    let mut b = RuneOutput::new("eajson", 1);
+    let ts_garbage_a = olorin::runes::output::TimestampStats {
+        min: "garbage".into(), max: "not-iso".into(), unique: 5,
+    };
+    let ts_garbage_b = olorin::runes::output::TimestampStats {
+        min: "more-junk".into(), max: "still-bad".into(), unique: 7,
+    };
+    a.fields.push(FieldStats {
+        name: "ts".into(), kind: FieldKind::Timestamp, count: 10,
+        null_count: None, numeric: None, text: None, bool: None,
+        timestamp: Some(ts_garbage_a),
+    });
+    b.fields.push(FieldStats {
+        name: "ts".into(), kind: FieldKind::Timestamp, count: 10,
+        null_count: None, numeric: None, text: None, bool: None,
+        timestamp: Some(ts_garbage_b),
+    });
+    let pa = write_runeoutput("olorin_eadiff_ts_bad_a.json", &a);
+    let pb = write_runeoutput("olorin_eadiff_ts_bad_b.json", &b);
+
+    let result = run_rune("eadiff", &format!("--json {pa} {pb}")).unwrap();
+    let out = parse_answer(&result.answer);
+    let names: Vec<&str> = out.fields.iter().map(|f| f.name.as_str()).collect();
+    assert!(names.contains(&"ts.unique_delta"),
+        "unique_delta survives garbage min/max: {names:?}");
+    assert!(!names.iter().any(|n| n.contains("shift_s")),
+        "no shift fields when ISO parse fails: {names:?}");
+    let _ = std::fs::remove_file(&pa);
+    let _ = std::fs::remove_file(&pb);
+}
+
+#[test]
+fn eadiff_text_top_n_emits_count_delta_and_markers() {
+    olorin::kernels::ffi::init().unwrap();
+    let mut a = RuneOutput::new("eajson", 1);
+    let mut b = RuneOutput::new("eajson", 1);
+    // "shared" appears in both top-N with count change.
+    // "dropped" appears in a only.
+    // "new" appears in b only.
+    a.fields.push(FieldStats {
+        name: "level".into(), kind: FieldKind::Text, count: 100,
+        null_count: None, numeric: None, bool: None, timestamp: None,
+        text: Some(olorin::runes::output::TextStats {
+            unique: 10,
+            top: vec![
+                olorin::runes::output::TextEntry { value: "shared".into(),  count: 50 },
+                olorin::runes::output::TextEntry { value: "dropped".into(), count: 30 },
+            ],
+        }),
+    });
+    b.fields.push(FieldStats {
+        name: "level".into(), kind: FieldKind::Text, count: 100,
+        null_count: None, numeric: None, bool: None, timestamp: None,
+        text: Some(olorin::runes::output::TextStats {
+            unique: 10,
+            top: vec![
+                olorin::runes::output::TextEntry { value: "shared".into(), count: 65 },
+                olorin::runes::output::TextEntry { value: "new".into(),    count: 20 },
+            ],
+        }),
+    });
+    let pa = write_runeoutput("olorin_eadiff_text_top_a.json", &a);
+    let pb = write_runeoutput("olorin_eadiff_text_top_b.json", &b);
+
+    let result = run_rune("eadiff", &format!("--json {pa} {pb}")).unwrap();
+    let out = parse_answer(&result.answer);
+    let names: Vec<&str> = out.fields.iter().map(|f| f.name.as_str()).collect();
+
+    // Shared value: count_delta = +15
+    let shared = out.fields.iter().find(|f| f.name == "level:shared.count_delta")
+        .expect("shared count_delta missing");
+    assert_eq!(shared.numeric.as_ref().unwrap().mean, 15.0);
+
+    // Asymmetric top-N markers.
+    assert!(names.contains(&"[appeared in top] level:new"),
+        "expected appeared-in-top marker: {names:?}");
+    assert!(names.contains(&"[disappeared from top] level:dropped"),
+        "expected disappeared-from-top marker: {names:?}");
+
+    let _ = std::fs::remove_file(&pa);
+    let _ = std::fs::remove_file(&pb);
+}
+
+#[test]
 fn eadiff_timestamp_field_emits_unique_delta() {
     olorin::kernels::ffi::init().unwrap();
     let mut a = RuneOutput::new("eajson", 1);
