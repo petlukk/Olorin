@@ -250,6 +250,14 @@ chunk, scalar-walk to validate the 8 digit positions. Single `.ea`
 source; same primitives lower cleanly to x86 SSE2 (Ryzen 7700X) and
 ARM NEON (Pi 5 Cortex-A76) with bit-exact bucket counts.
 
+**Measured 6.34 GB/s on Ryzen 7700X WSL2, 1.80 GB/s on Pi 5
+Cortex-A76 NEON** on a 100 MB synthetic log with 1.45M timestamps
+(every line). The structural-anchor filter is cheaper per byte than
+`log_level_scan`'s keyword AND-chains — fewer SIMD lane masks per
+16-byte chunk, scalar walk only on the (rare) candidate hits.
+Reproduce with `gcc -O2 benchmarks/timestamp_scan_bench.c -ldl &&
+./a.out <path/to/libtimestamp_scan.so>`.
+
 `--bucket weekday` swaps the 24-hour histogram for a 7-bucket
 Mon..Sun view computed via Zeller's congruence on the year/month/day
 digits the kernel already extracted. Same kernel pass, different
