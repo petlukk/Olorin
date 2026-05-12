@@ -6,6 +6,66 @@ uses [semver](https://semver.org/) at the minor level. Each release
 is tagged in git as `vX.Y.Z` and listed below in reverse-chronological
 order.
 
+## [1.0.0] — 2026-05-12
+
+Marks the rune family as production-ready. **No new features over
+0.9.4** — this is a stability commitment, not a feature release.
+Promotes the contracts that solidified over the v0.8.x and v0.9.x
+lines to "stable" status.
+
+### Stable contracts
+
+The following surfaces are now stable and will not change without
+a corresponding 2.0 bump:
+
+- **`RuneOutput` v1 schema** and its compact JSONL wire format
+  (`schema_version: 1`, `rune`, `source`, `totals`, `fields[]`,
+  `categories[]`, `samples[]`, `error`). The v1 shape carried six
+  runes and every `FieldKind` variant without a field addition;
+  the design is settled.
+- **`--json` mode behavior**: structured output is emitted
+  verbatim (no `<rune_output>` wrap, no `[timing: …]` footer, no
+  LLM narration). Refusal paths emit JSON too. Safety scan runs
+  on the raw bytes regardless of format.
+- **Six rune names and their core argument shape**: `eacrunch`,
+  `eajson`, `eaparquet`, `ealog`, `eatime`, `eadiff`. Each accepts
+  `[--json] <path>`; `eatime` also accepts `--bucket hour|weekday`;
+  `eadiff` takes two paths.
+- **Cross-rune chaining semantics**: match by exact name across
+  `fields[]` and `categories[]`. Numeric deltas signed in
+  `numeric.mean`. Bool fields split into paired
+  `<col>.true_delta` / `<col>.false_delta`. Timestamp emits
+  `<col>.unique_delta` + `<col>.min_shift_s` / `<col>.max_shift_s`.
+  Text emits `<col>.unique_delta` plus per-value
+  `<col>:<value>.count_delta` and `[appeared in top]` /
+  `[disappeared from top]` markers. Asymmetric structural changes
+  use `[appeared] <name>` / `[disappeared] <name>` Mixed markers.
+  Categories use `+<name>` / `-<name>` for symmetric deltas.
+
+### Out of scope for the 1.0 commitment
+
+These exist in the codebase but are not promised stable:
+
+- Internal kernel function signatures, the FFI loader, and the
+  `KernelTable` shape. Private to the implementation.
+- Specific throughput numbers (measured but workload-dependent).
+- The Gemma 4 inference stack. Still evolving on a separate
+  cadence; the 1.0 promise covers the rune family only.
+- Web UI / WhatsApp gateway. Present and functional but not
+  audited to the same depth as the rune dispatch path.
+
+### Final state at 1.0
+
+- 6 runes
+- 1 cross-arch SIMD kernel family (csv_scan, jsonl_struct,
+  log_level_scan, timestamp_scan, f32_stats, f64_stats), all
+  validated on x86 SSE2 and ARM NEON
+- 77 test suites, 423 passing tests, 0 failures
+- 0 build warnings
+- No file over the 500-LOC cap except the two documented
+  chacha20 fused decrypt+search kernels (Ea has no module
+  system; monolithic is required)
+
 ## [0.9.4] — 2026-05-12
 
 ### Fixed
