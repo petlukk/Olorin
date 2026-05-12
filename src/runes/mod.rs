@@ -8,6 +8,7 @@ use crate::core::safety;
 
 pub mod common;
 pub mod output;
+pub mod eajson_aggregate;
 
 /// Output safety classification for a rune's `answer` field.
 /// Declared per-rune, never computed at runtime.
