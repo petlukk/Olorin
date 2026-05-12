@@ -102,3 +102,104 @@ Generates synthetic CSVs in `/tmp/olorin_bench/` (idempotent — keeps
 files between runs). Output format matches the table above. Edit
 `benchmarks/gen_synthetic.py` to change schema; edit
 `benchmarks/bench.sh` to add new sizes or tools.
+
+---
+
+# Benchmark: eatime vs awk vs pandas
+
+**Goal**: measure `/rune eatime` against two everyday alternatives for
+"bucket log timestamps by hour-of-day" — `awk` (canonical Unix tool)
+and `pandas` (the Python default for log analysis). All three produce
+the same 24-slot hour-of-day histogram from a synthetic log file with
+ISO-8601 timestamps prefixed to every line.
+
+**Environment**: WSL2 Ubuntu 24.04, Ryzen 7700X, Python 3.12 + pandas
+2.3, GNU awk 5.x. Olorin built with `cargo build --release` and
+invoked via `--strict` so the LLM is excluded from the wall-clock.
+
+**Method**: each tool runs as a single process, end-to-end. Wall-clock
+and peak RSS measured by `/usr/bin/time -v`. Run
+`bash benchmarks/bench_eatime.sh` from the repo root to reproduce.
+
+## Results
+
+| Tool   | Size    |   Wall time |    Peak RSS |
+|--------|---------|------------:|------------:|
+| eatime | 10 MB   |  **0.04 s** |       15 MB |
+| awk    | 10 MB   |    0.15 s   |        4 MB |
+| pandas | 10 MB   |    1.15 s   |      110 MB |
+| eatime | 100 MB  |  **0.10 s** |      109 MB |
+| awk    | 100 MB  |    1.48 s   |        4 MB |
+| pandas | 100 MB  |    0.52 s   |      111 MB |
+
+| Comparison        | 10 MB     | 100 MB    |
+|-------------------|-----------|-----------|
+| eatime vs awk     | **3.8×**  | **14.8×** |
+| eatime vs pandas  | **28.8×** |  **5.2×** |
+
+The fixtures: 145,635 lines at 10 MB and 1,456,355 lines at 100 MB,
+every line beginning with `2026-MM-DDTHH:MM:SS` plus realistic log
+content. `bench_eatime.sh` generates them deterministically.
+
+## What this tells us
+
+**Against awk, the win grows with size.** awk is single-threaded
+scalar — every byte is touched by the regex engine. eatime's
+structural-anchor SIMD filter (3 `.==` lane masks per 16-byte chunk)
+trims ~95% of positions before any scalar work. At 100 MB the gap is
+~15×; at 10 MB it's smaller because both tools spend a similar fixed
+overhead on process startup.
+
+**Against pandas, the curve flips.** pandas pays ~500 ms of fixed
+cost (Python startup + pandas import + `pd.to_datetime` setup) before
+any data work. At 10 MB that startup dominates and eatime wins ~29×.
+At 100 MB pandas finally amortizes its setup, narrowing the gap to
+~5×. Still a real win, but the curve says "pandas catches up on big
+files" — same shape as the eacrunch vs pandas comparison above.
+
+**Memory**: awk is constant ~4 MB regardless of size (true streaming).
+eatime uses ~file-size memory because `open_capped` reads the file
+into a `Vec<u8>` rather than mmap-streaming — known follow-up lever.
+pandas materializes the full Series + parsed datetime column, so
+RSS is ~110 MB at both sizes.
+
+## What this leaves out
+
+1. **DuckDB** could likely beat pandas at 100 MB with its columnar
+   vectorized execution. Not measured. Same caveat as the eacrunch
+   bench above.
+2. **Sort stability**: awk's hash iteration order is undefined
+   without `gawk --posix`; the bench script pipes through `sort` to
+   match eatime's deterministic Mon..Sun / 00..23 ordering. Output
+   contents identical; format strings differ slightly.
+3. **Kernel-only throughput** (not end-to-end): the
+   `timestamp_scan` kernel measured separately at **6.34 GB/s on
+   Ryzen SSE2** and **1.80 GB/s on Pi 5 NEON** (see
+   `benchmarks/timestamp_scan_bench.c`). The end-to-end wall-clock
+   above includes process spawn, file read into `Vec<u8>`, JSON
+   serialization, and writeout — the kernel itself is ~6× faster
+   than the end-to-end pipeline implies.
+
+## A note on eadiff
+
+There is no comparable Unix tool for "compute a structural delta
+between two prior `--json` rune outputs." The closest competitor is a
+hand-rolled Python script that loads two JSON files and walks them.
+At realistic rune-output sizes (~1 KB each), wall-clock is dominated
+by process startup on both sides (~25 ms olorin `--strict`, ~50 ms
+Python). The eadiff value-add isn't speed; it's "deterministic
+structural delta with zero dependencies on the consumer side, output
+is itself a chainable RuneOutput." For users who want to chain rune
+runs without writing custom Python per pipeline step, eadiff is the
+one-line answer; speed is incidental.
+
+## Reproducing the eatime bench
+
+```bash
+# From repo root, after `cargo build --release`:
+bash benchmarks/bench_eatime.sh
+```
+
+Generates synthetic logs in `/tmp/olorin_bench/` (idempotent). Edit
+`benchmarks/gen_log_fixture.py` to change shape; edit
+`benchmarks/bench_eatime.sh` to add sizes or tools.

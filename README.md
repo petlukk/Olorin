@@ -456,6 +456,20 @@ sizes (no full DataFrame materialization). Reproduce with
 `bash benchmarks/bench.sh`; full commentary + caveats in
 [`benchmarks/results.md`](benchmarks/results.md).
 
+### Runes vs awk vs pandas (eatime hour-of-day histogram, x86 WSL)
+
+| Tool   | 10 MB log  | 100 MB log |
+|--------|-----------:|-----------:|
+| eatime | **0.04 s** | **0.10 s** |
+| awk    |    0.15 s  |    1.48 s  |
+| pandas |    1.15 s  |    0.52 s  |
+
+eatime beats awk by **3.8×** at 10 MB and **14.8×** at 100 MB (awk is
+single-threaded scalar; eatime's structural-anchor SIMD trims ~95% of
+positions before any scalar work). Beats pandas **29×** at 10 MB
+(Python startup dominates) and **5×** at 100 MB (pandas finally
+amortizes setup). Reproduce with `bash benchmarks/bench_eatime.sh`.
+
 ### Gemma 4 inference
 
 Measured on Raspberry Pi 5 (4 cores, LPDDR4X):
