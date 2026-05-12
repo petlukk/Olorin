@@ -280,8 +280,17 @@ across every `FieldKind`:
 - **Number** — signed deltas on min/max/mean/sum.
 - **Bool** — paired Number fields `<col>.true_delta` and
   `<col>.false_delta` carrying signed deltas of each count.
-- **Timestamp** / **Text** — Number field `<col>.unique_delta` with
-  the signed change in unique-value count.
+- **Timestamp** — `<col>.unique_delta` (signed change in unique-value
+  count) plus `<col>.min_shift_s` and `<col>.max_shift_s` carrying the
+  signed second-deltas of the range endpoints. Forward by one day
+  reads as `+86400.00`. Garbage ISO strings skip the shift fields
+  silently (no crash, no fake values).
+- **Text** — `<col>.unique_delta` plus per-value top-N comparison.
+  Values present in both runs' top-N with different counts emit as
+  `<col>:<value>.count_delta` (signed delta in `numeric.mean`).
+  Values appearing in only one side emit as
+  `[appeared in top] <col>:<value>` / `[disappeared from top]
+  <col>:<value>` Mixed markers.
 - **Categories** — directional naming: a bucket that grew emits as
   `+<name>`, one that shrank as `-<name>`. Unchanged buckets omitted.
 - **Asymmetric keys** (present in one input but not the other) —
@@ -337,7 +346,7 @@ union of `fields[]` and `categories[]`.
 - eaparquet: metadata-only — column data is never decoded. Statistics must be present in the file footer (most modern writers include them). BYTE_ARRAY (string) and INT96 (legacy timestamp) min/max are not decoded. Flat schemas only; nested groups (LIST/MAP/STRUCT children) are skipped from the column list.
 - ealog: severity keywords matched case-sensitively in upper-case form (`DEBUG/INFO/WARN/ERROR/FATAL`) bounded by `space/tab/newline/CR/[/]/"/:` only. Lowercase `info`/`warn` and embedded mentions inside JSON string payloads are intentionally not counted. Sample buffer caps at 5 lines; counts remain accurate past that.
 - eatime: ISO-8601 prefix `YYYY-MM-DDTHH:MM:SS` only. Other timestamp formats (syslog `May 11 10:54:00`, Unix epoch, RFC 2822, freeform) are intentionally out of scope — extending requires per-format kernels, not a flag. `--bucket hour` validates hour ≤ 23; `--bucket weekday` validates month 1-12 and day 1-31 but doesn't reject impossible dates like `2026-02-30T...` (Zeller produces a weekday anyway). Buckets cap at 16M positions per call.
-- eadiff: matches by exact field/category name across the two inputs. Number / Bool / Timestamp / Text fields all diffable; output uses naming conventions (`.true_delta`, `.false_delta`, `.unique_delta`) for the synthesized Number-kind delta fields. Asymmetric keys emit `[appeared] <name>` / `[disappeared] <name>` Mixed markers. Timestamp min/max range shift (needs ISO string parsing) and Text top-N rank overlap (needs richer encoding) are deferred to v0.9.3+.
+- eadiff: matches by exact field/category name across the two inputs. Every `FieldKind` is diffable. Output uses naming conventions for the synthesized Number-kind delta fields: `.true_delta` / `.false_delta` (Bool), `.unique_delta` (Text + Timestamp), `.min_shift_s` / `.max_shift_s` (Timestamp range, in seconds from the Gregorian epoch around 2000), `<col>:<value>.count_delta` (Text top-N). Asymmetric structural changes emit `[appeared] <name>` / `[disappeared] <name>` Mixed markers; top-N value changes emit `[appeared in top] <col>:<value>` / `[disappeared from top] <col>:<value>`. Stdin chaining (`-` for one of the two path args) is not yet wired through the rune dispatcher — both inputs must be files for now.
 - `--json`: a `RuneOutput` reaching the LLM is wrapped in `<rune_output untrusted="true">...</rune_output>` like any other rune output; but for `--json` chaining the recipient is another rune, not the model — `eadiff` reads the unwrapped JSON directly from disk. If you pipe `--json` output into LLM context manually, the safety scan still runs and the wrapping is the right default.
 - Narration: the model gets a token budget of ~1248 prompt + 768 decode. Outputs over that skip narration with a clear notice — the kernel summary is shown either way.
 
