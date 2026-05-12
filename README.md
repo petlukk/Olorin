@@ -21,6 +21,10 @@ in plain English.
 - **Honest scope** — Single binary, two dependencies (libc + libloading),
   3.8 MB release on ARM. Runs on a Raspberry Pi 5.
 
+Recent releases: see [`CHANGELOG.md`](CHANGELOG.md). Current version
+is **v0.9.4** (rune chaining + `--json` contract); the rune family
+shipped over v0.8.x–v0.9.x.
+
 ## Try it
 
 ```
