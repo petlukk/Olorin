@@ -180,6 +180,61 @@ fn eatime_rejects_outside_allowlist() {
 }
 
 #[test]
+fn eatime_weekday_bucket_groups_by_day_of_week() {
+    olorin::kernels::ffi::init().unwrap();
+    // 2026-05-11 is a Monday (calendar verified). Build a log with
+    // 3 timestamps on Monday 2026-05-11, 2 on Tuesday 2026-05-12,
+    // and 1 on Saturday 2026-05-16.
+    let log = b"\
+2026-05-11T08:00:00 mon a
+2026-05-11T09:00:00 mon b
+2026-05-11T10:00:00 mon c
+2026-05-12T08:00:00 tue a
+2026-05-12T11:00:00 tue b
+2026-05-16T14:30:00 sat single
+";
+    let path = write_tmp("olorin_eatime_weekday.log", log);
+    let result = run_rune("eatime", &format!("--json --bucket weekday {path}")).unwrap();
+    assert!(result.success, "rune failed: {}", result.answer);
+    let out = parse_answer(&result.answer);
+    assert_eq!(out.totals.rows, 6, "6 timestamps in fixture");
+    assert_eq!(out.categories.len(), 7,
+        "weekday bucket emits all 7 days deterministically");
+    let by_name: std::collections::HashMap<&str, u64> =
+        out.categories.iter().map(|c| (c.name.as_str(), c.count)).collect();
+    assert_eq!(by_name.get("Mon"), Some(&3));
+    assert_eq!(by_name.get("Tue"), Some(&2));
+    assert_eq!(by_name.get("Wed"), Some(&0));
+    assert_eq!(by_name.get("Sat"), Some(&1));
+    assert_eq!(by_name.get("Sun"), Some(&0));
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn eatime_weekday_bucket_text_mode_uses_weekday_label() {
+    olorin::kernels::ffi::init().unwrap();
+    let log = b"2026-05-11T10:00:00 mon\n2026-05-12T11:00:00 tue\n";
+    let path = write_tmp("olorin_eatime_weekday_text.log", log);
+    let result = run_rune("eatime", &format!("--bucket weekday {path}")).unwrap();
+    assert!(result.success);
+    let a = &result.answer;
+    assert!(a.contains("weekday:"),     "missing weekday label: {a}");
+    assert!(a.contains("Mon"),          "missing Mon row: {a}");
+    assert!(a.contains("Tue"),          "missing Tue row: {a}");
+    assert!(a.contains("peak: Mon"),    "missing peak row: {a}");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn eatime_unknown_bucket_emits_usage_error() {
+    olorin::kernels::ffi::init().unwrap();
+    let result = run_rune("eatime", "--bucket month /tmp/x.log").unwrap();
+    assert!(!result.success);
+    assert!(result.answer.contains("unknown --bucket"),
+        "expected unknown-bucket error: {}", result.answer);
+}
+
+#[test]
 fn eatime_emits_only_categories_not_fields() {
     olorin::kernels::ffi::init().unwrap();
     let log = b"2026-05-11T10:00:00 hello\n";
