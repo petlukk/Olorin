@@ -1,13 +1,22 @@
 //! eacrunch — CSV summarizer via SIMD csv_scan + f32_stats.
 //!
 //! Classifies columns as numeric vs text from the first 32 non-empty
-//! rows, then streams stats per column. Returns a one-paragraph summary
-//! suitable for a 2B model to narrate.
+//! rows, then streams stats per column. Output: the structured
+//! `RuneOutput` is built first; either serialized to JSON (when
+//! `--json` is set) or rendered to the legacy human-readable text.
 
 use super::{Rune, RuneResult, OutputSafety};
 use super::common::{resolve_path, open_capped, truncate_answer, PathError};
+use super::output::{
+    FieldKind, FieldStats, NumericStats, RuneOutput, Source, TextEntry, TextStats, Totals,
+};
 use std::path::PathBuf;
 use std::time::Instant;
+
+const RUNE_VERSION: i64 = 1;
+const SNIFF_ROWS: usize = 32;
+const TEXT_CARDINALITY_CAP: usize = 10_000;
+const TOP_N: usize = 3;
 
 pub struct Eacrunch;
 pub const RUNE: Eacrunch = Eacrunch;
@@ -17,73 +26,100 @@ impl Rune for Eacrunch {
     fn description(&self) -> &'static str {
         "Summarize a CSV file via SIMD: row count, per-column type \
          (numeric/text), and per-numeric-column stats (min/max/mean/sum). \
-         Top-3 most frequent values for text columns. Args: <path.csv>."
+         Top-3 most frequent values for text columns. Args: [--json] <path.csv>."
     }
-    fn usage(&self) -> &'static str { "eacrunch <path.csv>" }
+    fn usage(&self) -> &'static str { "eacrunch [--json] <path.csv>" }
     fn output_safety(&self) -> OutputSafety { OutputSafety::UntrustedQuoted }
 
     fn run(&self, args: &str) -> RuneResult {
         let t0 = Instant::now();
-        let path = args.trim();
-        if path.is_empty() {
-            return refusal(t0, "usage: eacrunch <path.csv>");
-        }
-        let home = crate::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
-        let resolved = match resolve_path(path, &home) {
-            Ok(p) => p,
-            Err(PathError::OutsideAllowlist) =>
-                return refusal(t0, "path rejected: outside allowlist (~ or /tmp only)"),
-            Err(PathError::NotFound) =>
-                return refusal(t0, "file not found"),
-            Err(PathError::TooLarge(n)) =>
-                return refusal(t0, &format!("file too large: {} bytes", n)),
-            Err(PathError::Io(e)) =>
-                return refusal(t0, &format!("io error: {e}")),
-        };
-        // `home` is passed so open_capped can re-check the canonical path
-        // against the allowlist — catches symlinks that resolve outside it.
-        let bytes = match open_capped(&resolved, &home) {
-            Ok(b) => b,
-            Err(e) => return refusal(t0, &format!("open failed: {e:?}")),
-        };
-        let summary = match summarize_csv(&bytes) {
-            Ok(s) => s,
-            Err(e) => return refusal(t0, &format!("parse failed: {e}")),
+        let (path, json_mode) = parse_args(args);
+        let output = execute(&path);
+        let answer = if json_mode {
+            output.to_json()
+        } else if let Some(err) = &output.error {
+            err.clone()
+        } else {
+            format_text(&output)
         };
         RuneResult {
-            answer: truncate_answer(&summary),
-            details: None,
-            success: true,
+            answer:    truncate_answer(&answer),
+            details:   None,
+            success:   output.success,
             timing_us: t0.elapsed().as_micros() as u64,
         }
     }
 }
 
-fn refusal(t0: Instant, msg: &str) -> RuneResult {
-    RuneResult {
-        answer: msg.to_string(),
-        details: None,
-        success: false,
-        timing_us: t0.elapsed().as_micros() as u64,
+fn parse_args(args: &str) -> (String, bool) {
+    let trimmed = args.trim();
+    if let Some(rest) = trimmed.strip_prefix("--json ") {
+        (rest.trim().to_string(), true)
+    } else if let Some(rest) = trimmed.strip_suffix(" --json") {
+        (rest.trim().to_string(), true)
+    } else if trimmed == "--json" {
+        (String::new(), true)
+    } else {
+        (trimmed.to_string(), false)
     }
 }
 
-fn summarize_csv(bytes: &[u8]) -> Result<String, String> {
+fn execute(path: &str) -> RuneOutput {
+    if path.is_empty() {
+        return error_output("usage: eacrunch [--json] <path.csv>");
+    }
+    let home = crate::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
+    let resolved = match resolve_path(path, &home) {
+        Ok(p) => p,
+        Err(PathError::OutsideAllowlist) =>
+            return error_output("path rejected: outside allowlist (~ or /tmp only)"),
+        Err(PathError::NotFound) =>
+            return error_output("file not found"),
+        Err(PathError::TooLarge(n)) =>
+            return error_output(&format!("file too large: {n} bytes")),
+        Err(PathError::Io(e)) =>
+            return error_output(&format!("io error: {e}")),
+    };
+    let bytes = match open_capped(&resolved, &home) {
+        Ok(b) => b,
+        Err(PathError::NotFound) =>
+            return error_output("file not found"),
+        Err(PathError::TooLarge(n)) =>
+            return error_output(&format!("file too large: {n} bytes")),
+        Err(PathError::OutsideAllowlist) =>
+            return error_output("path rejected: outside allowlist (~ or /tmp only)"),
+        Err(PathError::Io(e)) =>
+            return error_output(&format!("io error: {e}")),
+    };
+    let resolved_str = resolved.to_string_lossy().into_owned();
+    match build_output(&bytes, resolved_str) {
+        Ok(out) => out,
+        Err(e)  => error_output(&format!("parse failed: {e}")),
+    }
+}
+
+fn error_output(msg: &str) -> RuneOutput {
+    let mut out = RuneOutput::new("eacrunch", RUNE_VERSION);
+    out.success = false;
+    out.error = Some(msg.to_string());
+    out
+}
+
+fn build_output(bytes: &[u8], path: String) -> Result<RuneOutput, String> {
     use crate::kernels::ffi;
 
     if bytes.is_empty() {
         return Err("empty file".into());
     }
-    // csv_scan takes an i32 length. The 4 GB allowlist in open_capped is
-    // wider than i32::MAX, so guard the narrowing cast before calling.
-    // Lifting the kernel to i64 is deferred to the streaming MVP+1 pass.
+    // csv_scan takes an i32 length. Guard the narrowing cast before calling;
+    // lifting the kernel to i64 is deferred to the streaming MVP+1 pass.
     if bytes.len() > i32::MAX as usize {
         return Err(format!(
-            "file too large for csv_scan: {} bytes (2 GB limit)",
-            bytes.len()
+            "file too large for csv_scan: {} bytes (2 GB limit)", bytes.len()
         ));
     }
 
+    let t_scan = Instant::now();
     let len = bytes.len() as i32;
     let mut commas   = vec![0i32; bytes.len()];
     let mut newlines = vec![0i32; bytes.len()];
@@ -101,8 +137,8 @@ fn summarize_csv(bytes: &[u8]) -> Result<String, String> {
     let commas   = &commas[..n_comma as usize];
     let newlines = &newlines[..n_newln as usize];
 
-    // Build row boundaries (start, end-exclusive). Each row ends at a
-    // newline. If the final row lacks a trailing newline, include it too.
+    // Build row boundaries (start, end-exclusive). If the final row lacks
+    // a trailing newline, include it as a row too.
     let mut row_starts: Vec<usize> = Vec::with_capacity(newlines.len() + 1);
     let mut row_ends:   Vec<usize> = Vec::with_capacity(newlines.len() + 1);
     row_starts.push(0);
@@ -111,19 +147,17 @@ fn summarize_csv(bytes: &[u8]) -> Result<String, String> {
         if i + 1 < newlines.len() {
             row_starts.push(nl as usize + 1);
         } else if (nl as usize) + 1 < bytes.len() {
-            // Trailing bytes past the last newline — treat as a final row.
             row_starts.push(nl as usize + 1);
             row_ends.push(bytes.len());
         }
     }
     if row_ends.is_empty() {
-        // File had no newlines — treat the whole thing as one row.
         row_ends.push(bytes.len());
     }
 
     let n_rows = row_ends.len();
 
-    // Split each row into field byte ranges using commas within the row.
+    // Split rows into field byte ranges using commas within each row.
     let mut rows_fields: Vec<Vec<(usize, usize)>> = Vec::with_capacity(n_rows);
     let mut comma_cursor = 0usize;
     for r in 0..n_rows {
@@ -153,9 +187,9 @@ fn summarize_csv(bytes: &[u8]) -> Result<String, String> {
         return Err("no data rows".into());
     }
 
-    // Sniff first up-to-32 data rows to classify columns as numeric vs text
-    // (numeric if >= 75% of sniffed cells parse as f32).
-    let sniff_rows = 32.min(n_rows - 1);
+    // Sniff first up-to-32 data rows to classify columns as numeric vs
+    // text (numeric if >= 75% of sniffed cells parse as f32).
+    let sniff_rows = SNIFF_ROWS.min(n_rows - 1);
     let mut is_numeric = vec![false; n_cols];
     for c in 0..n_cols {
         let mut ok = 0u32;
@@ -168,12 +202,7 @@ fn summarize_csv(bytes: &[u8]) -> Result<String, String> {
         is_numeric[c] = ok * 100 >= (sniff_rows as u32) * 75;
     }
 
-    // Collect per-column f32 values (numeric cols) and unique-value counts
-    // (text cols, simple HashMap). Text cardinality is capped to bound
-    // memory on attacker-controlled inputs — values past the cap still
-    // bump existing counters but don't create new entries. Top-3 stays
-    // approximate-but-useful for realistic categorical columns.
-    const TEXT_CARDINALITY_CAP: usize = 10_000;
+    // Per-column numeric values + text-frequency maps.
     let mut numeric_vals: Vec<Vec<f32>> = vec![Vec::new(); n_cols];
     let mut text_tops: Vec<std::collections::HashMap<String, u32>> =
         vec![std::collections::HashMap::new(); n_cols];
@@ -195,9 +224,8 @@ fn summarize_csv(bytes: &[u8]) -> Result<String, String> {
         }
     }
 
-    // Stats per numeric column via the SIMD kernel; top-3 per text column.
-    let mut out = String::new();
-    out.push_str(&format!("rows: {}\ncolumns: {}\n", n_data, n_cols));
+    // Per-column stats → FieldStats.
+    let mut fields: Vec<FieldStats> = Vec::with_capacity(n_cols);
     for c in 0..n_cols {
         if is_numeric[c] {
             let vals = &numeric_vals[c];
@@ -213,21 +241,83 @@ fn summarize_csv(bytes: &[u8]) -> Result<String, String> {
                 (count, sum, mn, mx)
             };
             let mean = if count > 0 { sum / count as f32 } else { 0.0 };
-            out.push_str(&format!(
-                "{} (number): count={count}, mean={mean:.2}, min={min_v:.2}, max={max_v:.2}, sum={sum:.2}\n",
-                headers[c]
-            ));
+            fields.push(FieldStats {
+                name:       headers[c].clone(),
+                kind:       FieldKind::Number,
+                count:      count as u64,
+                null_count: None,
+                numeric:    Some(NumericStats {
+                    min:  min_v as f64,
+                    max:  max_v as f64,
+                    mean: mean as f64,
+                    sum:  sum as f64,
+                }),
+                text: None, bool: None, timestamp: None,
+            });
         } else {
-            // Top-3 most frequent values.
             let mut pairs: Vec<(&String, &u32)> = text_tops[c].iter().collect();
-            pairs.sort_by(|a, b| b.1.cmp(a.1));
-            let top: Vec<String> = pairs.iter().take(3)
-                .map(|(k, _)| (*k).clone()).collect();
-            out.push_str(&format!(
-                "{} (text): {} unique; top values: {}\n",
-                headers[c], pairs.len(), top.join(", ")
-            ));
+            // Sort by count desc, then value asc — without the tiebreaker the
+            // top-N order is HashMap-seed-dependent and varies across calls.
+            pairs.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+            let top: Vec<TextEntry> = pairs.iter().take(TOP_N)
+                .map(|(k, v)| TextEntry { value: (*k).clone(), count: **v as u64 })
+                .collect();
+            fields.push(FieldStats {
+                name:       headers[c].clone(),
+                kind:       FieldKind::Text,
+                count:      pairs.iter().map(|(_, v)| **v as u64).sum(),
+                null_count: None,
+                numeric:    None,
+                text:       Some(TextStats { unique: pairs.len() as u64, top }),
+                bool:       None,
+                timestamp:  None,
+            });
         }
     }
+
+    let scan_us = t_scan.elapsed().as_micros() as u64;
+
+    let mut out = RuneOutput::new("eacrunch", RUNE_VERSION);
+    out.source = Some(Source {
+        path,
+        bytes:  bytes.len() as u64,
+        format: "csv".to_string(),
+    });
+    out.totals = Totals { rows: n_data as u64, scan_us };
+    out.fields = fields;
     Ok(out)
+}
+
+fn format_text(out: &RuneOutput) -> String {
+    let mut buf = String::new();
+    buf.push_str(&format!("rows: {}\ncolumns: {}\n",
+        out.totals.rows, out.fields.len()));
+    for f in &out.fields {
+        match f.kind {
+            FieldKind::Number => {
+                let n = f.numeric.as_ref().expect("numeric kind has numeric stats");
+                buf.push_str(&format!(
+                    "{} (number): count={}, mean={:.2}, min={:.2}, max={:.2}, sum={:.2}\n",
+                    f.name, f.count, n.mean, n.min, n.max, n.sum
+                ));
+            }
+            FieldKind::Text => {
+                let t = f.text.as_ref().expect("text kind has text stats");
+                let top_str = t.top.iter()
+                    .map(|e| e.value.as_str()).collect::<Vec<_>>().join(", ");
+                buf.push_str(&format!(
+                    "{} (text): {} unique; top values: {}\n",
+                    f.name, t.unique, top_str
+                ));
+            }
+            // CSV sniffer only emits Number or Text. Other kinds would only
+            // appear if a future caller constructed a RuneOutput by hand and
+            // passed it to this formatter — keep the contract explicit.
+            FieldKind::Bool | FieldKind::Timestamp | FieldKind::Mixed => {
+                buf.push_str(&format!("{} ({}): {} values\n",
+                    f.name, f.kind.as_str(), f.count));
+            }
+        }
+    }
+    buf
 }
