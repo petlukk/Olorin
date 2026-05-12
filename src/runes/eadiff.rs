@@ -123,42 +123,77 @@ fn build_output(a: &RuneOutput, b: &RuneOutput) -> RuneOutput {
     let t0 = Instant::now();
 
     let mut fields: Vec<FieldStats> = Vec::new();
+    // Symmetric: name in both inputs. Dispatch by matching kind.
     for fb in &b.fields {
-        if fb.kind != FieldKind::Number { continue; }
         let Some(fa) = a.fields.iter().find(|f| f.name == fb.name) else { continue };
-        if fa.kind != FieldKind::Number { continue; }
-        let (Some(na), Some(nb)) = (fa.numeric.as_ref(), fb.numeric.as_ref()) else { continue };
-        fields.push(FieldStats {
-            name:       fb.name.clone(),
-            kind:       FieldKind::Number,
-            count:      fb.count,
-            null_count: None,
-            numeric:    Some(NumericStats {
-                min:  nb.min  - na.min,
-                max:  nb.max  - na.max,
-                mean: nb.mean - na.mean,
-                sum:  nb.sum  - na.sum,
-            }),
-            text: None, bool: None, timestamp: None,
-        });
+        match (fa.kind.clone(), fb.kind.clone()) {
+            (FieldKind::Number, FieldKind::Number) => {
+                if let Some(diff) = diff_number(&fb.name, fa, fb) { fields.push(diff); }
+            }
+            (FieldKind::Bool, FieldKind::Bool) => {
+                fields.extend(diff_bool(&fb.name, fa, fb));
+            }
+            (FieldKind::Timestamp, FieldKind::Timestamp) => {
+                if let Some(diff) = diff_unique(&fb.name, fa, fb) { fields.push(diff); }
+            }
+            (FieldKind::Text, FieldKind::Text) => {
+                if let Some(diff) = diff_unique(&fb.name, fa, fb) { fields.push(diff); }
+            }
+            // Mismatched-kind same name → flag as Mixed; the schema
+            // shouldn't produce two runs with different kinds for the
+            // same name from a stable input, so this signals a real
+            // schema-evolution event the caller probably wants to see.
+            _ => fields.push(mixed_marker(
+                &format!("[kind-changed] {}", fb.name),
+                fb.count,
+            )),
+        }
+    }
+    // Asymmetric fields: appeared in b but not a, or vice versa.
+    for fb in &b.fields {
+        if a.fields.iter().any(|f| f.name == fb.name) { continue; }
+        fields.push(mixed_marker(
+            &format!("[appeared] {}", fb.name),
+            fb.count,
+        ));
+    }
+    for fa in &a.fields {
+        if b.fields.iter().any(|f| f.name == fa.name) { continue; }
+        fields.push(mixed_marker(
+            &format!("[disappeared] {}", fa.name),
+            fa.count,
+        ));
     }
 
-    // Categories: directional delta. + prefix = grew, - prefix = shrank.
-    // Buckets with zero delta are omitted to keep output compact for
-    // sparse changes (typical case: a handful of hour buckets differ).
+    // Categories: directional delta on symmetric names; appeared /
+    // disappeared markers on asymmetric ones.
     let mut categories: Vec<Category> = Vec::new();
     for cb in &b.categories {
-        let Some(ca) = a.categories.iter().find(|c| c.name == cb.name) else { continue };
-        if cb.count == ca.count { continue; }
-        let (sign, magnitude) = if cb.count > ca.count {
-            ('+', cb.count - ca.count)
+        if let Some(ca) = a.categories.iter().find(|c| c.name == cb.name) {
+            if cb.count == ca.count { continue; }
+            let (sign, magnitude) = if cb.count > ca.count {
+                ('+', cb.count - ca.count)
+            } else {
+                ('-', ca.count - cb.count)
+            };
+            categories.push(Category {
+                name:  format!("{sign}{}", cb.name),
+                count: magnitude,
+            });
         } else {
-            ('-', ca.count - cb.count)
-        };
-        categories.push(Category {
-            name:  format!("{sign}{}", cb.name),
-            count: magnitude,
-        });
+            categories.push(Category {
+                name:  format!("[appeared] {}", cb.name),
+                count: cb.count,
+            });
+        }
+    }
+    for ca in &a.categories {
+        if !b.categories.iter().any(|c| c.name == ca.name) {
+            categories.push(Category {
+                name:  format!("[disappeared] {}", ca.name),
+                count: ca.count,
+            });
+        }
     }
 
     let scan_us = t0.elapsed().as_micros() as u64;
@@ -167,6 +202,83 @@ fn build_output(a: &RuneOutput, b: &RuneOutput) -> RuneOutput {
     out.fields = fields;
     out.categories = categories;
     out
+}
+
+fn diff_number(name: &str, fa: &FieldStats, fb: &FieldStats) -> Option<FieldStats> {
+    let (na, nb) = (fa.numeric.as_ref()?, fb.numeric.as_ref()?);
+    Some(FieldStats {
+        name:       name.to_string(),
+        kind:       FieldKind::Number,
+        count:      fb.count,
+        null_count: None,
+        numeric:    Some(NumericStats {
+            min:  nb.min  - na.min,
+            max:  nb.max  - na.max,
+            mean: nb.mean - na.mean,
+            sum:  nb.sum  - na.sum,
+        }),
+        text: None, bool: None, timestamp: None,
+    })
+}
+
+// Bool: split into two Number fields named `<col>.true_delta` and
+// `<col>.false_delta`, each carrying a signed delta in min=max=mean=sum.
+// Two counts that move independently → two single-purpose fields.
+fn diff_bool(name: &str, fa: &FieldStats, fb: &FieldStats) -> Vec<FieldStats> {
+    let (Some(ba), Some(bb)) = (fa.bool.as_ref(), fb.bool.as_ref()) else { return Vec::new() };
+    let t_delta = bb.true_count  as i64 - ba.true_count  as i64;
+    let f_delta = bb.false_count as i64 - ba.false_count as i64;
+    vec![
+        scalar_delta_field(&format!("{name}.true_delta"),  t_delta as f64, fb.count),
+        scalar_delta_field(&format!("{name}.false_delta"), f_delta as f64, fb.count),
+    ]
+}
+
+// Timestamp + Text: one Number field `<col>.unique_delta` carrying the
+// signed change in unique-value count. Min/max range shift for
+// Timestamp and top-N rank overlap for Text are deferred to v0.9.3.
+fn diff_unique(name: &str, fa: &FieldStats, fb: &FieldStats) -> Option<FieldStats> {
+    let (ua, ub) = match (&fa.kind, &fb.kind) {
+        (FieldKind::Timestamp, FieldKind::Timestamp) => (
+            fa.timestamp.as_ref()?.unique,
+            fb.timestamp.as_ref()?.unique,
+        ),
+        (FieldKind::Text, FieldKind::Text) => (
+            fa.text.as_ref()?.unique,
+            fb.text.as_ref()?.unique,
+        ),
+        _ => return None,
+    };
+    if ua == ub { return None; }
+    let delta = ub as i64 - ua as i64;
+    Some(scalar_delta_field(&format!("{name}.unique_delta"), delta as f64, fb.count))
+}
+
+// Helper: emit a Number FieldStats carrying a single signed value in
+// all four numeric slots. Used for synthesized scalar deltas
+// (bool counts, unique counts) that don't have a meaningful min/max
+// distinction — consumers read `numeric.mean` and ignore the rest.
+fn scalar_delta_field(name: &str, value: f64, count: u64) -> FieldStats {
+    FieldStats {
+        name:       name.to_string(),
+        kind:       FieldKind::Number,
+        count,
+        null_count: None,
+        numeric:    Some(NumericStats {
+            min: value, max: value, mean: value, sum: value,
+        }),
+        text: None, bool: None, timestamp: None,
+    }
+}
+
+fn mixed_marker(name: &str, count: u64) -> FieldStats {
+    FieldStats {
+        name:       name.to_string(),
+        kind:       FieldKind::Mixed,
+        count,
+        null_count: None,
+        numeric:    None, text: None, bool: None, timestamp: None,
+    }
 }
 
 fn format_text(out: &RuneOutput) -> String {
@@ -179,11 +291,30 @@ fn format_text(out: &RuneOutput) -> String {
         buf.push('\n');
         buf.push_str("field deltas (b - a):\n");
         for f in &out.fields {
-            let n = f.numeric.as_ref().expect("eadiff Number field has numeric");
-            buf.push_str(&format!(
-                "  {}: mean={:+.2}, min={:+.2}, max={:+.2}, sum={:+.2}\n",
-                f.name, n.mean, n.min, n.max, n.sum
-            ));
+            match f.kind {
+                FieldKind::Mixed => {
+                    // Asymmetric markers: name carries the [appeared]/
+                    // [disappeared] prefix already.
+                    buf.push_str(&format!("  {}\n", f.name));
+                }
+                FieldKind::Number => {
+                    let n = f.numeric.as_ref().expect("Number field has numeric");
+                    if f.name.ends_with("_delta") {
+                        // Synthesized scalar delta (bool / unique-count):
+                        // single meaningful value, print compactly.
+                        buf.push_str(&format!("  {}: {:+.2}\n", f.name, n.mean));
+                    } else {
+                        buf.push_str(&format!(
+                            "  {}: mean={:+.2}, min={:+.2}, max={:+.2}, sum={:+.2}\n",
+                            f.name, n.mean, n.min, n.max, n.sum
+                        ));
+                    }
+                }
+                // Bool / Text / Timestamp shouldn't appear in eadiff
+                // output today (they're always rewritten into Number
+                // fields or skipped). Future-proofed with a line.
+                _ => buf.push_str(&format!("  {} ({})\n", f.name, f.kind.as_str())),
+            }
         }
     }
     if !out.categories.is_empty() {

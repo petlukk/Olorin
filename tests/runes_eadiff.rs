@@ -129,14 +129,12 @@ fn eadiff_categories_use_directional_prefix() {
 }
 
 #[test]
-fn eadiff_skips_text_bool_timestamp_mixed_fields() {
+fn eadiff_text_field_emits_unique_delta() {
     olorin::kernels::ffi::init().unwrap();
     let mut a = RuneOutput::new("eajson", 1);
     let mut b = RuneOutput::new("eajson", 1);
-    // Number — diffed.
     a.fields.push(numeric_field("status", 200.0, 200.0, 200.0, 200000.0, 1000));
     b.fields.push(numeric_field("status", 404.0, 404.0, 404.0, 404000.0, 1000));
-    // Text — skipped in v1.
     a.fields.push(FieldStats {
         name: "level".into(), kind: FieldKind::Text, count: 1000,
         null_count: None, numeric: None,
@@ -149,23 +147,99 @@ fn eadiff_skips_text_bool_timestamp_mixed_fields() {
         text: Some(olorin::runes::output::TextStats { unique: 4, top: vec![] }),
         bool: None, timestamp: None,
     });
-    let pa = write_runeoutput("olorin_eadiff_skips_a.json", &a);
-    let pb = write_runeoutput("olorin_eadiff_skips_b.json", &b);
+    let pa = write_runeoutput("olorin_eadiff_textfld_a.json", &a);
+    let pb = write_runeoutput("olorin_eadiff_textfld_b.json", &b);
 
     let result = run_rune("eadiff", &format!("--json {pa} {pb}")).unwrap();
     let out = parse_answer(&result.answer);
-    assert_eq!(out.fields.len(), 1, "only the Number field is diffed");
-    assert_eq!(out.fields[0].name, "status");
-
+    let names: Vec<&str> = out.fields.iter().map(|f| f.name.as_str()).collect();
+    assert!(names.contains(&"status"), "status numeric delta missing: {names:?}");
+    assert!(names.contains(&"level.unique_delta"),
+        "text unique_delta missing: {names:?}");
+    let level = out.fields.iter().find(|f| f.name == "level.unique_delta").unwrap();
+    assert_eq!(level.numeric.as_ref().unwrap().mean, 1.0, "unique delta should be +1");
     let _ = std::fs::remove_file(&pa);
     let _ = std::fs::remove_file(&pb);
 }
 
 #[test]
-fn eadiff_asymmetric_keys_are_skipped() {
+fn eadiff_bool_field_emits_paired_deltas() {
+    olorin::kernels::ffi::init().unwrap();
+    let mut a = RuneOutput::new("eajson", 1);
+    let mut b = RuneOutput::new("eajson", 1);
+    a.fields.push(FieldStats {
+        name: "cached".into(), kind: FieldKind::Bool, count: 100,
+        null_count: None, numeric: None, text: None,
+        bool: Some(olorin::runes::output::BoolStats {
+            true_count: 90, false_count: 10
+        }),
+        timestamp: None,
+    });
+    b.fields.push(FieldStats {
+        name: "cached".into(), kind: FieldKind::Bool, count: 100,
+        null_count: None, numeric: None, text: None,
+        bool: Some(olorin::runes::output::BoolStats {
+            true_count: 85, false_count: 15
+        }),
+        timestamp: None,
+    });
+    let pa = write_runeoutput("olorin_eadiff_bool_a.json", &a);
+    let pb = write_runeoutput("olorin_eadiff_bool_b.json", &b);
+
+    let result = run_rune("eadiff", &format!("--json {pa} {pb}")).unwrap();
+    let out = parse_answer(&result.answer);
+    let by_name: std::collections::HashMap<&str, f64> = out.fields.iter()
+        .filter_map(|f| f.numeric.as_ref().map(|n| (f.name.as_str(), n.mean)))
+        .collect();
+    assert_eq!(by_name.get("cached.true_delta"),  Some(&-5.0),
+        "true count dropped by 5: {by_name:?}");
+    assert_eq!(by_name.get("cached.false_delta"), Some(&5.0),
+        "false count grew by 5: {by_name:?}");
+    let _ = std::fs::remove_file(&pa);
+    let _ = std::fs::remove_file(&pb);
+}
+
+#[test]
+fn eadiff_timestamp_field_emits_unique_delta() {
+    olorin::kernels::ffi::init().unwrap();
+    let mut a = RuneOutput::new("eajson", 1);
+    let mut b = RuneOutput::new("eajson", 1);
+    a.fields.push(FieldStats {
+        name: "ts".into(), kind: FieldKind::Timestamp, count: 1000,
+        null_count: None, numeric: None, text: None, bool: None,
+        timestamp: Some(olorin::runes::output::TimestampStats {
+            min: "2026-05-10T00:00:00Z".into(),
+            max: "2026-05-10T23:59:59Z".into(),
+            unique: 800,
+        }),
+    });
+    b.fields.push(FieldStats {
+        name: "ts".into(), kind: FieldKind::Timestamp, count: 1000,
+        null_count: None, numeric: None, text: None, bool: None,
+        timestamp: Some(olorin::runes::output::TimestampStats {
+            min: "2026-05-11T00:00:00Z".into(),
+            max: "2026-05-11T23:59:59Z".into(),
+            unique: 950,
+        }),
+    });
+    let pa = write_runeoutput("olorin_eadiff_ts_a.json", &a);
+    let pb = write_runeoutput("olorin_eadiff_ts_b.json", &b);
+
+    let result = run_rune("eadiff", &format!("--json {pa} {pb}")).unwrap();
+    let out = parse_answer(&result.answer);
+    let ts = out.fields.iter().find(|f| f.name == "ts.unique_delta")
+        .expect("timestamp unique_delta emitted");
+    assert_eq!(ts.numeric.as_ref().unwrap().mean, 150.0, "unique_delta = +150");
+    let _ = std::fs::remove_file(&pa);
+    let _ = std::fs::remove_file(&pb);
+}
+
+#[test]
+fn eadiff_asymmetric_fields_emit_markers() {
     olorin::kernels::ffi::init().unwrap();
     let mut a = RuneOutput::new("eacrunch", 1);
     a.fields.push(numeric_field("amount", 100.0, 100.0, 100.0, 100.0, 1));
+    a.fields.push(numeric_field("old_col", 7.0, 7.0, 7.0, 7.0, 1));
     let mut b = RuneOutput::new("eacrunch", 1);
     b.fields.push(numeric_field("amount", 150.0, 150.0, 150.0, 150.0, 1));
     b.fields.push(numeric_field("new_col", 5.0, 5.0, 5.0, 5.0, 1));
@@ -174,9 +248,37 @@ fn eadiff_asymmetric_keys_are_skipped() {
 
     let result = run_rune("eadiff", &format!("--json {pa} {pb}")).unwrap();
     let out = parse_answer(&result.answer);
-    assert_eq!(out.fields.len(), 1, "only the matched name survives");
-    assert_eq!(out.fields[0].name, "amount");
+    let names: Vec<&str> = out.fields.iter().map(|f| f.name.as_str()).collect();
+    assert!(names.contains(&"amount"), "matched field present: {names:?}");
+    assert!(names.contains(&"[appeared] new_col"),
+        "appeared marker missing: {names:?}");
+    assert!(names.contains(&"[disappeared] old_col"),
+        "disappeared marker missing: {names:?}");
+    let appeared = out.fields.iter().find(|f| f.name == "[appeared] new_col").unwrap();
+    assert_eq!(appeared.kind, FieldKind::Mixed,
+        "asymmetric markers use Mixed kind");
+    let _ = std::fs::remove_file(&pa);
+    let _ = std::fs::remove_file(&pb);
+}
 
+#[test]
+fn eadiff_asymmetric_categories_emit_markers() {
+    olorin::kernels::ffi::init().unwrap();
+    let mut a = RuneOutput::new("eatime", 1);
+    let mut b = RuneOutput::new("eatime", 1);
+    a.categories.push(Category { name: "Mon".into(), count: 10 });
+    a.categories.push(Category { name: "Tue".into(), count: 5  });
+    b.categories.push(Category { name: "Mon".into(), count: 12 });
+    b.categories.push(Category { name: "Wed".into(), count: 3  });
+    let pa = write_runeoutput("olorin_eadiff_cat_asym_a.json", &a);
+    let pb = write_runeoutput("olorin_eadiff_cat_asym_b.json", &b);
+
+    let result = run_rune("eadiff", &format!("--json {pa} {pb}")).unwrap();
+    let out = parse_answer(&result.answer);
+    let names: Vec<&str> = out.categories.iter().map(|c| c.name.as_str()).collect();
+    assert!(names.contains(&"+Mon"),             "Mon grew: {names:?}");
+    assert!(names.contains(&"[disappeared] Tue"), "Tue gone:  {names:?}");
+    assert!(names.contains(&"[appeared] Wed"),    "Wed new:   {names:?}");
     let _ = std::fs::remove_file(&pa);
     let _ = std::fs::remove_file(&pb);
 }
@@ -283,14 +385,16 @@ fn eadiff_invalid_json_input_emits_structured_failure() {
 }
 
 #[test]
-fn eadiff_no_overlap_emits_empty_result() {
+fn eadiff_empty_inputs_emit_empty_result() {
+    // Both inputs have nothing to diff over (no fields, no categories).
+    // v2: a truly empty pair still triggers the "no diffable structure
+    // overlap" message. v1's asymmetric-keys test now emits markers
+    // instead (see eadiff_asymmetric_fields_emit_markers).
     olorin::kernels::ffi::init().unwrap();
-    let mut a = RuneOutput::new("eacrunch", 1);
-    a.fields.push(numeric_field("only_in_a", 1.0, 1.0, 1.0, 1.0, 1));
-    let mut b = RuneOutput::new("eacrunch", 1);
-    b.fields.push(numeric_field("only_in_b", 2.0, 2.0, 2.0, 2.0, 1));
-    let pa = write_runeoutput("olorin_eadiff_noov_a.json", &a);
-    let pb = write_runeoutput("olorin_eadiff_noov_b.json", &b);
+    let a = RuneOutput::new("eacrunch", 1);
+    let b = RuneOutput::new("eacrunch", 1);
+    let pa = write_runeoutput("olorin_eadiff_empty_a.json", &a);
+    let pb = write_runeoutput("olorin_eadiff_empty_b.json", &b);
 
     let result = run_rune("eadiff", &format!("{pa} {pb}")).unwrap();
     assert!(result.success);
