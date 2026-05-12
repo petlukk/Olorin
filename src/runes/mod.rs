@@ -31,6 +31,17 @@ pub struct RuneResult {
     pub success:   bool,
     /// Always populated, even on refusal/error — this is the flex.
     pub timing_us: u64,
+    /// True when `answer` is a single-line JSONL serialization of a
+    /// `RuneOutput` (set by runes when `--json` is in the args). The
+    /// REPL / dispatch path uses this to:
+    /// - skip the `[timing: …]` footer (preserves JSONL parseability)
+    /// - skip the `<rune_output>` wrapping in `wrap_rune_result`
+    /// - skip LLM narration (the user explicitly asked for machine
+    ///   output; narrating it defeats the purpose)
+    /// The safety scan still runs on the JSON bytes either way —
+    /// prompt-injection patterns inside file-derived JSON string
+    /// values are blocked regardless of format.
+    pub structured: bool,
 }
 
 /// The contract every rune implements.
@@ -103,12 +114,21 @@ pub fn wrap_rune_result(
     safety_class: OutputSafety,
     result: RuneResult,
 ) -> Result<String, WrapError> {
-    let body = match safety_class {
-        OutputSafety::Trusted => result.answer,
-        OutputSafety::UntrustedQuoted => format!(
-            "<rune_output rune=\"{rune_name}\" untrusted=\"true\">{}</rune_output>",
-            result.answer
-        ),
+    // Structured (JSON) output is never wrapped — wrapping would break
+    // JSONL parseability for downstream runes like `eadiff` that read
+    // their inputs back via `RuneOutput::from_json`. The safety scan
+    // below still runs on the JSON bytes; injection patterns inside
+    // file-derived string values are blocked regardless of format.
+    let body = if result.structured {
+        result.answer
+    } else {
+        match safety_class {
+            OutputSafety::Trusted => result.answer,
+            OutputSafety::UntrustedQuoted => format!(
+                "<rune_output rune=\"{rune_name}\" untrusted=\"true\">{}</rune_output>",
+                result.answer
+            ),
+        }
     };
     let scan = safety::scan(body.as_bytes());
     if scan.blocked {
@@ -142,6 +162,13 @@ pub fn build_narration_prompt(
     _safety_class: OutputSafety,
     result: RuneResult,
 ) -> Option<String> {
+    // Structured (JSON) output is never narrated. The caller explicitly
+    // asked for machine output by passing `--json`; routing it through
+    // the LLM for a 1-2 sentence summary defeats the purpose and burns
+    // decode tokens. Plain-text rune output remains the narration path.
+    if result.structured {
+        return None;
+    }
     let scan = safety::scan(result.answer.as_bytes());
     if scan.blocked {
         return None;

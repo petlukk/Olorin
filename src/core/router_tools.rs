@@ -201,15 +201,26 @@ impl DispatchContext {
         let safety_class = rune.output_safety();
         let answer = result.answer.clone();
         let timing_us = result.timing_us;
+        let structured = result.structured;
 
-        // Display body for the user — kernel summary + details + timing.
-        let mut body = result.answer;
-        if let Some(d) = result.details {
-            body.push_str("\n\n---\n");
-            body.push_str(&d);
-        }
-        body.push_str(&format!("\n[timing: {timing_us}µs]"));
-        // Inbound safety scan on file-derived bytes (defense-in-depth).
+        // Display body: when the rune emitted structured (JSON) output,
+        // the user explicitly asked for machine-readable output via
+        // `--json`. Print the JSON verbatim — no details, no timing
+        // footer (would break JSONL parseability), no `<rune_output>`
+        // wrapping. The safety scan still runs on the raw bytes so
+        // injection patterns inside file-derived JSON string values are
+        // blocked.
+        let body = if structured {
+            result.answer
+        } else {
+            let mut b = result.answer;
+            if let Some(d) = result.details {
+                b.push_str("\n\n---\n");
+                b.push_str(&d);
+            }
+            b.push_str(&format!("\n[timing: {timing_us}µs]"));
+            b
+        };
         let scan = safety::scan(body.as_bytes());
         if scan.blocked {
             return Response::blocked("Rune output blocked by safety scan.");
@@ -218,11 +229,15 @@ impl DispatchContext {
         self.vault_save(b"tool", body.as_bytes());
 
         // Followup is always built; consumers gate on engine presence.
+        // Structured (JSON) output skips narration — the caller wanted
+        // machine output, narrating it to plain English defeats the
+        // purpose and burns decode tokens.
         let scratch = crate::runes::RuneResult {
             answer,
             details: None,
             success: result.success,
             timing_us,
+            structured,
         };
         let followup = crate::runes::build_narration_prompt(name, safety_class, scratch);
 

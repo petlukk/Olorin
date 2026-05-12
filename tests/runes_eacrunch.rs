@@ -7,10 +7,12 @@ fn rune_result_defaults() {
         details: None,
         success: true,
         timing_us: 42,
+        structured: false,
     };
     assert!(r.success);
     assert_eq!(r.answer, "hello");
     assert_eq!(r.timing_us, 42);
+    assert!(!r.structured);
 }
 
 #[test]

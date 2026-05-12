@@ -61,10 +61,11 @@ impl Rune for Eatime {
             format_text(&out)
         };
         RuneResult {
-            answer:    truncate_answer(&answer),
-            details:   None,
-            success:   out.success,
-            timing_us: t0.elapsed().as_micros() as u64,
+            answer:     truncate_answer(&answer),
+            details:    None,
+            success:    out.success,
+            timing_us:  t0.elapsed().as_micros() as u64,
+            structured: json_mode,
         }
     }
 }

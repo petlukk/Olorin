@@ -61,10 +61,11 @@ impl Rune for Eajson {
             format_text(&output)
         };
         RuneResult {
-            answer:    truncate_answer(&answer),
-            details:   None,
-            success:   output.success,
-            timing_us: t0.elapsed().as_micros() as u64,
+            answer:     truncate_answer(&answer),
+            details:    None,
+            success:    output.success,
+            timing_us:  t0.elapsed().as_micros() as u64,
+            structured: json_mode,
         }
     }
 }
