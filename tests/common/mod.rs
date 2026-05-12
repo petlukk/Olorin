@@ -10,6 +10,7 @@ use std::path::Path;
 
 pub mod llama_refs;
 pub mod q3k_quantize;
+pub mod eadiff_helpers;
 
 pub fn model_path() -> String {
     if let Ok(p) = std::env::var("OLORIN_MODEL_PATH") {
