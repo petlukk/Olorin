@@ -38,6 +38,11 @@ type LogLevelScanFn     = unsafe extern "C" fn(
     *mut i32, i32, *mut i32,
     *mut u8,
 );
+type TimestampScanFn    = unsafe extern "C" fn(
+    *const u8, i32,
+    *mut i32, i32, *mut i32,
+    *mut u8,
+);
 type F32StatsFn         = unsafe extern "C" fn(
     *const f32, i32,
     *mut i32,
@@ -88,6 +93,7 @@ pub struct KernelTable {
     pub csv_scan:                 CsvScanFn,
     pub jsonl_struct_scan:        JsonlStructFn,
     pub log_level_scan:           LogLevelScanFn,
+    pub timestamp_scan:           TimestampScanFn,
     pub f32_stats:                F32StatsFn,
     pub f64_stats:                F64StatsFn,
     pub eval_expr:                EvalExprFn,
@@ -153,6 +159,7 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
     let csv_scan_lib    = load("csv_scan")?;
     let jsonl_struct_lib = load("jsonl_struct")?;
     let log_level_scan_lib = load("log_level_scan")?;
+    let timestamp_scan_lib = load("timestamp_scan")?;
     let f32_stats_lib   = load("f32_stats")?;
     let f64_stats_lib   = load("f64_stats")?;
     let expr_eval       = load("expr_eval")?;
@@ -201,6 +208,8 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
                 sym(&jsonl_struct_lib, b"jsonl_struct_scan\0")?),
             log_level_scan: std::mem::transmute(
                 sym(&log_level_scan_lib, b"log_level_scan\0")?),
+            timestamp_scan: std::mem::transmute(
+                sym(&timestamp_scan_lib, b"timestamp_scan\0")?),
             f32_stats: std::mem::transmute(
                 sym(&f32_stats_lib, b"f32_stats\0")?),
             f64_stats: std::mem::transmute(
@@ -234,6 +243,7 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
                 chacha20_lib, chacha20_sv2, pretokenize_lib,
                 ansi_parser_lib, terminal_diff_lib,
                 csv_scan_lib, jsonl_struct_lib, log_level_scan_lib,
+                timestamp_scan_lib,
                 f32_stats_lib, f64_stats_lib,
             ],
         };
@@ -430,6 +440,33 @@ pub unsafe fn log_level_scan(
     (k().log_level_scan)(
         text, len,
         out_counts,
+        out_positions, max_positions, out_n_positions,
+        scratch,
+    );
+}
+
+/// Scan `text` for ISO-8601 timestamp prefixes (`YYYY-MM-DDT`) and
+/// emit each match's start byte offset. Used by `eatime` — the caller
+/// extracts HH:MM:SS from `text[offset+11..offset+19]` after each hit
+/// (the kernel deliberately does not validate the trailing 8 bytes,
+/// keeping the SIMD body to one tight pass and the tail safe).
+///
+/// # Safety
+/// - `text` must point to `len` readable bytes (any value of `len >= 0`
+///   is safe; the kernel handles tiny buffers via a scalar fallback).
+/// - `out_positions` must be writable for at least `max_positions` `i32`s
+///   when `max_positions > 0`. The kernel clamps writes at that capacity.
+/// - `out_n_positions` must point to one writable `i32` (always set to 0
+///   on entry, then incremented per emitted position).
+/// - `scratch` must be writable for 16 bytes; contents are unspecified
+///   after the call. Touched only when the SIMD body runs.
+pub unsafe fn timestamp_scan(
+    text: *const u8, len: i32,
+    out_positions: *mut i32, max_positions: i32, out_n_positions: *mut i32,
+    scratch: *mut u8,
+) {
+    (k().timestamp_scan)(
+        text, len,
         out_positions, max_positions, out_n_positions,
         scratch,
     );

@@ -1,0 +1,129 @@
+// ISO-8601 timestamp position scanner. Emits byte offsets where the
+// 11-byte prefix YYYY-MM-DDT occurs in `text`. Caller extracts
+// HH:MM:SS at offset+11..offset+19 for bucketing.
+//
+// SIMD strategy (cross-arch, .==-only idiom — same primitives as
+// log_level_scan, no movemask): per 16-byte chunk at position i, load
+// three shifted views text[i+4..], text[i+7..], text[i+10..] and
+// build lane masks for the structural anchors '-', '-', 'T'. AND
+// them into a single lane mask. Lanes that pass the structural
+// filter are *candidate* positions only — non-digit content like
+// `abc-de-fgT...` would also survive. Each candidate is scalar-walked
+// through `scan_pos`, which validates the 8 digit positions and emits
+// the byte offset only on a full match.
+//
+// Why the cheap filter: in real-world inputs, the joint probability
+// of '-', '-', 'T' at exactly those three offsets is low outside of
+// genuine timestamps; the SIMD filter trims ~95%+ of positions before
+// any scalar work. The scalar validator is small enough (8 byte
+// comparisons + bounds) that the per-candidate cost is negligible.
+//
+// out_positions    = byte offsets where YYYY-MM-DDT starts.
+// out_n_positions[0] = number of positions written (<= max_positions).
+//                       Always reset to 0 at the head of the kernel.
+// scratch (16 bytes) holds the per-chunk filter mask; contents after
+// the call are unspecified. Required only when max_positions > 0;
+// callers uninterested in positions may pass any 16-byte writable
+// buffer.
+
+func is_digit_byte(b: i32) -> i32 {
+    if b < 48 { return 0 }
+    if b > 57 { return 0 }
+    return 1
+}
+
+func scan_pos(text: *u8, p: i32, len: i32, positions: *mut i32, max_positions: i32, n_positions: *mut i32) {
+    if p + 11 > len { return }
+    if max_positions <= 0 { return }
+
+    let b0:  i32 = to_i32(text[p + 0])
+    let b1:  i32 = to_i32(text[p + 1])
+    let b2:  i32 = to_i32(text[p + 2])
+    let b3:  i32 = to_i32(text[p + 3])
+    if is_digit_byte(b0) == 0 { return }
+    if is_digit_byte(b1) == 0 { return }
+    if is_digit_byte(b2) == 0 { return }
+    if is_digit_byte(b3) == 0 { return }
+    if to_i32(text[p + 4]) != 45 { return }
+
+    let b5: i32 = to_i32(text[p + 5])
+    let b6: i32 = to_i32(text[p + 6])
+    if is_digit_byte(b5) == 0 { return }
+    if is_digit_byte(b6) == 0 { return }
+    if to_i32(text[p + 7]) != 45 { return }
+
+    let b8: i32 = to_i32(text[p + 8])
+    let b9: i32 = to_i32(text[p + 9])
+    if is_digit_byte(b8) == 0 { return }
+    if is_digit_byte(b9) == 0 { return }
+    if to_i32(text[p + 10]) != 84 { return }
+
+    let cur: i32 = n_positions[0]
+    if cur < max_positions {
+        positions[cur] = p
+        n_positions[0] = cur + 1
+    }
+}
+
+export func timestamp_scan(text: *u8, len: i32, out_positions: *mut i32, max_positions: i32, out_n_positions: *mut i32, scratch: *mut u8) {
+    out_n_positions[0] = 0
+
+    if len < 32 {
+        let mut p: i32 = 0
+        while p + 11 <= len {
+            scan_pos(text, p, len, out_positions, max_positions, out_n_positions)
+            p = p + 1
+        }
+        return
+    }
+
+    let v_hyphen: u8x16 = splat(45)
+    let v_T:      u8x16 = splat(84)
+    let v_zero:   u8x16 = splat(0)
+    let v_one:    u8x16 = splat(1)
+
+    // Scalar prologue: positions [0..16).
+    let mut p: i32 = 0
+    while p < 16 {
+        scan_pos(text, p, len, out_positions, max_positions, out_n_positions)
+        p = p + 1
+    }
+
+    // SIMD body: chunks at i=16, 32, 48, ... while i + 27 <= len.
+    // (Lane 15's candidate pattern ends at i+25, so text[i+25] must
+    // be readable, ⇔ i + 26 < len ⇔ i + 27 <= len.)
+    let mut i: i32 = 16
+    while i + 27 <= len {
+        let c4:  u8x16 = load(text, i + 4)
+        let c7:  u8x16 = load(text, i + 7)
+        let c10: u8x16 = load(text, i + 10)
+
+        let m4:  u8x16 = select(c4  .== v_hyphen, v_one, v_zero)
+        let m7:  u8x16 = select(c7  .== v_hyphen, v_one, v_zero)
+        let m10: u8x16 = select(c10 .== v_T,      v_one, v_zero)
+
+        let cand: u8x16 = m4 .& m7 .& m10
+        let any:  u8    = reduce_add(cand)
+
+        if to_i32(any) > 0 {
+            store(scratch, 0, cand)
+            let mut k: i32 = 0
+            while k < 16 {
+                if to_i32(scratch[k]) > 0 {
+                    scan_pos(text, i + k, len, out_positions, max_positions, out_n_positions)
+                }
+                k = k + 1
+            }
+        }
+
+        i = i + 16
+    }
+
+    // Scalar epilogue: any positions past the last SIMD chunk that
+    // still have room for the 11-byte prefix.
+    p = i
+    while p + 11 <= len {
+        scan_pos(text, p, len, out_positions, max_positions, out_n_positions)
+        p = p + 1
+    }
+}
