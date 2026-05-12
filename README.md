@@ -213,10 +213,11 @@ uses the same store-to-scratch + scalar-walk pattern as
 WSL2, 0.43 GB/s on Pi 5 Cortex-A76 NEON**, identical bit-exact
 counts across both architectures.
 
-### eatime — ISO-8601 hour-of-day histogram
+### eatime — ISO-8601 timestamp histogram
 
 ```
 /rune eatime ~/var/log/app.log
+/rune eatime --bucket weekday ~/var/log/app.log
 ```
 
 ```
@@ -249,6 +250,12 @@ chunk, scalar-walk to validate the 8 digit positions. Single `.ea`
 source; same primitives lower cleanly to x86 SSE2 (Ryzen 7700X) and
 ARM NEON (Pi 5 Cortex-A76) with bit-exact bucket counts.
 
+`--bucket weekday` swaps the 24-hour histogram for a 7-bucket
+Mon..Sun view computed via Zeller's congruence on the year/month/day
+digits the kernel already extracted. Same kernel pass, different
+scalar post-processing. Use it for "Tuesday-morning errors" style
+questions.
+
 ### eadiff — structural delta between two rune runs
 
 ```
@@ -267,15 +274,26 @@ category deltas:
 ```
 
 Two prior `--json` rune outputs in; one `RuneOutput` carrying signed
-deltas out. Match-by-name across `fields[]` (Number kind: signed
-deltas on min/max/mean/sum) and `categories[]` (directional naming —
-a bucket that grew emits as `+<name>`, one that shrank as `-<name>`;
-unchanged buckets are omitted).
+deltas out. Match-by-name across `fields[]` and `categories[]`,
+across every `FieldKind`:
+
+- **Number** — signed deltas on min/max/mean/sum.
+- **Bool** — paired Number fields `<col>.true_delta` and
+  `<col>.false_delta` carrying signed deltas of each count.
+- **Timestamp** / **Text** — Number field `<col>.unique_delta` with
+  the signed change in unique-value count.
+- **Categories** — directional naming: a bucket that grew emits as
+  `+<name>`, one that shrank as `-<name>`. Unchanged buckets omitted.
+- **Asymmetric keys** (present in one input but not the other) —
+  emitted as `[appeared] <name>` / `[disappeared] <name>` with
+  kind=Mixed and count from the originating side. The bracket prefix
+  is unambiguously not a real upstream field name.
 
 eadiff is *generic*: the same code handles `eatime × eatime` (hour-
-of-day drift), `eacrunch × eacrunch` (numeric column drift),
-`eaparquet × eaparquet` (footer-stat drift) — never branches on
-which rune produced the inputs. That's the v0.9.0 schema paying off.
+or weekday drift), `eacrunch × eacrunch` (numeric column drift),
+`eaparquet × eaparquet` (footer-stat drift), `eajson × eajson` (any
+key kind) — never branches on which rune produced the inputs.
+That's the v0.9.0 schema paying off.
 
 ### `--json` mode
 
@@ -318,8 +336,8 @@ union of `fields[]` and `categories[]`.
 - eajson: top-level scalars only — nested objects flatten one level deep (`http.status`); deeper nesting and arrays-of-objects are skipped. Mixed-type keys (number on one line, string on another) collapse to `(mixed)` with no stats. Text top-N capped at 10K cardinality.
 - eaparquet: metadata-only — column data is never decoded. Statistics must be present in the file footer (most modern writers include them). BYTE_ARRAY (string) and INT96 (legacy timestamp) min/max are not decoded. Flat schemas only; nested groups (LIST/MAP/STRUCT children) are skipped from the column list.
 - ealog: severity keywords matched case-sensitively in upper-case form (`DEBUG/INFO/WARN/ERROR/FATAL`) bounded by `space/tab/newline/CR/[/]/"/:` only. Lowercase `info`/`warn` and embedded mentions inside JSON string payloads are intentionally not counted. Sample buffer caps at 5 lines; counts remain accurate past that.
-- eatime: ISO-8601 prefix `YYYY-MM-DDTHH:MM:SS` only. Other timestamp formats (syslog `May 11 10:54:00`, Unix epoch, RFC 2822, freeform) are intentionally out of scope for v1 — extending requires per-format kernels, not a flag. Hour 24+ is dropped on the Rust side; bogus dates whose digits validate but represent nonsense like `2026-13-99T...` are not range-checked beyond the hour. Buckets cap at 16M positions per call.
-- eadiff: matches by exact field/category name across the two inputs. v1 only diffs Number-kind fields and named categories; Text top-N overlap, Bool true/false breakdown, Timestamp range diffs, Mixed-kind fields are skipped. Asymmetric keys (present in one input but not the other) are skipped — distinguishing "shrank" from "disappeared" needs a different encoding.
+- eatime: ISO-8601 prefix `YYYY-MM-DDTHH:MM:SS` only. Other timestamp formats (syslog `May 11 10:54:00`, Unix epoch, RFC 2822, freeform) are intentionally out of scope — extending requires per-format kernels, not a flag. `--bucket hour` validates hour ≤ 23; `--bucket weekday` validates month 1-12 and day 1-31 but doesn't reject impossible dates like `2026-02-30T...` (Zeller produces a weekday anyway). Buckets cap at 16M positions per call.
+- eadiff: matches by exact field/category name across the two inputs. Number / Bool / Timestamp / Text fields all diffable; output uses naming conventions (`.true_delta`, `.false_delta`, `.unique_delta`) for the synthesized Number-kind delta fields. Asymmetric keys emit `[appeared] <name>` / `[disappeared] <name>` Mixed markers. Timestamp min/max range shift (needs ISO string parsing) and Text top-N rank overlap (needs richer encoding) are deferred to v0.9.3+.
 - `--json`: a `RuneOutput` reaching the LLM is wrapped in `<rune_output untrusted="true">...</rune_output>` like any other rune output; but for `--json` chaining the recipient is another rune, not the model — `eadiff` reads the unwrapped JSON directly from disk. If you pipe `--json` output into LLM context manually, the safety scan still runs and the wrapping is the right default.
 - Narration: the model gets a token budget of ~1248 prompt + 768 decode. Outputs over that skip narration with a clear notice — the kernel summary is shown either way.
 
