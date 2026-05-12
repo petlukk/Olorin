@@ -3,15 +3,22 @@
 //! the line count via a single SIMD pass, plus records byte offsets
 //! of the first N ERROR / FATAL matches so the rune can surface
 //! sample lines for the LLM to narrate.
+//!
+//! Output: the structured `RuneOutput` is built first from the kernel
+//! results, then either serialized to JSON (when `--json` is set) or
+//! rendered to the legacy human-readable text. Both paths share the
+//! same source of truth — the text and the JSON can never disagree.
 
 use super::{Rune, RuneResult, OutputSafety};
 use super::common::{resolve_path, open_capped, truncate_answer, PathError};
+use super::output::{Category, RuneOutput, Sample, Source, Totals};
 use crate::kernels::ffi;
 use std::path::PathBuf;
 use std::time::Instant;
 
 const MAX_HIGH_SEVERITY_SAMPLES: usize = 5;
 const SAMPLE_LINE_TRUNCATE: usize = 160;
+const RUNE_VERSION: i64 = 1;
 
 pub struct Ealog;
 pub const RUNE: Ealog = Ealog;
@@ -22,54 +29,84 @@ impl Rune for Ealog {
         "Summarize a log file via SIMD: per-severity counts \
          (DEBUG/INFO/WARN/ERROR/FATAL), total line count, and bytes \
          scanned. Word-bounded matching ignores compound identifiers \
-         like ERROR_HANDLER. Args: <path.log>."
+         like ERROR_HANDLER. Args: [--json] <path.log>."
     }
-    fn usage(&self) -> &'static str { "ealog <path.log>" }
+    fn usage(&self) -> &'static str { "ealog [--json] <path.log>" }
     fn output_safety(&self) -> OutputSafety { OutputSafety::UntrustedQuoted }
 
     fn run(&self, args: &str) -> RuneResult {
         let t0 = Instant::now();
-        let path = args.trim();
-        if path.is_empty() {
-            return refusal(t0, "usage: ealog <path.log>");
-        }
-        let home = crate::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
-        let resolved = match resolve_path(path, &home) {
-            Ok(p) => p,
-            Err(PathError::OutsideAllowlist) =>
-                return refusal(t0, "path rejected: outside allowlist (~ or /tmp only)"),
-            Err(PathError::NotFound) =>
-                return refusal(t0, "file not found"),
-            Err(PathError::TooLarge(n)) =>
-                return refusal(t0, &format!("file too large: {n} bytes")),
-            Err(PathError::Io(e)) =>
-                return refusal(t0, &format!("io error: {e}")),
+        let (path, json_mode) = parse_args(args);
+        let output = execute(&path);
+        let answer = if json_mode {
+            output.to_json()
+        } else if let Some(err) = &output.error {
+            err.clone()
+        } else {
+            format_text(&output)
         };
-        let bytes = match open_capped(&resolved, &home) {
-            Ok(b) => b,
-            Err(e) => return refusal(t0, &format!("open failed: {e:?}")),
-        };
-
-        let answer = scan_and_format(&bytes);
         RuneResult {
-            answer: truncate_answer(&answer),
-            details: None,
-            success: true,
+            answer:    truncate_answer(&answer),
+            details:   None,
+            success:   output.success,
             timing_us: t0.elapsed().as_micros() as u64,
         }
     }
 }
 
-fn refusal(t0: Instant, msg: &str) -> RuneResult {
-    RuneResult {
-        answer: msg.to_string(),
-        details: None,
-        success: false,
-        timing_us: t0.elapsed().as_micros() as u64,
+fn parse_args(args: &str) -> (String, bool) {
+    let trimmed = args.trim();
+    if let Some(rest) = trimmed.strip_prefix("--json ") {
+        (rest.trim().to_string(), true)
+    } else if let Some(rest) = trimmed.strip_suffix(" --json") {
+        (rest.trim().to_string(), true)
+    } else if trimmed == "--json" {
+        (String::new(), true)
+    } else {
+        (trimmed.to_string(), false)
     }
 }
 
-fn scan_and_format(bytes: &[u8]) -> String {
+fn execute(path: &str) -> RuneOutput {
+    if path.is_empty() {
+        return error_output("usage: ealog [--json] <path.log>");
+    }
+    let home = crate::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
+    let resolved = match resolve_path(path, &home) {
+        Ok(p) => p,
+        Err(PathError::OutsideAllowlist) =>
+            return error_output("path rejected: outside allowlist (~ or /tmp only)"),
+        Err(PathError::NotFound) =>
+            return error_output("file not found"),
+        Err(PathError::TooLarge(n)) =>
+            return error_output(&format!("file too large: {n} bytes")),
+        Err(PathError::Io(e)) =>
+            return error_output(&format!("io error: {e}")),
+    };
+    let bytes = match open_capped(&resolved, &home) {
+        Ok(b) => b,
+        Err(PathError::NotFound) =>
+            return error_output("file not found"),
+        Err(PathError::TooLarge(n)) =>
+            return error_output(&format!("file too large: {n} bytes")),
+        Err(PathError::OutsideAllowlist) =>
+            return error_output("path rejected: outside allowlist (~ or /tmp only)"),
+        Err(PathError::Io(e)) =>
+            return error_output(&format!("io error: {e}")),
+    };
+
+    let resolved_str = resolved.to_string_lossy().into_owned();
+    build_output(&bytes, resolved_str)
+}
+
+fn error_output(msg: &str) -> RuneOutput {
+    let mut out = RuneOutput::new("ealog", RUNE_VERSION);
+    out.success = false;
+    out.error = Some(msg.to_string());
+    out
+}
+
+fn build_output(bytes: &[u8], path: String) -> RuneOutput {
     let t_scan = Instant::now();
     let mut counts = [0i32; 6];
     let mut positions = [0i32; MAX_HIGH_SEVERITY_SAMPLES];
@@ -83,50 +120,71 @@ fn scan_and_format(bytes: &[u8]) -> String {
             scratch.as_mut_ptr(),
         );
     }
-    let scan_us = t_scan.elapsed().as_micros();
+    let scan_us = t_scan.elapsed().as_micros() as u64;
 
-    let [c_debug, c_info, c_warn, c_error, c_fatal, c_nl] =
-        [counts[0] as u64, counts[1] as u64, counts[2] as u64,
-         counts[3] as u64, counts[4] as u64, counts[5] as u64];
-
-    // Newlines in the buffer = complete-line count. If the file does not
-    // end in a newline, the trailing partial line bumps the count by one.
+    let [c_debug, c_info, c_warn, c_error, c_fatal, c_nl] = [
+        counts[0] as u64, counts[1] as u64, counts[2] as u64,
+        counts[3] as u64, counts[4] as u64, counts[5] as u64,
+    ];
+    // Trailing partial line (no terminating newline) bumps the count.
     let lines = if !bytes.is_empty() && *bytes.last().unwrap() != b'\n' {
         c_nl + 1
     } else {
         c_nl
     };
 
-    let total = c_debug + c_info + c_warn + c_error + c_fatal;
-    let format = detect_format(bytes);
-
-    let mut out = String::with_capacity(512);
-    out.push_str(&format!("bytes:   {}\n", format_bytes(bytes.len())));
-    out.push_str(&format!("lines:   {lines}\n"));
-    out.push_str(&format!("format:  {format}\n"));
-    out.push_str(&format!("scan:    {} ms\n", scan_us / 1000));
-    out.push('\n');
-    out.push_str("severity:\n");
-    out.push_str(&fmt_level("DEBUG", c_debug, total));
-    out.push_str(&fmt_level("INFO",  c_info,  total));
-    out.push_str(&fmt_level("WARN",  c_warn,  total));
-    out.push_str(&fmt_level("ERROR", c_error, total));
-    out.push_str(&fmt_level("FATAL", c_fatal, total));
-    if total == 0 {
-        out.push_str("  (no severity keywords found — file may not be a log)\n");
-    }
-
-    let sample_count = n_pos as usize;
-    if sample_count > 0 {
-        out.push('\n');
-        out.push_str("high-severity sample:\n");
-        for &offset in &positions[..sample_count] {
-            let (line_num, line) = extract_line_at(bytes, offset as usize);
-            let display = truncate_line(line);
-            out.push_str(&format!("  L{line_num}: {display}\n"));
-        }
+    let mut out = RuneOutput::new("ealog", RUNE_VERSION);
+    out.source = Some(Source {
+        path,
+        bytes:  bytes.len() as u64,
+        format: detect_format(bytes).to_string(),
+    });
+    out.totals = Totals { rows: lines, scan_us };
+    out.categories = vec![
+        Category { name: "DEBUG".to_string(), count: c_debug },
+        Category { name: "INFO".to_string(),  count: c_info },
+        Category { name: "WARN".to_string(),  count: c_warn },
+        Category { name: "ERROR".to_string(), count: c_error },
+        Category { name: "FATAL".to_string(), count: c_fatal },
+    ];
+    for &offset in &positions[..n_pos as usize] {
+        let (line_num, line) = extract_line_at(bytes, offset as usize);
+        out.samples.push(Sample {
+            byte_offset: Some(offset as u64),
+            line:        Some(line_num as u64),
+            timestamp:   None,
+            text:        truncate_line(line),
+        });
     }
     out
+}
+
+fn format_text(out: &RuneOutput) -> String {
+    let src = out.source.as_ref().expect("build_output populates source on success");
+    let total: u64 = out.categories.iter().map(|c| c.count).sum();
+
+    let mut buf = String::with_capacity(512);
+    buf.push_str(&format!("bytes:   {}\n", format_bytes(src.bytes as usize)));
+    buf.push_str(&format!("lines:   {}\n", out.totals.rows));
+    buf.push_str(&format!("format:  {}\n", src.format));
+    buf.push_str(&format!("scan:    {} ms\n", out.totals.scan_us / 1000));
+    buf.push('\n');
+    buf.push_str("severity:\n");
+    for c in &out.categories {
+        buf.push_str(&fmt_level(&c.name, c.count, total));
+    }
+    if total == 0 {
+        buf.push_str("  (no severity keywords found — file may not be a log)\n");
+    }
+    if !out.samples.is_empty() {
+        buf.push('\n');
+        buf.push_str("high-severity sample:\n");
+        for s in &out.samples {
+            let line = s.line.unwrap_or(0);
+            buf.push_str(&format!("  L{line}: {}\n", s.text));
+        }
+    }
+    buf
 }
 
 fn extract_line_at(bytes: &[u8], offset: usize) -> (usize, &[u8]) {
