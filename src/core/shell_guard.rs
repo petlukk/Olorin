@@ -37,6 +37,19 @@ impl ShellGuard {
 
     /// Returns Ok(()) if allowed, Err(reason) if blocked.
     pub fn check(&self, command: &str) -> Result<(), String> {
+        // Path-textual deny — fires regardless of policy mode (even Open).
+        // The destructive-command classifier lets `cat` through because cat
+        // is read-only by its model; but `cat ~/.olorin/vault.bin` exfiltrates
+        // the user's encrypted vault to the attacker. The path_guard pattern
+        // can't be reused directly because the shell command may contain
+        // multiple paths embedded in flags, redirections, pipes, etc. —
+        // we conservatively textual-match the sensitive substrings instead.
+        if let Some(label) = contains_sensitive_path(command) {
+            return Err(format!(
+                "blocked: command references sensitive path ({label}). \
+                 shell tool refuses these in every policy mode."
+            ));
+        }
         if self.policy == ShellPolicy::Open {
             return Ok(());
         }
@@ -57,6 +70,38 @@ impl ShellGuard {
     pub fn classify(&self, command: &str) -> CommandRisk {
         classify(command)
     }
+}
+
+/// Substrings that disqualify any shell command from running, no matter
+/// the policy mode. Mirrors `core/path_guard.rs::SENSITIVE_RELATIVE` +
+/// SENSITIVE_ABSOLUTE but textual — applied to the literal command
+/// string the tool receives. False positives on innocent echoes are
+/// tolerable; the LLM has no reason to mention these paths during
+/// legitimate work.
+const SHELL_FORBIDDEN_PATHS: &[(&str, &str)] = &[
+    (".olorin/",          "Olorin vault directory"),
+    (".ssh/",             "SSH keys"),
+    (".aws/credentials",  "AWS credentials"),
+    (".aws/config",       "AWS config"),
+    (".gnupg/",           "GPG keys"),
+    (".config/anthropic", "Anthropic API config"),
+    (".config/openai",    "OpenAI API config"),
+    (".bashrc",           "shell rc file"),
+    (".zshrc",            "shell rc file"),
+    (".profile",          "shell profile"),
+    (".bash_history",     "shell history"),
+    (".zsh_history",      "shell history"),
+    ("/etc/shadow",       "system password file"),
+    ("/etc/sudoers",      "sudo config"),
+];
+
+fn contains_sensitive_path(cmd: &str) -> Option<&'static str> {
+    for &(needle, label) in SHELL_FORBIDDEN_PATHS {
+        if cmd.contains(needle) {
+            return Some(label);
+        }
+    }
+    None
 }
 
 const ALLOW_COMMANDS: &[&str] = &[
