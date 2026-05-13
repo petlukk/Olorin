@@ -17,10 +17,13 @@ fn find_field<'a>(out: &'a RuneOutput, name: &str) -> &'a FieldStats {
 }
 
 fn stage_fixture() -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
     let src = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/runes/tiny.parquet");
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
     let dst = std::env::temp_dir().join(format!(
-        "olorin_eaparquet_json_{}.parquet", std::process::id()
+        "olorin_eaparquet_json_{}_{n}.parquet", std::process::id()
     ));
     std::fs::copy(&src, &dst).expect("copy fixture to /tmp");
     dst
