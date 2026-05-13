@@ -1,0 +1,7 @@
+2026-05-11 INFO: starting
+2026-05-11 DEBUG: loaded config
+2026-05-11 WARN: cache miss
+2026-05-11 ERROR: connection reset by peer
+2026-05-11 INFO: retrying
+2026-05-11 ERROR: auth failed user=anonymous
+2026-05-11 FATAL: aborting after 3 failures
