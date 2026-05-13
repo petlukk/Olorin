@@ -3,6 +3,8 @@
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
+use super::output::RuneOutput;
+
 /// Soft cap for any rune input. Per spec section "Resource Limits".
 pub const MAX_INPUT_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
@@ -97,12 +99,45 @@ pub fn open_capped(path: &Path, home: &Path) -> Result<Vec<u8>, PathError> {
 /// Truncate a summary string to `MAX_ANSWER_BYTES`, appending a marker.
 /// Walks the cut point back to the nearest valid UTF-8 char boundary so
 /// multi-byte characters (e.g. Swedish letters, emoji) never cause a panic.
+///
+/// When the input is a `RuneOutput` JSON (detected by leading sentinel),
+/// byte-slicing would cut mid-string and leave unterminated JSON. In
+/// that case, emit a structured error `RuneOutput` so downstream
+/// `eadiff` / `from_json` parsers still see a valid record.
 pub fn truncate_answer(s: &str) -> String {
     if s.len() <= MAX_ANSWER_BYTES {
         return s.to_string();
+    }
+    if s.starts_with("{\"schema_version\":") {
+        return oversize_rune_error_json(s);
     }
     let cut = MAX_ANSWER_BYTES - 32;
     let cut = (0..=cut).rev().find(|&i| s.is_char_boundary(i)).unwrap_or(0);
     let dropped = s.len() - cut;
     format!("{} [...truncated {dropped} bytes]", &s[..cut])
+}
+
+/// Build a minimal failure `RuneOutput` carrying the original rune name
+/// and a size-cap error. Used when a real rune output overruns the
+/// answer cap; serializing this preserves the JSONL contract.
+fn oversize_rune_error_json(original: &str) -> String {
+    let rune = extract_rune_field(original).unwrap_or("unknown");
+    let mut out = RuneOutput::new(rune, 1);
+    out.success = false;
+    out.error = Some(format!(
+        "output exceeded {MAX_ANSWER_BYTES} bytes (was {} bytes)",
+        original.len(),
+    ));
+    out.to_json()
+}
+
+/// Pull the `"rune":"<name>"` value out of a `RuneOutput` JSON's
+/// prefix. Returns `None` if the field isn't present in the first KB.
+fn extract_rune_field(json: &str) -> Option<&str> {
+    let probe = &json[..json.len().min(1024)];
+    let key = "\"rune\":\"";
+    let start = probe.find(key)? + key.len();
+    let rest = &probe[start..];
+    let end = rest.find('"')?;
+    Some(&rest[..end])
 }
