@@ -32,7 +32,7 @@ fn run(key_hex: &str, msg: &[u8], expected_hex: &str) {
     );
 }
 
-// The IETF contribution text used in test vectors #2 and #3 (368 bytes).
+// The IETF contribution text used in test vectors #2 and #3 (375 bytes).
 // Source: RFC 8439 §A.3, verbatim hex from the RFC listing.
 static IETF_MSG: &[u8] = &[
     0x41, 0x6e, 0x79, 0x20, 0x73, 0x75, 0x62, 0x6d, 0x69, 0x73, 0x73, 0x69, 0x6f, 0x6e, 0x20, 0x74,
@@ -178,8 +178,8 @@ fn vector_07_three_blocks_r1() {
 
 // ---------------------------------------------------------------------------
 // RFC 8439 §A.3 — Test Vector #8
-// r=1, s=0, 48-byte message. Accumulator exactly equals p before final
-// reduction — result should be 0.
+// r=1, s=0, 48-byte message. After three blocks the accumulator mod p
+// equals 2^128; the lower 128 bits are zero, so the tag is 0.
 // ---------------------------------------------------------------------------
 #[test]
 fn vector_08_acc_equals_p() {
