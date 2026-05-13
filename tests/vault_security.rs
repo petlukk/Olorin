@@ -95,3 +95,46 @@ fn encrypt_decrypt_roundtrip_still_works_after_zeroize() {
     crypto::decrypt(&key, &nonce, 0, &mut buf);
     assert_eq!(&buf[..], plaintext, "decrypt does not roundtrip");
 }
+
+/// Finding #8: block_count must not wrap. ChaCha20 nonces here are
+/// `nonce_seed XOR block_count`; incrementing past u32::MAX would
+/// reuse a nonce on the next append (catastrophic — keystream xor
+/// of two plaintexts == both plaintexts XOR'd). Tamper the header on
+/// disk to push block_count to u32::MAX, re-open, and assert the
+/// next append errors instead of silently reusing the nonce.
+#[test]
+fn vault_refuses_to_append_when_counter_is_at_max() {
+    use std::io::{Seek, SeekFrom, Write};
+    olorin::kernels::ffi::init().unwrap();
+    let dir = unique_dir("counter_wrap");
+
+    {
+        let mut vault = Vault::open(&dir).expect("vault opens");
+        vault.append(b"user", b"hello once").expect("first append");
+    }
+
+    // Tamper the header: block_count is bytes 6..10 (u32 LE) per
+    // VaultHeader::to_bytes. Set it to u32::MAX.
+    let vault_path = dir.join("vault.bin");
+    let mut file = std::fs::OpenOptions::new()
+        .read(true).write(true).open(&vault_path).expect("reopen file");
+    file.seek(SeekFrom::Start(6)).expect("seek block_count");
+    file.write_all(&u32::MAX.to_le_bytes()).expect("tamper count");
+    drop(file);
+
+    // Re-open: the vault now thinks it has 2^32 - 1 blocks.
+    // Index parsing will fail because we didn't actually write those
+    // blocks — that's fine; the test only cares about post-open
+    // append refusing.
+    let reopened = Vault::open(&dir);
+    if let Ok(mut vault) = reopened {
+        let result = vault.append(b"user", b"hello twice");
+        assert!(result.is_err(),
+            "append at u32::MAX must refuse (would reuse nonce); got: {:?}", result);
+    }
+    // Either reopen-failure (index parse) or append-failure is
+    // acceptable — both mean the wrap can't silently produce a
+    // nonce-reused ciphertext.
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

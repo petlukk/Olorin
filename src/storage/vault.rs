@@ -10,10 +10,10 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::{Error, Result};
-use crate::kernels::ffi;
 use crate::storage::crypto;
 use crate::storage::key;
 use crate::storage::search::FusedSearcher;
+use crate::storage::secure::SecureBuffer;
 
 // ── Format constants ──────────────────────────────────────────────────────────
 
@@ -137,9 +137,20 @@ pub struct Vault {
     file: File,
     header: VaultHeader,
     index: Vec<IndexEntry>,
-    key: [u8; 32],
+    /// Encryption key in mlock'd + SIMD-zeroize-on-Drop memory. Backed
+    /// by `SecureBuffer` so the key never reaches the swap file and is
+    /// wiped on clean shutdown. Size is always 32 bytes.
+    key: SecureBuffer,
     nonce_seed: [u8; 12],
     searcher: FusedSearcher,
+}
+
+/// Pull the 32-byte key array out of the SecureBuffer for the crypto
+/// API. Safe — the buffer is initialized to 32 bytes at construction.
+fn key_array(buf: &SecureBuffer) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    out.copy_from_slice(buf.as_slice());
+    out
 }
 
 impl Vault {
@@ -156,12 +167,12 @@ impl Vault {
         }
     }
 
-    fn create_new(path: &Path, key: [u8; 32]) -> Result<Self> {
+    fn create_new(path: &Path, key_bytes: [u8; 32]) -> Result<Self> {
         let key_id = {
-            let h = key::xxhash64(&key, 0);
+            let h = key::xxhash64(&key_bytes, 0);
             let mut id = [0u8; 16];
             id[..8].copy_from_slice(&h.to_le_bytes());
-            id[8..16].copy_from_slice(&key::xxhash64(&key, h).to_le_bytes());
+            id[8..16].copy_from_slice(&key::xxhash64(&key_bytes, h).to_le_bytes());
             id
         };
         // nonce_seed must be unique per (key, vault) so ChaCha20 nonces
@@ -181,14 +192,28 @@ impl Vault {
             .open(path)?;
         file.write_all(&header.to_bytes())?;
         file.flush()?;
+        let mut key = SecureBuffer::new(32);
+        key.write(&key_bytes);
         Ok(Self { file, header, index: Vec::new(), key, nonce_seed, searcher: FusedSearcher::new() })
     }
 
-    fn open_existing(path: &Path, key: [u8; 32]) -> Result<Self> {
+    fn open_existing(path: &Path, key_bytes: [u8; 32]) -> Result<Self> {
         let mut file = OpenOptions::new().read(true).write(true).open(path)?;
+        let file_size = file.metadata()?.len();
         let mut hdr_buf = [0u8; HEADER_SIZE];
         file.read_exact(&mut hdr_buf)?;
         let header = VaultHeader::from_bytes(&hdr_buf)?;
+
+        // Sanity-check block_count against actual file size. A tampered
+        // or corrupted header claiming u32::MAX blocks would otherwise
+        // make Vec::with_capacity attempt a multi-terabyte allocation
+        // and abort the process — a DoS vector via vault.bin tampering.
+        let entries_region = file_size.saturating_sub(header.index_offset);
+        let max_entries = (entries_region / INDEX_ENTRY_SIZE as u64) as usize;
+        if header.block_count as usize > max_entries {
+            return Err(Error::Vault("vault header block_count exceeds file size"));
+        }
+
         let nonce_seed = header.nonce_seed;
         let mut index = Vec::with_capacity(header.block_count as usize);
         file.seek(SeekFrom::Start(header.index_offset))?;
@@ -197,6 +222,8 @@ impl Vault {
             file.read_exact(&mut entry_buf)?;
             index.push(IndexEntry::from_bytes(&entry_buf));
         }
+        let mut key = SecureBuffer::new(32);
+        key.write(&key_bytes);
         Ok(Self { file, header, index, key, nonce_seed, searcher: FusedSearcher::new() })
     }
 
@@ -212,13 +239,26 @@ impl Vault {
     }
 
     fn flush_block(&mut self, plaintext: &[u8]) -> Result<()> {
+        // Counter-wrap guard. ChaCha20 nonces here are
+        // `nonce_seed XOR block_count`; if the counter ever reached
+        // u32::MAX and incremented, the next append would reuse a
+        // nonce (catastrophic for ChaCha20). At one append per second
+        // this needs ~136 years to fire — the guard is defense against
+        // pathological callers or future bugs, not realistic exhaustion.
+        if self.header.block_count == u32::MAX {
+            return Err(Error::Vault(
+                "vault block counter exhausted (2^32) — refuse to reuse nonce",
+            ));
+        }
+
         let histogram = key::compute_histogram(plaintext);
         let hash = key::xxhash64(plaintext, 0);
         let nonce_counter = self.header.block_count;
         let nonce = derive_nonce(&self.nonce_seed, nonce_counter);
 
+        let key_bytes = key_array(&self.key);
         let mut ciphertext = plaintext.to_vec();
-        crypto::encrypt(&self.key, &nonce, 0, &mut ciphertext);
+        crypto::encrypt(&key_bytes, &nonce, 0, &mut ciphertext);
 
         let block_offset = self.header.index_offset;
         self.file.seek(SeekFrom::Start(block_offset))?;
@@ -256,7 +296,8 @@ impl Vault {
         self.file.read_exact(&mut ciphertext)?;
 
         let nonce = derive_nonce(&self.nonce_seed, nonce_counter);
-        crypto::decrypt(&self.key, &nonce, 0, &mut ciphertext);
+        let key_bytes = key_array(&self.key);
+        crypto::decrypt(&key_bytes, &nonce, 0, &mut ciphertext);
 
         let actual_hash = key::xxhash64(&ciphertext, 0);
         if actual_hash != expected_hash {
@@ -285,8 +326,11 @@ impl Vault {
         Ok((ciphertext, nonce))
     }
 
-    /// Get the vault encryption key (for fused search).
-    pub(crate) fn key(&self) -> &[u8; 32] { &self.key }
+    /// Get a copy of the vault encryption key (for fused search).
+    /// Returns by value rather than by reference because the underlying
+    /// storage is a SecureBuffer; callers were already copying out via
+    /// `let key_copy = *self.key()`.
+    pub(crate) fn key(&self) -> [u8; 32] { key_array(&self.key) }
 
     /// How many blocks are in the vault.
     pub fn block_count(&self) -> u32 { self.header.block_count }
@@ -322,7 +366,7 @@ impl Vault {
         scored.retain(|(_, s)| *s > 0.01);
 
         let needles: Vec<&[u8]> = query.split_whitespace().map(|w| w.as_bytes()).collect();
-        let key_copy = *self.key();
+        let key_copy = self.key();
         let mut results = Vec::with_capacity(scored.len());
 
         for (block_idx, score) in scored {
@@ -371,10 +415,7 @@ pub struct SearchResult {
     pub lines: Vec<String>,
 }
 
-impl Drop for Vault {
-    fn drop(&mut self) {
-        unsafe {
-            ffi::zeroize(self.key.as_mut_ptr(), 32);
-        }
-    }
-}
+// Drop impl is no longer needed: SecureBuffer's own Drop handles
+// SIMD-zeroization and page-unlock for `self.key`. Removing it
+// avoids a double-zero pass (harmless but wasteful).
+
