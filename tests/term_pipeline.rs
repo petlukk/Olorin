@@ -21,12 +21,29 @@ fn ansi_color_in_pipeline() {
     olorin::kernels::ffi::init().unwrap();
 
     let mut session = PtySession::new(80, 24).expect("failed to open PTY");
+
+    // Wait for the shell to actually start before sending the command.
+    // Under heavy parallel test load, /bin/bash --login can take a long
+    // time to reach the prompt, and bytes written before the shell wires
+    // stdin can be lost — that was the flake. Poll for any output as
+    // proof the shell came up.
+    let ready_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut shell_ready = false;
+    while std::time::Instant::now() < ready_deadline {
+        let dirty = session.read_and_apply();
+        if dirty.iter().any(|&d| d != 0) {
+            shell_ready = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(shell_ready, "shell produced no output within 5s — PTY startup failed");
+
     session.write_bytes(b"printf '\\033[31mRED\\033[0m'\n");
 
-    // /bin/bash --login on WSL can take >300ms to reach the prompt.
-    // Poll instead of a fixed sleep: read + scan the grid until 'RED'
-    // appears colored, or 2s elapses.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(2000);
+    // Now poll for the colored 'RED' to appear. 5s deadline (was 2s) —
+    // under heavy load the previous cap was the second source of flakes.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     let mut found_colored = false;
     while std::time::Instant::now() < deadline {
         let _ = session.read_and_apply();
@@ -47,7 +64,7 @@ fn ansi_color_in_pipeline() {
         if found_colored { break; }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    assert!(found_colored, "Expected colored 'RED' text in grid");
+    assert!(found_colored, "Expected colored 'RED' text in grid within 5s");
 }
 
 #[test]
