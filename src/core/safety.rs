@@ -98,6 +98,14 @@ pub fn scan(input: &[u8]) -> ScanResult {
 /// Outbound safety scan — only checks for secret leaks.
 /// Injection patterns are expected in LLM output (ChatML headers etc.)
 /// and must NOT trigger blocking.
+///
+/// Two checks run:
+/// 1. Commercial-credential leak detection via the fused SIMD kernel
+///    + tail-scan (sk-ant-api, AKIA, ghp_, etc.).
+/// 2. Olorin-specific scalar full-scan for `OLRN` vault magic and the
+///    literal `.olorin/` path string. These start with characters the
+///    SIMD kernel doesn't flag as candidates, so a scalar pass is
+///    needed; cost is negligible at outbound-response sizes.
 pub fn scan_outbound(input: &[u8]) -> ScanResult {
     if input.is_empty() {
         return ScanResult { blocked: false, has_leak: false, details: Vec::new() };
@@ -136,6 +144,19 @@ pub fn scan_outbound(input: &[u8]) -> ScanResult {
         }
     }
 
+    // Olorin-specific scalar pass — outbound only, not used by scan().
+    // We never want to block a user's inbound reference to their own
+    // vault, but the agent must not emit either pattern.
+    for &(needle, desc) in OUTBOUND_ONLY_LEAKS {
+        if let Some(pos) = find_needle(input, needle) {
+            details.push(SafetyWarning {
+                kind: WarningKind::SecretLeak,
+                pattern: desc,
+                position: pos,
+            });
+        }
+    }
+
     let has_leak = !details.is_empty();
 
     ScanResult {
@@ -143,6 +164,25 @@ pub fn scan_outbound(input: &[u8]) -> ScanResult {
         has_leak,
         details,
     }
+}
+
+/// Olorin-specific outbound leak patterns. Not in `LEAK_PATTERNS`
+/// because `scan()` (inbound) shouldn't block users who reference
+/// their own vault.
+const OUTBOUND_ONLY_LEAKS: &[(&[u8], &'static str)] = &[
+    (b"OLRN",     "Olorin vault magic"),
+    (b".olorin/", "Olorin internal path"),
+];
+
+/// Naive substring search. Outbound scan runs once per LLM response,
+/// so the cost is bounded by response size (~32 KB cap). No need for
+/// a SIMD path here.
+fn find_needle(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return None;
+    }
+    (0..=haystack.len() - needle.len())
+        .find(|&i| &haystack[i..i + needle.len()] == needle)
 }
 
 // ── Injection patterns ────────────────────────────────────────────────────────

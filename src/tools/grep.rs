@@ -1,12 +1,10 @@
 use super::ToolResult;
+use crate::core::path_guard::{resolve_safe_path, AccessMode};
 
 const MAX_OUTPUT: usize = 32 * 1024;
 
 pub fn run(args: &str) -> ToolResult {
-    // Parse: [flags] pattern [path]
-    // Simple format: "pattern" or "pattern /path" or "-i pattern /path"
-    let parts: Vec<&str> = args.splitn(3, ' ').collect();
-    if parts.is_empty() || args.trim().is_empty() {
+    if args.trim().is_empty() {
         return ToolResult {
             output: "usage: grep [-i] <pattern> [path]".to_string(),
             success: false,
@@ -16,24 +14,28 @@ pub fn run(args: &str) -> ToolResult {
     let mut argv: Vec<&str> = vec!["grep", "-rn", "--color=never", "--max-count=200"];
     let mut remaining = args.trim();
 
-    // Check for -i flag
     if remaining.starts_with("-i ") {
         argv.push("-i");
         remaining = remaining[3..].trim();
     }
 
-    // Split on first space: pattern path
-    let (pattern, path) = if let Some(pos) = remaining.find(' ') {
+    let (pattern, raw_path) = if let Some(pos) = remaining.find(' ') {
         (&remaining[..pos], remaining[pos + 1..].trim())
     } else {
         (remaining, ".")
     };
 
-    let path = if path.is_empty() { "." } else { path };
+    let raw_path = if raw_path.is_empty() { "." } else { raw_path };
+
+    let resolved = match resolve_safe_path(raw_path, AccessMode::Read) {
+        Ok(p) => p,
+        Err(e) => return ToolResult { output: e.refusal_message(), success: false },
+    };
+    let path_str = resolved.to_string_lossy().into_owned();
 
     argv.push("--");
     argv.push(pattern);
-    argv.push(path);
+    argv.push(&path_str);
 
     let output = std::process::Command::new(argv[0])
         .args(&argv[1..])

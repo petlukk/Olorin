@@ -1,4 +1,5 @@
 use super::ToolResult;
+use crate::core::path_guard::{resolve_safe_path, AccessMode};
 
 pub fn run(args: &str) -> ToolResult {
     let path = args.trim();
@@ -6,12 +7,19 @@ pub fn run(args: &str) -> ToolResult {
         return ToolResult { output: "usage: read <path>".to_string(), success: false };
     }
 
-    match std::fs::read_to_string(path) {
+    let resolved = match resolve_safe_path(path, AccessMode::Read) {
+        Ok(p) => p,
+        Err(e) => return ToolResult { output: e.refusal_message(), success: false },
+    };
+
+    match std::fs::read_to_string(&resolved) {
         Ok(content) => {
             let max_len = 64 * 1024;
             if content.len() > max_len {
+                let mut end = max_len;
+                while end > 0 && !content.is_char_boundary(end) { end -= 1; }
                 ToolResult {
-                    output: format!("{}... (truncated, {} bytes total)", { let mut end = max_len; while end > 0 && !content.is_char_boundary(end) { end -= 1; } &content[..end] }, content.len()),
+                    output: format!("{}... (truncated, {} bytes total)", &content[..end], content.len()),
                     success: true,
                 }
             } else {

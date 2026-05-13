@@ -97,7 +97,7 @@ pub fn dispatch_tool_call(name: &str, input: &crate::storage::json::Object) -> R
         if scan.blocked {
             return Err("tool output blocked by safety scan".to_string());
         }
-        return Ok(tool_result.output);
+        return Ok(wrap_tool_output(&tool_result.output));
     }
 
     // 2) Runes path.
@@ -118,6 +118,18 @@ pub fn dispatch_tool_call(name: &str, input: &crate::storage::json::Object) -> R
 
     // 3) Unknown name.
     Err(format!("unknown tool or rune: {name}"))
+}
+
+/// Wrap a tool's plain output in the `<tool_output untrusted="true">`
+/// envelope before feeding it back to the LLM. Mirrors the rune
+/// pattern (`OutputSafety::UntrustedQuoted` → `<rune_output>` wrap)
+/// so the model treats file-derived bytes as data, not instructions.
+///
+/// Re-uses the same untrusted-marker convention documented in the
+/// system prompt; a separate tag distinguishes the source (rune vs.
+/// tool) without weakening the data-vs-instructions signal.
+pub fn wrap_tool_output(output: &str) -> String {
+    format!("<tool_output untrusted=\"true\">{output}</tool_output>")
 }
 
 // ── Timing ───────────────────────────────────────────────────────────────────

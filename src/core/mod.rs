@@ -5,6 +5,7 @@ mod router_config;
 pub mod session;
 pub mod safety;
 pub mod shell_guard;
+pub mod path_guard;
 pub mod anthropic;
 pub mod dispatch;
 pub mod handlers;

@@ -1,11 +1,17 @@
 use super::ToolResult;
+use crate::core::path_guard::{resolve_safe_path, AccessMode};
 
 pub fn run(args: &str) -> ToolResult {
-    let path = if args.trim().is_empty() { "." } else { args.trim() };
+    let raw = if args.trim().is_empty() { "." } else { args.trim() };
 
-    let dir = match std::fs::read_dir(path) {
+    let resolved = match resolve_safe_path(raw, AccessMode::Read) {
+        Ok(p) => p,
+        Err(e) => return ToolResult { output: e.refusal_message(), success: false },
+    };
+
+    let dir = match std::fs::read_dir(&resolved) {
         Ok(d) => d,
-        Err(e) => return ToolResult { output: format!("{path}: {e}"), success: false },
+        Err(e) => return ToolResult { output: format!("{raw}: {e}"), success: false },
     };
 
     let mut entries = Vec::new();
@@ -29,8 +35,8 @@ pub fn run(args: &str) -> ToolResult {
     entries.sort();
 
     if entries.is_empty() {
-        ToolResult { output: format!("{path}: empty directory"), success: true }
+        ToolResult { output: format!("{raw}: empty directory"), success: true }
     } else {
-        ToolResult { output: format!("{path}:\n{}", entries.join("\n")), success: true }
+        ToolResult { output: format!("{raw}:\n{}", entries.join("\n")), success: true }
     }
 }
