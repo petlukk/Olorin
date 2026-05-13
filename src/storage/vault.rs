@@ -147,7 +147,7 @@ impl Vault {
     pub fn open(dir: &Path) -> Result<Self> {
         std::fs::create_dir_all(dir)?;
         let path = dir.join("vault.bin");
-        let key = key::derive_key();
+        let key = key::derive_key().map_err(Error::Vault)?;
 
         if path.exists() {
             Self::open_existing(&path, key)
@@ -164,11 +164,15 @@ impl Vault {
             id[8..16].copy_from_slice(&key::xxhash64(&key, h).to_le_bytes());
             id
         };
+        // nonce_seed must be unique per (key, vault) so ChaCha20 nonces
+        // don't collide. Use nanosecond precision rather than mixing in
+        // key bytes: storing key[..4] here would write the first four
+        // bytes of the vault key directly into the cleartext file header.
         let nonce_seed = {
-            let t = now_epoch();
+            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
             let mut seed = [0u8; 12];
-            seed[..8].copy_from_slice(&t.to_le_bytes());
-            seed[8..12].copy_from_slice(&key[..4]);
+            seed[..8].copy_from_slice(&now.as_secs().to_le_bytes());
+            seed[8..12].copy_from_slice(&now.subsec_nanos().to_le_bytes());
             seed
         };
         let header = VaultHeader::new(key_id, nonce_seed);

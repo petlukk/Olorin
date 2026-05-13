@@ -24,10 +24,14 @@ const OBFUSCATED_SEED: [u8; 32] = {
     out
 };
 
-/// Read hardware identifier for key binding.
-fn hardware_id() -> [u8; 32] {
+/// Read hardware identifier for key binding. Returns `Err` when no
+/// platform source is available — refusing to derive a key from a
+/// universal constant fallback (which would silently produce the same
+/// key on every host without a machine identifier, e.g. some sandboxed
+/// or fresh-container environments).
+fn hardware_id() -> Result<[u8; 32], &'static str> {
     let raw = crate::platform::hwid::machine_id()
-        .unwrap_or_else(|| "olorin-fallback-id".to_string());
+        .ok_or("no platform machine identifier available")?;
     let mut id = [0u8; 32];
     let bytes = raw.trim().as_bytes();
     for (i, &b) in bytes.iter().enumerate() {
@@ -36,17 +40,19 @@ fn hardware_id() -> [u8; 32] {
     for i in 1..32 {
         id[i] ^= id[i - 1].wrapping_mul(31);
     }
-    id
+    Ok(id)
 }
 
 /// Derive the vault key: `OBFUSCATED_SEED ^ COMPILE_MASK ^ hardware_id()` = `seed ^ hw`.
-pub fn derive_key() -> [u8; 32] {
-    let hw = hardware_id();
+/// Errors when no machine identifier is available, refusing to fall
+/// back to a universal constant.
+pub fn derive_key() -> Result<[u8; 32], &'static str> {
+    let hw = hardware_id()?;
     let mut key = [0u8; 32];
     for i in 0..32 {
         key[i] = OBFUSCATED_SEED[i] ^ COMPILE_MASK[i] ^ hw[i];
     }
-    key
+    Ok(key)
 }
 
 pub fn compute_histogram(data: &[u8]) -> [u8; 256] {
