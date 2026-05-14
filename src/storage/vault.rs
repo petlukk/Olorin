@@ -250,6 +250,70 @@ fn build_block_aad(
     aad
 }
 
+/// Decrypt every v1 block off disk and verify each block's xxhash tag.
+/// Used only by [`Vault::migrate_v1_to_v2`].  Returns the plaintexts in
+/// on-disk order — the caller re-emits them as v2 AEAD blocks.
+fn read_all_v1_plaintexts(path: &Path, key_bytes: &[u8; 32]) -> Result<Vec<Vec<u8>>> {
+    const V1_HEADER_SIZE: usize = 64;
+    const V1_INDEX_ENTRY_SIZE: usize = 288;
+
+    let mut file = OpenOptions::new().read(true).open(path)?;
+    let file_size = file.metadata()?.len();
+
+    let mut hdr = [0u8; V1_HEADER_SIZE];
+    file.read_exact(&mut hdr)?;
+    if hdr[0..4] != VAULT_MAGIC {
+        return Err(Error::Vault("bad magic"));
+    }
+    let v1_version = u16::from_le_bytes(hdr[4..6].try_into().unwrap());
+    if v1_version != 1 {
+        return Err(Error::Vault("expected v1 vault"));
+    }
+    let block_count = u32::from_le_bytes(hdr[6..10].try_into().unwrap()) as usize;
+    let index_offset = u64::from_le_bytes(hdr[10..18].try_into().unwrap());
+    let mut nonce_seed_v1 = [0u8; 12];
+    nonce_seed_v1.copy_from_slice(&hdr[34..46]);
+
+    let entries_region = file_size.saturating_sub(index_offset);
+    let max_entries = (entries_region / V1_INDEX_ENTRY_SIZE as u64) as usize;
+    if block_count > max_entries {
+        return Err(Error::Vault("v1 header block_count exceeds file size"));
+    }
+
+    file.seek(SeekFrom::Start(index_offset))?;
+    let mut entries: Vec<(u64, u32, u64, u32)> = Vec::with_capacity(block_count);
+    for _ in 0..block_count {
+        let mut e = [0u8; V1_INDEX_ENTRY_SIZE];
+        file.read_exact(&mut e)?;
+        let off = u64::from_le_bytes(e[0..8].try_into().unwrap());
+        let len = u32::from_le_bytes(e[8..12].try_into().unwrap());
+        let xxh = u64::from_le_bytes(e[20..28].try_into().unwrap());
+        let nc = u32::from_le_bytes(e[28..32].try_into().unwrap());
+        entries.push((off, len, xxh, nc));
+    }
+
+    let mut plaintexts: Vec<Vec<u8>> = Vec::with_capacity(block_count);
+    for &(off, len, expected_xxh, nc) in &entries {
+        let mut ct = vec![0u8; len as usize];
+        file.seek(SeekFrom::Start(off))?;
+        file.read_exact(&mut ct)?;
+
+        // v1 nonce derivation: XOR counter into the low 4 bytes of seed.
+        let mut nonce = nonce_seed_v1;
+        let cb = nc.to_le_bytes();
+        for j in 0..4 {
+            nonce[j] ^= cb[j];
+        }
+        crypto::decrypt(key_bytes, &nonce, 0, &mut ct);
+
+        if key::xxhash64(&ct, 0) != expected_xxh {
+            return Err(Error::Vault("v1 block integrity check failed"));
+        }
+        plaintexts.push(ct);
+    }
+    Ok(plaintexts)
+}
+
 // ── Vault ─────────────────────────────────────────────────────────────────────
 
 pub struct Vault {
@@ -319,24 +383,29 @@ impl Vault {
     }
 
     fn open_existing(path: &Path, key_bytes: [u8; 32]) -> Result<Self> {
+        // Peek magic + version to route v1 vs v2.  Open read-only here so the
+        // migration path can take ownership of the write-capable handle later.
+        let mut peek = OpenOptions::new().read(true).open(path)?;
+        let mut head = [0u8; 6];
+        peek.read_exact(&mut head)?;
+        drop(peek);
+
+        if head[0..4] != VAULT_MAGIC {
+            return Err(Error::Vault("bad magic"));
+        }
+        let version = u16::from_le_bytes(head[4..6].try_into().unwrap());
+        match version {
+            1 => Self::migrate_v1_to_v2(path, key_bytes),
+            2 => Self::open_v2(path, key_bytes),
+            _ => Err(Error::Vault("unsupported vault version")),
+        }
+    }
+
+    fn open_v2(path: &Path, key_bytes: [u8; 32]) -> Result<Self> {
         let mut file = OpenOptions::new().read(true).write(true).open(path)?;
         let file_size = file.metadata()?.len();
 
-        // Peek the version byte (header bytes 4..6) to route v1 vs v2.
-        // v1 layout was 64 bytes too but with version=1; we defer auto-migration
-        // to a later commit and refuse here so callers get a clear error.
-        let mut version_buf = [0u8; 6];
-        file.seek(SeekFrom::Start(0))?;
-        file.read_exact(&mut version_buf)?;
-        let version = u16::from_le_bytes(version_buf[4..6].try_into().unwrap());
-        if version == 1 {
-            return Err(Error::Vault(
-                "v1 vault detected — auto-migration not yet wired (Task 11)",
-            ));
-        }
-
         let mut hdr_buf = [0u8; HEADER_SIZE_V2];
-        file.seek(SeekFrom::Start(0))?;
         file.read_exact(&mut hdr_buf)?;
         let header = VaultHeaderV2::from_bytes(&hdr_buf)?;
 
@@ -585,6 +654,34 @@ impl Vault {
         }
         self.file.flush()?;
         Ok(())
+    }
+
+    /// One-shot v1 → v2 migration.  Read+verify all v1 plaintexts (xxhash
+    /// catches transit corruption); only on success do we touch the file —
+    /// the backup, the tmp build, and the atomic rename all happen after
+    /// every block has been decoded.  A corrupt v1 fails before any of
+    /// these steps, so `.v1.bak` is only ever produced for a vault that
+    /// could be fully read.
+    fn migrate_v1_to_v2(path: &Path, key_bytes: [u8; 32]) -> Result<Self> {
+        let plaintexts = read_all_v1_plaintexts(path, &key_bytes)?;
+
+        let backup = path.with_extension("bin.v1.bak");
+        std::fs::copy(path, &backup)?;
+        OpenOptions::new().write(true).open(&backup)?.sync_data()?;
+
+        let tmp = path.with_extension("bin.tmp");
+        if tmp.exists() {
+            std::fs::remove_file(&tmp)?;
+        }
+        {
+            let mut v2 = Self::create_new(&tmp, key_bytes)?;
+            for pt in &plaintexts {
+                v2.flush_block(pt)?;
+            }
+            // File handle closes on drop.
+        }
+        std::fs::rename(&tmp, path)?;
+        Self::open_v2(path, key_bytes)
     }
 
     /// Bump `header_rewrites`, Poly1305-MAC the new header[0..46] || index
