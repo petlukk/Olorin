@@ -288,3 +288,50 @@ fn write(path: &str, contents: &str) {
     let mut f = std::fs::File::create(Path::new(path)).expect("create input");
     f.write_all(contents.as_bytes()).expect("write input");
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// AEAD cross-arch bit-identity.  ChaCha20-Poly1305 with fixed inputs must
+// produce the same ct+tag bytes on x86 (SSE2/AVX2) and ARM NEON.  Captured
+// as a 1040-byte golden (1024 ct + 16 tag) frozen on x86; Pi 5 verification
+// re-runs the test and compares to the same fixture.
+// ────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn aead_seal_bit_identical() {
+    olorin::kernels::ffi::init().expect("kernel init");
+
+    let key = [0xAAu8; 32];
+    let nonce = [0xBBu8; 12];
+    let aad = b"olorin-vault-v2";
+    let pt: Vec<u8> = (0..1024u16).map(|i| i as u8).collect();
+
+    let mut buf = pt.clone();
+    let mut tag = [0u8; 16];
+    olorin::storage::aead::seal(&key, &nonce, aad, &mut buf, &mut tag);
+
+    let mut blob = Vec::with_capacity(buf.len() + 16);
+    blob.extend_from_slice(&buf);
+    blob.extend_from_slice(&tag);
+
+    let golden_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/aead_golden.bin");
+
+    if std::env::var("BLESS").is_ok() {
+        if let Some(parent) = golden_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&golden_path, &blob).expect("write golden");
+        return;
+    }
+
+    let expected = std::fs::read(&golden_path).unwrap_or_else(|_| {
+        panic!(
+            "missing AEAD golden at {} — run with BLESS=1 to create it",
+            golden_path.display()
+        )
+    });
+    assert_eq!(
+        blob, expected,
+        "AEAD ct+tag diverges from cross-arch golden (1040 bytes, byte 0..1023 = ct, 1024..1039 = tag)"
+    );
+}
