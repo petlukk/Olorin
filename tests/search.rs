@@ -11,7 +11,7 @@ fn test_fused_search_roundtrip() {
     olorin::storage::crypto::encrypt(&key, &nonce, 0, &mut ct);
 
     let mut searcher = FusedSearcher::new();
-    let result = searcher.search(&key, &nonce, &ct, &[b"fox"]);
+    let result = searcher.search(&key, &nonce, 0, &ct, &[b"fox"]);
     assert!(result.match_count > 0);
 }
 
@@ -25,6 +25,6 @@ fn test_fused_search_no_match() {
     olorin::storage::crypto::encrypt(&key, &nonce, 0, &mut ct);
 
     let mut searcher = FusedSearcher::new();
-    let result = searcher.search(&key, &nonce, &ct, &[b"unicorn"]);
+    let result = searcher.search(&key, &nonce, 0, &ct, &[b"unicorn"]);
     assert_eq!(result.match_count, 0);
 }
