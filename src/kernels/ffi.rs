@@ -61,6 +61,15 @@ type BatchCosineFn      = unsafe extern "C" fn(*const f32, f32, *const f32, i32,
 type NormalizeFn        = unsafe extern "C" fn(*mut f32, i32, i32);
 type TopKFn             = unsafe extern "C" fn(*const f32, i32, i32, *mut i32, *mut f32);
 type JlProjectFn        = unsafe extern "C" fn(*const f32, *const f32, i32, i32, *mut f32, *mut f32);
+// poly1305_mac kernel: takes an extra *mut i32 scratch (22 words) that the
+// Rust wrapper allocates on the stack.  The public `poly1305_mac` exposed
+// below presents the clean 4-parameter interface from the task spec.
+type Poly1305MacKernFn  = unsafe extern "C" fn(
+    *const u8, *const u8, i32, *mut u8, *mut i32,
+);
+type Poly1305VerifyKernFn = unsafe extern "C" fn(
+    *const u8, *const u8, i32, *const u8, *mut i32,
+) -> i32;
 type Chacha20EncryptFn  = unsafe extern "C" fn(
     *const i32, *const i32, i32,
     *const u8, *mut u8, i32,
@@ -107,6 +116,8 @@ pub struct KernelTable {
     pub pretokenize:              PretokenizeFn,
     pub ansi_classify:            AnsiClassifyFn,
     pub terminal_diff:            TerminalDiffFn,
+    pub poly1305_mac_kern:        Poly1305MacKernFn,
+    pub poly1305_verify_kern:     Poly1305VerifyKernFn,
 }
 
 // SAFETY: KernelTable holds function pointers and library handles.
@@ -170,6 +181,7 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
     let pretokenize_lib = load("pretokenize")?;
     let ansi_parser_lib  = load("ansi_parser")?;
     let terminal_diff_lib = load("terminal_diff")?;
+    let poly1305_lib    = load("poly1305")?;
 
     // Runtime CPU detection: prefer AVX-512 search kernel if available
     #[cfg(target_arch = "x86_64")]
@@ -236,6 +248,10 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
                 sym(&ansi_parser_lib, b"ansi_classify\0")?),
             terminal_diff: std::mem::transmute(
                 sym(&terminal_diff_lib, b"terminal_diff\0")?),
+            poly1305_mac_kern: std::mem::transmute(
+                sym(&poly1305_lib, b"poly1305_mac\0")?),
+            poly1305_verify_kern: std::mem::transmute(
+                sym(&poly1305_lib, b"poly1305_verify\0")?),
             libs: vec![
                 command_router,
                 fused_safety, intent_router, expr_eval,
@@ -245,6 +261,7 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
                 csv_scan_lib, jsonl_struct_lib, log_level_scan_lib,
                 timestamp_scan_lib,
                 f32_stats_lib, f64_stats_lib,
+                poly1305_lib,
             ],
         };
         Ok(table)
@@ -389,4 +406,37 @@ pub unsafe fn terminal_diff(
     old_grid: *const u8, new_grid: *const u8, dirty: *mut u8, n_cells: i32,
 ) {
     (k().terminal_diff)(old_grid, new_grid, dirty, n_cells);
+}
+
+/// Poly1305 MAC (RFC 8439 §2.5).
+///
+/// Computes a 16-byte authentication tag over `msg` using `key`.
+///
+/// # Safety
+/// - `key` must be valid for 32 bytes.
+/// - `msg` must be valid for `msg_len` bytes (0 is allowed).
+/// - `tag_out` must be valid for 16 bytes (write).
+pub unsafe fn poly1305_mac(
+    key: *const u8, msg: *const u8, msg_len: i32, tag_out: *mut u8,
+) {
+    // 22-word scratch buffer: r[0..4], 5*r[0..4], row_k[0..3], h[0..3], tag[0..3].
+    let mut scratch = [0i32; 22];
+    (k().poly1305_mac_kern)(key, msg, msg_len, tag_out, scratch.as_mut_ptr());
+}
+
+/// Constant-time Poly1305 tag verification.
+///
+/// Returns 1 iff the tag computed over `msg` with `key` exactly equals
+/// the 16 bytes at `tag`.  No branches on key/msg/tag bytes; the compare
+/// is OR-reduce + branchless `((acc - 1) >> 31) & 1`.
+///
+/// # Safety
+/// - `key` must be valid for 32 bytes.
+/// - `msg` must be valid for `msg_len` bytes (0 is allowed).
+/// - `tag` must be valid for 16 bytes (read).
+pub unsafe fn poly1305_verify(
+    key: *const u8, msg: *const u8, msg_len: i32, tag: *const u8,
+) -> i32 {
+    let mut scratch = [0i32; 22];
+    (k().poly1305_verify_kern)(key, msg, msg_len, tag, scratch.as_mut_ptr())
 }

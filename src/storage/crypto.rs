@@ -16,6 +16,13 @@ pub fn decrypt(key: &[u8; 32], nonce: &[u8; 12], counter: i32, buf: &mut [u8]) {
     chacha20_xor(key, nonce, counter, buf);
 }
 
+/// Write `out.len()` bytes of ChaCha20 keystream into `out`.
+/// Used to derive the Poly1305 one-time key from counter=0.
+pub fn keystream(key: &[u8; 32], nonce: &[u8; 12], counter: i32, out: &mut [u8]) {
+    out.iter_mut().for_each(|b| *b = 0);
+    chacha20_xor(key, nonce, counter, out);
+}
+
 fn chacha20_xor(key: &[u8; 32], nonce: &[u8; 12], counter: i32, buf: &mut [u8]) {
     if buf.is_empty() {
         return;

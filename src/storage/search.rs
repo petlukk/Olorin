@@ -59,13 +59,15 @@ impl FusedSearcher {
 
     /// Fused ChaCha20 decrypt + multi-needle search.
     ///
-    /// Arguments: `key`, `nonce`, `ciphertext`, `needles`.
+    /// `ctr_init` is the ChaCha20 starting block counter — v1 vaults use 0,
+    /// v2 vaults use 1 (counter 0 is reserved for the Poly1305 OTK).
     /// Returns only matching context lines — full plaintext never materialises.
     /// Returns an empty result (not an error) for empty inputs.
     pub fn search(
         &mut self,
         key: &[u8; 32],
         nonce: &[u8; 12],
+        ctr_init: i32,
         ciphertext: &[u8],
         needles: &[&[u8]],
     ) -> FusedSearchResult {
@@ -133,7 +135,7 @@ impl FusedSearcher {
             ffi::chacha20_search_v2(
                 key_i32.as_ptr(),
                 nonce_i32.as_ptr(),
-                0, // ctr_init
+                ctr_init,
                 self.ct_i32_buf.as_ptr() as *const u8,
                 len,
                 self.ks_i32.as_mut_ptr(),

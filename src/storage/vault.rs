@@ -10,6 +10,8 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::{Error, Result};
+use crate::kernels::ffi;
+use crate::storage::aead;
 use crate::storage::crypto;
 use crate::storage::key;
 use crate::storage::search::FusedSearcher;
@@ -18,67 +20,92 @@ use crate::storage::secure::SecureBuffer;
 // ── Format constants ──────────────────────────────────────────────────────────
 
 const VAULT_MAGIC: [u8; 4] = *b"OLRN";
-const VAULT_VERSION: u16 = 1;
-const HEADER_SIZE: usize = 64;
 const INDEX_ENTRY_SIZE: usize = 288;
 
-// ── VaultHeader ───────────────────────────────────────────────────────────────
+// The v1 VaultHeader / VAULT_VERSION / HEADER_SIZE were dropped after the
+// migration helper switched to raw byte parsing (see `read_all_v1_plaintexts`,
+// which carries its own local V1_HEADER_SIZE / V1_INDEX_ENTRY_SIZE).  v1
+// vaults are still recognised + auto-migrated on first open by a v2 binary.
+
+// ── VaultHeaderV2 ─────────────────────────────────────────────────────────────
+
+pub const HEADER_SIZE_V2: usize = 64;
+const VAULT_VERSION_V2: u16 = 2;
 
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
-struct VaultHeader {
-    magic: [u8; 4],
-    version: u16,
-    block_count: u32,
-    index_offset: u64,
-    key_id: [u8; 16],
-    nonce_seed: [u8; 12],
-    reserved: [u8; 18],
+pub struct VaultHeaderV2 {
+    pub magic: [u8; 4],
+    pub version: u16,
+    pub block_count: u32,
+    pub index_offset: u64,
+    pub key_id: [u8; 16],
+    pub nonce_seed_8: [u8; 8],
+    pub header_rewrites: u32,
+    pub header_tag: [u8; 16],
+    pub reserved: [u8; 2],
 }
 
-impl VaultHeader {
-    fn new(key_id: [u8; 16], nonce_seed: [u8; 12]) -> Self {
+impl VaultHeaderV2 {
+    pub(crate) fn new(key_id: [u8; 16], nonce_seed_8: [u8; 8]) -> Self {
         Self {
             magic: VAULT_MAGIC,
-            version: VAULT_VERSION,
+            version: VAULT_VERSION_V2,
             block_count: 0,
-            index_offset: HEADER_SIZE as u64,
+            index_offset: HEADER_SIZE_V2 as u64,
             key_id,
-            nonce_seed,
-            reserved: [0u8; 18],
+            nonce_seed_8,
+            header_rewrites: 0,
+            header_tag: [0; 16],
+            reserved: [0; 2],
         }
     }
 
-    fn to_bytes(self) -> [u8; HEADER_SIZE] {
-        let mut buf = [0u8; HEADER_SIZE];
+    pub fn to_bytes(self) -> [u8; HEADER_SIZE_V2] {
+        let mut buf = [0u8; HEADER_SIZE_V2];
         buf[0..4].copy_from_slice(&self.magic);
         buf[4..6].copy_from_slice(&self.version.to_le_bytes());
         buf[6..10].copy_from_slice(&self.block_count.to_le_bytes());
         buf[10..18].copy_from_slice(&self.index_offset.to_le_bytes());
         buf[18..34].copy_from_slice(&self.key_id);
-        buf[34..46].copy_from_slice(&self.nonce_seed);
-        buf[46..64].copy_from_slice(&self.reserved);
+        buf[34..42].copy_from_slice(&self.nonce_seed_8);
+        buf[42..46].copy_from_slice(&self.header_rewrites.to_le_bytes());
+        buf[46..62].copy_from_slice(&self.header_tag);
+        buf[62..64].copy_from_slice(&self.reserved);
         buf
     }
 
-    fn from_bytes(buf: &[u8; HEADER_SIZE]) -> Result<Self> {
+    pub fn from_bytes(buf: &[u8; HEADER_SIZE_V2]) -> Result<Self> {
         let magic: [u8; 4] = buf[0..4].try_into().unwrap();
         if magic != VAULT_MAGIC {
             return Err(Error::Vault("bad magic"));
         }
         let version = u16::from_le_bytes(buf[4..6].try_into().unwrap());
-        if version != VAULT_VERSION {
-            return Err(Error::Vault("unsupported version"));
+        if version != VAULT_VERSION_V2 {
+            return Err(Error::Vault("unsupported vault version"));
         }
         let block_count = u32::from_le_bytes(buf[6..10].try_into().unwrap());
         let index_offset = u64::from_le_bytes(buf[10..18].try_into().unwrap());
         let mut key_id = [0u8; 16];
         key_id.copy_from_slice(&buf[18..34]);
-        let mut nonce_seed = [0u8; 12];
-        nonce_seed.copy_from_slice(&buf[34..46]);
-        let mut reserved = [0u8; 18];
-        reserved.copy_from_slice(&buf[46..64]);
-        Ok(Self { magic, version, block_count, index_offset, key_id, nonce_seed, reserved })
+        let mut nonce_seed_8 = [0u8; 8];
+        nonce_seed_8.copy_from_slice(&buf[34..42]);
+        let header_rewrites = u32::from_le_bytes(buf[42..46].try_into().unwrap());
+        let mut header_tag = [0u8; 16];
+        header_tag.copy_from_slice(&buf[46..62]);
+        let mut reserved = [0u8; 2];
+        reserved.copy_from_slice(&buf[62..64]);
+        Ok(Self {
+            magic,
+            version,
+            block_count,
+            index_offset,
+            key_id,
+            nonce_seed_8,
+            header_rewrites,
+            header_tag,
+            reserved,
+        })
     }
 }
 
@@ -89,7 +116,10 @@ struct IndexEntry {
     offset: u64,
     length: u32,
     timestamp: u64,
-    xxhash: u64,
+    /// Was xxhash(plaintext) in v1; integrity is now carried by the per-block
+    /// AEAD tag.  Zeroed on write; ignored on read.  Layout preserved so a
+    /// v1→v2 migration can stream entries without shifting offsets.
+    _reserved: u64,
     nonce_counter: u32,
     histogram: [u8; 256],
 }
@@ -100,7 +130,7 @@ impl IndexEntry {
         buf[0..8].copy_from_slice(&self.offset.to_le_bytes());
         buf[8..12].copy_from_slice(&self.length.to_le_bytes());
         buf[12..20].copy_from_slice(&self.timestamp.to_le_bytes());
-        buf[20..28].copy_from_slice(&self.xxhash.to_le_bytes());
+        buf[20..28].copy_from_slice(&0u64.to_le_bytes());
         buf[28..32].copy_from_slice(&self.nonce_counter.to_le_bytes());
         buf[32..288].copy_from_slice(&self.histogram);
         buf
@@ -110,11 +140,10 @@ impl IndexEntry {
         let offset = u64::from_le_bytes(buf[0..8].try_into().unwrap());
         let length = u32::from_le_bytes(buf[8..12].try_into().unwrap());
         let timestamp = u64::from_le_bytes(buf[12..20].try_into().unwrap());
-        let xxhash = u64::from_le_bytes(buf[20..28].try_into().unwrap());
         let nonce_counter = u32::from_le_bytes(buf[28..32].try_into().unwrap());
         let mut histogram = [0u8; 256];
         histogram.copy_from_slice(&buf[32..288]);
-        Self { offset, length, timestamp, xxhash, nonce_counter, histogram }
+        Self { offset, length, timestamp, _reserved: 0, nonce_counter, histogram }
     }
 }
 
@@ -124,24 +153,120 @@ fn now_epoch() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
 }
 
-fn derive_nonce(seed: &[u8; 12], counter: u32) -> [u8; 12] {
-    let mut nonce = *seed;
-    let cb = counter.to_le_bytes();
-    for i in 0..4 { nonce[i] ^= cb[i]; }
+/// v2 per-block nonce: 8 bytes of nonce_seed_8 || u32_le(counter).
+/// Counter values are bounded to [0, 0x80000000) — the high bit is
+/// reserved for the header-tag domain (see [`derive_header_nonce`]).
+fn derive_block_nonce(seed8: &[u8; 8], counter: u32) -> [u8; 12] {
+    let mut nonce = [0u8; 12];
+    nonce[0..8].copy_from_slice(seed8);
+    nonce[8..12].copy_from_slice(&counter.to_le_bytes());
     nonce
+}
+
+/// v2 header nonce: 8 bytes of nonce_seed_8 || u32_le(0x80000000 | rewrites).
+/// High-bit-set 4-byte tail can never collide with a block nonce because
+/// `flush_block` refuses counter ≥ 0x80000000.
+fn derive_header_nonce(seed8: &[u8; 8], rewrites: u32) -> [u8; 12] {
+    let mut nonce = [0u8; 12];
+    nonce[0..8].copy_from_slice(seed8);
+    let domain = 0x8000_0000u32 | rewrites;
+    nonce[8..12].copy_from_slice(&domain.to_le_bytes());
+    nonce
+}
+
+/// Per-block AAD: key_id || version_le || counter_le || timestamp_le || histogram.
+/// Binds the ciphertext to this exact (vault, version, position, time, content
+/// shape) tuple so a swapped block fails AEAD verification.
+fn build_block_aad(
+    key_id: &[u8; 16],
+    version: u16,
+    nonce_counter: u32,
+    timestamp: u64,
+    histogram: &[u8; 256],
+) -> Vec<u8> {
+    let mut aad = Vec::with_capacity(286);
+    aad.extend_from_slice(key_id);
+    aad.extend_from_slice(&version.to_le_bytes());
+    aad.extend_from_slice(&nonce_counter.to_le_bytes());
+    aad.extend_from_slice(&timestamp.to_le_bytes());
+    aad.extend_from_slice(histogram);
+    aad
+}
+
+/// Decrypt every v1 block off disk and verify each block's xxhash tag.
+/// Used only by [`Vault::migrate_v1_to_v2`].  Returns the plaintexts in
+/// on-disk order — the caller re-emits them as v2 AEAD blocks.
+fn read_all_v1_plaintexts(path: &Path, key_bytes: &[u8; 32]) -> Result<Vec<Vec<u8>>> {
+    const V1_HEADER_SIZE: usize = 64;
+    const V1_INDEX_ENTRY_SIZE: usize = 288;
+
+    let mut file = OpenOptions::new().read(true).open(path)?;
+    let file_size = file.metadata()?.len();
+
+    let mut hdr = [0u8; V1_HEADER_SIZE];
+    file.read_exact(&mut hdr)?;
+    if hdr[0..4] != VAULT_MAGIC {
+        return Err(Error::Vault("bad magic"));
+    }
+    let v1_version = u16::from_le_bytes(hdr[4..6].try_into().unwrap());
+    if v1_version != 1 {
+        return Err(Error::Vault("expected v1 vault"));
+    }
+    let block_count = u32::from_le_bytes(hdr[6..10].try_into().unwrap()) as usize;
+    let index_offset = u64::from_le_bytes(hdr[10..18].try_into().unwrap());
+    let mut nonce_seed_v1 = [0u8; 12];
+    nonce_seed_v1.copy_from_slice(&hdr[34..46]);
+
+    let entries_region = file_size.saturating_sub(index_offset);
+    let max_entries = (entries_region / V1_INDEX_ENTRY_SIZE as u64) as usize;
+    if block_count > max_entries {
+        return Err(Error::Vault("v1 header block_count exceeds file size"));
+    }
+
+    file.seek(SeekFrom::Start(index_offset))?;
+    let mut entries: Vec<(u64, u32, u64, u32)> = Vec::with_capacity(block_count);
+    for _ in 0..block_count {
+        let mut e = [0u8; V1_INDEX_ENTRY_SIZE];
+        file.read_exact(&mut e)?;
+        let off = u64::from_le_bytes(e[0..8].try_into().unwrap());
+        let len = u32::from_le_bytes(e[8..12].try_into().unwrap());
+        let xxh = u64::from_le_bytes(e[20..28].try_into().unwrap());
+        let nc = u32::from_le_bytes(e[28..32].try_into().unwrap());
+        entries.push((off, len, xxh, nc));
+    }
+
+    let mut plaintexts: Vec<Vec<u8>> = Vec::with_capacity(block_count);
+    for &(off, len, expected_xxh, nc) in &entries {
+        let mut ct = vec![0u8; len as usize];
+        file.seek(SeekFrom::Start(off))?;
+        file.read_exact(&mut ct)?;
+
+        // v1 nonce derivation: XOR counter into the low 4 bytes of seed.
+        let mut nonce = nonce_seed_v1;
+        let cb = nc.to_le_bytes();
+        for j in 0..4 {
+            nonce[j] ^= cb[j];
+        }
+        crypto::decrypt(key_bytes, &nonce, 0, &mut ct);
+
+        if key::xxhash64(&ct, 0) != expected_xxh {
+            return Err(Error::Vault("v1 block integrity check failed"));
+        }
+        plaintexts.push(ct);
+    }
+    Ok(plaintexts)
 }
 
 // ── Vault ─────────────────────────────────────────────────────────────────────
 
 pub struct Vault {
     file: File,
-    header: VaultHeader,
+    header: VaultHeaderV2,
     index: Vec<IndexEntry>,
     /// Encryption key in mlock'd + SIMD-zeroize-on-Drop memory. Backed
     /// by `SecureBuffer` so the key never reaches the swap file and is
     /// wiped on clean shutdown. Size is always 32 bytes.
     key: SecureBuffer,
-    nonce_seed: [u8; 12],
     searcher: FusedSearcher,
 }
 
@@ -175,34 +300,57 @@ impl Vault {
             id[8..16].copy_from_slice(&key::xxhash64(&key_bytes, h).to_le_bytes());
             id
         };
-        // nonce_seed must be unique per (key, vault) so ChaCha20 nonces
-        // don't collide. Use nanosecond precision rather than mixing in
-        // key bytes: storing key[..4] here would write the first four
-        // bytes of the vault key directly into the cleartext file header.
-        let nonce_seed = {
+        // nonce_seed_8 uniqueness: two vaults created on the same machine
+        // must not share it (would risk nonce reuse if they shared a key).
+        // Nanosecond precision is good enough — `unique_dir`-style back-to-back
+        // creations land in different nanos buckets.  Never mix key bytes in:
+        // doing so would write a key prefix into the cleartext file header.
+        let nonce_seed_8 = {
             let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
-            let mut seed = [0u8; 12];
-            seed[..8].copy_from_slice(&now.as_secs().to_le_bytes());
-            seed[8..12].copy_from_slice(&now.subsec_nanos().to_le_bytes());
+            let mut seed = [0u8; 8];
+            seed[..4].copy_from_slice(&now.subsec_nanos().to_le_bytes());
+            seed[4..8].copy_from_slice(&(now.as_secs() as u32).to_le_bytes());
             seed
         };
-        let header = VaultHeader::new(key_id, nonce_seed);
-        let mut file = OpenOptions::new()
+        let header = VaultHeaderV2::new(key_id, nonce_seed_8);
+        let file = OpenOptions::new()
             .read(true).write(true).create(true).truncate(true)
             .open(path)?;
-        file.write_all(&header.to_bytes())?;
-        file.flush()?;
         let mut key = SecureBuffer::new(32);
         key.write(&key_bytes);
-        Ok(Self { file, header, index: Vec::new(), key, nonce_seed, searcher: FusedSearcher::new() })
+        let mut vault = Self { file, header, index: Vec::new(), key, searcher: FusedSearcher::new() };
+        // First write: a valid v2 header with header_rewrites = 1 and a tag
+        // covering the empty index.  Subsequent appends bump rewrites.
+        vault.recompute_and_write_header_tag()?;
+        Ok(vault)
     }
 
     fn open_existing(path: &Path, key_bytes: [u8; 32]) -> Result<Self> {
+        // Peek magic + version to route v1 vs v2.  Open read-only here so the
+        // migration path can take ownership of the write-capable handle later.
+        let mut peek = OpenOptions::new().read(true).open(path)?;
+        let mut head = [0u8; 6];
+        peek.read_exact(&mut head)?;
+        drop(peek);
+
+        if head[0..4] != VAULT_MAGIC {
+            return Err(Error::Vault("bad magic"));
+        }
+        let version = u16::from_le_bytes(head[4..6].try_into().unwrap());
+        match version {
+            1 => Self::migrate_v1_to_v2(path, key_bytes),
+            2 => Self::open_v2(path, key_bytes),
+            _ => Err(Error::Vault("unsupported vault version")),
+        }
+    }
+
+    fn open_v2(path: &Path, key_bytes: [u8; 32]) -> Result<Self> {
         let mut file = OpenOptions::new().read(true).write(true).open(path)?;
         let file_size = file.metadata()?.len();
-        let mut hdr_buf = [0u8; HEADER_SIZE];
+
+        let mut hdr_buf = [0u8; HEADER_SIZE_V2];
         file.read_exact(&mut hdr_buf)?;
-        let header = VaultHeader::from_bytes(&hdr_buf)?;
+        let header = VaultHeaderV2::from_bytes(&hdr_buf)?;
 
         // Sanity-check block_count against actual file size. A tampered
         // or corrupted header claiming u32::MAX blocks would otherwise
@@ -214,7 +362,6 @@ impl Vault {
             return Err(Error::Vault("vault header block_count exceeds file size"));
         }
 
-        let nonce_seed = header.nonce_seed;
         let mut index = Vec::with_capacity(header.block_count as usize);
         file.seek(SeekFrom::Start(header.index_offset))?;
         for _ in 0..header.block_count {
@@ -222,9 +369,39 @@ impl Vault {
             file.read_exact(&mut entry_buf)?;
             index.push(IndexEntry::from_bytes(&entry_buf));
         }
+
+        // Verify header_tag — Poly1305 MAC over header[0..46] || serialized
+        // index, with OTK derived from a domain-separated header nonce.
+        // Catches tampering of block_count, index_offset, key_id, nonce_seed_8,
+        // header_rewrites, or any index entry byte.  The reserved bytes
+        // (62..64) and the tag itself (46..62) are not in the MAC input.
+        let header_bytes = header.to_bytes();
+        let mut mac_input =
+            Vec::with_capacity(46 + index.len() * INDEX_ENTRY_SIZE);
+        mac_input.extend_from_slice(&header_bytes[0..46]);
+        for e in &index {
+            mac_input.extend_from_slice(&e.to_bytes());
+        }
+        let header_nonce =
+            derive_header_nonce(&header.nonce_seed_8, header.header_rewrites);
+        let mut otk = [0u8; 32];
+        crypto::keystream(&key_bytes, &header_nonce, 0, &mut otk);
+        let ok = unsafe {
+            ffi::poly1305_verify(
+                otk.as_ptr(),
+                mac_input.as_ptr(),
+                mac_input.len() as i32,
+                header.header_tag.as_ptr(),
+            )
+        };
+        unsafe { ffi::zeroize(otk.as_mut_ptr(), 32); }
+        if ok == 0 {
+            return Err(Error::Vault("vault header or index has been tampered"));
+        }
+
         let mut key = SecureBuffer::new(32);
         key.write(&key_bytes);
-        Ok(Self { file, header, index, key, nonce_seed, searcher: FusedSearcher::new() })
+        Ok(Self { file, header, index, key, searcher: FusedSearcher::new() })
     }
 
     /// Append a message (role + content), encrypt, and write immediately.
@@ -239,45 +416,52 @@ impl Vault {
     }
 
     fn flush_block(&mut self, plaintext: &[u8]) -> Result<()> {
-        // Counter-wrap guard. ChaCha20 nonces here are
-        // `nonce_seed XOR block_count`; if the counter ever reached
-        // u32::MAX and incremented, the next append would reuse a
-        // nonce (catastrophic for ChaCha20). At one append per second
-        // this needs ~136 years to fire — the guard is defense against
-        // pathological callers or future bugs, not realistic exhaustion.
-        if self.header.block_count == u32::MAX {
+        // Counter-wrap guard.  Tightened from u32::MAX to 0x80000000 because
+        // the high bit of the nonce-counter slot is reserved for the
+        // header-tag domain (see `derive_header_nonce`).  At 1 append/s this
+        // still gives ~68 years before exhaustion.
+        if self.header.block_count >= 0x8000_0000 {
             return Err(Error::Vault(
-                "vault block counter exhausted (2^32) — refuse to reuse nonce",
+                "vault block counter exhausted — refuse to reuse nonce",
             ));
         }
 
         let histogram = key::compute_histogram(plaintext);
-        let hash = key::xxhash64(plaintext, 0);
+        let timestamp = now_epoch();
         let nonce_counter = self.header.block_count;
-        let nonce = derive_nonce(&self.nonce_seed, nonce_counter);
+        let nonce = derive_block_nonce(&self.header.nonce_seed_8, nonce_counter);
+        let aad = build_block_aad(
+            &self.header.key_id,
+            VAULT_VERSION_V2,
+            nonce_counter,
+            timestamp,
+            &histogram,
+        );
 
         let key_bytes = key_array(&self.key);
-        let mut ciphertext = plaintext.to_vec();
-        crypto::encrypt(&key_bytes, &nonce, 0, &mut ciphertext);
+        let mut ct = plaintext.to_vec();
+        let mut tag = [0u8; 16];
+        aead::seal(&key_bytes, &nonce, &aad, &mut ct, &mut tag);
 
         let block_offset = self.header.index_offset;
         self.file.seek(SeekFrom::Start(block_offset))?;
-        self.file.write_all(&ciphertext)?;
+        self.file.write_all(&ct)?;
+        self.file.write_all(&tag)?;
 
         let entry = IndexEntry {
             offset: block_offset,
-            length: ciphertext.len() as u32,
-            timestamp: now_epoch(),
-            xxhash: hash,
+            length: (ct.len() + 16) as u32,
+            timestamp,
+            _reserved: 0,
             nonce_counter,
             histogram,
         };
         self.index.push(entry);
         self.header.block_count += 1;
-        self.header.index_offset = block_offset + ciphertext.len() as u64;
+        self.header.index_offset = block_offset + ct.len() as u64 + 16;
 
         self.write_index()?;
-        self.write_header()
+        self.recompute_and_write_header_tag()
     }
 
     /// Decrypt a specific block by index.
@@ -288,27 +472,41 @@ impl Vault {
         let entry = &self.index[block_index];
         let offset = entry.offset;
         let length = entry.length as usize;
-        let nonce_counter = entry.nonce_counter;
-        let expected_hash = entry.xxhash;
-
-        let mut ciphertext = vec![0u8; length];
-        self.file.seek(SeekFrom::Start(offset))?;
-        self.file.read_exact(&mut ciphertext)?;
-
-        let nonce = derive_nonce(&self.nonce_seed, nonce_counter);
-        let key_bytes = key_array(&self.key);
-        crypto::decrypt(&key_bytes, &nonce, 0, &mut ciphertext);
-
-        let actual_hash = key::xxhash64(&ciphertext, 0);
-        if actual_hash != expected_hash {
-            return Err(Error::Vault("integrity check failed"));
+        if length < 16 {
+            return Err(Error::Vault("block length less than AEAD tag size"));
         }
-        Ok(ciphertext)
+        let nonce_counter = entry.nonce_counter;
+        let timestamp = entry.timestamp;
+        let histogram = entry.histogram;
+
+        let mut ct_and_tag = vec![0u8; length];
+        self.file.seek(SeekFrom::Start(offset))?;
+        self.file.read_exact(&mut ct_and_tag)?;
+
+        let ct_len = length - 16;
+        let mut tag = [0u8; 16];
+        tag.copy_from_slice(&ct_and_tag[ct_len..]);
+        ct_and_tag.truncate(ct_len);
+
+        let nonce = derive_block_nonce(&self.header.nonce_seed_8, nonce_counter);
+        let key_bytes = key_array(&self.key);
+        let aad = build_block_aad(
+            &self.header.key_id,
+            VAULT_VERSION_V2,
+            nonce_counter,
+            timestamp,
+            &histogram,
+        );
+        aead::open(&key_bytes, &nonce, &aad, &mut ct_and_tag, &tag)?;
+        Ok(ct_and_tag)
     }
 
-    /// Read raw encrypted block + its nonce. Used by fused search.
+    /// Read a block from disk and split it into `(ct, tag, nonce)`.  Used by
+    /// `Vault::search`'s verify-then-search path: the caller MAC-verifies
+    /// `tag` against `ct`+AAD before passing `ct` to the fused decrypt+search
+    /// kernel, so a tampered block never reaches search results.
     pub(crate) fn read_encrypted_block(&mut self, block_index: usize)
-        -> Result<(Vec<u8>, [u8; 12])>
+        -> Result<(Vec<u8>, [u8; 16], [u8; 12])>
     {
         if block_index >= self.index.len() {
             return Err(Error::Vault("block index out of range"));
@@ -316,14 +514,21 @@ impl Vault {
         let entry = &self.index[block_index];
         let offset = entry.offset;
         let length = entry.length as usize;
+        if length < 16 {
+            return Err(Error::Vault("block length less than AEAD tag size"));
+        }
         let nonce_counter = entry.nonce_counter;
 
-        let mut ciphertext = vec![0u8; length];
+        let mut ct_and_tag = vec![0u8; length];
         self.file.seek(SeekFrom::Start(offset))?;
-        self.file.read_exact(&mut ciphertext)?;
+        self.file.read_exact(&mut ct_and_tag)?;
+        let ct_len = length - 16;
+        let mut tag = [0u8; 16];
+        tag.copy_from_slice(&ct_and_tag[ct_len..]);
+        ct_and_tag.truncate(ct_len);
 
-        let nonce = derive_nonce(&self.nonce_seed, nonce_counter);
-        Ok((ciphertext, nonce))
+        let nonce = derive_block_nonce(&self.header.nonce_seed_8, nonce_counter);
+        Ok((ct_and_tag, tag, nonce))
     }
 
     /// Get a copy of the vault encryption key (for fused search).
@@ -334,11 +539,6 @@ impl Vault {
 
     /// How many blocks are in the vault.
     pub fn block_count(&self) -> u32 { self.header.block_count }
-
-    /// Hash of the last block (for session token integrity).
-    pub fn last_block_hash(&self) -> Option<u64> {
-        self.index.last().map(|e| e.xxhash)
-    }
 
     /// Search vault blocks for the query using histogram cosine similarity + fused decrypt+search.
     pub fn search(&mut self, query: &str, top_k: usize) -> Result<Vec<SearchResult>> {
@@ -370,8 +570,27 @@ impl Vault {
         let mut results = Vec::with_capacity(scored.len());
 
         for (block_idx, score) in scored {
-            let (ciphertext, nonce) = self.read_encrypted_block(block_idx)?;
-            let fused = self.searcher.search(&key_copy, &nonce, &ciphertext, &needles);
+            let (ciphertext, tag, nonce) = self.read_encrypted_block(block_idx)?;
+
+            // MAC-verify the candidate block before letting the fused
+            // decrypt+search kernel touch it.  A tampered block silently
+            // drops out of the result set — no plaintext, partial line,
+            // or even block index ever leaks through.
+            let entry = &self.index[block_idx];
+            let aad = build_block_aad(
+                &self.header.key_id,
+                VAULT_VERSION_V2,
+                entry.nonce_counter,
+                entry.timestamp,
+                &entry.histogram,
+            );
+            if aead::verify(&key_copy, &nonce, &aad, &ciphertext, &tag).is_err() {
+                continue;
+            }
+
+            // v2 encrypts blocks at counter=1 (counter=0 is reserved for the
+            // Poly1305 OTK).
+            let fused = self.searcher.search(&key_copy, &nonce, 1, &ciphertext, &needles);
             let lines: Vec<String> = fused.context_lines
                 .into_iter()
                 .map(|l| String::from_utf8_lossy(&l).to_string())
@@ -400,10 +619,72 @@ impl Vault {
         Ok(())
     }
 
-    fn write_header(&mut self) -> Result<()> {
+    /// One-shot v1 → v2 migration.  Read+verify all v1 plaintexts (xxhash
+    /// catches transit corruption); only on success do we touch the file —
+    /// the backup, the tmp build, and the atomic rename all happen after
+    /// every block has been decoded.  A corrupt v1 fails before any of
+    /// these steps, so `.v1.bak` is only ever produced for a vault that
+    /// could be fully read.
+    fn migrate_v1_to_v2(path: &Path, key_bytes: [u8; 32]) -> Result<Self> {
+        let plaintexts = read_all_v1_plaintexts(path, &key_bytes)?;
+
+        let backup = path.with_extension("bin.v1.bak");
+        std::fs::copy(path, &backup)?;
+        OpenOptions::new().write(true).open(&backup)?.sync_data()?;
+
+        let tmp = path.with_extension("bin.tmp");
+        if tmp.exists() {
+            std::fs::remove_file(&tmp)?;
+        }
+        {
+            let mut v2 = Self::create_new(&tmp, key_bytes)?;
+            for pt in &plaintexts {
+                v2.flush_block(pt)?;
+            }
+            // File handle closes on drop.
+        }
+        std::fs::rename(&tmp, path)?;
+        Self::open_v2(path, key_bytes)
+    }
+
+    /// Bump `header_rewrites`, Poly1305-MAC the new header[0..46] || index
+    /// using a domain-separated nonce, write the header back to the file,
+    /// and fsync.  Called at the end of every operation that mutates the
+    /// header (create, append, future migration writes).
+    fn recompute_and_write_header_tag(&mut self) -> Result<()> {
+        self.header.header_rewrites = self.header.header_rewrites.wrapping_add(1);
+
+        let header_bytes = self.header.to_bytes();
+        let prefix = &header_bytes[0..46];
+        let mut mac_input =
+            Vec::with_capacity(46 + self.index.len() * INDEX_ENTRY_SIZE);
+        mac_input.extend_from_slice(prefix);
+        for e in &self.index {
+            mac_input.extend_from_slice(&e.to_bytes());
+        }
+
+        let key_bytes = key_array(&self.key);
+        let header_nonce =
+            derive_header_nonce(&self.header.nonce_seed_8, self.header.header_rewrites);
+
+        // Same OTK derivation as aead::seal, but no encryption — just MAC.
+        let mut otk = [0u8; 32];
+        crypto::keystream(&key_bytes, &header_nonce, 0, &mut otk);
+        let mut tag = [0u8; 16];
+        unsafe {
+            ffi::poly1305_mac(
+                otk.as_ptr(),
+                mac_input.as_ptr(),
+                mac_input.len() as i32,
+                tag.as_mut_ptr(),
+            );
+            ffi::zeroize(otk.as_mut_ptr(), 32);
+        }
+        self.header.header_tag = tag;
+
         self.file.seek(SeekFrom::Start(0))?;
         self.file.write_all(&self.header.to_bytes())?;
-        self.file.flush()?;
+        self.file.sync_data()?;
         Ok(())
     }
 }

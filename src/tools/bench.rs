@@ -310,12 +310,12 @@ fn bench_fused() -> Result<String, String> {
 
     // Warmup
     for _ in 0..100 {
-        let _ = searcher.search(&key, &nonce, &ciphertext, needles);
+        let _ = searcher.search(&key, &nonce, 0, &ciphertext, needles);
     }
 
     let start = Instant::now();
     for _ in 0..iterations {
-        let _ = searcher.search(&key, &nonce, &ciphertext, needles);
+        let _ = searcher.search(&key, &nonce, 0, &ciphertext, needles);
     }
     let elapsed = start.elapsed();
 

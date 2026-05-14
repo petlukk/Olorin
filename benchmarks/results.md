@@ -203,3 +203,64 @@ bash benchmarks/bench_eatime.sh
 Generates synthetic logs in `/tmp/olorin_bench/` (idempotent). Edit
 `benchmarks/gen_log_fixture.py` to change shape; edit
 `benchmarks/bench_eatime.sh` to add sizes or tools.
+
+---
+
+# Benchmark: ChaCha20-Poly1305 AEAD (vault v2)
+
+**Goal**: measure `aead::seal` throughput across the plaintext sizes a
+vault actually sees — from short conversation turns (~64-256 B) to large
+attachments (~16 KB). Captures the per-block fixed cost at small sizes
+and the streaming rate at large sizes.
+
+**Environment**: Ryzen 1700 (workstation), x86 SSE2 build, Rust release
+profile (LTO + opt-level=z).
+
+**Method**: one process, one test. Allocates fresh ciphertext buffer
+once, copies plaintext in before each iteration so each `seal` call
+operates on identical input. Wall-clock via `Instant::now()`. Run
+`cargo test --release --test bench_aead_throughput -- --nocapture --test-threads=1`
+to reproduce.
+
+## Results
+
+Date: 2026-05-14
+
+| Plaintext size |    iters | ns/byte |   GB/s | Notes                          |
+|----------------|---------:|--------:|-------:|--------------------------------|
+| 64 B           |   15,625 |  27.13  |  0.037 | Per-block fixed cost dominant  |
+| 256 B          |    3,906 |   8.87  |  0.113 |                                |
+| 1024 B         |      976 |   5.70  |  0.175 | Typical vault block            |
+| 4096 B         |      244 |   5.27  |  0.190 |                                |
+| 16384 B        |      100 |   5.15  |  0.194 | Stream-rate plateau            |
+
+Sanity floor: < 10 ns/byte on every size ≥ 256 ✓.
+
+## What this tells us
+
+**Stream rate plateaus at ~5.15 ns/byte (≈ 194 MB/s).** That ceiling
+is the cost of one ChaCha20 keystream byte (4-round interleaved SSE2)
++ one Poly1305 multiply contribution (5×26-bit limbs, 10 wmul calls
+per 16-byte block) + Rust-level buffer plumbing (`build_mac_message`
+allocates a fresh `Vec<u8>`, OTK derivation runs a full ChaCha20 block
+at counter=0).
+
+**Per-block overhead dominates below 256 B.** A 64-byte plaintext
+spends ~27 ns/byte total but only ~5 ns/byte on the actual stream
+work; the other ~22 ns/byte is fixed: OTK derivation, MAC-input
+construction, two pad16 zero-fills, the trailing 16-byte length
+footer. Vault appends a single conversation turn at a time, so the
+64–256 B band is the realistic operating range — and the answer is
+"single-digit microseconds per turn, dominated by ChaCha20 not by
+allocation."
+
+## What this leaves out
+
+1. **AVX-512 / AVX2 builds**: not measured. SSE2 is the worst-case
+   floor; AVX2 should push the stream rate past 1 GB/s.
+2. **ARM NEON / Pi 5**: deferred to the cross-arch sweep. Cross-arch
+   *correctness* is locked by `tests/cross_arch_bit_identity.rs`
+   (`aead_seal_bit_identical`), not by this bench.
+3. **`aead::verify` rate**: only `seal` measured. `verify` does the
+   same Poly1305 MAC work (no decrypt), so its rate should track
+   `seal` within rounding error.
