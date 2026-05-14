@@ -357,6 +357,36 @@ impl Vault {
             file.read_exact(&mut entry_buf)?;
             index.push(IndexEntry::from_bytes(&entry_buf));
         }
+
+        // Verify header_tag — Poly1305 MAC over header[0..46] || serialized
+        // index, with OTK derived from a domain-separated header nonce.
+        // Catches tampering of block_count, index_offset, key_id, nonce_seed_8,
+        // header_rewrites, or any index entry byte.  The reserved bytes
+        // (62..64) and the tag itself (46..62) are not in the MAC input.
+        let header_bytes = header.to_bytes();
+        let mut mac_input =
+            Vec::with_capacity(46 + index.len() * INDEX_ENTRY_SIZE);
+        mac_input.extend_from_slice(&header_bytes[0..46]);
+        for e in &index {
+            mac_input.extend_from_slice(&e.to_bytes());
+        }
+        let header_nonce =
+            derive_header_nonce(&header.nonce_seed_8, header.header_rewrites);
+        let mut otk = [0u8; 32];
+        crypto::keystream(&key_bytes, &header_nonce, 0, &mut otk);
+        let ok = unsafe {
+            ffi::poly1305_verify(
+                otk.as_ptr(),
+                mac_input.as_ptr(),
+                mac_input.len() as i32,
+                header.header_tag.as_ptr(),
+            )
+        };
+        unsafe { ffi::zeroize(otk.as_mut_ptr(), 32); }
+        if ok == 0 {
+            return Err(Error::Vault("vault header or index has been tampered"));
+        }
+
         let mut key = SecureBuffer::new(32);
         key.write(&key_bytes);
         Ok(Self { file, header, index, key, searcher: FusedSearcher::new() })
