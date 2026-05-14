@@ -82,6 +82,88 @@ impl VaultHeader {
     }
 }
 
+// ── VaultHeaderV2 (AEAD layout, on-disk wiring lands in Task 9) ───────────────
+
+pub const HEADER_SIZE_V2: usize = 64;
+const VAULT_VERSION_V2: u16 = 2;
+
+#[repr(C, packed)]
+#[derive(Clone, Copy)]
+pub struct VaultHeaderV2 {
+    pub magic: [u8; 4],
+    pub version: u16,
+    pub block_count: u32,
+    pub index_offset: u64,
+    pub key_id: [u8; 16],
+    pub nonce_seed_8: [u8; 8],
+    pub header_rewrites: u32,
+    pub header_tag: [u8; 16],
+    pub reserved: [u8; 2],
+}
+
+impl VaultHeaderV2 {
+    pub(crate) fn new(key_id: [u8; 16], nonce_seed_8: [u8; 8]) -> Self {
+        Self {
+            magic: VAULT_MAGIC,
+            version: VAULT_VERSION_V2,
+            block_count: 0,
+            index_offset: HEADER_SIZE_V2 as u64,
+            key_id,
+            nonce_seed_8,
+            header_rewrites: 0,
+            header_tag: [0; 16],
+            reserved: [0; 2],
+        }
+    }
+
+    pub fn to_bytes(self) -> [u8; HEADER_SIZE_V2] {
+        let mut buf = [0u8; HEADER_SIZE_V2];
+        buf[0..4].copy_from_slice(&self.magic);
+        buf[4..6].copy_from_slice(&self.version.to_le_bytes());
+        buf[6..10].copy_from_slice(&self.block_count.to_le_bytes());
+        buf[10..18].copy_from_slice(&self.index_offset.to_le_bytes());
+        buf[18..34].copy_from_slice(&self.key_id);
+        buf[34..42].copy_from_slice(&self.nonce_seed_8);
+        buf[42..46].copy_from_slice(&self.header_rewrites.to_le_bytes());
+        buf[46..62].copy_from_slice(&self.header_tag);
+        buf[62..64].copy_from_slice(&self.reserved);
+        buf
+    }
+
+    pub fn from_bytes(buf: &[u8; HEADER_SIZE_V2]) -> Result<Self> {
+        let magic: [u8; 4] = buf[0..4].try_into().unwrap();
+        if magic != VAULT_MAGIC {
+            return Err(Error::Vault("bad magic"));
+        }
+        let version = u16::from_le_bytes(buf[4..6].try_into().unwrap());
+        if version != VAULT_VERSION_V2 {
+            return Err(Error::Vault("unsupported vault version"));
+        }
+        let block_count = u32::from_le_bytes(buf[6..10].try_into().unwrap());
+        let index_offset = u64::from_le_bytes(buf[10..18].try_into().unwrap());
+        let mut key_id = [0u8; 16];
+        key_id.copy_from_slice(&buf[18..34]);
+        let mut nonce_seed_8 = [0u8; 8];
+        nonce_seed_8.copy_from_slice(&buf[34..42]);
+        let header_rewrites = u32::from_le_bytes(buf[42..46].try_into().unwrap());
+        let mut header_tag = [0u8; 16];
+        header_tag.copy_from_slice(&buf[46..62]);
+        let mut reserved = [0u8; 2];
+        reserved.copy_from_slice(&buf[62..64]);
+        Ok(Self {
+            magic,
+            version,
+            block_count,
+            index_offset,
+            key_id,
+            nonce_seed_8,
+            header_rewrites,
+            header_tag,
+            reserved,
+        })
+    }
+}
+
 // ── IndexEntry ────────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
