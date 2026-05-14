@@ -1,0 +1,386 @@
+// Poly1305 MAC (RFC 8439 §2.5) — SIMD per-block multiply via wmul_u64_lo/hi.
+//
+// Accumulator: 5 × 26-bit limbs.  Limbs 0–3 packed in u32x4 for the SIMD
+// multiply grid; limb 4 stays scalar.
+//
+// Per-block multiply (h × r mod 2^130-5):
+//   For each output limb k, construct scratch[10..13] = row_k (the four r
+//   multipliers for h0..h3), then:
+//     wmul_u64_lo(h_lo, row_k)  →  products for h0,h1 as u64x2
+//     wmul_u64_hi(h_lo, row_k)  →  products for h2,h3 as u64x2
+//     d[k] += reduce_add(lo) + reduce_add(hi)  +  h4 * scalar_r
+//   Total: 10 wmul calls per block (5 lo + 5 hi).  Only h4 uses a scalar
+//   integer multiply; h0..h3 always go through wmul_u64_lo/hi.
+//
+// Scratch layout (*mut i32, 22 elements total):
+//   [0..3]   r[0..3]      clamped r limbs (persistent)
+//   [4]      r[4]         scalar r limb (persistent)
+//   [5..8]   5*r[0..3]    pre-multiplied (persistent)
+//   [9]      5*r[4]       scalar (persistent)
+//   [10..13] row_k buffer  (temporary: rebuilt per output limb in mulmod_simd)
+//   [14..17] h[0..3]      accumulator lanes (updated each block)
+//   [18..21] tag words     (four i32 words, loaded as u8x16 at the end)
+//
+// Memory note: scratch is written as i32 but read for wmul via ptr_as_u32,
+// which reinterprets the same bits.  All limb values are 26-bit non-negative,
+// so the bit pattern is identical in i32 and u32 representation.
+//
+// aarch64 only — x86 is poly1305.ea.  All intrinsics used here are
+// cross-platform in eacompute: wmul_u64_lo/hi lower to umull/umull2 on ARM,
+// reduce_add to addv/uaddlv, load/store to ldr/str via SIMD lanes.
+
+#[cfg(aarch64)]
+
+// ---------------------------------------------------------------------------
+// Byte helpers
+// ---------------------------------------------------------------------------
+
+func rd8(p: *u8, off: i32) -> i32 {
+    return to_i32(p[off]) & 255
+}
+
+func rd32le(p: *u8, off: i32) -> i32 {
+    return  rd8(p, off)
+         | (rd8(p, off + 1) << 8)
+         | (rd8(p, off + 2) << 16)
+         | (rd8(p, off + 3) << 24)
+}
+
+// ---------------------------------------------------------------------------
+// Key setup: clamp r, extract 5 × 26-bit limbs and 5*r into scratch[0..9].
+// ---------------------------------------------------------------------------
+func setup_r(key: *u8, scratch: *mut i32) {
+    let w0: i32 = rd32le(key, 0)  & 0x0fffffff
+    let w1: i32 = rd32le(key, 4)  & 0x0ffffffc
+    let w2: i32 = rd32le(key, 8)  & 0x0ffffffc
+    let w3: i32 = rd32le(key, 12) & 0x0ffffffc
+
+    let mask26: i32 = 67108863
+    let r0: i32 = w0 & mask26
+    let r1: i32 = ((w0 >> 26) & 63) | ((w1 & 1048575) << 6)
+    let r2: i32 = ((w1 >> 20) & 4095) | ((w2 & 16383) << 12)
+    let r3: i32 = ((w2 >> 14) & 262143) | ((w3 & 255) << 18)
+    let r4: i32 = (w3 >> 8) & mask26
+
+    scratch[0] = r0
+    scratch[1] = r1
+    scratch[2] = r2
+    scratch[3] = r3
+    scratch[4] = r4
+    scratch[5] = r0 * 5
+    scratch[6] = r1 * 5
+    scratch[7] = r2 * 5
+    scratch[8] = r3 * 5
+    scratch[9] = r4 * 5
+}
+
+// ---------------------------------------------------------------------------
+// Block loading: convert ≤16 message bytes to 5 × 26-bit limbs.
+// Writes n[0..3] to scratch[10..13].  Returns n4 as i32.
+// ---------------------------------------------------------------------------
+func block_to_limbs(msg: *u8, off: i32, chunk_len: i32, scratch: *mut i32) -> i32 {
+    let mut b0: i32 = 0
+    let mut b1: i32 = 0
+    let mut b2: i32 = 0
+    let mut b3: i32 = 0
+
+    if chunk_len >= 1  { b0 = b0 |  rd8(msg, off)            }
+    if chunk_len >= 2  { b0 = b0 | (rd8(msg, off + 1) << 8)  }
+    if chunk_len >= 3  { b0 = b0 | (rd8(msg, off + 2) << 16) }
+    if chunk_len >= 4  { b0 = b0 | (rd8(msg, off + 3) << 24) }
+    if chunk_len >= 5  { b1 = b1 |  rd8(msg, off + 4)          }
+    if chunk_len >= 6  { b1 = b1 | (rd8(msg, off + 5) << 8)   }
+    if chunk_len >= 7  { b1 = b1 | (rd8(msg, off + 6) << 16)  }
+    if chunk_len >= 8  { b1 = b1 | (rd8(msg, off + 7) << 24)  }
+    if chunk_len >= 9  { b2 = b2 |  rd8(msg, off + 8)          }
+    if chunk_len >= 10 { b2 = b2 | (rd8(msg, off + 9) << 8)   }
+    if chunk_len >= 11 { b2 = b2 | (rd8(msg, off + 10) << 16) }
+    if chunk_len >= 12 { b2 = b2 | (rd8(msg, off + 11) << 24) }
+    if chunk_len >= 13 { b3 = b3 |  rd8(msg, off + 12)         }
+    if chunk_len >= 14 { b3 = b3 | (rd8(msg, off + 13) << 8)  }
+    if chunk_len >= 15 { b3 = b3 | (rd8(msg, off + 14) << 16) }
+    if chunk_len >= 16 { b3 = b3 | (rd8(msg, off + 15) << 24) }
+
+    // Implicit 0x01 byte placed at bit position chunk_len*8.
+    let bit_pos: i32 = chunk_len * 8
+    let bit_val: i32 = 1 << (bit_pos & 31)
+    if bit_pos < 32 {
+        b0 = b0 | bit_val
+    } else {
+        if bit_pos < 64 {
+            b1 = b1 | bit_val
+        } else {
+            if bit_pos < 96 {
+                b2 = b2 | bit_val
+            } else {
+                if bit_pos < 128 {
+                    b3 = b3 | bit_val
+                }
+            }
+        }
+    }
+
+    let mask26: i32 = 67108863
+    scratch[10] = b0 & mask26
+    scratch[11] = ((b0 >> 26) & 63) | ((b1 & 1048575) << 6)
+    scratch[12] = ((b1 >> 20) & 4095) | ((b2 & 16383) << 12)
+    scratch[13] = ((b2 >> 14) & 262143) | ((b3 & 255) << 18)
+    // n4 = bits [104..129] of the 130-bit block.
+    // For chunk_len < 16 the implicit 0x01 byte lands in bits 0..127
+    // (already embedded in b0..b3 above).
+    // For chunk_len == 16 the 0x01 byte is at bit position 128 = 104 + 24,
+    // i.e., bit 24 of limb 4.  Add it explicitly.
+    //
+    // (b3 >> 8) is an arithmetic right shift on i32; if b3's bit 31 is set
+    // (message byte 15 has the high bit set, or implicit bit at pos 120),
+    // sign-extension fills bits 24..31 of the result with 1s, leaking
+    // phantom bits into limb 4.  Mask to 24 bits to keep only the real
+    // message bits 104..127 (bit 24 is reserved for the implicit terminator).
+    let n4_base: i32 = (b3 >> 8) & 16777215
+    if chunk_len >= 16 {
+        return n4_base | (1 << 24)
+    } else {
+        return n4_base
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SIMD per-block multiply: h = h × r mod (2^130 − 5).
+//
+// h[0..3] in scratch[14..17] (i32); h4 passed/returned as i64.
+// r[0..4] in scratch[0..4]; 5*r[0..4] in scratch[5..9].
+// scratch[10..13] used as row_k buffer.
+//
+// For output limb k the four multipliers for h0..h3 are:
+//   row_k[i] = r[(k-i+5)%5]  (if i <= k, no reduction factor needed)
+//              5*r[(k-i+5)%5] (if i > k, wraps → 2^130≡5 factor)
+//
+// 10 wmul calls total (5 wmul_lo + 5 wmul_hi).
+// ---------------------------------------------------------------------------
+func mulmod_simd(scratch: *mut i32, h4: i64) -> i64 {
+    // h_lo = [h0,h1,h2,h3] as u32x4.
+    // ptr_as_u32 reinterprets the *mut i32 as *u32 — same bits.
+    let h_lo: u32x4 = load(ptr_as_u32(scratch), 14)
+
+    // -- Output limb 0 -------------------------------------------------------
+    // d0 = h0*r0 + h1*(5*r4) + h2*(5*r3) + h3*(5*r2)  [+ h4*(5*r1)]
+    scratch[10] = scratch[0]
+    scratch[11] = scratch[9]
+    scratch[12] = scratch[8]
+    scratch[13] = scratch[7]
+    let row0: u32x4 = load(ptr_as_u32(scratch), 10)
+    let lo0: u64x2 = wmul_u64_lo(h_lo, row0)
+    let hi0: u64x2 = wmul_u64_hi(h_lo, row0)
+    let mut d0: i64 = to_i64(reduce_add(lo0)) + to_i64(reduce_add(hi0))
+    d0 = d0 + h4 * to_i64(scratch[6])
+
+    // -- Output limb 1 -------------------------------------------------------
+    // d1 = h0*r1 + h1*r0 + h2*(5*r4) + h3*(5*r3)  [+ h4*(5*r2)]
+    scratch[10] = scratch[1]
+    scratch[11] = scratch[0]
+    scratch[12] = scratch[9]
+    scratch[13] = scratch[8]
+    let row1: u32x4 = load(ptr_as_u32(scratch), 10)
+    let lo1: u64x2 = wmul_u64_lo(h_lo, row1)
+    let hi1: u64x2 = wmul_u64_hi(h_lo, row1)
+    let mut d1: i64 = to_i64(reduce_add(lo1)) + to_i64(reduce_add(hi1))
+    d1 = d1 + h4 * to_i64(scratch[7])
+
+    // -- Output limb 2 -------------------------------------------------------
+    // d2 = h0*r2 + h1*r1 + h2*r0 + h3*(5*r4)  [+ h4*(5*r3)]
+    scratch[10] = scratch[2]
+    scratch[11] = scratch[1]
+    scratch[12] = scratch[0]
+    scratch[13] = scratch[9]
+    let row2: u32x4 = load(ptr_as_u32(scratch), 10)
+    let lo2: u64x2 = wmul_u64_lo(h_lo, row2)
+    let hi2: u64x2 = wmul_u64_hi(h_lo, row2)
+    let mut d2: i64 = to_i64(reduce_add(lo2)) + to_i64(reduce_add(hi2))
+    d2 = d2 + h4 * to_i64(scratch[8])
+
+    // -- Output limb 3 -------------------------------------------------------
+    // d3 = h0*r3 + h1*r2 + h2*r1 + h3*r0  [+ h4*(5*r4)]
+    scratch[10] = scratch[3]
+    scratch[11] = scratch[2]
+    scratch[12] = scratch[1]
+    scratch[13] = scratch[0]
+    let row3: u32x4 = load(ptr_as_u32(scratch), 10)
+    let lo3: u64x2 = wmul_u64_lo(h_lo, row3)
+    let hi3: u64x2 = wmul_u64_hi(h_lo, row3)
+    let mut d3: i64 = to_i64(reduce_add(lo3)) + to_i64(reduce_add(hi3))
+    d3 = d3 + h4 * to_i64(scratch[9])
+
+    // -- Output limb 4 -------------------------------------------------------
+    // d4 = h0*r4 + h1*r3 + h2*r2 + h3*r1  [+ h4*r0]
+    scratch[10] = scratch[4]
+    scratch[11] = scratch[3]
+    scratch[12] = scratch[2]
+    scratch[13] = scratch[1]
+    let row4: u32x4 = load(ptr_as_u32(scratch), 10)
+    let lo4: u64x2 = wmul_u64_lo(h_lo, row4)
+    let hi4: u64x2 = wmul_u64_hi(h_lo, row4)
+    let mut d4: i64 = to_i64(reduce_add(lo4)) + to_i64(reduce_add(hi4))
+    d4 = d4 + h4 * to_i64(scratch[0])
+
+    // -- Carry propagation (two passes) --------------------------------------
+    let mask26: i64 = 67108863
+
+    // Pass 1
+    let mut c: i64 = d0 >> 26
+    d0 = d0 & mask26
+    d1 = d1 + c
+    c = d1 >> 26
+    d1 = d1 & mask26
+    d2 = d2 + c
+    c = d2 >> 26
+    d2 = d2 & mask26
+    d3 = d3 + c
+    c = d3 >> 26
+    d3 = d3 & mask26
+    d4 = d4 + c
+    c = d4 >> 26
+    d4 = d4 & mask26
+    d0 = d0 + c * 5
+
+    // Pass 2
+    c = d0 >> 26
+    d0 = d0 & mask26
+    d1 = d1 + c
+    c = d1 >> 26
+    d1 = d1 & mask26
+    d2 = d2 + c
+    c = d2 >> 26
+    d2 = d2 & mask26
+    d3 = d3 + c
+    c = d3 >> 26
+    d3 = d3 & mask26
+    d4 = d4 + c
+    c = d4 >> 26
+    d4 = d4 & mask26
+    d0 = d0 + c * 5
+
+    // Write h[0..3] back to scratch[14..17] (26-bit values fit in i32).
+    scratch[14] = to_i32(d0)
+    scratch[15] = to_i32(d1)
+    scratch[16] = to_i32(d2)
+    scratch[17] = to_i32(d3)
+    return d4
+}
+
+// ---------------------------------------------------------------------------
+// Exported entry point
+// ---------------------------------------------------------------------------
+export func poly1305_mac(
+    key:     *u8,
+    msg:     *u8,
+    msg_len: i32,
+    tag_out: *mut u8,
+    scratch: *mut i32
+) {
+    setup_r(key, scratch)
+
+    // s: bytes [16..31] of key, four little-endian 32-bit words.
+    let s0: i32 = rd32le(key, 16)
+    let s1: i32 = rd32le(key, 20)
+    let s2: i32 = rd32le(key, 24)
+    let s3: i32 = rd32le(key, 28)
+
+    scratch[14] = 0
+    scratch[15] = 0
+    scratch[16] = 0
+    scratch[17] = 0
+    let mut h4: i64 = 0
+
+    let mut offset: i32 = 0
+    while offset < msg_len {
+        let remaining: i32 = msg_len - offset
+        let mut chunk_len: i32 = remaining
+        if remaining >= 16 { chunk_len = 16 }
+
+        let n4: i32 = block_to_limbs(msg, offset, chunk_len, scratch)
+
+        scratch[14] = scratch[14] + scratch[10]
+        scratch[15] = scratch[15] + scratch[11]
+        scratch[16] = scratch[16] + scratch[12]
+        scratch[17] = scratch[17] + scratch[13]
+        h4 = h4 + to_i64(n4)
+
+        h4 = mulmod_simd(scratch, h4)
+
+        offset = offset + 16
+    }
+
+    // --- Final reduction: h mod p (p = 2^130-5) -----------------------------
+    let mut h0: i64 = to_i64(scratch[14])
+    let mut h1: i64 = to_i64(scratch[15])
+    let mut h2: i64 = to_i64(scratch[16])
+    let mut h3: i64 = to_i64(scratch[17])
+    let mask26: i64 = 67108863
+
+    // Full carry normalization.
+    let mut c: i64 = h0 >> 26
+    h0 = h0 & mask26
+    h1 = h1 + c
+    c = h1 >> 26
+    h1 = h1 & mask26
+    h2 = h2 + c
+    c = h2 >> 26
+    h2 = h2 & mask26
+    h3 = h3 + c
+    c = h3 >> 26
+    h3 = h3 & mask26
+    h4 = h4 + c
+    c = h4 >> 26
+    h4 = h4 & mask26
+    h0 = h0 + c * 5
+    c = h0 >> 26
+    h0 = h0 & mask26
+    h1 = h1 + c
+
+    // Conditional subtract p: compute g = h + 5 and take g if overflow.
+    let g0: i64 = h0 + 5
+    c = g0 >> 26
+    let g0f: i64 = g0 & mask26
+    let g1: i64 = h1 + c
+    c = g1 >> 26
+    let g1f: i64 = g1 & mask26
+    let g2: i64 = h2 + c
+    c = g2 >> 26
+    let g2f: i64 = g2 & mask26
+    let g3: i64 = h3 + c
+    c = g3 >> 26
+    let g3f: i64 = g3 & mask26
+    let g4: i64 = h4 + c
+    let g4f: i64 = g4 & mask26
+    // sel = 1 if h >= p (carry out of g4), else 0.
+    let sel: i64 = g4 >> 26
+    // mask_g = 0 - sel → all-ones when sel=1, zero when sel=0.
+    let mask_g: i64 = 0 - sel
+    h0 = h0 ^ ((h0 ^ g0f) & mask_g)
+    h1 = h1 ^ ((h1 ^ g1f) & mask_g)
+    h2 = h2 ^ ((h2 ^ g2f) & mask_g)
+    h3 = h3 ^ ((h3 ^ g3f) & mask_g)
+    h4 = h4 ^ ((h4 ^ g4f) & mask_g)
+
+    // Collapse to four 32-bit words.
+    let hw0: i32 = to_i32(h0 | (h1 << 26))
+    let hw1: i32 = to_i32((h1 >> 6) | (h2 << 20))
+    let hw2: i32 = to_i32((h2 >> 12) | (h3 << 14))
+    let hw3: i32 = to_i32((h3 >> 18) | (h4 << 8))
+
+    // --- (h + s) mod 2^128 --------------------------------------------------
+    let t0_64: i64 = (to_i64(hw0) & 4294967295) + (to_i64(s0) & 4294967295)
+    let t1_64: i64 = (to_i64(hw1) & 4294967295) + (to_i64(s1) & 4294967295) + (t0_64 >> 32)
+    let t2_64: i64 = (to_i64(hw2) & 4294967295) + (to_i64(s2) & 4294967295) + (t1_64 >> 32)
+    let t3_64: i64 = (to_i64(hw3) & 4294967295) + (to_i64(s3) & 4294967295) + (t2_64 >> 32)
+    scratch[18] = to_i32(t0_64)
+    scratch[19] = to_i32(t1_64)
+    scratch[20] = to_i32(t2_64)
+    scratch[21] = to_i32(t3_64)
+
+    // Copy 16 tag bytes from scratch[18..21] to tag_out via u8x16 load/store.
+    // scratch is *mut i32; byte offset 72 = element 18 × 4 bytes.
+    // ptr_as_u8 gives *mut u8; load at element offset 72 (byte units).
+    let tag_bytes: u8x16 = load(ptr_as_u8(scratch), 72)
+    store(tag_out, 0, tag_bytes)
+}
