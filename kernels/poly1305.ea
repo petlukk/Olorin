@@ -266,15 +266,12 @@ func mulmod_simd(scratch: *mut i32, h4: i64) -> i64 {
 }
 
 // ---------------------------------------------------------------------------
-// Exported entry point
+// Tag computation: runs setup + per-block multiply loop + final reduction,
+// writes the 16-byte tag as four i32 words into scratch[18..21].
+// Shared by both poly1305_mac (which copies it out) and poly1305_verify
+// (which compares it constant-time against a provided tag).
 // ---------------------------------------------------------------------------
-export func poly1305_mac(
-    key:     *u8,
-    msg:     *u8,
-    msg_len: i32,
-    tag_out: *mut u8,
-    scratch: *mut i32
-) {
+func compute_tag_words(key: *u8, msg: *u8, msg_len: i32, scratch: *mut i32) {
     setup_r(key, scratch)
 
     // s: bytes [16..31] of key, four little-endian 32-bit words.
@@ -375,10 +372,57 @@ export func poly1305_mac(
     scratch[19] = to_i32(t1_64)
     scratch[20] = to_i32(t2_64)
     scratch[21] = to_i32(t3_64)
+}
+
+// ---------------------------------------------------------------------------
+// Exported entry points
+// ---------------------------------------------------------------------------
+export func poly1305_mac(
+    key:     *u8,
+    msg:     *u8,
+    msg_len: i32,
+    tag_out: *mut u8,
+    scratch: *mut i32
+) {
+    compute_tag_words(key, msg, msg_len, scratch)
 
     // Copy 16 tag bytes from scratch[18..21] to tag_out via u8x16 load/store.
     // scratch is *mut i32; byte offset 72 = element 18 × 4 bytes.
     // ptr_as_u8 gives *mut u8; load at element offset 72 (byte units).
     let tag_bytes: u8x16 = load(ptr_as_u8(scratch), 72)
     store(tag_out, 0, tag_bytes)
+}
+
+// Constant-time tag compare.  Computes the expected tag, XORs against the
+// provided tag, OR-reduces all 16 difference bytes, and returns 1 iff the
+// reduction is zero (tags match).  No branch on key/msg/tag bytes:
+//   - XOR is data-oblivious.
+//   - OR-reduction loops a fixed 16 times regardless of values.
+//   - Final compare uses ((acc - 1) >> 31) & 1 — branchless on i32.
+export func poly1305_verify(
+    key:     *u8,
+    msg:     *u8,
+    msg_len: i32,
+    tag:     *u8,
+    scratch: *mut i32
+) -> i32 {
+    compute_tag_words(key, msg, msg_len, scratch)
+
+    // diff = computed_tag XOR provided_tag, lane-wise on u8x16.
+    let computed: u8x16 = load(ptr_as_u8(scratch), 72)
+    let provided: u8x16 = load(tag, 0)
+    let diff: u8x16 = computed .^ provided
+    store(ptr_as_u8(scratch), 72, diff)
+
+    // OR-reduce the 16 difference bytes as four 32-bit words (scratch[18..21]
+    // holds the bytes after the u8x16 store above).  Data-oblivious: same
+    // arithmetic regardless of input values.
+    let acc: i32 = scratch[18] | scratch[19] | scratch[20] | scratch[21]
+
+    // Branchless "is_zero(acc)" on i32:
+    //   acc | (-acc) has bit 31 set iff acc != 0 (INT_MIN included).
+    //   Arith. >> 31 yields -1 when set, 0 otherwise; & 1 -> {1, 0}.
+    //   Invert with 1 ^ ... so result is 1 iff acc == 0 (tags match).
+    let any_nonzero: i32 = ((acc | (0 - acc)) >> 31) & 1
+    return 1 ^ any_nonzero
 }

@@ -67,6 +67,9 @@ type JlProjectFn        = unsafe extern "C" fn(*const f32, *const f32, i32, i32,
 type Poly1305MacKernFn  = unsafe extern "C" fn(
     *const u8, *const u8, i32, *mut u8, *mut i32,
 );
+type Poly1305VerifyKernFn = unsafe extern "C" fn(
+    *const u8, *const u8, i32, *const u8, *mut i32,
+) -> i32;
 type Chacha20EncryptFn  = unsafe extern "C" fn(
     *const i32, *const i32, i32,
     *const u8, *mut u8, i32,
@@ -114,6 +117,7 @@ pub struct KernelTable {
     pub ansi_classify:            AnsiClassifyFn,
     pub terminal_diff:            TerminalDiffFn,
     pub poly1305_mac_kern:        Poly1305MacKernFn,
+    pub poly1305_verify_kern:     Poly1305VerifyKernFn,
 }
 
 // SAFETY: KernelTable holds function pointers and library handles.
@@ -246,6 +250,8 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
                 sym(&terminal_diff_lib, b"terminal_diff\0")?),
             poly1305_mac_kern: std::mem::transmute(
                 sym(&poly1305_lib, b"poly1305_mac\0")?),
+            poly1305_verify_kern: std::mem::transmute(
+                sym(&poly1305_lib, b"poly1305_verify\0")?),
             libs: vec![
                 command_router,
                 fused_safety, intent_router, expr_eval,
@@ -416,4 +422,21 @@ pub unsafe fn poly1305_mac(
     // 22-word scratch buffer: r[0..4], 5*r[0..4], row_k[0..3], h[0..3], tag[0..3].
     let mut scratch = [0i32; 22];
     (k().poly1305_mac_kern)(key, msg, msg_len, tag_out, scratch.as_mut_ptr());
+}
+
+/// Constant-time Poly1305 tag verification.
+///
+/// Returns 1 iff the tag computed over `msg` with `key` exactly equals
+/// the 16 bytes at `tag`.  No branches on key/msg/tag bytes; the compare
+/// is OR-reduce + branchless `((acc - 1) >> 31) & 1`.
+///
+/// # Safety
+/// - `key` must be valid for 32 bytes.
+/// - `msg` must be valid for `msg_len` bytes (0 is allowed).
+/// - `tag` must be valid for 16 bytes (read).
+pub unsafe fn poly1305_verify(
+    key: *const u8, msg: *const u8, msg_len: i32, tag: *const u8,
+) -> i32 {
+    let mut scratch = [0i32; 22];
+    (k().poly1305_verify_kern)(key, msg, msg_len, tag, scratch.as_mut_ptr())
 }
