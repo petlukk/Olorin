@@ -1,4 +1,5 @@
 pub mod vault;
+pub mod aead;
 pub mod crypto;
 pub mod search;
 pub mod secure;
