@@ -36,6 +36,38 @@ pub fn seal(
     }
 }
 
+/// Constant-time MAC verification only — does NOT decrypt.  Use this when
+/// you want to decide whether to trust `ct` before any downstream
+/// processing (e.g., fused decrypt+search) without ever exposing the
+/// plaintext outside the FusedSearcher kernel.
+pub fn verify(
+    key: &[u8; 32],
+    nonce: &[u8; 12],
+    aad: &[u8],
+    ct: &[u8],
+    tag: &[u8; 16],
+) -> Result<()> {
+    let mut otk = [0u8; 32];
+    crypto::keystream(key, nonce, 0, &mut otk);
+
+    let mac_msg = build_mac_message(aad, ct);
+    let ok = unsafe {
+        ffi::poly1305_verify(
+            otk.as_ptr(),
+            mac_msg.as_ptr(),
+            mac_msg.len() as i32,
+            tag.as_ptr(),
+        )
+    };
+    unsafe {
+        ffi::zeroize(otk.as_mut_ptr(), 32);
+    }
+    if ok == 0 {
+        return Err(Error::Vault("integrity check failed"));
+    }
+    Ok(())
+}
+
 /// Verify `tag` against `ct`+`aad` in constant time using `key`+`nonce`,
 /// then decrypt `ct` in-place.  On integrity failure, `ct` is left
 /// unchanged and `Error::Vault` is returned.

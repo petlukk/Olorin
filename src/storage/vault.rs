@@ -558,11 +558,12 @@ impl Vault {
         Ok(ct_and_tag)
     }
 
-    /// Read raw encrypted block (ct only, AEAD tag stripped) + its nonce.
-    /// Used by fused search; tag verification is the caller's responsibility
-    /// (Task 12 will switch search to a verify-then-search flow).
+    /// Read a block from disk and split it into `(ct, tag, nonce)`.  Used by
+    /// `Vault::search`'s verify-then-search path: the caller MAC-verifies
+    /// `tag` against `ct`+AAD before passing `ct` to the fused decrypt+search
+    /// kernel, so a tampered block never reaches search results.
     pub(crate) fn read_encrypted_block(&mut self, block_index: usize)
-        -> Result<(Vec<u8>, [u8; 12])>
+        -> Result<(Vec<u8>, [u8; 16], [u8; 12])>
     {
         if block_index >= self.index.len() {
             return Err(Error::Vault("block index out of range"));
@@ -578,10 +579,13 @@ impl Vault {
         let mut ct_and_tag = vec![0u8; length];
         self.file.seek(SeekFrom::Start(offset))?;
         self.file.read_exact(&mut ct_and_tag)?;
-        ct_and_tag.truncate(length - 16);
+        let ct_len = length - 16;
+        let mut tag = [0u8; 16];
+        tag.copy_from_slice(&ct_and_tag[ct_len..]);
+        ct_and_tag.truncate(ct_len);
 
         let nonce = derive_block_nonce(&self.header.nonce_seed_8, nonce_counter);
-        Ok((ct_and_tag, nonce))
+        Ok((ct_and_tag, tag, nonce))
     }
 
     /// Get a copy of the vault encryption key (for fused search).
@@ -623,10 +627,26 @@ impl Vault {
         let mut results = Vec::with_capacity(scored.len());
 
         for (block_idx, score) in scored {
-            let (ciphertext, nonce) = self.read_encrypted_block(block_idx)?;
+            let (ciphertext, tag, nonce) = self.read_encrypted_block(block_idx)?;
+
+            // MAC-verify the candidate block before letting the fused
+            // decrypt+search kernel touch it.  A tampered block silently
+            // drops out of the result set — no plaintext, partial line,
+            // or even block index ever leaks through.
+            let entry = &self.index[block_idx];
+            let aad = build_block_aad(
+                &self.header.key_id,
+                VAULT_VERSION_V2,
+                entry.nonce_counter,
+                entry.timestamp,
+                &entry.histogram,
+            );
+            if aead::verify(&key_copy, &nonce, &aad, &ciphertext, &tag).is_err() {
+                continue;
+            }
+
             // v2 encrypts blocks at counter=1 (counter=0 is reserved for the
-            // Poly1305 OTK).  Tag verification will move into search itself
-            // in Task 12 (verify-then-search).
+            // Poly1305 OTK).
             let fused = self.searcher.search(&key_copy, &nonce, 1, &ciphertext, &needles);
             let lines: Vec<String> = fused.context_lines
                 .into_iter()
