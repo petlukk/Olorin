@@ -20,71 +20,14 @@ use crate::storage::secure::SecureBuffer;
 // ── Format constants ──────────────────────────────────────────────────────────
 
 const VAULT_MAGIC: [u8; 4] = *b"OLRN";
-const VAULT_VERSION: u16 = 1;
-const HEADER_SIZE: usize = 64;
 const INDEX_ENTRY_SIZE: usize = 288;
 
-// ── VaultHeader ───────────────────────────────────────────────────────────────
+// The v1 VaultHeader / VAULT_VERSION / HEADER_SIZE were dropped after the
+// migration helper switched to raw byte parsing (see `read_all_v1_plaintexts`,
+// which carries its own local V1_HEADER_SIZE / V1_INDEX_ENTRY_SIZE).  v1
+// vaults are still recognised + auto-migrated on first open by a v2 binary.
 
-#[repr(C, packed)]
-#[derive(Clone, Copy)]
-struct VaultHeader {
-    magic: [u8; 4],
-    version: u16,
-    block_count: u32,
-    index_offset: u64,
-    key_id: [u8; 16],
-    nonce_seed: [u8; 12],
-    reserved: [u8; 18],
-}
-
-impl VaultHeader {
-    fn new(key_id: [u8; 16], nonce_seed: [u8; 12]) -> Self {
-        Self {
-            magic: VAULT_MAGIC,
-            version: VAULT_VERSION,
-            block_count: 0,
-            index_offset: HEADER_SIZE as u64,
-            key_id,
-            nonce_seed,
-            reserved: [0u8; 18],
-        }
-    }
-
-    fn to_bytes(self) -> [u8; HEADER_SIZE] {
-        let mut buf = [0u8; HEADER_SIZE];
-        buf[0..4].copy_from_slice(&self.magic);
-        buf[4..6].copy_from_slice(&self.version.to_le_bytes());
-        buf[6..10].copy_from_slice(&self.block_count.to_le_bytes());
-        buf[10..18].copy_from_slice(&self.index_offset.to_le_bytes());
-        buf[18..34].copy_from_slice(&self.key_id);
-        buf[34..46].copy_from_slice(&self.nonce_seed);
-        buf[46..64].copy_from_slice(&self.reserved);
-        buf
-    }
-
-    fn from_bytes(buf: &[u8; HEADER_SIZE]) -> Result<Self> {
-        let magic: [u8; 4] = buf[0..4].try_into().unwrap();
-        if magic != VAULT_MAGIC {
-            return Err(Error::Vault("bad magic"));
-        }
-        let version = u16::from_le_bytes(buf[4..6].try_into().unwrap());
-        if version != VAULT_VERSION {
-            return Err(Error::Vault("unsupported version"));
-        }
-        let block_count = u32::from_le_bytes(buf[6..10].try_into().unwrap());
-        let index_offset = u64::from_le_bytes(buf[10..18].try_into().unwrap());
-        let mut key_id = [0u8; 16];
-        key_id.copy_from_slice(&buf[18..34]);
-        let mut nonce_seed = [0u8; 12];
-        nonce_seed.copy_from_slice(&buf[34..46]);
-        let mut reserved = [0u8; 18];
-        reserved.copy_from_slice(&buf[46..64]);
-        Ok(Self { magic, version, block_count, index_offset, key_id, nonce_seed, reserved })
-    }
-}
-
-// ── VaultHeaderV2 (AEAD layout, on-disk wiring lands in Task 9) ───────────────
+// ── VaultHeaderV2 ─────────────────────────────────────────────────────────────
 
 pub const HEADER_SIZE_V2: usize = 64;
 const VAULT_VERSION_V2: u16 = 2;

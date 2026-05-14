@@ -6,6 +6,81 @@ uses [semver](https://semver.org/) at the minor level. Each release
 is tagged in git as `vX.Y.Z` and listed below in reverse-chronological
 order.
 
+## [1.1.0] — 2026-05-14
+
+Vault crypto upgrade: per-block ChaCha20-Poly1305 AEAD with binding AAD,
+a Poly1305 tag over the header + index, constant-time tag compare on
+open, and verify-then-search in the fused decrypt path.  v1 vaults
+auto-migrate to v2 on first open by a v1.1.0 binary, with the original
+preserved as `vault.bin.v1.bak`.
+
+### Added
+
+- **Vault format v2 (ChaCha20-Poly1305 AEAD).** Per-block integrity now
+  uses Poly1305 (RFC 8439) over `aad || ciphertext` instead of v1's
+  xxhash check.  The AAD binds `key_id || version || nonce_counter ||
+  timestamp || histogram`, so a swapped or copied block fails open even
+  if the attacker controls both halves.
+- **Header MAC.** The 64-byte v2 header carries a `header_tag` field
+  that Poly1305-MACs `header[0..46] || serialized_index` using a
+  domain-separated nonce (the high bit of the 4-byte counter slot is
+  reserved for this domain — see the tightened wrap guard below).  Any
+  byte flipped inside the MAC region — `block_count`, `index_offset`,
+  `key_id`, `nonce_seed_8`, `header_rewrites`, or any index entry —
+  fails open with `Error::Vault("vault header or index has been
+  tampered")`.
+- **Auto-migration of v1 vaults.** On first open by a v1.1.0 binary,
+  v1 vaults are streamed, xxhash-verified, re-encrypted as v2 blocks,
+  and atomically renamed into place.  The original is preserved as
+  `vault.bin.v1.bak`.  A corrupt v1 fails before any backup or write,
+  so users can't lose data to a silent migration error.
+- **Constant-time tag verification.** `poly1305_verify` exported by
+  both x86 and ARM kernels runs OR-reduce + branchless `is_zero` on
+  the 16-byte XOR difference.  No early-exit; no byte-position
+  timing leak.
+- **Verify-then-search.** `Vault::search` MAC-verifies each candidate
+  block before handing it to `FusedSearcher`.  A tampered block drops
+  silently — no block index, no partial line, no signal reaches the
+  result set.
+- `src/storage/aead.rs` — `seal` / `open` / `verify` (verify-only,
+  no decrypt) for ChaCha20-Poly1305 with AAD.
+- `kernels/poly1305.ea` + `kernels/poly1305_arm.ea` — Poly1305 SIMD
+  kernel, 5×26-bit radix using `wmul_u64_lo` / `wmul_u64_hi`.
+- Cross-arch bit-identity golden at `tests/fixtures/aead_golden.bin`
+  (1040 bytes = 1024 ct + 16 tag).  x86 ≡ ARM NEON.
+
+### Changed
+
+- **Vault block counter wrap tightened** from `u32::MAX` to
+  `0x80000000`.  The high bit of the 4-byte counter slot is now
+  reserved for the header-MAC nonce domain, so an honest counter must
+  never set it.  At one append per second this still gives ~68 years
+  before exhaustion.
+- `IndexEntry.xxhash` is now `_reserved` — on-disk layout preserved
+  (zeros written, ignored on read), so a v1→v2 migration can stream
+  entries without shifting offsets.
+- `FusedSearcher::search` now takes a `ctr_init: i32` parameter
+  (v1 vaults passed 0, v2 passes 1 — counter 0 is the Poly1305 OTK).
+- `Vault::read_encrypted_block` returns `(ct, tag, nonce)` instead of
+  `(ct, nonce)`; only `Vault::search` uses it.
+
+### Removed (breaking on-disk format)
+
+- v1 vault format.  v1 vaults auto-migrate to v2 on first open;
+  external tooling that parsed v1 directly must update.
+- `Vault::last_block_hash()` — xxhash slot is gone.  Per-block AEAD
+  tag is a stronger and constant-time integrity check.
+
+### Security findings closed
+
+- v1's xxhash-on-plaintext was non-cryptographic — an attacker who
+  could write to `vault.bin` could substitute matching plaintext +
+  precomputed xxhash and read it back without detection.  v2's
+  Poly1305 tag is key-dependent so this attack now requires the key.
+- v1 had no header integrity — `block_count`, `nonce_seed`, or index
+  bytes could be tampered with at rest and the vault would open
+  normally.  v2's `header_tag` closes this.
+
 ## [1.0.0] — 2026-05-12
 
 Marks the rune family as production-ready. **No new features over
