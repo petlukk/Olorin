@@ -6,6 +6,30 @@ uses [semver](https://semver.org/) at the minor level. Each release
 is tagged in git as `vX.Y.Z` and listed below in reverse-chronological
 order.
 
+## [1.1.1] — 2026-05-15
+
+Doc-only patch.  README architecture overview and "The Vault" diagram
+brought up to date with the v1.1.0 AEAD format.  No code change; no
+on-disk format change; v1.1.0 vaults open unchanged.
+
+### Fixed
+
+- README's "The Vault" diagram still showed `block --> xxHash64 verify
+  --> ChaCha20 decrypt` for the read path.  Now reads `Poly1305 verify
+  --> ChaCha20 decrypt` to match the v1.1.0 AEAD format.
+- README intro to "The Vault" still said "encrypted at rest using
+  ChaCha20" — updated to "ChaCha20-Poly1305 AEAD" so first-time readers
+  see the authenticated half.
+- README write-path diagram updated from "ChaCha20 encrypt" to
+  "ChaCha20-Poly1305 seal" (matches `src/storage/aead.rs::seal`).
+- README search-path diagram now shows the per-block Poly1305 verify
+  gate that runs before each `FusedSearcher` candidate — surfacing the
+  verify-then-search behavior added in v1.1.0.
+- README architecture tree's `storage/key.rs` entry no longer advertises
+  `xxHash64`.  The function survives as an internal helper used only by
+  the v1→v2 migration verifier; it is no longer part of the live vault
+  read or write flow.
+
 ## [1.1.0] — 2026-05-14
 
 Vault crypto upgrade: per-block ChaCha20-Poly1305 AEAD with binding AAD,

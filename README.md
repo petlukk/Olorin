@@ -407,7 +407,7 @@ olorin/
       search.rs       FusedSearcher (zero-exposure)
       secure.rs       SecureBuffer (mlock + SIMD zeroize)
       json.rs         Recursive descent JSON parser
-      key.rs          Key derivation + xxHash64
+      key.rs          Key derivation
 
     interface/      The Gates
       terminal.rs     REPL (stdin/stdout)
@@ -486,17 +486,18 @@ tuned for 4-core ARM.
 
 ## The Vault
 
-Every conversation is encrypted at rest using ChaCha20.
+Every conversation is encrypted at rest using ChaCha20-Poly1305 AEAD.
 
 ```
-Write:  message --> ChaCha20 encrypt --> vault.bin (append-only)
-                                     --> byte histogram --> index
+Write:  message --> ChaCha20-Poly1305 seal --> vault.bin (append-only)
+                                           --> byte histogram --> index
 
 Search: query --> histogram --> cosine similarity vs index --> ranked blocks
+             --> Poly1305 verify each candidate block
              --> FusedSearcher: decrypt+search in SIMD registers
              --> only matched context lines returned
 
-Read:   block --> xxHash64 verify --> ChaCha20 decrypt
+Read:   block --> Poly1305 verify --> ChaCha20 decrypt
 ```
 
 The FusedSearcher (`chacha20_search_v2` kernel) decrypts in SIMD registers,
