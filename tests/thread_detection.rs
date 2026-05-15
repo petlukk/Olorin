@@ -1,17 +1,27 @@
 //! Sanity checks for hardware-detection helpers in
 //! `inference::threadpool` — `detect_thread_count` and
 //! `detect_prefill_ubatch`.
+//!
+//! All four tests mutate or read `OLORIN_THREADS` / `OLORIN_PREFILL_UBATCH`.
+//! `cargo test` runs tests within one binary in parallel by default, and
+//! env-var mutation is process-global, so the tests race without a lock.
+//! `ENV_LOCK` serializes them.  Poisoning is treated as recoverable: a
+//! prior panic leaves the env in whatever state the next test cares about
+//! resetting, so we should not chain-panic on the lock itself.
 
 use olorin::inference::threadpool::{detect_prefill_ubatch, detect_thread_count};
+use std::sync::{Mutex, MutexGuard};
+
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+fn env_guard() -> MutexGuard<'static, ()> {
+    ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+}
 
 #[test]
 fn detect_thread_count_is_plausible() {
-    // Test must leave OLORIN_THREADS clean. If an outer shell has it set,
-    // the env-var branch is exercised; otherwise we fall into sysfs/fallback.
-    // In either case, the answer should be a plausible worker count:
-    //   - at least 1
-    //   - at most the logical-CPU count reported by the stdlib
-    //     (physical-core detection can't return MORE than logical-CPU count)
+    let _g = env_guard();
+
     let n = detect_thread_count();
     assert!(n >= 1, "detect_thread_count returned {n}, must be >= 1");
 
@@ -28,9 +38,8 @@ fn detect_thread_count_is_plausible() {
 
 #[test]
 fn olorin_threads_env_var_overrides() {
-    // SAFETY: env-var mutation is process-global. Running this test under
-    // --test-threads=1 (or in its own binary, which it is as a separate .rs
-    // file) avoids interleaving with other tests in this file.
+    let _g = env_guard();
+
     unsafe { std::env::set_var("OLORIN_THREADS", "3"); }
     assert_eq!(detect_thread_count(), 3);
     unsafe { std::env::set_var("OLORIN_THREADS", "bogus"); }
@@ -41,6 +50,8 @@ fn olorin_threads_env_var_overrides() {
 
 #[test]
 fn prefill_ubatch_env_var_overrides() {
+    let _g = env_guard();
+
     // Explicit override — must be respected regardless of hardware.
     unsafe { std::env::set_var("OLORIN_PREFILL_UBATCH", "32"); }
     assert_eq!(detect_prefill_ubatch(), 32);
@@ -66,6 +77,8 @@ fn prefill_ubatch_env_var_overrides() {
 
 #[test]
 fn prefill_ubatch_sysfs_detection_consistent() {
+    let _g = env_guard();
+
     // With no override, detection result must be either 64 (big-L3 path)
     // or usize::MAX (small/no L3 path). Which one is hardware-specific.
     unsafe { std::env::remove_var("OLORIN_PREFILL_UBATCH"); }
