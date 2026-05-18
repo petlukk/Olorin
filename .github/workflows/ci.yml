@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs on the same ref (e.g. force-push).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Olorin's build.rs locates the Ea compiler via `which ea`; the steps
+  # below ensure `ea` is on PATH before `cargo build` runs.
+
+jobs:
+  build-test:
+    name: Build + test (Linux x86_64)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout Olorin
+        uses: actions/checkout@v4
+
+      - name: Install eacompute system deps (LLVM 18)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            llvm-18-dev clang-18 libpolly-18-dev libzstd-dev
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Checkout eacompute (sibling repo)
+        uses: actions/checkout@v4
+        with:
+          repository: petlukk/eacompute
+          path: eacompute
+          ref: main
+
+      - name: Cache eacompute build
+        uses: actions/cache@v4
+        with:
+          path: eacompute/target
+          key: eacompute-${{ runner.os }}-${{ hashFiles('eacompute/Cargo.lock', 'eacompute/Cargo.toml', 'eacompute/build.rs') }}-${{ hashFiles('eacompute/src/**') }}
+
+      - name: Build eacompute (release)
+        working-directory: eacompute
+        run: cargo build --release --features=llvm
+
+      - name: Add ea to PATH
+        run: echo "${GITHUB_WORKSPACE}/eacompute/target/release" >> "$GITHUB_PATH"
+
+      - name: Verify ea on PATH
+        run: |
+          which ea
+          ea --version || true
+
+      - name: Cache Olorin cargo + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: olorin-v1
+          shared-key: linux-x86_64
+
+      - name: Build Olorin (release)
+        run: cargo build --release
+
+      - name: Run tests (release)
+        # `--release` matches the build profile we just compiled, avoiding
+        # a second full rebuild for the test binaries. If specific tests
+        # prove flaky on the runner, filter with `--skip <name>` here.
+        run: cargo test --release --no-fail-fast
