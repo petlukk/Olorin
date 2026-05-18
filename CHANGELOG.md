@@ -8,6 +8,12 @@ order.
 
 ## [Unreleased]
 
+First slice of arc #3 (passphrase + Argon2id KDF, the v2.0 vault
+story).  Adds Blake2b — the inner hash that Argon2id will build on —
+as an Ea kernel + Rust wrapper.  No on-disk format change yet; the
+new primitive is unused outside its own KAT tests until the rest of
+arc #3 lands.
+
 Removed the v1 → v2 vault migration shipped in v1.1.0.  Olorin has
 always been a private, single-user repo; the migration served a
 userbase that doesn't exist, so it was dead-on-arrival per the
@@ -18,6 +24,25 @@ v1 vaults are no longer recognised — opening one now returns
 `unsupported vault version`.  No v1 vaults exist in the wild, so this
 has no observable user impact; it just stops shipping the upgrade path
 for a hypothetical migration.
+
+### Added
+
+- **`kernels/blake2b.ea`** — Blake2b compression function (RFC 7693
+  §3.2) as a generic-arch Ea kernel.  IV constants are passed in via
+  a `*u64 constants` parameter rather than baked into the kernel
+  source: the IVs are data (fractional bits of √2..√19), not
+  algorithm, and pushing them to the Rust side keeps the kernel free
+  of magic constants — same data-vs-algorithm split that GGUF weights
+  use.  Scalar u64 ops; same source compiles on x86_64 and aarch64.
+- **`src/storage/blake2b.rs`** — variable-output (1..=64 byte) Rust
+  wrapper around the kernel: one-shot `hash()` plus a streaming
+  `Hasher` API that defers compression of the staged block until
+  another byte is known to be coming (required for correct counter
+  + final-flag accounting per RFC 7693 §3.3).
+- **`tests/blake2b_kat.rs`** — 7 known-answer tests: RFC 7693
+  Appendix A `Blake2b-512("abc")`, Blake2b-512/256 empty-input
+  references, chunked-vs-one-shot parity, exact-block-boundary
+  behaviour, multi-block input handling, and digest-length distinctness.
 
 ### Removed
 

@@ -9,3 +9,4 @@ pub mod jsonl_parse;
 pub mod parquet;
 mod thrift_compact;
 pub mod key;
+pub mod blake2b;

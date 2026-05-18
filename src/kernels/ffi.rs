@@ -70,6 +70,17 @@ type Poly1305MacKernFn  = unsafe extern "C" fn(
 type Poly1305VerifyKernFn = unsafe extern "C" fn(
     *const u8, *const u8, i32, *const u8, *mut i32,
 ) -> i32;
+// blake2b_compress kernel: caller allocates the IV constants table (9 u64s
+// — eight Blake2b IVs and the all-ones finalization mask), the 16-u64
+// v_scratch, and the 8-u64 chaining state.  Algorithm constants live on
+// the Rust side because Ea's hex parser caps at i64::MAX and four of the
+// Blake2b IVs need bit 63 set; passing them in as data also matches the
+// pattern used everywhere else in Olorin (weights/configs in Rust,
+// algorithm in the kernel).
+type Blake2bCompressFn   = unsafe extern "C" fn(
+    *mut u64, *const u64, *const u64,
+    u64, u64, i32, *mut u64,
+);
 type Chacha20EncryptFn  = unsafe extern "C" fn(
     *const i32, *const i32, i32,
     *const u8, *mut u8, i32,
@@ -118,6 +129,7 @@ pub struct KernelTable {
     pub terminal_diff:            TerminalDiffFn,
     pub poly1305_mac_kern:        Poly1305MacKernFn,
     pub poly1305_verify_kern:     Poly1305VerifyKernFn,
+    pub blake2b_compress_kern:    Blake2bCompressFn,
 }
 
 // SAFETY: KernelTable holds function pointers and library handles.
@@ -182,6 +194,7 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
     let ansi_parser_lib  = load("ansi_parser")?;
     let terminal_diff_lib = load("terminal_diff")?;
     let poly1305_lib    = load("poly1305")?;
+    let blake2b_lib     = load("blake2b")?;
 
     // Runtime CPU detection: prefer AVX-512 search kernel if available
     #[cfg(target_arch = "x86_64")]
@@ -252,6 +265,8 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
                 sym(&poly1305_lib, b"poly1305_mac\0")?),
             poly1305_verify_kern: std::mem::transmute(
                 sym(&poly1305_lib, b"poly1305_verify\0")?),
+            blake2b_compress_kern: std::mem::transmute(
+                sym(&blake2b_lib, b"blake2b_compress\0")?),
             libs: vec![
                 command_router,
                 fused_safety, intent_router, expr_eval,
@@ -262,6 +277,7 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
                 timestamp_scan_lib,
                 f32_stats_lib, f64_stats_lib,
                 poly1305_lib,
+                blake2b_lib,
             ],
         };
         Ok(table)
@@ -439,4 +455,30 @@ pub unsafe fn poly1305_verify(
 ) -> i32 {
     let mut scratch = [0i32; 22];
     (k().poly1305_verify_kern)(key, msg, msg_len, tag, scratch.as_mut_ptr())
+}
+
+/// Blake2b compression function (RFC 7693 §3.2).
+///
+/// Walks one 128-byte message block through the Blake2b mixing rounds,
+/// updating the 8-u64 chaining state in place.  The variable-output
+/// hash builder in `storage::blake2b` calls this once per block and
+/// finalises by passing `is_final = 1` on the last block.
+///
+/// # Safety
+/// - `state` must be valid for 8 u64s (read+write).
+/// - `block` must be valid for 16 u64s (read).
+/// - `constants` must be valid for 9 u64s (read): the eight Blake2b
+///   IVs followed by the all-ones finalization mask.
+/// - `v_scratch` must be valid for 16 u64s (write); contents on entry
+///   are ignored.
+pub unsafe fn blake2b_compress(
+    state: *mut u64,
+    block: *const u64,
+    constants: *const u64,
+    t_low: u64,
+    t_high: u64,
+    is_final: i32,
+    v_scratch: *mut u64,
+) {
+    (k().blake2b_compress_kern)(state, block, constants, t_low, t_high, is_final, v_scratch);
 }
