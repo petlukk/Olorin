@@ -1,4 +1,8 @@
-//! v2 vault round-trip + header-tag mutation tests.
+//! v3 vault round-trip + header-tag mutation tests.
+//!
+//! Filename kept as `vault_v2_write_read` because the byte-layout
+//! tested here is identical to v2 — the v3 bump is a key-derivation
+//! change, not a header-format change.
 //!
 //! After Task 9 the write path is ChaCha20-Poly1305 AEAD per block and
 //! the header is MACed with a domain-separated nonce.  This file proves
@@ -22,17 +26,17 @@ fn unique_dir(label: &str) -> std::path::PathBuf {
 }
 
 #[test]
-fn fresh_vault_is_v2_and_round_trips() {
+fn fresh_vault_is_v3_and_round_trips() {
     ffi::init().unwrap();
     let dir = unique_dir("rtrip");
     {
-        let mut v = Vault::open(&dir).expect("create");
+        let mut v = Vault::open_with(&dir, b"test-passphrase", olorin::storage::argon2id::Params::TEST_FAST).expect("create");
         v.append(b"user", b"hello").unwrap();
         v.append(b"assistant", b"world").unwrap();
         assert_eq!(v.block_count(), 2);
     }
 
-    let mut v = Vault::open(&dir).expect("reopen");
+    let mut v = Vault::open_with(&dir, b"test-passphrase", olorin::storage::argon2id::Params::TEST_FAST).expect("reopen");
     assert_eq!(v.block_count(), 2);
     let pt0 = v.decrypt_block(0).unwrap();
     assert_eq!(&pt0, b"user: hello\n");
@@ -42,13 +46,13 @@ fn fresh_vault_is_v2_and_round_trips() {
 }
 
 #[test]
-fn fresh_vault_writes_version_2_byte() {
+fn fresh_vault_writes_version_3_byte() {
     ffi::init().unwrap();
-    let dir = unique_dir("version2");
-    let _v = Vault::open(&dir).expect("create");
+    let dir = unique_dir("version3");
+    let _v = Vault::open_with(&dir, b"test-passphrase", olorin::storage::argon2id::Params::TEST_FAST).expect("create");
     let bytes = std::fs::read(dir.join("vault.bin")).unwrap();
     let version = u16::from_le_bytes(bytes[4..6].try_into().unwrap());
-    assert_eq!(version, 2, "fresh vault should be v2");
+    assert_eq!(version, 3, "fresh vault should be v3 (passphrase + Argon2id KDF)");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -58,7 +62,7 @@ fn header_tag_and_rewrites_advance_on_each_append() {
     let dir = unique_dir("rewrites");
     let path = dir.join("vault.bin");
 
-    let mut v = Vault::open(&dir).unwrap();
+    let mut v = Vault::open_with(&dir, b"test-passphrase", olorin::storage::argon2id::Params::TEST_FAST).unwrap();
     v.append(b"u", b"a").unwrap();
     let bytes1 = std::fs::read(&path).unwrap();
     let tag1 = bytes1[46..62].to_vec();
@@ -85,7 +89,7 @@ fn aead_tag_rejects_block_tampering() {
     let path = dir.join("vault.bin");
 
     {
-        let mut v = Vault::open(&dir).unwrap();
+        let mut v = Vault::open_with(&dir, b"test-passphrase", olorin::storage::argon2id::Params::TEST_FAST).unwrap();
         v.append(b"u", b"secret payload").unwrap();
     }
 
@@ -101,7 +105,7 @@ fn aead_tag_rejects_block_tampering() {
         f.write_all(&b).unwrap();
     }
 
-    let mut v = Vault::open(&dir).unwrap();
+    let mut v = Vault::open_with(&dir, b"test-passphrase", olorin::storage::argon2id::Params::TEST_FAST).unwrap();
     let result = v.decrypt_block(0);
     assert!(result.is_err(), "tampered block must fail AEAD verification");
     let _ = std::fs::remove_dir_all(&dir);

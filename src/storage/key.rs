@@ -1,58 +1,57 @@
 //! Vault key derivation and hashing helpers.
 //!
-//! Key: XOR-obfuscated seed ^ hardware_id (from `platform::hwid`).
-//! Histogram: byte-frequency index for encrypted search.
-//! xxHash64: fast non-crypto hash for integrity checks.
+//! Key derivation: Argon2id (RFC 9106) over passphrase + salt, using
+//! the storage-layer wrapper in [`crate::storage::argon2id`].  The
+//! salt is generated fresh at first vault create and persisted in
+//! `<vault_dir>/vault.salt`; without the salt file the vault is
+//! undecryptable (by design — losing the salt loses the vault).
+//!
+//! Histogram + xxHash64 helpers are unchanged from the v2.x layout.
 
-/// Compile-time mask — obfuscates the seed in .rodata.
-const COMPILE_MASK: [u8; 32] = [
-    0xA7, 0x3B, 0xC9, 0x14, 0xE6, 0x58, 0xF2, 0x0D,
-    0x8B, 0x61, 0xD4, 0x37, 0x9E, 0xAC, 0x55, 0x73,
-    0xC2, 0x1F, 0xB8, 0x46, 0x7A, 0xE3, 0x09, 0xD1,
-    0x5C, 0x84, 0xF7, 0x2E, 0x63, 0xA0, 0x4B, 0x19,
-];
+use std::path::Path;
 
-/// seed ^ COMPILE_MASK — raw seed never appears in .rodata.
-const OBFUSCATED_SEED: [u8; 32] = {
-    let seed = b"olorin-vault-seed-v0.5-default!!";
+use crate::error::{Error, Result};
+use crate::platform::random;
+use crate::storage::argon2id::{argon2id, Params};
+
+pub const SALT_BYTES: usize = 16;
+const SALT_FILE: &str = "vault.salt";
+
+/// Derive the 32-byte vault key from a passphrase, salt, and Argon2id
+/// parameters.  Wraps `storage::argon2id::argon2id` with the
+/// no-secret, no-AD profile that the vault uses (per RFC 9106's two
+/// recommended profiles, Olorin's vault has neither auxiliary input).
+pub fn derive_key(passphrase: &[u8], salt: &[u8; SALT_BYTES], params: Params) -> Result<[u8; 32]> {
     let mut out = [0u8; 32];
-    let mut i = 0;
-    while i < 32 {
-        out[i] = seed[i] ^ COMPILE_MASK[i];
-        i += 1;
-    }
-    out
-};
-
-/// Read hardware identifier for key binding. Returns `Err` when no
-/// platform source is available — refusing to derive a key from a
-/// universal constant fallback (which would silently produce the same
-/// key on every host without a machine identifier, e.g. some sandboxed
-/// or fresh-container environments).
-fn hardware_id() -> Result<[u8; 32], &'static str> {
-    let raw = crate::platform::hwid::machine_id()
-        .ok_or("no platform machine identifier available")?;
-    let mut id = [0u8; 32];
-    let bytes = raw.trim().as_bytes();
-    for (i, &b) in bytes.iter().enumerate() {
-        id[i % 32] ^= b;
-    }
-    for i in 1..32 {
-        id[i] ^= id[i - 1].wrapping_mul(31);
-    }
-    Ok(id)
+    argon2id(passphrase, salt, &[], &[], params, &mut out)?;
+    Ok(out)
 }
 
-/// Derive the vault key: `OBFUSCATED_SEED ^ COMPILE_MASK ^ hardware_id()` = `seed ^ hw`.
-/// Errors when no machine identifier is available, refusing to fall
-/// back to a universal constant.
-pub fn derive_key() -> Result<[u8; 32], &'static str> {
-    let hw = hardware_id()?;
-    let mut key = [0u8; 32];
-    for i in 0..32 {
-        key[i] = OBFUSCATED_SEED[i] ^ COMPILE_MASK[i] ^ hw[i];
+/// Read the per-vault salt from `<dir>/vault.salt`, or generate and
+/// persist a fresh 16-byte salt if the file is absent.
+///
+/// Salt is treated as public-but-stable: it's the input that makes
+/// every vault's Argon2id output unique, but it's not a secret in
+/// itself.  Stored separately from `vault.bin` so a salt-only leak
+/// reveals nothing (and a vault-only copy is unopenable without it).
+pub fn load_or_create_salt(dir: &Path) -> Result<[u8; SALT_BYTES]> {
+    let path = dir.join(SALT_FILE);
+    if path.exists() {
+        let bytes = std::fs::read(&path)
+            .map_err(|_| Error::Vault("failed to read vault.salt"))?;
+        if bytes.len() != SALT_BYTES {
+            return Err(Error::Vault("vault.salt has wrong length"));
+        }
+        let mut salt = [0u8; SALT_BYTES];
+        salt.copy_from_slice(&bytes);
+        Ok(salt)
+    } else {
+        let mut salt = [0u8; SALT_BYTES];
+        random::fill_bytes(&mut salt)?;
+        std::fs::write(&path, salt)
+            .map_err(|_| Error::Vault("failed to write vault.salt"))?;
+        Ok(salt)
     }
-    Ok(key)
 }
 
 pub fn compute_histogram(data: &[u8]) -> [u8; 256] {

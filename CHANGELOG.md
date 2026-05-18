@@ -9,10 +9,47 @@ order.
 ## [Unreleased]
 
 Arc #3 (passphrase + Argon2id KDF, the v2.0 vault story) — Blake2b
-primitive + full Argon2id implementation landed.  Both are exercised
-by KAT tests only; no on-disk format change yet, no key-derivation
-call site changed.  The next slice wires Argon2id into `derive_key`
-and bumps the vault format.
+primitive, full Argon2id, and the `derive_key` rewrite + salt
+persistence + vault format bump to v3.  v2 vaults are rejected;
+per [[feedback-no-migration-for-private-repo]] there is no
+migration path.  REPL passphrase prompt + Web/WhatsApp auth flow
+(tasks #4 and #5) are still pending — for now the production
+`Router::open_vault` reads `OLORIN_PASSPHRASE` from the environment
+and disables persistence when it's unset.
+
+### Added (this slice)
+
+- **`src/platform/random.rs`** — cryptographically secure random
+  bytes via the OS entropy source (Linux `getrandom(2)` syscall,
+  fallback `/dev/urandom`; Windows `BCryptGenRandom`).  Used to
+  generate the per-vault salt at first open.
+- **Salt persistence** — `<vault_dir>/vault.salt` holds 16 random
+  bytes generated at first vault create.  The salt is treated as
+  public-but-stable: it makes Argon2id outputs unique across vaults
+  but isn't itself a secret.  Losing the salt means losing the
+  vault (no recovery path — exactly what the threat model says).
+- **`Vault::open_with(dir, passphrase, kdf)`** — explicit KDF
+  parameters for tests.  Production callers use `Vault::open()`,
+  which pins `Params::VAULT_DEFAULT` (64 MiB, t=3, p=1).
+- **`Params::TEST_FAST`** — minimum-cost Argon2id profile (8 KiB,
+  t=1) for the vault-test suite; keeps test wall-clock under control
+  without skipping the KDF entirely.
+- **`tests/vault_passphrase.rs`** — 5 tests covering salt creation,
+  salt reuse, wrong-passphrase rejection, v2 vault rejection, and
+  `derive_key` determinism.
+
+### Changed (this slice)
+
+- **`Vault::open` signature** — `(dir: &Path, passphrase: &[u8])`
+  instead of `(dir: &Path)`.  Migration impact: every
+  in-repo caller updated.  `OLORIN_PASSPHRASE` env var sources the
+  production passphrase until task #4 adds an interactive prompt.
+- **`key::derive_key` signature** — `(passphrase, salt, params) ->
+  Result<[u8; 32]>`.  Hwid mixing removed entirely (arc #4
+  collapsed, per [[next-security-arcs-2026-05-18]]).
+- **Vault format version 2 → 3.**  Byte layout unchanged; only the
+  version byte advanced.  v2 vaults return `"unsupported vault
+  version"` on open.
 
 Removed the v1 → v2 vault migration shipped in v1.1.0.  Olorin has
 always been a private, single-user repo; the migration served a

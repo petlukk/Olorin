@@ -1,6 +1,7 @@
 //! Round-trip and version-rejection tests for VaultHeaderV2.
-//! The v2 struct exists but is not yet wired into the on-disk format
-//! (that lands in Task 9).
+//! The struct name retains its V2 suffix — the byte layout is the
+//! one introduced in v2; the version byte alone advanced to 3 with
+//! the passphrase + Argon2id rollout.
 
 use olorin::storage::vault::{HEADER_SIZE_V2, VaultHeaderV2};
 
@@ -8,7 +9,7 @@ use olorin::storage::vault::{HEADER_SIZE_V2, VaultHeaderV2};
 fn header_v2_round_trip() {
     let h = VaultHeaderV2 {
         magic: *b"OLRN",
-        version: 2,
+        version: 3,
         block_count: 1337,
         index_offset: 0xdead_beef,
         key_id: [0x42; 16],

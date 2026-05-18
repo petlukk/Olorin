@@ -19,7 +19,7 @@ use crate::error::{Error, Result};
 
 pub(super) const VAULT_MAGIC: [u8; 4] = *b"OLRN";
 pub(super) const INDEX_ENTRY_SIZE: usize = 288;
-pub(super) const VAULT_VERSION_V2: u16 = 2;
+pub(super) const VAULT_VERSION_V3: u16 = 3;
 
 // ── VaultHeaderV2 ─────────────────────────────────────────────────────────────
 
@@ -43,7 +43,7 @@ impl VaultHeaderV2 {
     pub(crate) fn new(key_id: [u8; 16], nonce_seed_8: [u8; 8]) -> Self {
         Self {
             magic: VAULT_MAGIC,
-            version: VAULT_VERSION_V2,
+            version: VAULT_VERSION_V3,
             block_count: 0,
             index_offset: HEADER_SIZE_V2 as u64,
             key_id,
@@ -74,7 +74,7 @@ impl VaultHeaderV2 {
             return Err(Error::Vault("bad magic"));
         }
         let version = u16::from_le_bytes(buf[4..6].try_into().unwrap());
-        if version != VAULT_VERSION_V2 {
+        if version != VAULT_VERSION_V3 {
             return Err(Error::Vault("unsupported vault version"));
         }
         let block_count = u32::from_le_bytes(buf[6..10].try_into().unwrap());

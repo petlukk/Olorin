@@ -50,6 +50,16 @@ impl Params {
         parallelism: 1,
         tag_length: 32,
     };
+
+    /// Minimum-cost profile for tests that need a real KDF call but
+    /// don't want to pay the 200 ms per Argon2id pass.  RFC 9106 §3.1
+    /// requires memory_kib >= 8 * parallelism — 8 KiB is the floor.
+    pub const TEST_FAST: Self = Self {
+        memory_kib: 8,
+        iterations: 1,
+        parallelism: 1,
+        tag_length: 32,
+    };
 }
 
 fn validate(p: &Params, password_len: usize, salt_len: usize) -> Result<()> {

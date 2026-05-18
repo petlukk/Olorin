@@ -30,8 +30,9 @@ fn vault_header_does_not_contain_key_prefix() {
     let dir = unique_dir("hdr_no_key");
     olorin::kernels::ffi::init().unwrap();
 
-    let key = key::derive_key().expect("hardware id required for this test");
-    let _vault = Vault::open(&dir).expect("vault opens");
+    let _vault = Vault::open_with(&dir, b"test-passphrase", olorin::storage::argon2id::Params::TEST_FAST).expect("vault opens");
+    let salt = key::load_or_create_salt(&dir).expect("salt");
+    let key = key::derive_key(b"test-passphrase", &salt, olorin::storage::argon2id::Params::TEST_FAST).expect("derive_key");
 
     let header = std::fs::read(dir.join("vault.bin")).expect("read vault");
     assert!(
@@ -72,8 +73,8 @@ fn two_vaults_have_distinct_nonce_seeds() {
     let dir_a = unique_dir("seed_a");
     let dir_b = unique_dir("seed_b");
 
-    let _a = Vault::open(&dir_a).expect("vault a");
-    let _b = Vault::open(&dir_b).expect("vault b");
+    let _a = Vault::open_with(&dir_a, b"test-passphrase", olorin::storage::argon2id::Params::TEST_FAST).expect("vault a");
+    let _b = Vault::open_with(&dir_b, b"test-passphrase", olorin::storage::argon2id::Params::TEST_FAST).expect("vault b");
 
     let bytes_a = std::fs::read(dir_a.join("vault.bin")).expect("read a");
     let bytes_b = std::fs::read(dir_b.join("vault.bin")).expect("read b");
@@ -121,7 +122,7 @@ fn vault_refuses_to_append_when_counter_is_at_max() {
     let dir = unique_dir("counter_wrap");
 
     {
-        let mut vault = Vault::open(&dir).expect("vault opens");
+        let mut vault = Vault::open_with(&dir, b"test-passphrase", olorin::storage::argon2id::Params::TEST_FAST).expect("vault opens");
         vault.append(b"user", b"hello once").expect("first append");
     }
 
@@ -142,7 +143,7 @@ fn vault_refuses_to_append_when_counter_is_at_max() {
     // Index parsing will fail because we didn't actually write those
     // blocks — that's fine; the test only cares about post-open
     // append refusing.
-    let reopened = Vault::open(&dir);
+    let reopened = Vault::open_with(&dir, b"test-passphrase", olorin::storage::argon2id::Params::TEST_FAST);
     if let Ok(mut vault) = reopened {
         let result = vault.append(b"user", b"hello twice");
         assert!(
@@ -165,7 +166,7 @@ fn vault_refuses_to_append_when_counter_is_at_max() {
 // ────────────────────────────────────────────────────────────────────────────
 
 fn make_three_block_vault(dir: &std::path::Path) {
-    let mut v = Vault::open(dir).expect("vault opens");
+    let mut v = Vault::open_with(dir, b"test-passphrase", olorin::storage::argon2id::Params::TEST_FAST).expect("vault opens");
     v.append(b"user", b"alpha").unwrap();
     v.append(b"user", b"beta").unwrap();
     v.append(b"user", b"gamma").unwrap();
@@ -205,7 +206,7 @@ fn v2_block_tag_byte_flip_detected_at_decrypt() {
     f.write_all(&b).unwrap();
     drop(f);
 
-    let mut v = Vault::open(&dir).expect("open succeeds — block region untouched by header MAC");
+    let mut v = Vault::open_with(&dir, b"test-passphrase", olorin::storage::argon2id::Params::TEST_FAST).expect("open succeeds — block region untouched by header MAC");
     let res = v.decrypt_block(0);
     assert!(res.is_err(), "tag-region tamper must fail AEAD verify");
     let _ = std::fs::remove_dir_all(&dir);
@@ -224,7 +225,7 @@ fn header_index_offset_flip_detected_at_open() {
     bytes[10] ^= 0x01;
     std::fs::write(&path, &bytes).unwrap();
 
-    let result = Vault::open(&dir);
+    let result = Vault::open_with(&dir, b"test-passphrase", olorin::storage::argon2id::Params::TEST_FAST);
     assert!(result.is_err(), "index_offset tamper must be rejected");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -249,7 +250,7 @@ fn truncate_mid_index_rejected_at_open() {
     f.set_len(target).unwrap();
     drop(f);
 
-    let result = Vault::open(&dir);
+    let result = Vault::open_with(&dir, b"test-passphrase", olorin::storage::argon2id::Params::TEST_FAST);
     assert!(result.is_err(), "truncated vault must be rejected");
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -1,6 +1,7 @@
 //! Encrypted vault — append-only conversation storage.
 //!
-//! Key derivation: XOR-obfuscated seed ^ hardware_id (from /etc/machine-id).
+//! Key derivation: Argon2id (RFC 9106) over passphrase + per-vault salt
+//! (see [`crate::storage::key`] and [`crate::storage::argon2id`]).
 //! Format: binary header + encrypted blocks + index at tail (see
 //! [`vault_format`] for the byte-layout details).
 //! Plaintext never lingers — blocks are encrypted immediately on append.
@@ -13,13 +14,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::error::{Error, Result};
 use crate::kernels::ffi;
 use crate::storage::aead;
+use crate::storage::argon2id::Params as KdfParams;
 use crate::storage::crypto;
 use crate::storage::key;
 use crate::storage::search::FusedSearcher;
 use crate::storage::secure::SecureBuffer;
 use crate::storage::vault_format::{
     build_block_aad, derive_block_nonce, derive_header_nonce, now_epoch,
-    IndexEntry, INDEX_ENTRY_SIZE, VAULT_VERSION_V2,
+    IndexEntry, INDEX_ENTRY_SIZE, VAULT_VERSION_V3,
 };
 
 pub use crate::storage::vault_format::{VaultHeaderV2, HEADER_SIZE_V2};
@@ -46,11 +48,26 @@ fn key_array(buf: &SecureBuffer) -> [u8; 32] {
 }
 
 impl Vault {
-    /// Open or create a vault in `dir`. Key auto-derived from hardware ID.
-    pub fn open(dir: &Path) -> Result<Self> {
+    /// Open or create a vault in `dir` using the production KDF
+    /// profile (`KdfParams::VAULT_DEFAULT`).  Generates `vault.salt`
+    /// on first call; subsequent calls reuse it.  Wrong passphrase →
+    /// `Error::Vault("vault header or index has been tampered")` (the
+    /// key_id+MAC mismatch surfaces as a tamper error since both
+    /// derivations produce 32 random-looking bytes).
+    pub fn open(dir: &Path, passphrase: &[u8]) -> Result<Self> {
+        Self::open_with(dir, passphrase, KdfParams::VAULT_DEFAULT)
+    }
+
+    /// Open or create a vault with explicit KDF parameters.  Same as
+    /// [`Vault::open`] but lets tests use a low-cost Argon2id profile
+    /// so the suite isn't dominated by KDF work.  Production callers
+    /// should use `open()` — the default profile is the threat-model
+    /// commitment.
+    pub fn open_with(dir: &Path, passphrase: &[u8], kdf: KdfParams) -> Result<Self> {
         std::fs::create_dir_all(dir)?;
         let path = dir.join("vault.bin");
-        let key = key::derive_key().map_err(Error::Vault)?;
+        let salt = key::load_or_create_salt(dir)?;
+        let key = key::derive_key(passphrase, &salt, kdf)?;
 
         if path.exists() {
             Self::open_existing(&path, key)
@@ -180,7 +197,7 @@ impl Vault {
         let nonce = derive_block_nonce(&self.header.nonce_seed_8, nonce_counter);
         let aad = build_block_aad(
             &self.header.key_id,
-            VAULT_VERSION_V2,
+            VAULT_VERSION_V3,
             nonce_counter,
             timestamp,
             &histogram,
@@ -240,7 +257,7 @@ impl Vault {
         let key_bytes = key_array(&self.key);
         let aad = build_block_aad(
             &self.header.key_id,
-            VAULT_VERSION_V2,
+            VAULT_VERSION_V3,
             nonce_counter,
             timestamp,
             &histogram,
@@ -327,7 +344,7 @@ impl Vault {
             let entry = &self.index[block_idx];
             let aad = build_block_aad(
                 &self.header.key_id,
-                VAULT_VERSION_V2,
+                VAULT_VERSION_V3,
                 entry.nonce_counter,
                 entry.timestamp,
                 &entry.histogram,

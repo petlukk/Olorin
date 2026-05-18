@@ -131,11 +131,23 @@ impl DispatchContext {
             eprintln!("[vault] home unset, persistence disabled");
             None
         })?;
+        // Argon2id passphrase sourcing — task #3 lands the env-var
+        // fallback only; task #4 will add an interactive REPL prompt
+        // as the primary source.  Keep persistence off when neither
+        // is set so a fresh install doesn't silently create a vault
+        // under a default passphrase.
+        let passphrase = match std::env::var("OLORIN_PASSPHRASE") {
+            Ok(p) if !p.is_empty() => p,
+            _ => {
+                eprintln!("[vault] OLORIN_PASSPHRASE unset, persistence disabled");
+                return None;
+            }
+        };
         let vault_dir = home.join(".olorin").join("vault").join("default");
         std::fs::create_dir_all(&vault_dir)
             .map_err(|e| eprintln!("[vault] mkdir {} failed, persistence disabled: {e}", vault_dir.display()))
             .ok()?;
-        Vault::open(&vault_dir)
+        Vault::open(&vault_dir, passphrase.as_bytes())
             .map_err(|e| eprintln!("[vault] open {} failed, persistence disabled: {e:?}", vault_dir.display()))
             .ok()
     }

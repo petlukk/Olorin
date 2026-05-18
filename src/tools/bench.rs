@@ -290,7 +290,19 @@ fn bench_fused() -> Result<String, String> {
     let vault_path = bench_dir.join("vault.bin");
     let _ = std::fs::remove_file(&vault_path);
 
-    let mut vault = Vault::open(&bench_dir).map_err(|e| e.to_string())?;
+    // Bench uses a fixed passphrase + fast KDF params — we're measuring
+    // the encryption/search hot path, not the one-shot KDF.
+    let mut vault = Vault::open_with(
+        &bench_dir,
+        b"bench-passphrase",
+        crate::storage::argon2id::Params {
+            memory_kib: 8,
+            iterations: 1,
+            parallelism: 1,
+            tag_length: 32,
+        },
+    )
+    .map_err(|e| e.to_string())?;
 
     // Write a 4 KB block with searchable content
     let block = "How do I optimize x86 SIMD code for AVX-512? Use 512-bit zmm registers.".repeat(40);

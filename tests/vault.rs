@@ -32,7 +32,7 @@ fn test_vault_append_and_read() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
 
-    let mut vault = Vault::open(&dir).unwrap();
+    let mut vault = Vault::open_with(&dir, b"test-passphrase", olorin::storage::argon2id::Params::TEST_FAST).unwrap();
     vault.append(b"user", b"hello world").unwrap();
     vault.append(b"assistant", b"hi there").unwrap();
 

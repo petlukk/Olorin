@@ -38,7 +38,7 @@ fn search_drops_tampered_block_from_results() {
     let path = dir.join("vault.bin");
 
     {
-        let mut v = Vault::open(&dir).unwrap();
+        let mut v = Vault::open_with(&dir, b"test-passphrase", olorin::storage::argon2id::Params::TEST_FAST).unwrap();
         v.append(b"user", b"alpha apple").unwrap();
         v.append(b"user", b"beta banana").unwrap();
         v.append(b"user", b"gamma grape").unwrap();
@@ -62,7 +62,7 @@ fn search_drops_tampered_block_from_results() {
     // contents), so Vault::open must still succeed.
     assert!(block1_off >= V2_HEADER_SIZE as u64);
 
-    let mut v = Vault::open(&dir).expect("open succeeds — only ciphertext was touched");
+    let mut v = Vault::open_with(&dir, b"test-passphrase", olorin::storage::argon2id::Params::TEST_FAST).expect("open succeeds — only ciphertext was touched");
 
     // decrypt_block(1) must fail (AEAD tag check).
     assert!(v.decrypt_block(1).is_err(), "tampered block must fail AEAD open");
@@ -91,12 +91,12 @@ fn search_still_works_on_untampered_vault() {
     ffi::init().unwrap();
     let dir = unique_dir("clean");
     {
-        let mut v = Vault::open(&dir).unwrap();
+        let mut v = Vault::open_with(&dir, b"test-passphrase", olorin::storage::argon2id::Params::TEST_FAST).unwrap();
         v.append(b"user", b"alpha apple").unwrap();
         v.append(b"user", b"beta banana").unwrap();
         v.append(b"user", b"gamma grape").unwrap();
     }
-    let mut v = Vault::open(&dir).unwrap();
+    let mut v = Vault::open_with(&dir, b"test-passphrase", olorin::storage::argon2id::Params::TEST_FAST).unwrap();
     let results = v.search("banana", 10).unwrap();
     assert!(!results.is_empty(), "untampered vault must still surface matches");
     let _ = std::fs::remove_dir_all(&dir);
