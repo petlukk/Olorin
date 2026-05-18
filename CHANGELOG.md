@@ -6,7 +6,49 @@ uses [semver](https://semver.org/) at the minor level. Each release
 is tagged in git as `vX.Y.Z` and listed below in reverse-chronological
 order.
 
-## [1.2.0] — 2026-05-15
+## [1.2.1] — 2026-05-18
+
+Release-readiness patch: first public-ready Olorin. Adds MIT LICENSE,
+GitHub Actions CI, status badges, a restructured README with the rune
+catalog and architecture details extracted to `docs/`, and a full
+Security & threat model section calling out what the vault protects
+against and what is queued for v2.0. One small test-stability fix
+(no production-code change).
+
+### Added
+
+- **`LICENSE`** — MIT.
+- **`.github/workflows/ci.yml`** — Linux x86_64 build + test, with
+  sibling `eacompute@main` checked out and cached by SHA. First green
+  run: 9m7s; subsequent runs hit the cache.
+- **`docs/runes.md`** — full rune catalog moved out of README. Per-rune
+  samples, the `--json` chaining contract, and limits live here.
+- **`docs/architecture.md`** — source layout, kernel inventory, runtime
+  layout, hard-rules contract — moved out of README for contributors.
+- **Security & threat model section** in README — three structured
+  parts (protects-against / does-not-yet / designed-for), names the
+  v2.0 passphrase + Argon2id work explicitly.
+- **CI + License badges** at the top of README.
+
+### Changed
+
+- **README trimmed from 654 → 242 lines.** Pitch + Olorin Pipe + a
+  runes section that pushes runes as the categorical differentiator
+  now land above the fold. Performance tables already lived in
+  `benchmarks/results.md`; README now mentions and links rather than
+  reproducing.
+- **`.gitignore`** — `/docs/` rule changed to `/docs/*` with explicit
+  `!` negations for the two public docs files. Internal docs
+  (`PI5_OPTIMIZATION_PLAN.md`, `handoffs/`, `superpowers/`) stay
+  local-only.
+
+### Fixed
+
+- **`thread_detection` env-var race** — test serialized via Mutex.
+  Previously could flake under parallel test execution when other
+  tests mutated `OLORIN_THREADS`.
+
+
 
 Inbound safety upgrade: score-based injection matching with multi-language
 patterns + two-form normalization closes word-variant, punctuation/spacing,
