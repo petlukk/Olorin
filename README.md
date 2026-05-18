@@ -56,7 +56,7 @@ order; the model only fires if no deterministic path matched.
         core::router::dispatch()
                    |
         1. Safety Scan ---------> BLOCK            \
-        2. Slash Command? ------> /tools direct     |  deterministic
+        2. Slash Command? ------> /tools or /rune     |  deterministic
         3. Intent Router? ------> kernel match      |  paths first
         4. Recall --------------> session + vault   |
            (sanitized input only)                  /
