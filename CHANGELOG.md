@@ -6,6 +6,34 @@ uses [semver](https://semver.org/) at the minor level. Each release
 is tagged in git as `vX.Y.Z` and listed below in reverse-chronological
 order.
 
+## [Unreleased]
+
+Removed the v1 → v2 vault migration shipped in v1.1.0.  Olorin has
+always been a private, single-user repo; the migration served a
+userbase that doesn't exist, so it was dead-on-arrival per the
+"no premature features" hard rule.  Clearing it now also shrinks
+the baseline that arc #3 (passphrase + Argon2id) will land on.
+
+v1 vaults are no longer recognised — opening one now returns
+`unsupported vault version`.  No v1 vaults exist in the wild, so this
+has no observable user impact; it just stops shipping the upgrade path
+for a hypothetical migration.
+
+### Removed
+
+- `Vault::migrate_v1_to_v2` and the v1 dispatch arm in
+  `Vault::open_existing`; the function now opens v2 directly (the
+  separate `open_v2` helper was folded back into `open_existing`).
+- `vault_format::read_all_v1_plaintexts` and its `OpenOptions` /
+  `Read` / `Seek` / `crypto` / `key` imports.
+- `tests/vault_migration_v1_to_v2.rs` (191 lines) — the entire test
+  file covering the removed migration path.
+
+### Changed
+
+- `src/storage/vault.rs` 465 → 417 lines.
+- `src/storage/vault_format.rs` 261 → 188 lines.
+
 ## [1.2.2] — 2026-05-18
 
 Internal refactor only: `src/storage/vault.rs` was 702 lines, breaking

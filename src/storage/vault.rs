@@ -19,8 +19,7 @@ use crate::storage::search::FusedSearcher;
 use crate::storage::secure::SecureBuffer;
 use crate::storage::vault_format::{
     build_block_aad, derive_block_nonce, derive_header_nonce, now_epoch,
-    read_all_v1_plaintexts, IndexEntry, INDEX_ENTRY_SIZE, VAULT_MAGIC,
-    VAULT_VERSION_V2,
+    IndexEntry, INDEX_ENTRY_SIZE, VAULT_VERSION_V2,
 };
 
 pub use crate::storage::vault_format::{VaultHeaderV2, HEADER_SIZE_V2};
@@ -94,25 +93,6 @@ impl Vault {
     }
 
     fn open_existing(path: &Path, key_bytes: [u8; 32]) -> Result<Self> {
-        // Peek magic + version to route v1 vs v2.  Open read-only here so the
-        // migration path can take ownership of the write-capable handle later.
-        let mut peek = OpenOptions::new().read(true).open(path)?;
-        let mut head = [0u8; 6];
-        peek.read_exact(&mut head)?;
-        drop(peek);
-
-        if head[0..4] != VAULT_MAGIC {
-            return Err(Error::Vault("bad magic"));
-        }
-        let version = u16::from_le_bytes(head[4..6].try_into().unwrap());
-        match version {
-            1 => Self::migrate_v1_to_v2(path, key_bytes),
-            2 => Self::open_v2(path, key_bytes),
-            _ => Err(Error::Vault("unsupported vault version")),
-        }
-    }
-
-    fn open_v2(path: &Path, key_bytes: [u8; 32]) -> Result<Self> {
         let mut file = OpenOptions::new().read(true).write(true).open(path)?;
         let file_size = file.metadata()?.len();
 
@@ -385,34 +365,6 @@ impl Vault {
         }
         self.file.flush()?;
         Ok(())
-    }
-
-    /// One-shot v1 → v2 migration.  Read+verify all v1 plaintexts (xxhash
-    /// catches transit corruption); only on success do we touch the file —
-    /// the backup, the tmp build, and the atomic rename all happen after
-    /// every block has been decoded.  A corrupt v1 fails before any of
-    /// these steps, so `.v1.bak` is only ever produced for a vault that
-    /// could be fully read.
-    fn migrate_v1_to_v2(path: &Path, key_bytes: [u8; 32]) -> Result<Self> {
-        let plaintexts = read_all_v1_plaintexts(path, &key_bytes)?;
-
-        let backup = path.with_extension("bin.v1.bak");
-        std::fs::copy(path, &backup)?;
-        OpenOptions::new().write(true).open(&backup)?.sync_data()?;
-
-        let tmp = path.with_extension("bin.tmp");
-        if tmp.exists() {
-            std::fs::remove_file(&tmp)?;
-        }
-        {
-            let mut v2 = Self::create_new(&tmp, key_bytes)?;
-            for pt in &plaintexts {
-                v2.flush_block(pt)?;
-            }
-            // File handle closes on drop.
-        }
-        std::fs::rename(&tmp, path)?;
-        Self::open_v2(path, key_bytes)
     }
 
     /// Bump `header_rewrites`, Poly1305-MAC the new header[0..46] || index

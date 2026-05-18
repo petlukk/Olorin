@@ -1,4 +1,4 @@
-//! Vault on-disk format — types, constants, and the v1 plaintext reader.
+//! Vault on-disk format — types and constants for the v2 byte layout.
 //!
 //! Extracted from `vault.rs` so the `Vault` struct's runtime logic stays
 //! readable.  Everything here knows the *byte layout* of `vault.bin`:
@@ -7,29 +7,19 @@
 //! - [`IndexEntry`] — the 288-byte per-block index entry
 //! - [`derive_block_nonce`] / [`derive_header_nonce`] — the v2 nonce schedule
 //! - [`build_block_aad`] — the per-block AEAD associated data
-//! - [`read_all_v1_plaintexts`] — one-shot v1 reader used only by migration
 //!
 //! `VaultHeaderV2` and `HEADER_SIZE_V2` are re-exported from `vault.rs`
 //! so external callers (and the `tests/vault_header_v2.rs` round-trip test)
 //! keep their import path `olorin::storage::vault::{VaultHeaderV2, ...}`
 //! working.
 
-use std::fs::OpenOptions;
-use std::io::{Read, Seek, SeekFrom};
-use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::{Error, Result};
-use crate::storage::crypto;
-use crate::storage::key;
 
 pub(super) const VAULT_MAGIC: [u8; 4] = *b"OLRN";
 pub(super) const INDEX_ENTRY_SIZE: usize = 288;
 pub(super) const VAULT_VERSION_V2: u16 = 2;
-
-// The v1 VaultHeader / VAULT_VERSION / HEADER_SIZE were dropped after the
-// migration helper switched to raw byte parsing.  v1 vaults are still
-// recognised + auto-migrated on first open by a v2 binary.
 
 // ── VaultHeaderV2 ─────────────────────────────────────────────────────────────
 
@@ -196,66 +186,3 @@ pub(super) fn build_block_aad(
     aad
 }
 
-/// Decrypt every v1 block off disk and verify each block's xxhash tag.
-/// Used only by `Vault::migrate_v1_to_v2`.  Returns the plaintexts in
-/// on-disk order — the caller re-emits them as v2 AEAD blocks.
-pub(super) fn read_all_v1_plaintexts(path: &Path, key_bytes: &[u8; 32]) -> Result<Vec<Vec<u8>>> {
-    const V1_HEADER_SIZE: usize = 64;
-    const V1_INDEX_ENTRY_SIZE: usize = 288;
-
-    let mut file = OpenOptions::new().read(true).open(path)?;
-    let file_size = file.metadata()?.len();
-
-    let mut hdr = [0u8; V1_HEADER_SIZE];
-    file.read_exact(&mut hdr)?;
-    if hdr[0..4] != VAULT_MAGIC {
-        return Err(Error::Vault("bad magic"));
-    }
-    let v1_version = u16::from_le_bytes(hdr[4..6].try_into().unwrap());
-    if v1_version != 1 {
-        return Err(Error::Vault("expected v1 vault"));
-    }
-    let block_count = u32::from_le_bytes(hdr[6..10].try_into().unwrap()) as usize;
-    let index_offset = u64::from_le_bytes(hdr[10..18].try_into().unwrap());
-    let mut nonce_seed_v1 = [0u8; 12];
-    nonce_seed_v1.copy_from_slice(&hdr[34..46]);
-
-    let entries_region = file_size.saturating_sub(index_offset);
-    let max_entries = (entries_region / V1_INDEX_ENTRY_SIZE as u64) as usize;
-    if block_count > max_entries {
-        return Err(Error::Vault("v1 header block_count exceeds file size"));
-    }
-
-    file.seek(SeekFrom::Start(index_offset))?;
-    let mut entries: Vec<(u64, u32, u64, u32)> = Vec::with_capacity(block_count);
-    for _ in 0..block_count {
-        let mut e = [0u8; V1_INDEX_ENTRY_SIZE];
-        file.read_exact(&mut e)?;
-        let off = u64::from_le_bytes(e[0..8].try_into().unwrap());
-        let len = u32::from_le_bytes(e[8..12].try_into().unwrap());
-        let xxh = u64::from_le_bytes(e[20..28].try_into().unwrap());
-        let nc = u32::from_le_bytes(e[28..32].try_into().unwrap());
-        entries.push((off, len, xxh, nc));
-    }
-
-    let mut plaintexts: Vec<Vec<u8>> = Vec::with_capacity(block_count);
-    for &(off, len, expected_xxh, nc) in &entries {
-        let mut ct = vec![0u8; len as usize];
-        file.seek(SeekFrom::Start(off))?;
-        file.read_exact(&mut ct)?;
-
-        // v1 nonce derivation: XOR counter into the low 4 bytes of seed.
-        let mut nonce = nonce_seed_v1;
-        let cb = nc.to_le_bytes();
-        for j in 0..4 {
-            nonce[j] ^= cb[j];
-        }
-        crypto::decrypt(key_bytes, &nonce, 0, &mut ct);
-
-        if key::xxhash64(&ct, 0) != expected_xxh {
-            return Err(Error::Vault("v1 block integrity check failed"));
-        }
-        plaintexts.push(ct);
-    }
-    Ok(plaintexts)
-}
