@@ -10,3 +10,4 @@ pub mod parquet;
 mod thrift_compact;
 pub mod key;
 pub mod blake2b;
+pub mod argon2id;

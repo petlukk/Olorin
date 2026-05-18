@@ -8,11 +8,11 @@ order.
 
 ## [Unreleased]
 
-First slice of arc #3 (passphrase + Argon2id KDF, the v2.0 vault
-story).  Adds Blake2b — the inner hash that Argon2id will build on —
-as an Ea kernel + Rust wrapper.  No on-disk format change yet; the
-new primitive is unused outside its own KAT tests until the rest of
-arc #3 lands.
+Arc #3 (passphrase + Argon2id KDF, the v2.0 vault story) — Blake2b
+primitive + full Argon2id implementation landed.  Both are exercised
+by KAT tests only; no on-disk format change yet, no key-derivation
+call site changed.  The next slice wires Argon2id into `derive_key`
+and bumps the vault format.
 
 Removed the v1 → v2 vault migration shipped in v1.1.0.  Olorin has
 always been a private, single-user repo; the migration served a
@@ -43,6 +43,26 @@ for a hypothetical migration.
   Appendix A `Blake2b-512("abc")`, Blake2b-512/256 empty-input
   references, chunked-vs-one-shot parity, exact-block-boundary
   behaviour, multi-block input handling, and digest-length distinctness.
+- **`kernels/argon2_block.ea`** — Argon2 G compression
+  (RFC 9106 §3.4) as an Eä kernel.  Same `g_prime` / `p_at` pattern
+  as Blake2b but with the Argon2-specific extra-multiply
+  (`2 * trunc(a) * trunc(b)`) on every addition — the one thing that
+  stops Blake2b from being usable as a drop-in inner step.  Column
+  step uses a gather/scatter through a 16-u64 scratch buffer; same
+  source compiles on x86_64 and aarch64.
+- **`src/storage/argon2id.rs`** — full Argon2id (RFC 9106): H₀
+  construction, H′ variable-output Blake2b with chained-mode for
+  T > 64, segment fill with Argon2i / Argon2d mode switch at SL/2 in
+  slice 0 of pass 0, and the XOR-into-existing-block path for
+  passes > 0.  Public surface: `argon2id(password, salt, secret, ad,
+  Params, out)` and `Params::VAULT_DEFAULT` (64 MiB, t=3, p=1).
+- **`tests/argon2id_kat.rs`** — 5 tests including the canonical
+  RFC 9106 §5.2 vector (byte-exact), determinism / wrong-passphrase
+  regression guard for `Params::VAULT_DEFAULT`, and input-validation
+  rejections (short salt, zero iterations, output-length mismatch).
+- **`src/kernels/ffi_crypto.rs`** — split out from `ffi.rs` so that
+  file stays under the 500-LOC hard rule with Blake2b + Argon2 added.
+  Same re-export pattern as `ffi_data.rs`.
 
 ### Removed
 
