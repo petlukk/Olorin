@@ -1,0 +1,318 @@
+# Runes — the full catalog
+
+> A *rune* is a SIMD-first command. Each one is one Ea kernel plus a thin Rust
+> orchestrator that turns MB-scale raw data into a small structured summary
+> in sub-second time. The language model never sees the raw bytes — only the
+> kernel's output, which it phrases in one or two plain-English sentences.
+
+Runes are how Olorin reasons over data larger than the model's context window.
+Gemma 4 E2B has ~128K tokens of context; a modest bank statement is 50 MB.
+A rune compresses the file losslessly along the dimensions that matter
+(counts, ranges, top-N values, distributions), so the model can narrate
+findings without ever holding the full file in its head.
+
+Output is wrapped in `<rune_output untrusted="true">...</rune_output>` and
+runs through the inbound safety scan before reaching the LLM turn — file-derived
+bytes are always treated as data, never instructions.
+
+The six v1 runes:
+
+- [`eacrunch`](#eacrunch--csv-summarizer) — CSV summarizer
+- [`eajson`](#eajson--json-lines-summarizer) — JSON Lines summarizer
+- [`eaparquet`](#eaparquet--parquet-metadata-summarizer) — Parquet metadata
+- [`ealog`](#ealog--log-severity-scanner) — log severity scanner
+- [`eatime`](#eatime--iso-8601-timestamp-histogram) — timestamp histogram
+- [`eadiff`](#eadiff--structural-delta-between-two-rune-runs) — structural delta between two rune runs
+
+The `--json` flag on any rune emits the same data as machine-readable JSON Lines
+for piping into another rune. See [`--json` mode](#--json-mode) below for the
+chaining contract.
+
+---
+
+## eacrunch — CSV summarizer
+
+```
+/rune eacrunch ~/Downloads/statement.csv
+```
+
+```
+rows: 1247
+columns: 4
+date (text): 340 unique; top values: 2024-01-15, 2024-02-10, 2024-03-05
+category (text): 8 unique; top values: groceries, food, rent
+amount (number): count=1247, mean=46.70, min=1.00, max=1850.00, sum=58235.00
+merchant (text): 42 unique; top values: Coop, ICA, SL
+```
+
+## eajson — JSON Lines summarizer
+
+```
+/rune eajson ~/Downloads/access.log.jsonl
+```
+
+```
+rows: 1000
+keys: 7 (+12 high-cardinality keys suppressed)
+ts (timestamp): 1000 unique of 1000; range: 2026-05-06T08:00:00Z .. 2026-05-06T08:42:13Z
+status (number): count=1000, mean=232.10, min=200.00, max=503.00, sum=232100.00
+method (text): 4 unique; top values: GET, POST, HEAD
+src_ip (text): 47 unique; top values: 1.2.3.4, 10.0.0.5, 192.168.1.10
+http.user_agent (text): 12 unique; top values: curl/7.68, Mozilla/5.0, Nikto
+cached (bool): true=623, false=377
+MESSAGE (text): 8 unique; top values: GET /index, POST /api/auth, GET /admin
+```
+
+eajson handles real systemd / container / web-server log shapes: nested objects
+flatten to `parent.child` keys, byte-array MESSAGE fields (systemd's binary
+format) decode as UTF-8, ISO-8601 timestamp fields report a `min..max` range,
+and high-cardinality noise (cursors, sequence IDs) is suppressed with a count
+notice. Escape sequences in strings (`\"`, `\\`, etc.) are correctly handled
+by the kernel via a 5th match character (backslash) and an odd-run filter in
+the orchestrator.
+
+## eaparquet — Parquet metadata summarizer
+
+```
+/rune eaparquet ~/data/transactions.parquet
+```
+
+```
+rows: 10000000
+columns: 4
+id (number): values=10000000, min=1.00, max=10000000.00, nulls=0
+category (text): values=10000000, nulls=12 [byte-array column; min/max not decoded]
+amount (number): values=10000000, min=0.50, max=9999.99, nulls=0
+is_recurring (bool): values=10000000, nulls=0
+```
+
+Reads only the file footer — Parquet writers pre-compute per-column
+min/max/null_count at write time and store them in the metadata. The rune walks
+the footer (Thrift compact decoder, scalar — no SIMD path exists for
+variable-length encodings) and aggregates per-column statistics across row
+groups via the `f64_stats` SIMD kernel. For a file with N row groups and C
+columns, that's `3*C` kernel calls each doing an N-element f64x2 reduction —
+real SIMD work that scales with file size.
+
+**Limit**: column-data SIMD decoding (PLAIN/RLE/dictionary encoding +
+snappy/gzip/zstd decompression) is out of scope for v1. Statistics must be
+present in the file metadata (most modern writers include them by default).
+Primitive types only: BOOLEAN/INT32/INT64/FLOAT/DOUBLE get min/max; BYTE_ARRAY
+(strings) and INT96 (legacy timestamp) are reported by type but their stats are
+left absent.
+
+## ealog — log severity scanner
+
+```
+/rune ealog ~/var/log/app.log
+```
+
+```
+bytes:   1.2 GB
+lines:   47123891
+format:  plaintext
+scan:    162 ms
+
+severity:
+  DEBUG       1234567  ( 2.62%)
+  INFO       44000000  (93.38%)
+  WARN         789012  ( 1.67%)
+  ERROR         23456  ( 0.05%)
+  FATAL            12  ( 0.00%)
+
+high-severity sample:
+  L42179:    FATAL bootstrap: cannot bind 0.0.0.0:443: address in use
+  L8129441:  ERROR upstream: timeout reading from backend (5s)
+  L8129502:  ERROR upstream: timeout reading from backend (5s)
+```
+
+Counts word-bounded `DEBUG / INFO / WARN / ERROR / FATAL` occurrences, the
+total line count, and records byte offsets of up to 5 ERROR/FATAL matches —
+all in one SIMD pass through the file. Word boundary check (delimited by
+space, tab, newline, CR, `[`, `]`, `"`, `:`) catches the common formats —
+plaintext (`[INFO] ...`), JSONL (`"level":"ERROR"`), and systemd
+(`Jan 01 12:00 host: INFO`) — without false positives on identifiers like
+`ERROR_HANDLER`.
+
+The kernel is cross-arch in a single `.ea` source: it avoids the `movemask`
+primitive (x86-only) in favor of `select` + integer `reduce_add` over a
+0x01-where-match lane mask. Position recording uses the same store-to-scratch
++ scalar-walk pattern as `csv_scan` / `jsonl_struct`. **Measured 0.70 GB/s on
+Ryzen 7700X WSL2, 0.43 GB/s on Pi 5 Cortex-A76 NEON**, identical bit-exact
+counts across both architectures.
+
+## eatime — ISO-8601 timestamp histogram
+
+```
+/rune eatime ~/var/log/app.log
+/rune eatime --bucket weekday ~/var/log/app.log
+```
+
+```
+bytes:       1.2 GB
+timestamps:  47123891
+scan:        184 ms
+
+hour-of-day:
+  00:00     1230891  ( 2.61%)
+  01:00     1198432  ( 2.54%)
+  ...
+  06:00     8421902  (17.87%)
+  07:00     6122891  (12.99%)
+  ...
+  23:00     1320012  ( 2.80%)
+
+peak: 06:00 (8421902 timestamps)
+```
+
+One SIMD pass to find every `YYYY-MM-DDTHH:MM:SS` occurrence in the buffer —
+log lines, CSV cells, JSONL values, any position. Per-hour counts bucketed
+scalar after the SIMD scan. All 24 hour-of-day slots are always emitted (even
+when count is 0) so downstream `eadiff` chaining is deterministic.
+
+The kernel uses the same cross-arch idiom as `log_level_scan`: structural
+anchors (`-`, `-`, `T` at offsets 4, 7, 10) detected via SIMD `.==` lane masks,
+`reduce_add` to detect any candidate in the chunk, scalar-walk to validate the
+8 digit positions. Single `.ea` source; same primitives lower cleanly to x86
+SSE2 (Ryzen 7700X) and ARM NEON (Pi 5 Cortex-A76) with bit-exact bucket counts.
+
+**Measured 6.34 GB/s on Ryzen 7700X WSL2, 1.80 GB/s on Pi 5 Cortex-A76 NEON**
+on a 100 MB synthetic log with 1.45M timestamps (every line). The
+structural-anchor filter is cheaper per byte than `log_level_scan`'s keyword
+AND-chains — fewer SIMD lane masks per 16-byte chunk, scalar walk only on the
+(rare) candidate hits. Reproduce with `gcc -O2 benchmarks/timestamp_scan_bench.c
+-ldl && ./a.out <path/to/libtimestamp_scan.so>`.
+
+`--bucket weekday` swaps the 24-hour histogram for a 7-bucket Mon..Sun view
+computed via Zeller's congruence on the year/month/day digits the kernel
+already extracted. Same kernel pass, different scalar post-processing. Use it
+for "Tuesday-morning errors" style questions.
+
+## eadiff — structural delta between two rune runs
+
+```
+/rune eatime --json ~/yesterday.log > /tmp/y.json
+/rune eatime --json ~/today.log     > /tmp/t.json
+/rune eadiff /tmp/y.json /tmp/t.json
+```
+
+```
+fields-diffed:     0
+categories-diffed: 2
+
+category deltas:
+  +06:00            3
+  -07:00            1
+```
+
+Two prior `--json` rune outputs in; one `RuneOutput` carrying signed deltas
+out. Match-by-name across `fields[]` and `categories[]`, across every
+`FieldKind`:
+
+- **Number** — signed deltas on min/max/mean/sum.
+- **Bool** — paired Number fields `<col>.true_delta` and `<col>.false_delta`
+  carrying signed deltas of each count.
+- **Timestamp** — `<col>.unique_delta` (signed change in unique-value count)
+  plus `<col>.min_shift_s` and `<col>.max_shift_s` carrying the signed
+  second-deltas of the range endpoints. Forward by one day reads as
+  `+86400.00`. Garbage ISO strings skip the shift fields silently (no crash,
+  no fake values).
+- **Text** — `<col>.unique_delta` plus per-value top-N comparison. Values
+  present in both runs' top-N with different counts emit as
+  `<col>:<value>.count_delta` (signed delta in `numeric.mean`). Values
+  appearing in only one side emit as `[appeared in top] <col>:<value>` /
+  `[disappeared from top] <col>:<value>` Mixed markers.
+- **Categories** — directional naming: a bucket that grew emits as `+<name>`,
+  one that shrank as `-<name>`. Unchanged buckets omitted.
+- **Asymmetric keys** (present in one input but not the other) — emitted as
+  `[appeared] <name>` / `[disappeared] <name>` with kind=Mixed and count from
+  the originating side. The bracket prefix is unambiguously not a real
+  upstream field name.
+
+eadiff is *generic*: the same code handles `eatime × eatime` (hour- or weekday
+drift), `eacrunch × eacrunch` (numeric column drift), `eaparquet × eaparquet`
+(footer-stat drift), `eajson × eajson` (any key kind) — never branches on which
+rune produced the inputs. That's the v0.9.0 schema paying off.
+
+---
+
+## `--json` mode
+
+Every rune accepts `--json`:
+
+```
+/rune eacrunch --json ~/today.csv
+```
+
+Output is one compact JSON object per line — a `RuneOutput v1` serialization
+with stable keys (`schema_version`, `rune`, `source`, `totals`, `fields[]`,
+`categories[]`, `samples[]`). Refusal paths emit JSON too (with `success:false`
+and `error`), so a chained downstream rune always reads a parseable
+`RuneOutput` instead of choking on free-form text.
+
+This is the *chaining contract*. The structured form is the same data the
+human-readable text view shows — text and JSON cannot drift, because both are
+rendered from a single in-memory `RuneOutput`. Downstream consumers like
+`eadiff` read `RuneOutput` back via `RuneOutput::from_json` and operate on the
+union of `fields[]` and `categories[]`.
+
+`--json` explicitly opts out of LLM involvement. The structured JSON answer is
+emitted verbatim — no `<rune_output untrusted="true">` wrapping (would break
+parseability for downstream runes), no `[timing: …]` footer (would break JSONL
+parseability), no LLM narration (the user asked for machine output). The
+safety scan still runs on the raw JSON bytes, so prompt-injection patterns
+inside file-derived string values (CSV cells, JSON value strings, text-top
+entries) are blocked regardless of format.
+
+## Real public data to try it on
+
+- **Synthetic fixtures** — `tests/fixtures/runes/{tiny.csv,tiny.jsonl}` in this
+  repo. Small, good for a smoke test.
+- **systemd journal** — `journalctl -o json -n 1000 > /tmp/log.jsonl` then
+  `/rune eajson /tmp/log.jsonl` — real local data, no setup.
+- **nginx / app logs** — point `/rune ealog` at any access log or app log on
+  disk for a severity histogram + first 5 high-severity samples in milliseconds.
+- **US Bank Transaction Categories v2** — 68K real transaction descriptions,
+  MIT-licensed (CSV):
+  https://huggingface.co/datasets/DoDataThings/us-bank-transaction-categories-v2
+- **NYC TLC Yellow Taxi trip records** — millions of rows per month,
+  permissive (CSV):
+  https://catalog.data.gov/dataset/2023-yellow-taxi-trip-data
+
+## Limits
+
+- **Max input**: 4 GB (2 GB for the `csv_scan` / `jsonl_struct` kernels in this
+  version — bumping to i64 is a planned follow-up).
+- **Path allowlist**: `~` and `/tmp` only. Symlinks escaping the allowlist are
+  rejected at open time.
+- **Output cap**: 32 KB summary (truncated with a `[...truncated N bytes]`
+  marker at a UTF-8-safe boundary).
+- **eacrunch**: unquoted CSV only; CRLF line endings tolerated (trailing `\r`
+  trimmed per field).
+- **eajson**: top-level scalars only — nested objects flatten one level deep
+  (`http.status`); deeper nesting and arrays-of-objects are skipped.
+  Mixed-type keys (number on one line, string on another) collapse to
+  `(mixed)` with no stats. Text top-N capped at 10K cardinality.
+- **eaparquet**: metadata-only — column data is never decoded. Statistics must
+  be present in the file footer. BYTE_ARRAY (string) and INT96 (legacy
+  timestamp) min/max are not decoded. Flat schemas only; nested groups
+  (LIST/MAP/STRUCT children) are skipped from the column list.
+- **ealog**: severity keywords matched case-sensitively in upper-case form
+  (`DEBUG/INFO/WARN/ERROR/FATAL`) bounded by `space/tab/newline/CR/[/]/"/:`
+  only. Lowercase `info`/`warn` and embedded mentions inside JSON string
+  payloads are intentionally not counted. Sample buffer caps at 5 lines;
+  counts remain accurate past that.
+- **eatime**: ISO-8601 prefix `YYYY-MM-DDTHH:MM:SS` only. Other timestamp
+  formats (syslog `May 11 10:54:00`, Unix epoch, RFC 2822, freeform) are
+  intentionally out of scope — extending requires per-format kernels, not a
+  flag. `--bucket hour` validates hour ≤ 23; `--bucket weekday` validates
+  month 1-12 and day 1-31 but doesn't reject impossible dates like
+  `2026-02-30T...` (Zeller produces a weekday anyway). Buckets cap at 16M
+  positions per call.
+- **eadiff**: matches by exact field/category name across the two inputs.
+  Every `FieldKind` is diffable. Stdin chaining (`-` for one of the two path
+  args) is not yet wired through the rune dispatcher — both inputs must be
+  files for now.
+- **Narration**: the model gets a token budget of ~1248 prompt + 768 decode.
+  Outputs over that skip narration with a clear notice — the kernel summary
+  is shown either way.

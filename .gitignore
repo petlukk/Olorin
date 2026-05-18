@@ -9,8 +9,10 @@
 /*.o
 
 # Internal docs and Claude Code workspace — local-only, not for remote.
-# README.md remains tracked.
+# README.md remains tracked; public docs under /docs/ are listed below.
 /CLAUDE.md
-/docs/
+/docs/*
+!/docs/runes.md
+!/docs/architecture.md
 /.claude/
 *.pdf
