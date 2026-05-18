@@ -6,6 +6,31 @@ uses [semver](https://semver.org/) at the minor level. Each release
 is tagged in git as `vX.Y.Z` and listed below in reverse-chronological
 order.
 
+## [1.2.2] — 2026-05-18
+
+Internal refactor only: `src/storage/vault.rs` was 702 lines, breaking
+the project's 500-line hard rule.  All on-disk-format types and helpers
+(`VaultHeaderV2`, `IndexEntry`, nonce derivation, AAD building, v1
+plaintext reader) move to a new sibling `src/storage/vault_format.rs`.
+Public API is preserved: `olorin::storage::vault::{VaultHeaderV2,
+HEADER_SIZE_V2}` still resolve via `pub use`.  v1.2.1 vaults open
+unchanged; no on-disk format change.
+
+Originally also queued for this release: arc #4 (hwid-mixing one-way
+function).  Cancelled mid-session — the proposed swap from XOR-cascade
+to xxhash64-keyed chains would have rotated `derive_key()`'s output,
+silently breaking every existing v1.2.x vault.  Folded into the v2.0
+arc #3 work (passphrase + Argon2id) where key derivation breaks by
+design.
+
+### Changed
+
+- **`src/storage/vault.rs` 702 → 465 lines** by extracting all on-disk
+  format code to `src/storage/vault_format.rs` (261 lines).  No
+  behaviour change; all 318 tests pass unchanged.
+- **`src/storage/mod.rs`** — registers `vault_format` as a private
+  sibling module.  External callers use the `vault.rs` re-exports.
+
 ## [1.2.1] — 2026-05-18
 
 Release-readiness patch: first public-ready Olorin. Adds MIT LICENSE,
