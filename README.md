@@ -141,17 +141,49 @@ The FusedSearcher (`chacha20_search_v2` kernel) decrypts in SIMD registers,
 searches in-register, and returns only matched context lines. ~95% of block
 content never exists as plaintext.
 
-## Security
+## Security & threat model
 
-- **AEAD at rest** — ChaCha20-Poly1305 per block, Poly1305-verified before any
-  decrypt. Tampered blocks rejected.
-- **Vault key** — XOR-obfuscated seed in `.rodata`, mixed with hardware ID at
-  runtime. (User passphrase + Argon2id is the v2.0 story.)
-- **SecureBuffer** — `mlock` + SIMD-zeroed on Drop for all sensitive data.
-- **Inbound safety scan** — score-based, multi-language (EN + SV) injection
-  matching with two-form normalization (catches punctuation/spacing bypasses).
-- **All input untrusted** — REPL, Web UI, WhatsApp all pass full safety
-  pipeline; file-derived bytes are always treated as data, never instructions.
+**What Olorin protects against:**
+
+- **File-system theft of the vault.** Every block is ChaCha20-Poly1305 AEAD
+  with the tag verified before decrypt. An attacker who exfiltrates
+  `~/.olorin/vault/` alone — without the binary, without the host — cannot
+  read or modify any conversation. Tampered bytes are rejected at load time,
+  never silently surfaced as garbage.
+- **Plaintext lingering in process memory.** The FusedSearcher decrypts and
+  searches inside SIMD registers; ~95% of block content never exists as
+  plaintext. SecureBuffer wraps all sensitive data with `mlock` (no swap-out)
+  and SIMD-zeroes on Drop.
+- **File content posing as instructions.** Rune output is wrapped in
+  `<rune_output untrusted="true">`; agent read/write/grep route through a
+  sensitive-subtree denylist; the shell tool classifier blocks exfil paths
+  textually before any policy-mode check.
+- **Basic-to-mid prompt injection.** Score-based multi-language (EN + SV)
+  inbound matcher with two-form normalization (alphanumeric + alnum-only)
+  catches keyword bypasses, punctuation/spacing obfuscation, and word-variant
+  attacks. All input — REPL, Web UI, WhatsApp — passes the same pipeline.
+
+**What it does *not* yet protect against:**
+
+- **An attacker with the binary AND the machine.** The vault seed is
+  XOR-obfuscated in `.rodata` and mixed with `/etc/machine-id` at runtime.
+  Read access to both is sufficient to derive the key. **Passphrase +
+  Argon2id KDF is the v2.0 story** — until then, treat Olorin as
+  single-user-on-trusted-hardware.
+- **Sophisticated prompt injection.** Adversarial paraphrasing and
+  out-of-distribution languages can slip past keyword + score matching. A
+  full-ML classifier is a future project, not on the v1.x roadmap.
+- **Code execution on the host.** Olorin is a local binary you choose to run.
+  There's no sandboxing of the agent against an attacker who already has
+  shell access to the host.
+- **Side-channel attacks.** `poly1305_verify` uses constant-time comparison,
+  but Olorin is not formally hardened against timing, cache, or
+  speculative-execution side channels.
+
+**Designed for:** a single user on their own machine, protecting conversation
+history and analysis from file-system-level theft (lost laptop, leaked backup,
+cloud-sync mishap). **Not designed for:** multi-user systems, hostile-network
+adversaries with host access, or hardware an attacker can physically reach.
 
 ## Interfaces
 
