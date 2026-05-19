@@ -270,16 +270,17 @@ pub fn teleport_loop_streaming(
 
 /// Start the WhatsApp bridge as standalone (--whatsapp flag).
 pub fn run_whatsapp(model_arg: Option<&str>) {
-    // Build the dispatch context (and prompt for the vault passphrase)
-    // before spawning the bridge — if auth fails we exit without leaving
-    // an orphan bridge process behind.
+    // Two-phase init: open the vault first, fail-fast if it didn't
+    // open, then load the inference engine.  Skips the model-load
+    // cost (and the bridge spawn) when we're going to refuse anyway.
     let api_key = std::env::var("ANTHROPIC_API_KEY").ok();
-    let built = DispatchContext::new(api_key, model_arg);
+    let mut built = DispatchContext::new_no_engine(api_key);
     if !built.has_vault() {
         eprintln!("[olorin] vault unavailable — refusing to start --whatsapp without persistence.");
         eprintln!("[olorin] Set OLORIN_PASSPHRASE, or launch interactively so the tty prompt can run.");
         std::process::exit(1);
     }
+    built.load_engine_now(model_arg);
     let ctx = std::sync::Arc::new(std::sync::Mutex::new(built));
 
     let child = match spawn_bridge() {

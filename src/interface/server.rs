@@ -27,21 +27,27 @@ pub fn get_chat_html() -> String {
 
 pub fn run(port: u16, model_arg: Option<&str>, strict: bool, audit_path: Option<&str>) {
     let api_key = std::env::var("ANTHROPIC_API_KEY").ok();
+    // Two-phase init: open the vault first, fail-fast if it didn't open,
+    // then load the inference engine.  Skips the ~5–10 second model
+    // load when we're going to refuse to start anyway.
     let mut built = if strict {
         DispatchContext::new_strict(model_arg)
     } else {
-        DispatchContext::new(api_key, model_arg)
+        DispatchContext::new_no_engine(api_key)
     };
+    if !built.has_vault() {
+        eprintln!("[olorin] vault unavailable — refusing to start --serve without persistence.");
+        eprintln!("[olorin] Set OLORIN_PASSPHRASE, or launch interactively so the tty prompt can run.");
+        std::process::exit(1);
+    }
+    if !strict {
+        built.load_engine_now(model_arg);
+    }
     if let Some(path) = audit_path {
         match crate::core::audit::AuditLog::open(std::path::Path::new(path)) {
             Ok(log) => { built = built.with_audit(log); }
             Err(e) => eprintln!("[Olorin] audit: failed to open {path}: {e} — continuing without audit"),
         }
-    }
-    if !built.has_vault() {
-        eprintln!("[olorin] vault unavailable — refusing to start --serve without persistence.");
-        eprintln!("[olorin] Set OLORIN_PASSPHRASE, or launch interactively so the tty prompt can run.");
-        std::process::exit(1);
     }
     let ctx = Arc::new(Mutex::new(built));
     let teleported = Arc::new(AtomicBool::new(false));

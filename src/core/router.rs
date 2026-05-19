@@ -85,15 +85,39 @@ impl DispatchContext {
         self.vault.is_some()
     }
 
+    /// Build a non-strict context *without* loading the inference engine.
+    /// Server entry points use this to perform the [`has_vault`] check
+    /// before paying the ~5–10 second model-load cost; on failure they
+    /// can exit before any model bytes are read from disk.
+    /// Pair with [`load_engine_now`] once the vault check has passed.
+    pub fn new_no_engine(api_key: Option<String>) -> Self {
+        Self::build_no_engine(api_key, false)
+    }
+
+    /// Load the inference engine into a previously engine-less context.
+    /// No-op in strict mode and when an engine is already loaded.
+    pub fn load_engine_now(&mut self, model_arg: Option<&str>) {
+        if !self.strict && self.engine.is_none() {
+            self.engine = Self::load_engine(model_arg);
+        }
+    }
+
     fn build(api_key: Option<String>, model_arg: Option<&str>, strict: bool) -> Self {
+        let mut ctx = Self::build_no_engine(api_key, strict);
+        if !strict {
+            ctx.engine = Self::load_engine(model_arg);
+        }
+        ctx
+    }
+
+    fn build_no_engine(api_key: Option<String>, strict: bool) -> Self {
         let anthropic = if strict { None } else { api_key.map(AnthropicClient::new) };
         let vault = Self::open_vault();
-        let engine = if strict { None } else { Self::load_engine(model_arg) };
         let mut ctx = Self {
             messages:      Vec::new(),
             recall:        VectorStore::new(1024),
             vault,
-            engine,
+            engine:        None,
             anthropic,
             last_timing:   None,
             system_prompt: {
