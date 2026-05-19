@@ -38,6 +38,11 @@ pub fn run(port: u16, model_arg: Option<&str>, strict: bool, audit_path: Option<
             Err(e) => eprintln!("[Olorin] audit: failed to open {path}: {e} — continuing without audit"),
         }
     }
+    if !built.has_vault() {
+        eprintln!("[olorin] vault unavailable — refusing to start --serve without persistence.");
+        eprintln!("[olorin] Set OLORIN_PASSPHRASE, or launch interactively so the tty prompt can run.");
+        std::process::exit(1);
+    }
     let ctx = Arc::new(Mutex::new(built));
     let teleported = Arc::new(AtomicBool::new(false));
     ctx.lock().unwrap_or_else(|e| e.into_inner()).server_teleported = Some(teleported.clone());

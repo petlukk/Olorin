@@ -9,3 +9,4 @@ pub mod lock;
 pub mod mmap;
 pub mod random;
 pub mod sysinfo;
+pub mod term;

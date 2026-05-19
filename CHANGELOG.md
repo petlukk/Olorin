@@ -9,13 +9,11 @@ order.
 ## [Unreleased]
 
 Arc #3 (passphrase + Argon2id KDF, the v2.0 vault story) — Blake2b
-primitive, full Argon2id, and the `derive_key` rewrite + salt
-persistence + vault format bump to v3.  v2 vaults are rejected;
-per [[feedback-no-migration-for-private-repo]] there is no
-migration path.  REPL passphrase prompt + Web/WhatsApp auth flow
-(tasks #4 and #5) are still pending — for now the production
-`Router::open_vault` reads `OLORIN_PASSPHRASE` from the environment
-and disables persistence when it's unset.
+primitive, full Argon2id, the `derive_key` rewrite + salt
+persistence + vault format bump to v3, the interactive REPL
+passphrase prompt, and the Web UI + WhatsApp fail-fast guard.  v2
+vaults are rejected; per [[feedback-no-migration-for-private-repo]]
+there is no migration path.  Arc #3 is now complete.
 
 ### Added (this slice)
 
@@ -37,6 +35,48 @@ and disables persistence when it's unset.
 - **`tests/vault_passphrase.rs`** — 5 tests covering salt creation,
   salt reuse, wrong-passphrase rejection, v2 vault rejection, and
   `derive_key` determinism.
+
+### Added (REPL prompt slice)
+
+- **`src/platform/term.rs`** — `read_secret(prompt)` reads a line
+  from `/dev/tty` (Unix) or `CONIN$` (Windows) with echo disabled,
+  returning the bytes in a SecureBuffer.  Termios / ConsoleMode is
+  restored even on error paths.  No third-party dep — direct
+  `tcsetattr` + `BCryptGenRandom`-style FFI through `libc`.
+- **`Router::prompt_for_passphrase(is_new)`** — wraps `read_secret`;
+  prompts once for an existing vault, twice (with confirmation) for
+  a fresh vault so a typo doesn't lock conversation history.
+
+### Changed (REPL prompt slice)
+
+- **`Router::open_vault` passphrase sourcing** — interactive tty
+  prompt is now the primary source; `OLORIN_PASSPHRASE` env var
+  stays available as a non-interactive fallback (CI / scripts).
+  Persistence is disabled only when both are unavailable.
+
+### Added (Web UI + WhatsApp auth slice)
+
+- **`DispatchContext::has_vault()`** — true iff the encrypted vault
+  opened.  Server entry points read this before binding a port; the
+  REPL ignores it (interactive use can still ask one-off questions
+  without persistence).
+- **`tests/server_vault_required.rs`** — 2 end-to-end tests: both
+  `--serve` and `--whatsapp` exit non-zero with an explanatory
+  stderr message when no passphrase source resolves (no tty + no
+  `OLORIN_PASSPHRASE`).  The WhatsApp test also asserts that the
+  bridge subprocess is *not* spawned in the failure case.
+
+### Changed (Web UI + WhatsApp auth slice)
+
+- **`--serve` and `--whatsapp` refuse to start without a vault.** An
+  unattended server with persistence silently disabled would lose
+  every conversation on restart and never load the vault-stored API
+  key — a footgun the operator never gets to see.  The REPL keeps
+  the lenient "disabled, but you can still chat" path.
+- **WhatsApp bridge spawn order** — `run_whatsapp` now builds the
+  dispatch context (which prompts for the passphrase) *before*
+  spawning the bridge subprocess, so a failed vault open no longer
+  leaves an orphan bridge process behind.
 
 ### Changed (this slice)
 
