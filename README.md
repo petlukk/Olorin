@@ -24,9 +24,13 @@ English.
 - **Honest scope** — Single binary, two dependencies (libc + libloading),
   3.8 MB release on ARM. Runs on a Raspberry Pi 5.
 
-Current version: **v1.2.0** — the rune family, the `RuneOutput v1` schema,
-and the `--json` chaining contract are stable. They will not change without
-a v2.0 bump. See [`CHANGELOG.md`](CHANGELOG.md) for the full history.
+Current version: **v2.0.0** — the vault key is now Argon2id-derived from a
+user passphrase + per-vault salt (arc #3 of the security follow-up queue).
+The rune family, the `RuneOutput v1` schema, and the `--json` chaining
+contract remain stable. **Breaking change:** v2.0 vaults are not
+read-compatible with v1.2.x — delete `~/.olorin/vault/default/` and you'll
+be prompted for a fresh passphrase. See [`CHANGELOG.md`](CHANGELOG.md) for
+the full history.
 
 ## Try it
 
@@ -145,11 +149,14 @@ content never exists as plaintext.
 
 **What Olorin protects against:**
 
-- **File-system theft of the vault.** Every block is ChaCha20-Poly1305 AEAD
-  with the tag verified before decrypt. An attacker who exfiltrates
-  `~/.olorin/vault/` alone — without the binary, without the host — cannot
-  read or modify any conversation. Tampered bytes are rejected at load time,
-  never silently surfaced as garbage.
+- **File-system theft of the vault — including hardware theft.** Every
+  block is ChaCha20-Poly1305 AEAD with the tag verified before decrypt.
+  The vault key is Argon2id-derived (64 MiB, t=3, p=1) from a user
+  passphrase + a per-vault salt; the salt is stored next to the vault
+  but is useless on its own. An attacker who exfiltrates
+  `~/.olorin/vault/` — or the entire laptop — cannot read or modify any
+  conversation without also knowing the passphrase. Tampered bytes are
+  rejected at load time, never silently surfaced as garbage.
 - **Plaintext lingering in process memory.** The FusedSearcher decrypts and
   searches inside SIMD registers; ~95% of block content never exists as
   plaintext. SecureBuffer wraps all sensitive data with `mlock` (no swap-out)
@@ -165,14 +172,15 @@ content never exists as plaintext.
 
 **What it does *not* yet protect against:**
 
-- **An attacker with the binary AND the machine.** The vault seed is
-  XOR-obfuscated in `.rodata` and mixed with `/etc/machine-id` at runtime.
-  Read access to both is sufficient to derive the key. **Passphrase +
-  Argon2id KDF is the v2.0 story** — until then, treat Olorin as
-  single-user-on-trusted-hardware.
+- **A weak or leaked passphrase.** Argon2id at 64 MiB / t=3 raises the
+  per-guess cost dramatically, but a dictionary-strength passphrase is
+  still recoverable by a determined attacker with the vault file. Pick a
+  passphrase the way you'd pick a master password for a password manager.
+  Losing the passphrase means losing the vault — there is no recovery
+  path, by design.
 - **Sophisticated prompt injection.** Adversarial paraphrasing and
   out-of-distribution languages can slip past keyword + score matching. A
-  full-ML classifier is a future project, not on the v1.x roadmap.
+  full-ML classifier is a future project, not on the current roadmap.
 - **Code execution on the host.** Olorin is a local binary you choose to run.
   There's no sandboxing of the agent against an attacker who already has
   shell access to the host.
@@ -182,8 +190,10 @@ content never exists as plaintext.
 
 **Designed for:** a single user on their own machine, protecting conversation
 history and analysis from file-system-level theft (lost laptop, leaked backup,
-cloud-sync mishap). **Not designed for:** multi-user systems, hostile-network
-adversaries with host access, or hardware an attacker can physically reach.
+cloud-sync mishap). The passphrase + Argon2id flow extends this to hardware
+theft as well, provided the passphrase is strong. **Not designed for:**
+multi-user systems, hostile-network adversaries with host access, or scenarios
+where the passphrase itself is compromised.
 
 ## Interfaces
 
@@ -230,11 +240,11 @@ kernel inventory, and runtime contracts.
 
 | Metric | Value |
 |---|---|
-| Rust source | 17,660 lines |
-| Ea kernel source | 12,568 lines (64 files, 42 logical kernels) |
-| Test lines | 9,466 (60 files, 318 tests) |
+| Rust source | 23,722 lines |
+| Ea kernel source | 14,286 lines (71 files, 44 logical kernels) |
+| Test lines | 15,899 (101 files, 571 tests) |
 | Dependencies | 2 (libc, libloading) |
-| Release binary (ARM) | 3.8 MB (all kernels embedded) |
+| Release binary (ARM) | 4.3 MB (all kernels embedded) |
 | Max file size | 500 lines (enforced) |
 
 ## License
