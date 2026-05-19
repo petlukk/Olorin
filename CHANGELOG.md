@@ -8,12 +8,16 @@ order.
 
 ## [Unreleased]
 
+## [2.0.0] — 2026-05-19
+
 Arc #3 (passphrase + Argon2id KDF, the v2.0 vault story) — Blake2b
 primitive, full Argon2id, the `derive_key` rewrite + salt
 persistence + vault format bump to v3, the interactive REPL
 passphrase prompt, and the Web UI + WhatsApp fail-fast guard.  v2
 vaults are rejected; per [[feedback-no-migration-for-private-repo]]
-there is no migration path.  Arc #3 is now complete.
+there is no migration path.  Major bump because the on-disk vault
+format is incompatible with v1.2.x — existing vaults must be
+regenerated under the new passphrase flow.
 
 ### Added (this slice)
 
