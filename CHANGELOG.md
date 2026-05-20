@@ -8,6 +8,31 @@ order.
 
 ## [Unreleased]
 
+## [2.0.2] — 2026-05-20
+
+Release-pipeline patch for v2.0.1.  The v2.0.1 tag was created but
+never produced an attached GitHub Release because the Windows matrix
+entry failed on two predictable issues; this patch unblocks them so
+the install scripts have artifacts to download.
+
+### Changed
+
+- **`.github/workflows/release.yml`** — Windows LLVM install now passes
+  `--allow-downgrade --force` to chocolatey.  The `windows-2022` runner
+  ships LLVM 20.1.8 by default and eacompute pins to LLVM 18 via
+  llvm-sys, so the install step has to step backwards.
+
+### Known limitations
+
+- **Windows users get `olorin.exe` but not `wa-bridge.exe`.**  The bridge
+  currently uses `mattn/go-sqlite3` which is CGo-only and needs a
+  working MinGW on the runner.  Rather than wire up MSYS2 in CI, the
+  Windows bridge build is skipped for this release.  A follow-up will
+  swap to `modernc.org/sqlite` (pure-Go drop-in for whatsmeow's session
+  store) and re-enable the Windows bridge.  In the meantime, Windows
+  users who want `/teleport` can build the bridge from source with a
+  local Go + MinGW toolchain.
+
 ## [2.0.1] — 2026-05-20
 
 Public-launch package.  No code-behaviour changes, no on-disk format

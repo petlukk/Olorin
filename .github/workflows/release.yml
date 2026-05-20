@@ -51,7 +51,10 @@ jobs:
 
       - name: Install LLVM 18 (Windows)
         if: matrix.os_family == 'windows'
-        run: choco install llvm --version=18.1.8 --no-progress -y
+        # The windows-2022 image ships LLVM 20 by default; eacompute pins
+        # to LLVM 18 via llvm-sys, so we force the downgrade. `--force`
+        # makes choco accept the already-installed-but-newer state.
+        run: choco install llvm --version=18.1.8 --no-progress --allow-downgrade --force -y
         shell: pwsh
 
       - name: Install Rust toolchain (stable)
@@ -105,13 +108,19 @@ jobs:
           cp "target/release/olorin${EXT}" "dist/olorin-${TARGET}${EXT}"
 
       # --- WhatsApp bridge (Go) -----------------------------------------
+      # Windows is skipped here: the bridge currently uses mattn/go-sqlite3
+      # which is CGo-only and needs a working MinGW on the build host.
+      # A pure-Go sqlite swap (modernc.org/sqlite) lands in a follow-up;
+      # for now Windows users get olorin.exe without wa-bridge.exe.
 
       - name: Set up Go
+        if: matrix.os_family != 'windows'
         uses: actions/setup-go@v5
         with:
           go-version: '1.25'
 
       - name: Build wa-bridge (release, stripped)
+        if: matrix.os_family != 'windows'
         working-directory: bridge
         shell: bash
         env:
