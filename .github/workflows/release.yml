@@ -97,6 +97,13 @@ jobs:
           shared-key: ${{ matrix.target }}
 
       - name: Build Olorin (release)
+        # Wrap pidfd_spawnp / pidfd_getpid on Linux so the binary loads on
+        # older glibc (e.g. Debian 12 Bookworm, glibc 2.36) — the runners
+        # ship glibc 2.39 and without the wrap the resulting binary
+        # demands `GLIBC_2.39` at runtime.  Olorin's exec module already
+        # provides the fallback impls these wraps redirect to.
+        env:
+          RUSTFLAGS: ${{ matrix.os_family == 'linux' && '-C link-args=-Wl,--wrap=pidfd_spawnp -C link-args=-Wl,--wrap=pidfd_getpid' || '' }}
         run: cargo build --release
 
       - name: Stage olorin binary
