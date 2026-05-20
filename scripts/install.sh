@@ -24,15 +24,16 @@ info() { printf '  %s\n' "$*"; }
 step() { printf '\n[%s] %s\n' "$1" "$2"; }
 
 # stdin may be the curl pipe; read prompts from the controlling tty instead.
+# In dash the redirect-setup error fires before `2>/dev/null` takes effect
+# on `exec`, so the probe lives in a subshell where its stderr is contained.
+# If that subshell can open /dev/tty, the real exec in the parent shell will
+# also succeed (same controlling-terminal context).
+PROMPT_FD=
 if [ -t 0 ]; then
   PROMPT_FD=0
-else
-  if [ -r /dev/tty ]; then
-    exec 3</dev/tty
-    PROMPT_FD=3
-  else
-    PROMPT_FD=
-  fi
+elif ( : </dev/tty ) >/dev/null 2>&1; then
+  exec 3</dev/tty
+  PROMPT_FD=3
 fi
 
 ask() {
