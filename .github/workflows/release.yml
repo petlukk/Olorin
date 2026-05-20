@@ -31,10 +31,11 @@ jobs:
             runner: ubuntu-24.04-arm
             ext: ''
             os_family: linux
-          - target: windows-x86_64
-            runner: windows-2022
-            ext: '.exe'
-            os_family: windows
+          # Windows is deferred — eacompute requires an LLVM 18 MSVC dev
+          # distribution that is not available via chocolatey.  The recipe
+          # lives in petlukk/Ea_showcase/build-windows.bat (LLVM_SYS_*_PREFIX
+          # pointing at a real dev install plus a libxml2s.lib stub); CI
+          # needs the same setup before Windows can rejoin the matrix.
 
     steps:
       - name: Checkout Olorin

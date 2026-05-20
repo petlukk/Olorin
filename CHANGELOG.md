@@ -12,26 +12,32 @@ order.
 
 Release-pipeline patch for v2.0.1.  The v2.0.1 tag was created but
 never produced an attached GitHub Release because the Windows matrix
-entry failed on two predictable issues; this patch unblocks them so
-the install scripts have artifacts to download.
+entry failed at eacompute's `llvm-sys` step (chocolatey's `llvm`
+package is binaries-only, not a dev SDK with `llvm-config.exe`).
+Rather than block the public-launch release on a half-day Windows
+LLVM setup, v2.0.2 ships **Linux x86_64 + Linux aarch64 only**;
+Windows is deferred to a later release.
 
 ### Changed
 
-- **`.github/workflows/release.yml`** — Windows LLVM install now passes
-  `--allow-downgrade --force` to chocolatey.  The `windows-2022` runner
-  ships LLVM 20.1.8 by default and eacompute pins to LLVM 18 via
-  llvm-sys, so the install step has to step backwards.
+- **`.github/workflows/release.yml`** — Windows dropped from the build
+  matrix.  Reinstating it needs an LLVM 18 MSVC developer
+  distribution on the runner (the recipe is in
+  petlukk/Ea_showcase/`build-windows.bat`: `LLVM_SYS_*_PREFIX` pointing
+  at a real dev install, plus the `libxml2s.lib` stub), not just the
+  binaries-only chocolatey `llvm` package.
+- **`README.md`** — Install section reflects the actual platform
+  coverage (Linux x86_64 / aarch64).  The PowerShell installer
+  remains in `scripts/install.ps1` for when Windows releases resume,
+  but the README no longer advertises it as installable today.
 
 ### Known limitations
 
-- **Windows users get `olorin.exe` but not `wa-bridge.exe`.**  The bridge
-  currently uses `mattn/go-sqlite3` which is CGo-only and needs a
-  working MinGW on the runner.  Rather than wire up MSYS2 in CI, the
-  Windows bridge build is skipped for this release.  A follow-up will
-  swap to `modernc.org/sqlite` (pure-Go drop-in for whatsmeow's session
-  store) and re-enable the Windows bridge.  In the meantime, Windows
-  users who want `/teleport` can build the bridge from source with a
-  local Go + MinGW toolchain.
+- **Windows is not in this release.**  No `olorin.exe` or
+  `wa-bridge.exe` is published for v2.0.2.  Windows users who want to
+  run Olorin can build from source per the contributor instructions
+  in the README.  CI work to ship Windows binaries cleanly is
+  tracked as the next platform-coverage item.
 
 ## [2.0.1] — 2026-05-20
 

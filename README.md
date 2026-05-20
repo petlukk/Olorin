@@ -210,19 +210,11 @@ Olorin Pipe — same SIMD kernels, same vault, same audit log.
 
 ## Install
 
-Prebuilt binaries are published per release for **Linux x86_64**,
-**Linux aarch64** (Raspberry Pi 5), and **Windows x86_64**.
-
-**Linux / macOS shell:**
+Prebuilt binaries are published per release for **Linux x86_64** and
+**Linux aarch64** (Raspberry Pi 5):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/petlukk/Olorin/main/scripts/install.sh | sh
-```
-
-**Windows PowerShell:**
-
-```powershell
-iwr -useb https://raw.githubusercontent.com/petlukk/Olorin/main/scripts/install.ps1 | iex
 ```
 
 The installer downloads the latest release binary, optionally prompts for
@@ -232,6 +224,13 @@ and bridge are both opt-in; the core binary is ~2 MB on x86 / ~4.3 MB on
 ARM with all SIMD kernels embedded. Olorin reads `~/.olorin/env` at
 startup, so the key written by the installer is picked up without any
 shell-rc plumbing.
+
+> **Windows:** binaries are not yet published. The Rust + Ea code is
+> Windows-compatible (verified locally), but CI doesn't yet provide an
+> LLVM 18 MSVC developer distribution to build against. The
+> `scripts/install.ps1` script is in the repo, ready for when Windows
+> releases resume; for now Windows users should build from source per
+> the contributor section below.
 
 Drop a GGUF model into `~/.olorin/models/` to use local inference:
 
