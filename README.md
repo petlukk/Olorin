@@ -241,7 +241,7 @@ kernel inventory, and runtime contracts.
 | Metric | Value |
 |---|---|
 | Rust source | 23,722 lines |
-| Ea kernel source | 14,286 lines (71 files, 44 logical kernels) |
+| Ea kernel source | 14,286 lines (71 files, 49 logical kernels) |
 | Test lines | 15,899 (101 files, 571 tests) |
 | Dependencies | 2 (libc, libloading) |
 | Release binary (ARM) | 4.3 MB (all kernels embedded) |

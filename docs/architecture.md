@@ -57,13 +57,13 @@ olorin/
       ffi.rs          KernelTable + core/safety/storage wrappers
       ffi_inference.rs  Inference FFI (Q4K/Q6K/BF16 dot, GEMM, RoPE, etc.)
 
-    tools/          20 built-in tools
+    tools/          19 built-in tools
     recall.rs       VectorStore (JL-projected embeddings)
 
-  kernels/          64 Ea SIMD kernel source files (flat) — 42 logical kernels
+  kernels/          71 Ea SIMD kernel source files (flat) — 49 logical kernels
                     with ARM variants
   web/chat.html     Chat UI (Catppuccin themed, embedded in binary)
-  tests/            60 test files, 318 tests
+  tests/            97 test files, 571 tests
 ```
 
 ## Gemma 4 E2B inference
@@ -81,7 +81,7 @@ GEMM for prefill, hot-vocab (32K logits) for fast sampling.
 
 ## Kernel infrastructure
 
-64 Ea SIMD kernel source files (42 logical kernels with ARM variants) compiled
+71 Ea SIMD kernel source files (49 logical kernels with ARM variants) compiled
 by `build.rs` into shared objects (ARM NEON + dotprod on aarch64, SSE/AVX2 on
 x86_64).
 
