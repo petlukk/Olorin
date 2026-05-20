@@ -1,4 +1,4 @@
-//! eajson — JSON Lines summarizer via SIMD `jsonl_struct_scan` + `f32_stats`.
+//! eajson — JSON Lines summarizer via SIMD `jsonl_struct_scan` + `f64_stats`.
 //!
 //! Features:
 //! - Escape-aware quote walking — `\"` inside strings is correctly skipped.

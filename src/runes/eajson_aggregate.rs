@@ -26,7 +26,7 @@ enum KeyType { Number, Text, Bool, Timestamp, Mixed }
 pub struct Aggregator {
     key_order:    Vec<String>,
     key_types:    HashMap<String, KeyType>,
-    numeric_vals: HashMap<String, Vec<f32>>,
+    numeric_vals: HashMap<String, Vec<f64>>,
     text_tops:    HashMap<String, HashMap<String, u32>>,
     text_counts:  HashMap<String, u32>,
     bool_counts:  HashMap<String, (u32, u32)>,
@@ -139,7 +139,7 @@ fn ingest_scalar(full_key: &str, val_bytes: &[u8], kind: ScalarKind, agg: &mut A
     match kind {
         ScalarKind::Number => {
             let txt = std::str::from_utf8(val_bytes).unwrap_or("");
-            if let Ok(v) = txt.parse::<f32>() {
+            if let Ok(v) = txt.parse::<f64>() {
                 agg.numeric_vals.entry(full_key.to_string()).or_default().push(v);
             }
         }
@@ -198,18 +198,18 @@ fn make_field(k: &str, kind: KeyType, agg: &Aggregator) -> FieldStats {
         KeyType::Number => {
             let vals = agg.numeric_vals.get(k).map(|v| v.as_slice()).unwrap_or(&[]);
             let (count, sum, min_v, max_v) = unsafe {
-                let mut count = 0i32; let mut sum = 0f32;
-                let mut mn = 0f32; let mut mx = 0f32;
-                ffi::f32_stats(vals.as_ptr(), vals.len() as i32,
+                let mut count = 0i32; let mut sum = 0f64;
+                let mut mn = 0f64; let mut mx = 0f64;
+                ffi::f64_stats(vals.as_ptr(), vals.len() as i32,
                     &mut count, &mut sum, &mut mn, &mut mx);
                 (count, sum, mn, mx)
             };
-            let mean = if count > 0 { sum / count as f32 } else { 0.0 };
+            let mean = if count > 0 { sum / count as f64 } else { 0.0 };
             FieldStats {
                 kind: FieldKind::Number, count: count as u64,
                 numeric: Some(NumericStats {
-                    min: min_v as f64, max: max_v as f64,
-                    mean: mean as f64, sum: sum as f64,
+                    min: min_v, max: max_v,
+                    mean, sum,
                 }),
                 ..blank
             }

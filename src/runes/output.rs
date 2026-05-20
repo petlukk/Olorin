@@ -13,7 +13,7 @@
 //!
 //! Wire format: one compact JSON object per line, produced via
 //! `storage::json` (zero new deps). NaN/±Inf are emitted as `null`
-//! because they aren't valid JSON; `f32_stats` returns NaN on empty
+//! because they aren't valid JSON; `f64_stats` returns NaN on empty
 //! inputs which a rune will hit.
 
 use crate::storage::json::{self, Object, Value};

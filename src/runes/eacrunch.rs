@@ -1,4 +1,4 @@
-//! eacrunch — CSV summarizer via SIMD csv_scan + f32_stats.
+//! eacrunch — CSV summarizer via SIMD csv_scan + f64_stats.
 //!
 //! Classifies columns as numeric vs text from the first 32 non-empty
 //! rows, then streams stats per column. Output: the structured
@@ -189,7 +189,7 @@ fn build_output(bytes: &[u8], path: String) -> Result<RuneOutput, String> {
     }
 
     // Sniff first up-to-32 data rows to classify columns as numeric vs
-    // text (numeric if >= 75% of sniffed cells parse as f32).
+    // text (numeric if >= 75% of sniffed cells parse as f64).
     let sniff_rows = SNIFF_ROWS.min(n_rows - 1);
     let mut is_numeric = vec![false; n_cols];
     for c in 0..n_cols {
@@ -198,13 +198,13 @@ fn build_output(bytes: &[u8], path: String) -> Result<RuneOutput, String> {
             if c >= rows_fields[r].len() { continue; }
             let (s, e) = rows_fields[r][c];
             let txt = std::str::from_utf8(&bytes[s..e]).unwrap_or("").trim();
-            if txt.parse::<f32>().is_ok() { ok += 1; }
+            if txt.parse::<f64>().is_ok() { ok += 1; }
         }
         is_numeric[c] = ok * 100 >= (sniff_rows as u32) * 75;
     }
 
     // Per-column numeric values + text-frequency maps.
-    let mut numeric_vals: Vec<Vec<f32>> = vec![Vec::new(); n_cols];
+    let mut numeric_vals: Vec<Vec<f64>> = vec![Vec::new(); n_cols];
     let mut text_tops: Vec<std::collections::HashMap<String, u32>> =
         vec![std::collections::HashMap::new(); n_cols];
     let n_data = n_rows - 1;
@@ -214,7 +214,7 @@ fn build_output(bytes: &[u8], path: String) -> Result<RuneOutput, String> {
             let (s, e) = rows_fields[r][c];
             let txt = std::str::from_utf8(&bytes[s..e]).unwrap_or("").trim();
             if is_numeric[c] {
-                if let Ok(v) = txt.parse::<f32>() {
+                if let Ok(v) = txt.parse::<f64>() {
                     numeric_vals[c].push(v);
                 }
             } else if let Some(ct) = text_tops[c].get_mut(txt) {
@@ -232,26 +232,26 @@ fn build_output(bytes: &[u8], path: String) -> Result<RuneOutput, String> {
             let vals = &numeric_vals[c];
             let (count, sum, min_v, max_v) = unsafe {
                 let mut count = 0i32;
-                let mut sum   = 0f32;
-                let mut mn    = 0f32;
-                let mut mx    = 0f32;
-                ffi::f32_stats(
+                let mut sum   = 0f64;
+                let mut mn    = 0f64;
+                let mut mx    = 0f64;
+                ffi::f64_stats(
                     vals.as_ptr(), vals.len() as i32,
                     &mut count, &mut sum, &mut mn, &mut mx,
                 );
                 (count, sum, mn, mx)
             };
-            let mean = if count > 0 { sum / count as f32 } else { 0.0 };
+            let mean = if count > 0 { sum / count as f64 } else { 0.0 };
             fields.push(FieldStats {
                 name:       headers[c].clone(),
                 kind:       FieldKind::Number,
                 count:      count as u64,
                 null_count: None,
                 numeric:    Some(NumericStats {
-                    min:  min_v as f64,
-                    max:  max_v as f64,
-                    mean: mean as f64,
-                    sum:  sum as f64,
+                    min:  min_v,
+                    max:  max_v,
+                    mean,
+                    sum,
                 }),
                 text: None, bool: None, timestamp: None,
             });
