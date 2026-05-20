@@ -2,6 +2,8 @@ use olorin::interface;
 use olorin::kernels::ffi;
 
 fn main() {
+    olorin::config::load_env_file();
+
     let args: Vec<String> = std::env::args().collect();
 
     let serve    = args.contains(&"--serve".into());

@@ -1,0 +1,176 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to attach the release to (must already exist)'
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x86_64
+            runner: ubuntu-24.04
+            ext: ''
+            os_family: linux
+          - target: linux-aarch64
+            runner: ubuntu-24.04-arm
+            ext: ''
+            os_family: linux
+          - target: windows-x86_64
+            runner: windows-2022
+            ext: '.exe'
+            os_family: windows
+
+    steps:
+      - name: Checkout Olorin
+        uses: actions/checkout@v4
+
+      # --- eacompute (Ea compiler, required to build SIMD kernels) -----
+
+      - name: Install eacompute system deps (Linux, LLVM 18)
+        if: matrix.os_family == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            llvm-18-dev clang-18 libpolly-18-dev libzstd-dev
+
+      - name: Install LLVM 18 (Windows)
+        if: matrix.os_family == 'windows'
+        run: choco install llvm --version=18.1.8 --no-progress -y
+        shell: pwsh
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Checkout eacompute (sibling repo)
+        uses: actions/checkout@v4
+        with:
+          repository: petlukk/eacompute
+          path: eacompute
+          ref: main
+
+      - name: Cache eacompute build
+        uses: actions/cache@v4
+        with:
+          path: eacompute/target
+          key: eacompute-${{ matrix.target }}-${{ hashFiles('eacompute/Cargo.lock', 'eacompute/Cargo.toml', 'eacompute/build.rs') }}-${{ hashFiles('eacompute/src/**') }}
+
+      - name: Build eacompute (release)
+        working-directory: eacompute
+        run: cargo build --release --features=llvm
+
+      - name: Add ea to PATH (Linux)
+        if: matrix.os_family == 'linux'
+        run: echo "${GITHUB_WORKSPACE}/eacompute/target/release" >> "$GITHUB_PATH"
+
+      - name: Add ea to PATH (Windows)
+        if: matrix.os_family == 'windows'
+        run: |
+          "$env:GITHUB_WORKSPACE\eacompute\target\release" | Out-File -FilePath $env:GITHUB_PATH -Append
+        shell: pwsh
+
+      # --- Olorin binary ------------------------------------------------
+
+      - name: Cache Olorin cargo + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: olorin-release-v1
+          shared-key: ${{ matrix.target }}
+
+      - name: Build Olorin (release)
+        run: cargo build --release
+
+      - name: Stage olorin binary
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          EXT:    ${{ matrix.ext }}
+        run: |
+          mkdir -p dist
+          cp "target/release/olorin${EXT}" "dist/olorin-${TARGET}${EXT}"
+
+      # --- WhatsApp bridge (Go) -----------------------------------------
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Build wa-bridge (release, stripped)
+        working-directory: bridge
+        shell: bash
+        env:
+          CGO_ENABLED: '1'
+          TARGET: ${{ matrix.target }}
+          EXT:    ${{ matrix.ext }}
+        run: |
+          go build -trimpath -ldflags='-s -w' -o "../dist/wa-bridge-${TARGET}${EXT}" .
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: olorin-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten and checksum
+        run: |
+          mkdir -p release
+          find artifacts -type f -exec cp {} release/ \;
+          cd release
+          sha256sum * > SHA256SUMS
+          ls -la
+
+      - name: Resolve tag
+        id: tag
+        env:
+          DISPATCH_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          if [ -n "${DISPATCH_TAG}" ]; then
+            tag="${DISPATCH_TAG}"
+          else
+            tag="${GITHUB_REF#refs/tags/}"
+          fi
+          # Reject anything not matching vX.Y.Z to fail fast if the input
+          # is malformed (defence in depth — also limits what we feed to
+          # action-gh-release).
+          case "$tag" in
+            v[0-9]*) ;;
+            *) echo "Refusing unexpected tag: $tag" >&2; exit 1 ;;
+          esac
+          printf 'tag=%s\n' "$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Create / update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.tag.outputs.tag }}
+          files: release/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true

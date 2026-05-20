@@ -7,6 +7,7 @@ macro_rules! olorin_debug {
 }
 
 pub mod error;
+pub mod config;
 pub mod core;
 pub mod inference;
 pub mod storage;

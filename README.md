@@ -208,9 +208,46 @@ Olorin Pipe — same SIMD kernels, same vault, same audit log.
   subprocess; scan the QR with WhatsApp on your phone, then any message to
   the linked number gets dispatched through the same Pipe.
 
-## Building
+## Install
 
-Ea compiler required in PATH:
+Prebuilt binaries are published per release for **Linux x86_64**,
+**Linux aarch64** (Raspberry Pi 5), and **Windows x86_64**.
+
+**Linux / macOS shell:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/petlukk/Olorin/main/scripts/install.sh | sh
+```
+
+**Windows PowerShell:**
+
+```powershell
+iwr -useb https://raw.githubusercontent.com/petlukk/Olorin/main/scripts/install.ps1 | iex
+```
+
+The installer downloads the latest release binary, optionally prompts for
+an `ANTHROPIC_API_KEY` (cloud fallback when no local model is loaded),
+and optionally fetches the WhatsApp `/teleport` bridge. Cloud-fallback
+and bridge are both opt-in; the core binary is ~2 MB on x86 / ~4.3 MB on
+ARM with all SIMD kernels embedded. Olorin reads `~/.olorin/env` at
+startup, so the key written by the installer is picked up without any
+shell-rc plumbing.
+
+Drop a GGUF model into `~/.olorin/models/` to use local inference:
+
+```bash
+cp gemma-4-e2b-it-Q4_K_M.gguf ~/.olorin/models/
+olorin --model ~/.olorin/models/gemma-4-e2b-it-Q4_K_M.gguf --serve
+```
+
+Without a model, Olorin runs tools, slash-commands, and runes
+deterministically; cloud fallback fires only if `ANTHROPIC_API_KEY` is
+set.
+
+## Building from source
+
+For contributors. Requires the [Ea compiler](https://github.com/petlukk/eacompute)
+on `PATH`:
 
 ```bash
 PATH="/path/to/eacompute/target/release:$PATH" cargo build --release
@@ -224,17 +261,14 @@ RUSTFLAGS="-C link-args=-Wl,--wrap=pidfd_spawnp -C link-args=-Wl,--wrap=pidfd_ge
 cargo build --release --target aarch64-unknown-linux-gnu
 ```
 
-Drop a GGUF model into `~/.olorin/models/`:
+To build the WhatsApp bridge separately (requires Go 1.25+):
 
 ```bash
-cp gemma-4-e2b-it-Q4_K_M.gguf ~/.olorin/models/
-./olorin --model ~/.olorin/models/gemma-4-e2b-it-Q4_K_M.gguf --serve
+cd bridge && go build -trimpath -ldflags='-s -w' -o ../wa-bridge
 ```
 
-Without a model, Olorin runs tools, slash-commands, and runes deterministically
-(set `ANTHROPIC_API_KEY` for cloud inference as fallback). See
-[`docs/architecture.md`](docs/architecture.md) for the full source layout,
-kernel inventory, and runtime contracts.
+See [`docs/architecture.md`](docs/architecture.md) for the full source
+layout, kernel inventory, and runtime contracts.
 
 ## Project stats
 
