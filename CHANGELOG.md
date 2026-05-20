@@ -8,6 +8,44 @@ order.
 
 ## [Unreleased]
 
+## [2.0.3] — 2026-05-20
+
+Two production-data-discovered correctness fixes, bundled as one patch:
+the eajson + eacrunch numeric-stats kernels lose precision above the
+f32 lossless boundary (commit `9295897`), and the rune-narration prompt
+makes Gemma 4 echo a trailing template fragment for repetitive-pattern
+rune outputs.  Both were caught while running the install scripts on
+the production Pi 5 against real public datasets on 2026-05-20.
+
+### Fixed
+
+- **eajson / eacrunch numeric stats — f32 → f64.**  The aggregator
+  was parsing JSON numbers / CSV cells to f32 and feeding the
+  `f32_stats` SIMD kernel.  Above the ~16.7M lossless f32 boundary,
+  distinct integers collapse into a single f32 bucket.  Symptom:
+  GitHub `payload.push_id` values (~3.4×10¹⁰, f32 spacing 4096)
+  all reported as a single identical value above the actual data
+  max.  Fixed by switching the aggregator to `Vec<f64>` and calling
+  the (already-shipped) `f64_stats` kernel.  Schema unchanged
+  (`NumericStats` was always `f64`); behaviour-only change.  Two new
+  regression tests with the original 25-push-id sample bake the
+  oracle in.
+- **Rune-narration prompt — drop the trailing instruction.**  The
+  user prompt used to repeat the system prompt's "respond in 1-2
+  plain-English sentences" instruction at the end.  For runes with
+  long repetitive output (eatime's 24 hour buckets, eajson's
+  ~28 key lines), Gemma 4 generated next-most-likely tokens that
+  *continued the trailing instruction* instead of summarising the
+  data — sometimes hallucinating markdown bolding and repeating the
+  echo 2-3 times.  The new user prompt is just
+  `Output of \`<rune>\`:\n\n<answer>` with no trailing nag; the
+  system prompt at `NARRATION_SYSTEM_PROMPT` carries the entire
+  instruction load.  Five new tests in
+  `tests/narration_prompt_shape.rs` lock the new shape in
+  (no template fragments leak through, data is preserved verbatim,
+  long outputs don't reintroduce a trailing instruction).
+  Existing `runes_llm_wiring` tests updated to match.
+
 ## [2.0.2] — 2026-05-20
 
 Release-pipeline patch for v2.0.1.  The v2.0.1 tag was created but

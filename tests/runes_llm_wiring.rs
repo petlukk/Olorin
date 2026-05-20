@@ -90,29 +90,32 @@ fn wrap_rune_result_untrusted_wraps_in_delimiter() {
 // ── build_narration_prompt: rune → followup-prompt construction ───────────────
 
 #[test]
-fn build_narration_prompt_trusted_includes_answer_and_instruction() {
+fn build_narration_prompt_trusted_includes_only_label_and_body() {
     let r = mk_result("rows=100, col0_mean=3.14");
     let prompt = build_narration_prompt("eahash", OutputSafety::Trusted, r)
         .expect("trusted prompt should not be blocked");
-    // Data-then-instruction shape: tool name + body up front, summarize
-    // ask at the end. This is the textbook in-context-summarization shape
-    // Gemma 4 was trained for; the previous wrapper-based shape pushed
-    // the model into emitting EOS immediately.
+    // Label-and-body shape: a one-line `Output of \`<rune>\`:` label
+    // followed by the rune's answer verbatim.  The previous shape ended
+    // with an `In 1-2 plain-English sentences…` trailing instruction,
+    // which Gemma 4 echoed back as the response for repetitive-pattern
+    // rune outputs (eatime hour buckets, eajson key dumps — observed
+    // 2026-05-20).  All instruction load now lives in the system prompt
+    // at NARRATION_SYSTEM_PROMPT.
     assert!(
-        prompt.starts_with("Here is the output of the eahash analysis tool:"),
-        "prompt missing tool-name lead-in: {prompt}"
+        prompt.starts_with("Output of `eahash`:"),
+        "prompt missing label: {prompt}"
     );
     assert!(
         prompt.contains("rows=100, col0_mean=3.14"),
         "prompt missing answer body: {prompt}"
     );
     assert!(
-        prompt.contains("In 1-2 plain-English sentences"),
-        "prompt missing 1-2 sentence instruction: {prompt}"
+        !prompt.contains("In 1-2 plain-English sentences"),
+        "trailing instruction must NOT be in the user prompt: {prompt}"
     );
     assert!(
-        prompt.contains("Do not repeat the raw numbers verbatim"),
-        "prompt missing no-numbers guidance: {prompt}"
+        !prompt.contains("Do not repeat the raw numbers verbatim"),
+        "trailing instruction must NOT be in the user prompt: {prompt}"
     );
 }
 
@@ -120,14 +123,13 @@ fn build_narration_prompt_trusted_includes_answer_and_instruction() {
 fn build_narration_prompt_untrusted_uses_same_shape_as_trusted() {
     // The narration prompt format is uniform across safety classes — the
     // injection defense is the safety::scan run on the raw answer, NOT
-    // visual wrapping (which made Gemma 4 misbehave for narration). Both
-    // classes produce the same textbook instruction-data shape.
+    // visual wrapping (which made Gemma 4 misbehave for narration).
     let r = mk_result("rows: 10\namount: mean=42.50");
     let prompt = build_narration_prompt("eacrunch", OutputSafety::UntrustedQuoted, r)
         .expect("benign untrusted prompt should not be blocked");
     assert!(
-        prompt.starts_with("Here is the output of the eacrunch analysis tool:"),
-        "prompt missing tool-name lead-in: {prompt}"
+        prompt.starts_with("Output of `eacrunch`:"),
+        "prompt missing label: {prompt}"
     );
     assert!(
         prompt.contains("rows: 10"),

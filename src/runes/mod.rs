@@ -174,11 +174,12 @@ pub fn build_narration_prompt(
     if scan.blocked {
         return None;
     }
-    Some(format!(
-        "Here is the output of the {rune_name} analysis tool:\n\n\
-         {}\n\n\
-         In 1-2 plain-English sentences, tell me what stands out about this \
-         data. Do not repeat the raw numbers verbatim; surface insights.",
-        result.answer
-    ))
+    // The user prompt is intentionally just the rune output with a
+    // single-line label.  The system prompt (NARRATION_SYSTEM_PROMPT in
+    // router_tools.rs) already tells the model to summarise in 1-2
+    // sentences; repeating the instruction here used to make Gemma 4
+    // echo the trailing instruction as its "response" for repetitive-
+    // pattern rune outputs (eatime hour buckets, eajson key dumps).
+    // See tests/narration_prompt_shape.rs for the regression.
+    Some(format!("Output of `{rune_name}`:\n\n{}", result.answer))
 }
