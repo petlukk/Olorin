@@ -22,15 +22,17 @@ English.
   is 11× faster end-to-end than pandas on a 100K-row CSV; eatime scans
   timestamps at 6.34 GB/s on x86. See [`benchmarks/results.md`](benchmarks/results.md).
 - **Honest scope** — Single binary, two dependencies (libc + libloading),
-  3.8 MB release on ARM. Runs on a Raspberry Pi 5.
+  ~2 MB release on x86_64 / ~4.3 MB on ARM. Runs on a Raspberry Pi 5.
 
-Current version: **v2.0.0** — the vault key is now Argon2id-derived from a
-user passphrase + per-vault salt (arc #3 of the security follow-up queue).
-The rune family, the `RuneOutput v1` schema, and the `--json` chaining
-contract remain stable. **Breaking change:** v2.0 vaults are not
-read-compatible with v1.2.x — delete `~/.olorin/vault/default/` and you'll
-be prompted for a fresh passphrase. See [`CHANGELOG.md`](CHANGELOG.md) for
-the full history.
+Current version: **v2.0.2** — adds the `curl | sh` install path and the
+public release pipeline (Linux x86_64 and aarch64 binaries are published
+per release; Windows users build from source for now). The vault key
+remains Argon2id-derived from a user passphrase + per-vault salt
+(arc #3, shipped in v2.0.0). The rune family, the `RuneOutput v1`
+schema, and the `--json` chaining contract remain stable. **Upgrading
+from v1.x:** v2.0 vaults are not read-compatible with v1.2.x — delete
+`~/.olorin/vault/default/` and you'll be prompted for a fresh passphrase
+on next run. See [`CHANGELOG.md`](CHANGELOG.md) for the full history.
 
 ## Try it
 
@@ -273,11 +275,11 @@ layout, kernel inventory, and runtime contracts.
 
 | Metric | Value |
 |---|---|
-| Rust source | 23,722 lines |
+| Rust source | 23,786 lines (122 files) |
 | Ea kernel source | 14,286 lines (71 files, 49 logical kernels) |
-| Test lines | 15,899 (101 files, 571 tests) |
-| Dependencies | 2 (libc, libloading) |
-| Release binary (ARM) | 4.3 MB (all kernels embedded) |
+| Tests | 15,966 lines (98 files, 582 tests) |
+| Runtime dependencies | 2 (libc, libloading) |
+| Release binary | 2.0 MB on x86_64 / 4.3 MB on ARM (all kernels embedded) |
 | Max file size | 500 lines (enforced) |
 
 ## License
