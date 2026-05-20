@@ -13,7 +13,7 @@
 //! let the system prompt carry all instruction load.  This test locks
 //! that contract in.
 
-use olorin::runes::{build_narration_prompt, OutputSafety, RuneResult};
+use olorin::runes::{build_narration_prompt, NARRATION_MAX_ANSWER_BYTES, OutputSafety, RuneResult};
 
 fn make_result(answer: &str) -> RuneResult {
     RuneResult {
@@ -84,10 +84,13 @@ fn rune_data_is_preserved_verbatim_in_user_prompt() {
 }
 
 #[test]
-fn long_repetitive_output_does_not_get_trailing_template() {
-    // Simulates the eatime case that caused the original bug: 24
-    // hour-bucket lines.  Confirm none of the old template fragments
-    // sneak back in for long outputs either.
+fn long_repetitive_output_skips_narration() {
+    // The eatime case: 24 hour-bucket lines + header.  At this size
+    // Gemma 4 (especially the q3kffnimpl production quant) narrates
+    // unreliably even with a clean prompt shape — observed both
+    // template-echo (pre-v2.0.3) and hallucinated fragment output
+    // (v2.0.3).  Above NARRATION_MAX_ANSWER_BYTES the rune skips
+    // narration entirely and the user sees clean kernel output.
     let mut data = String::from("bytes:       130.1 KB\ntimestamps:  1867\nscan:        0 ms\n\nhour-of-day:\n");
     for h in 0..24 {
         data.push_str(&format!("  {h:02}:00       {}  ( {:.2}%)\n",
@@ -95,12 +98,28 @@ fn long_repetitive_output_does_not_get_trailing_template() {
             if h == 7 { 65.0 } else { 0.0 }));
     }
     data.push_str("\npeak: 07:00 (1214 timestamps)\n");
+    assert!(data.len() > NARRATION_MAX_ANSWER_BYTES,
+        "fixture must exceed the skip threshold; got {} <= {}",
+        data.len(), NARRATION_MAX_ANSWER_BYTES);
 
     let r = make_result(&data);
-    let p = build_narration_prompt("eatime", OutputSafety::Trusted, r).unwrap();
+    let p = build_narration_prompt("eatime", OutputSafety::Trusted, r);
+    assert!(
+        p.is_none(),
+        "long output must skip narration to avoid model garbage; got prompt:\n{p:?}"
+    );
+}
 
-    assert!(!p.contains("plain-English"),  "leaked template: plain-English");
-    assert!(!p.contains("stands out"),     "leaked template: stands out");
-    assert!(!p.contains("surface insights"),"leaked template: surface insights");
-    assert!(p.contains("hour-of-day"),     "data must be preserved");
+#[test]
+fn short_output_just_below_threshold_still_narrates() {
+    // Fixture under the threshold — narration should fire normally.
+    let data = "rows: 5\ncolumn_a: mean=42\ncolumn_b: 7 unique\n";
+    assert!(data.len() < NARRATION_MAX_ANSWER_BYTES,
+        "fixture must stay under the skip threshold");
+    let r = make_result(data);
+    let p = build_narration_prompt("eacrunch", OutputSafety::Trusted, r);
+    assert!(
+        p.is_some(),
+        "short output should produce a narration prompt; got None"
+    );
 }

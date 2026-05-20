@@ -8,6 +8,28 @@ order.
 
 ## [Unreleased]
 
+## [2.0.4] — 2026-05-20
+
+Follow-up to v2.0.3's narration prompt-shape fix.  v2.0.3 stopped the
+trailing-template-echo failure mode but the same long-output runes
+(eatime, eajson) then started rambling / hallucinating fragments from
+the data instead of summarising it — a different failure but still
+garbage on top of clean kernel output.
+
+### Changed
+
+- **`build_narration_prompt` skips narration for answers over 600 bytes.**
+  Empirically calibrated on the production Pi: working runes top out
+  around 422 bytes (eaparquet), failing runes start around 857 bytes
+  (eatime).  600 B splits the two regimes with ~180 B headroom on
+  the lower side and ~250 B on the upper side.  Above the threshold
+  the kernel output is shown unaccompanied — no LLM call, no decode
+  wait, no garbage narration appended.  Bad narration was strictly
+  worse than no narration; this restores the "kernel output is the
+  product, model narration is a bonus" contract.
+- `NARRATION_MAX_ANSWER_BYTES` is a `pub const`; tests assert the
+  threshold rather than hard-coding bytes counts.
+
 ## [2.0.3] — 2026-05-20
 
 Two production-data-discovered correctness fixes, bundled as one patch:

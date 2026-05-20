@@ -158,6 +158,25 @@ pub fn wrap_rune_result(
 /// `safety_class` is currently unused for narration — both Trusted and
 /// UntrustedQuoted use the same plain-text shape — but it's kept in the
 /// signature for callers that need the distinction in other contexts.
+/// Above this answer-bytes threshold, narration is skipped entirely.
+///
+/// Empirically calibrated against real-data runs on Pi 5 /
+/// gemma-4-e2b-q3kffnimpl on 2026-05-20.  Measured rune answer sizes
+/// from the on-disk test set:
+///
+///   eadiff      136 bytes  ✓ narrates
+///   eacrunch    237 bytes  ✓ narrates
+///   ealog       246 bytes  ✓ narrates
+///   eaparquet   422 bytes  ✓ narrates
+///   eatime      857 bytes  ✗ rambles / hallucinates fragments
+///   eajson    1 783 bytes  ✗ rambles / hallucinates fragments
+///
+/// 600 bytes splits the two regimes with ~180 B headroom over the
+/// largest working case and ~250 B below the smallest failing case.
+/// The token-budget check in `run_followup_sync` remains as the
+/// second guard for prompts that fit in bytes but blow up in tokens.
+pub const NARRATION_MAX_ANSWER_BYTES: usize = 600;
+
 pub fn build_narration_prompt(
     rune_name: &str,
     _safety_class: OutputSafety,
@@ -168,6 +187,13 @@ pub fn build_narration_prompt(
     // the LLM for a 1-2 sentence summary defeats the purpose and burns
     // decode tokens. Plain-text rune output remains the narration path.
     if result.structured {
+        return None;
+    }
+    // Long outputs skip narration entirely — the model unreliably
+    // narrates dense tabular content even with a clean prompt shape,
+    // and a garbled narration is worse than none.  See the
+    // NARRATION_MAX_ANSWER_BYTES doc above for the empirical basis.
+    if result.answer.len() > NARRATION_MAX_ANSWER_BYTES {
         return None;
     }
     let scan = safety::scan(result.answer.as_bytes());
