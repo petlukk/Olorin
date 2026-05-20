@@ -8,6 +8,64 @@ order.
 
 ## [Unreleased]
 
+## [2.0.1] — 2026-05-20
+
+Public-launch package.  No code-behaviour changes, no on-disk format
+changes — this is the release that adds a `curl | sh` install path
+plus per-platform release binaries, so external users can grab Olorin
+without a Rust + Ea + Go toolchain on their machine.  Olorin also
+gains a native env-file reader so the installer's API-key prompt
+turns into something the binary actually picks up at startup.
+
+### Added
+
+- **`scripts/install.sh`** — pipe-safe bash installer (Linux x86_64 +
+  aarch64).  Resolves the latest release tag from GitHub, downloads
+  `olorin-<target>`, optionally prompts for `ANTHROPIC_API_KEY` and
+  writes `~/.olorin/env` mode 0600, optionally downloads the WhatsApp
+  bridge, optionally updates the user's `~/.bashrc` / `~/.zshrc`.
+  Verifies SHA256 against the release's `SHA256SUMS` when published.
+  All prompts route through `/dev/tty` so `curl | sh` works.
+- **`scripts/install.ps1`** — PowerShell mirror for Windows x86_64.
+  Installs to `%LOCALAPPDATA%\Olorin\bin`, updates User-scope PATH
+  via `[Environment]::SetEnvironmentVariable`, same env-file +
+  bridge + checksum flow as the bash script.
+- **`src/config.rs` + `load_env_file()`** — native reader for
+  `~/.olorin/env` (`KEY=VALUE`, `#` comments, leading `export `
+  tolerated, paired single/double quotes stripped).  Called as the
+  first line of `main()`; process env wins over file env, so any
+  `ANTHROPIC_API_KEY` already exported by the shell still beats the
+  installer's file write.
+- **`tests/config_env_file.rs`** — 11 parser tests (quoting,
+  comments, export-prefix, invalid keys, embedded equals, trailing
+  whitespace, unmatched quotes).
+- **`.github/workflows/release.yml`** — matrix build on `v*` tag
+  push (or manual `workflow_dispatch`) across Linux x86_64,
+  Linux aarch64 (`ubuntu-24.04-arm`), and Windows x86_64
+  (`windows-2022`).  Each runner builds eacompute, Olorin, and the
+  Go bridge (Go 1.25, CGo enabled, `-trimpath -ldflags='-s -w'`).
+  A separate release job collects all artifacts, generates
+  `SHA256SUMS`, and publishes a GitHub Release with auto-generated
+  notes.  `workflow_dispatch` input is validated against `v[0-9]*`
+  before being fed to `action-gh-release`.
+- **`SECURITY.md`** — disclosure policy at the repo root: GitHub
+  Security Advisories as the private channel, 7-day ack / 30-day
+  fix best-effort, supported-versions table, explicit in-scope
+  (vault crypto, SecureBuffer, path/shell guards, prompt injection,
+  constant-time, memory safety) and out-of-scope (weak passphrase,
+  sophisticated injection, host compromise, side channels, DoS,
+  third-party models, cloud fallback) lists.
+
+### Changed
+
+- **`README.md`** — leads with `curl | sh` and `iwr | iex` install
+  commands; the from-source build instructions move below as the
+  contributor path.  Project-stats table updated: 44 → 49 logical
+  kernels (matches reality).
+- **`docs/architecture.md`** — refreshed counts: 64 → 71 kernel
+  source files, 42 → 49 logical kernels, 60 → 97 test files,
+  318 → 571 tests, 20 → 19 built-in tools.
+
 ## [2.0.0] — 2026-05-19
 
 Arc #3 (passphrase + Argon2id KDF, the v2.0 vault story) — Blake2b
