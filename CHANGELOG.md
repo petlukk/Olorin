@@ -53,38 +53,69 @@ replacement; this lands the swap.
   `release.yml` checks out `petlukk/eacompute@main`, which is at
   `v1.14.0-4` as of this release — covered.
 
-### Performance addendum (measured 2026-05-21, interleaved A/B)
+### Performance addendum — RETRACTING THE PERFORMANCE CLAIM (measured 2026-05-21, interleaved A/B)
 
-Follow-up remeasurement on Pi 5 with v2.0.4 and v2.0.5 binaries
-co-built from source the same day, runs interleaved
-(`A r1 → B r1 → A r2 → B r2 → ...`), 10 runs per binary,
+**The `+0.7 % t/s decode` claim in the Performance section above is
+withdrawn.**  A rigorous remeasurement on the same day this release
+shipped — both v2.0.4 and v2.0.5 binaries co-built from source on
+the same toolchain, runs interleaved (`A r1 → B r1 → A r2 → ...`),
 OLORIN_THREADS=3, performance governor pinned, q3kffnimpl model,
-672-token prefill, same fixed prompt:
+same fixed 672-token prompt — shows v2.0.5 and v2.0.4 are
+statistically indistinguishable on **both** prefill and decode.
 
-| stage | v2.0.4 mean ± σ (ms) | v2.0.5 mean ± σ (ms) | Δ |
+#### Prefill (10 interleaved runs per binary, per-stage means ± σ in ms)
+
+| stage | v2.0.4 | v2.0.5 | Δ |
 |---|---:|---:|---:|
 | total prefill | 27030.4 ± 47.2 | 27081.7 ± 68.5 | +0.19 % (+2.0σ, noise) |
-| attention | 5112.4 ± 10.7 | 5112.0 ± 12.3 | -0.01 % (literally zero) |
+| attention | 5112.4 ± 10.7 | 5112.0 ± 12.3 | -0.01 % (zero) |
 | `gelu_mul` | 413.9 ± 3.2 | 410.4 ± 4.3 | **-0.84 %** (-2.0σ, the kernel changed) |
 | all other stages | unchanged within noise | | |
 
-The only stage with a real delta is `gelu_mul` itself at -0.84 %.
-`gelu_mul` is 1.5 % of prefill, so propagated to total prefill the
-effect is ≈ 0.01 % — within noise.  **Prefill is statistically
-unchanged; the decode +0.7 % t/s claim above stands as the
-release's measurable improvement.**
+`gelu_mul` is 1.5 % of prefill — propagated effect ≈ 0.01 %, within noise.
 
-This addendum exists because a sequential (non-interleaved) A/B
-earlier this day appeared to show a 4 % attention drop and a 3 %
-total prefill improvement.  Both were artifacts: the v2.0.4 binary
-hit an environmental hump during runs 2-8 of its sequential block,
-while v2.0.5 (run second) caught a fully-calm Pi state.  σ on
-v2.0.4 stages was 5-15× larger than σ on v2.0.5 stages — the
-smoking-gun for time-based drift, not a code-level effect.
-Interleaving the runs washes the drift out: both binaries see the
-same time-distribution of Pi state, and the delta becomes
-code-attributable.  Documenting the methodology here so the
-discipline is on the record.
+#### Decode (5 interleaved runs per binary, ~1500 per-token samples per binary)
+
+| percentile | v2.0.4 (ms) | v2.0.5 (ms) | Δ |
+|---|---:|---:|---:|
+| min | 134.40 | 134.60 | +0.20 |
+| p25 | 135.90 | 136.10 | +0.20 |
+| **median** | **137.70** | **137.70** | **0 (identical)** |
+| p75 | 139.70 | 139.80 | +0.10 |
+| p95 | 141.20 | 141.20 | 0 |
+
+σ ratio v204/v205 = 2.75 / 3.12, comparable — no environmental
+disparity, interleaving worked.  Distributions sit on top of each
+other rather than "translated" as the original claim implied.
+
+#### What v2.0.5 actually delivers
+
+The catastrophic-cancellation-elimination is real: `gemma4_gelu`
+SIMD output is bit-close to llama's scalar reference (max abs
+4.8e-7, max rel 5e-5, well under the 1e-3 / 1e-4 tolerances).  The
+worry the original entry described — that the identity
+`tanh(x) = 1 - 2/(exp(2x) + 1)` amplifies small `exp_poly_f32`
+errors near `x ≈ 0` — was addressed by switching to v1.14.0's
+`tanh_approx_f32`.  **v2.0.5 is a correctness improvement with no
+measurable end-to-end performance delta on Pi 5.**
+
+#### Why the original claim was wrong
+
+Both the `+0.7 % decode` and the (also-retracted, then re-checked)
+`-4 % attention` claims came from sequential A/B benches:
+`v2.0.4 r1..rN` first, then `v2.0.5 r1..rN`.  On a Pi 5 sharing
+the host with kiosk chrome and routine background load, the second
+binary's run window often catches a more-settled state than the
+first's.  σ on v2.0.4 stages was 5-15× larger than σ on v2.0.5
+stages in the prefill repro — the smoking-gun for time-based drift,
+not a code-level effect.  Interleaving the runs forces both
+binaries to see the same time-distribution of Pi state, and the
+delta becomes code-attributable.  Both prefill and decode go to
+zero under this protocol.
+
+Discipline going forward: A/B perf benches use co-built binaries
+(both built from source the same day on the same toolchain) AND
+interleaved run order.  Either alone is insufficient.
 
 ## [2.0.4] — 2026-05-20
 
