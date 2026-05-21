@@ -53,6 +53,39 @@ replacement; this lands the swap.
   `release.yml` checks out `petlukk/eacompute@main`, which is at
   `v1.14.0-4` as of this release — covered.
 
+### Performance addendum (measured 2026-05-21, interleaved A/B)
+
+Follow-up remeasurement on Pi 5 with v2.0.4 and v2.0.5 binaries
+co-built from source the same day, runs interleaved
+(`A r1 → B r1 → A r2 → B r2 → ...`), 10 runs per binary,
+OLORIN_THREADS=3, performance governor pinned, q3kffnimpl model,
+672-token prefill, same fixed prompt:
+
+| stage | v2.0.4 mean ± σ (ms) | v2.0.5 mean ± σ (ms) | Δ |
+|---|---:|---:|---:|
+| total prefill | 27030.4 ± 47.2 | 27081.7 ± 68.5 | +0.19 % (+2.0σ, noise) |
+| attention | 5112.4 ± 10.7 | 5112.0 ± 12.3 | -0.01 % (literally zero) |
+| `gelu_mul` | 413.9 ± 3.2 | 410.4 ± 4.3 | **-0.84 %** (-2.0σ, the kernel changed) |
+| all other stages | unchanged within noise | | |
+
+The only stage with a real delta is `gelu_mul` itself at -0.84 %.
+`gelu_mul` is 1.5 % of prefill, so propagated to total prefill the
+effect is ≈ 0.01 % — within noise.  **Prefill is statistically
+unchanged; the decode +0.7 % t/s claim above stands as the
+release's measurable improvement.**
+
+This addendum exists because a sequential (non-interleaved) A/B
+earlier this day appeared to show a 4 % attention drop and a 3 %
+total prefill improvement.  Both were artifacts: the v2.0.4 binary
+hit an environmental hump during runs 2-8 of its sequential block,
+while v2.0.5 (run second) caught a fully-calm Pi state.  σ on
+v2.0.4 stages was 5-15× larger than σ on v2.0.5 stages — the
+smoking-gun for time-based drift, not a code-level effect.
+Interleaving the runs washes the drift out: both binaries see the
+same time-distribution of Pi state, and the delta becomes
+code-attributable.  Documenting the methodology here so the
+discipline is on the record.
+
 ## [2.0.4] — 2026-05-20
 
 Follow-up to v2.0.3's narration prompt-shape fix.  v2.0.3 stopped the
