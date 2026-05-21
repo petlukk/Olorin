@@ -1,63 +1,106 @@
 // Argon2 G compression function (RFC 9106 §3.4) — one block step.
+// x86 AVX2 SIMD path (u64x4) — gated #[cfg(x86_64)] for build.rs.
+// ARM NEON path is in argon2_block_arm.ea (scalar; NEON has no u64×u64
+// SIMD multiply, so u64x2 SIMD regressed 1.7× vs scalar — bench
+// 2026-05-21 Pi 5).
 //
 //   G(X, Y) -> Z, all three 1024-byte (128 × u64) blocks.
 //
-//   R = X XOR Y
-//   apply Argon2 P to each of the 8 rows of R  (rows are contiguous: 16 u64s)
-//   apply Argon2 P to each of the 8 columns of R'  (columns are strided)
-//   Z = R'' XOR R
+//   R   = X XOR Y
+//   R'  = apply P to each of the 8 rows of R    (rows are contiguous: 16 u64s)
+//   R'' = apply P to each of the 8 columns of R' (gather → P → scatter)
+//   Z   = R'' XOR R
 //
-// Argon2's P transform is one Blake2b-style round (8 G' calls) operating
-// on 16 u64s, using the modified G' from RFC 9106 §3.6: addition has an
-// extra `2 * trunc(a) * trunc(b)` term where `trunc()` keeps the low 32
-// bits.  This is what prevents off-the-shelf Blake2b hardware (or our
-// own Blake2b kernel) from being usable as a drop-in.
+// SIMD trick: Argon2's P is one Blake2b-style round = 4 column G' + 4
+// diagonal G'.  The 4 column G' operate on disjoint indices of the
+// 16-u64 block — they lockstep into 4 u64x4 vectors where row a/b/c/d
+// occupy lane 0..3.  Diagonal phase uses the canonical Blake2b rot-
+// left-by-row permutation (a: 0, b: 1, c: 2, d: 3) so the same
+// vectorized G' loop runs twice with shuffles in between.
 //
-// Columns are gathered into a 16-u64 scratch buffer, P'd, and scattered
-// back — keeps the inner P transform branch-free and lets the same
-// `p_at` helper work for rows (offset into z) and columns (offset 0
-// into scratch).
-//
-// Constants live entirely in i32 (counters / offsets) and a single u64
-// mask `0xFFFFFFFF`, which fits in i64::MAX — no need for a Rust-side
-// constants table here.
+// BlaMka primitive `2 * lo32(a) * lo32(b)` lowers to vpmuludq directly:
+// `(a .& 0xFFFFFFFF) .* (b .& 0xFFFFFFFF)` — LLVM's combineMul detects
+// provably-zero upper 32 bits and picks vpmuludq.  Rotate-by-32 of a
+// u64 lane lowers to vpshufd (halves-swap, 1 cycle).  Other rotates
+// (24/16/63) lower to vpshufb / shr|shl|or as LLVM sees fit.  No new
+// eacompute intrinsics needed.
 
-func rotr64(x: u64, n: u64) -> u64 {
-    let shift_back: u64 = 64 - n
-    return (x >> n) | (x << shift_back)
-}
+func p_at_simd(v: *restrict mut u64, base: i32) {
+    let mut va: u64x4 = load(v, base +  0)
+    let mut vb: u64x4 = load(v, base +  4)
+    let mut vc: u64x4 = load(v, base +  8)
+    let mut vd: u64x4 = load(v, base + 12)
 
-// Argon2 G' (RFC 9106 §3.6).  Operates on v[] in place at the four given
-// indices.  Notice the extra `2 * lo32(a) * lo32(b)` term on every
-// addition — that is the only thing distinguishing this from Blake2b's
-// own G.
-func g_prime(
-    v: *restrict mut u64,
-    a: i32, b: i32, c: i32, d: i32
-) {
-    let mask: u64 = 0xFFFFFFFF
-    v[a] = v[a] + v[b] + 2 * (v[a] & mask) * (v[b] & mask)
-    v[d] = rotr64(v[d] ^ v[a], 32)
-    v[c] = v[c] + v[d] + 2 * (v[c] & mask) * (v[d] & mask)
-    v[b] = rotr64(v[b] ^ v[c], 24)
-    v[a] = v[a] + v[b] + 2 * (v[a] & mask) * (v[b] & mask)
-    v[d] = rotr64(v[d] ^ v[a], 16)
-    v[c] = v[c] + v[d] + 2 * (v[c] & mask) * (v[d] & mask)
-    v[b] = rotr64(v[b] ^ v[c], 63)
-}
+    let mask_s: u64 = 4294967295
+    let mask:  u64x4 = splat(mask_s)
+    let two_s: u64 = 2
+    let two:   u64x4 = splat(two_s)
 
-// Argon2 P transform: one Blake2b-style round on 16 u64s starting at
-// offset `base` in `v`.  Index pattern matches Blake2b's first round
-// (the four-column G's followed by the four-diagonal G's).
-func p_at(v: *restrict mut u64, base: i32) {
-    g_prime(v, base+ 0, base+ 4, base+ 8, base+12)
-    g_prime(v, base+ 1, base+ 5, base+ 9, base+13)
-    g_prime(v, base+ 2, base+ 6, base+10, base+14)
-    g_prime(v, base+ 3, base+ 7, base+11, base+15)
-    g_prime(v, base+ 0, base+ 5, base+10, base+15)
-    g_prime(v, base+ 1, base+ 6, base+11, base+12)
-    g_prime(v, base+ 2, base+ 7, base+ 8, base+13)
-    g_prime(v, base+ 3, base+ 4, base+ 9, base+14)
+    let r32_s: u64 = 32
+    let r32:   u64x4 = splat(r32_s)
+    let r24_s: u64 = 24
+    let r24:   u64x4 = splat(r24_s)
+    let r40_s: u64 = 40
+    let r40:   u64x4 = splat(r40_s)
+    let r16_s: u64 = 16
+    let r16:   u64x4 = splat(r16_s)
+    let r48_s: u64 = 48
+    let r48:   u64x4 = splat(r48_s)
+    let r63_s: u64 = 63
+    let r63:   u64x4 = splat(r63_s)
+    let r1_s:  u64 = 1
+    let r1:    u64x4 = splat(r1_s)
+
+    // ─── Column phase ─── lanes 0..3 hold the four column G's ──────
+    va = va .+ vb .+ two .* ((va .& mask) .* (vb .& mask))
+    vd = vd .^ va
+    vd = (vd .>> r32) .| (vd .<< r32)
+
+    vc = vc .+ vd .+ two .* ((vc .& mask) .* (vd .& mask))
+    vb = vb .^ vc
+    vb = (vb .>> r24) .| (vb .<< r40)
+
+    va = va .+ vb .+ two .* ((va .& mask) .* (vb .& mask))
+    vd = vd .^ va
+    vd = (vd .>> r16) .| (vd .<< r48)
+
+    vc = vc .+ vd .+ two .* ((vc .& mask) .* (vd .& mask))
+    vb = vb .^ vc
+    vb = (vb .>> r63) .| (vb .<< r1)
+
+    // ─── Pivot to diagonal layout ─── canonical Blake2b shuffle ────
+    //   row a: identity   row b: rot-left 1
+    //   row c: rot-left 2 row d: rot-left 3
+    vb = shuffle(vb, [1, 2, 3, 0])
+    vc = shuffle(vc, [2, 3, 0, 1])
+    vd = shuffle(vd, [3, 0, 1, 2])
+
+    // ─── Diagonal phase ─── same G' body on the permuted lanes ─────
+    va = va .+ vb .+ two .* ((va .& mask) .* (vb .& mask))
+    vd = vd .^ va
+    vd = (vd .>> r32) .| (vd .<< r32)
+
+    vc = vc .+ vd .+ two .* ((vc .& mask) .* (vd .& mask))
+    vb = vb .^ vc
+    vb = (vb .>> r24) .| (vb .<< r40)
+
+    va = va .+ vb .+ two .* ((va .& mask) .* (vb .& mask))
+    vd = vd .^ va
+    vd = (vd .>> r16) .| (vd .<< r48)
+
+    vc = vc .+ vd .+ two .* ((vc .& mask) .* (vd .& mask))
+    vb = vb .^ vc
+    vb = (vb .>> r63) .| (vb .<< r1)
+
+    // ─── Un-pivot before store ─── inverse rotations ───────────────
+    vb = shuffle(vb, [3, 0, 1, 2])   // inverse of rot-left 1
+    vc = shuffle(vc, [2, 3, 0, 1])   // self-inverse (rot-left 2)
+    vd = shuffle(vd, [1, 2, 3, 0])   // inverse of rot-left 3
+
+    store(v, base +  0, va)
+    store(v, base +  4, vb)
+    store(v, base +  8, vc)
+    store(v, base + 12, vd)
 }
 
 export func argon2_block_compress(
@@ -66,21 +109,24 @@ export func argon2_block_compress(
     z: *restrict mut u64,
     scratch: *restrict mut u64
 ) {
+    // R = X XOR Y, into z.  32 u64x4 vector ops cover the 128 u64s.
     let mut i: i32 = 0
     while i < 128 {
-        z[i] = x[i] ^ y[i]
-        i = i + 1
+        let xv: u64x4 = load(x, i)
+        let yv: u64x4 = load(y, i)
+        store(z, i, xv .^ yv)
+        i = i + 4
     }
 
     // Row-mode P transforms (8 rows × 16 u64s).
-    p_at(z,   0)
-    p_at(z,  16)
-    p_at(z,  32)
-    p_at(z,  48)
-    p_at(z,  64)
-    p_at(z,  80)
-    p_at(z,  96)
-    p_at(z, 112)
+    p_at_simd(z,   0)
+    p_at_simd(z,  16)
+    p_at_simd(z,  32)
+    p_at_simd(z,  48)
+    p_at_simd(z,  64)
+    p_at_simd(z,  80)
+    p_at_simd(z,  96)
+    p_at_simd(z, 112)
 
     // Column-mode P transforms (8 columns, gather → P → scatter).
     // Column j is registers (0,j), (1,j), …, (7,j); a register is a
@@ -90,17 +136,17 @@ export func argon2_block_compress(
         let col2: i32 = col * 2
         let mut row: i32 = 0
         while row < 8 {
-            let r16: i32 = row * 16
-            scratch[row * 2]     = z[col2 + r16]
-            scratch[row * 2 + 1] = z[col2 + r16 + 1]
+            let r16off: i32 = row * 16
+            scratch[row * 2]     = z[col2 + r16off]
+            scratch[row * 2 + 1] = z[col2 + r16off + 1]
             row = row + 1
         }
-        p_at(scratch, 0)
+        p_at_simd(scratch, 0)
         row = 0
         while row < 8 {
-            let r16: i32 = row * 16
-            z[col2 + r16]     = scratch[row * 2]
-            z[col2 + r16 + 1] = scratch[row * 2 + 1]
+            let r16off: i32 = row * 16
+            z[col2 + r16off]     = scratch[row * 2]
+            z[col2 + r16off + 1] = scratch[row * 2 + 1]
             row = row + 1
         }
         col = col + 1
@@ -109,7 +155,10 @@ export func argon2_block_compress(
     // Final XOR with R = X XOR Y.
     i = 0
     while i < 128 {
-        z[i] = z[i] ^ (x[i] ^ y[i])
-        i = i + 1
+        let zv: u64x4 = load(z, i)
+        let xv: u64x4 = load(x, i)
+        let yv: u64x4 = load(y, i)
+        store(z, i, zv .^ (xv .^ yv))
+        i = i + 4
     }
 }

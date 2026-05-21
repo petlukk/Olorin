@@ -8,6 +8,68 @@ order.
 
 ## [Unreleased]
 
+## [2.0.6] — 2026-05-21
+
+Argon2id `argon2_block_compress` x86 path rewritten from scalar
+u64 to AVX2 SIMD u64x4.  The 16-u64 Argon2 P transform state is held
+as four u64x4 vectors (rows a/b/c/d as lanes) so the four column G'
+calls run in lockstep; the diagonal phase uses the canonical
+Blake2b rot-left-by-row permutation to align lanes.  Zero new
+eacompute intrinsics required — pure operator chain on the v1.12
+u64x4 type plus a couple of compile-time-constant shuffles.
+
+ARM (Pi 5 production) path stays scalar.  An attempt to write the
+same kernel as u64x2 NEON SIMD regressed 1.7× because NEON has no
+u64×u64 SIMD multiply instruction and LLVM falls back to scalar mul
+via FMOV/MUL/INS lane round-trips.  Full memo in
+`memory/project_argon2_u64x2_arm_null.md`.
+
+### Changed
+
+- **`kernels/argon2_block.ea` — x86 AVX2 SIMD path (u64x4) with
+  `#[cfg(x86_64)]` gate.**  The masked BlaMka multiply
+  `(a .& mask) .* (b .& mask)` lowers to a single `vpmuludq` per
+  BlaMka site (LLVM `combineMul` detects provably-zero upper 32 bits
+  and picks `vpmuludq` directly).  Rotate-by-32 lowers to `vpshufd
+  $177` (single halves-swap uop on modern x86); rotate-by-24/16/63
+  lower to `vpshufb` and shift|or pairs as LLVM sees fit.
+  Diagonalization is three `vpermq` per `p_at` half.  Eight `store`
+  calls per output tile.
+- **`kernels/argon2_block_arm.ea` — NEW.**  Scalar path, identical
+  source to the pre-v2.0.6 cross-arch `argon2_block.ea`.  build.rs
+  strips the `_arm` suffix and produces `argon2_block.so` for the
+  aarch64 target.
+
+### Verified
+
+- `argon2id_rfc9106_section_5_2_vector` KAT bit-exact on both
+  x86_64 and aarch64.
+- `vault_default_params_are_deterministic` KAT passes on both
+  arches.
+
+### Not done (parked for next session)
+
+- ARM SIMD `argon2_block_compress` via explicit `wmul_u64_lo(u32x4,
+  u32x4) -> u64x2` (eacompute v1.12.0) with bitcast + lane
+  deinterleave to feed u32x4 inputs from masked u64x2.  Estimated
+  2-3× win over scalar on Pi 5; the operator-chain attempt is null,
+  the explicit-intrinsic path has not been tried.  Design sketch
+  and risk list in `memory/project_argon2_u64x2_arm_null.md`.
+
+### Requires
+
+- eacompute ≥ v1.12 at build time (`u64x4` type + full operator
+  suite).  `release.yml` uses `petlukk/eacompute@main`, currently
+  at `v1.14.0-4` — covered.
+
+### Performance
+
+No perf claim in this release.  Per the discipline established in
+the v2.0.5 addendum: rigorous A/B benches require co-built binaries
+and interleaved run order.  The x86 SIMD asm is verified to emit
+`vpmuludq` and `vpshufd $177` (the optimal patterns) — the
+performance probe is a follow-up.
+
 ## [2.0.5] — 2026-05-21
 
 `gemma4_gelu` kernel rewritten on top of the v1.14.0 `tanh_approx_f32`
