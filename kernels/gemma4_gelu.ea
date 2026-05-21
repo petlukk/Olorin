@@ -2,21 +2,16 @@
 //
 // out[i] = GELU(gate[i]) * up[i]
 // GELU(x) = x * 0.5 * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
-// tanh(x) = 1 - 2 / (exp(2x) + 1)
 //
-// SIMD path uses exp_poly_f32 (8 FMAs/lane, no libm scalarization).
-// exp_poly_f32 domain is [-50, 50]; we clamp 2*inner before the call.
-// At |2*inner| = 50, tanh saturates to ±1 within a few ulps, so the
-// clamp is invisible in GELU output for any real activation.
+// SIMD path uses tanh_approx_f32 (eacompute v1.14.0+): rational P(x²)·x/Q(x²)
+// approximation, ~3e-7 max abs error, single fdiv per call. Internally
+// clamped to [-9, 9], where tanh already saturates to ±1 within a few ulps.
 
 export func gelu_mul(gate: *restrict f32, up: *restrict f32, out: *mut f32, n: i32) {
     let v_half: f32x4 = splat(0.5)
     let v_coeff: f32x4 = splat(0.7978845608)   // sqrt(2/pi)
     let v_cubic: f32x4 = splat(0.044715)
-    let v_two: f32x4 = splat(2.0)
     let v_one: f32x4 = splat(1.0)
-    let v_clamp_hi: f32x4 = splat(50.0)
-    let v_clamp_lo: f32x4 = splat(-50.0)
 
     let mut i: i32 = 0
 
@@ -24,23 +19,16 @@ export func gelu_mul(gate: *restrict f32, up: *restrict f32, out: *mut f32, n: i
         let g: f32x4 = load(gate, i)
         let u: f32x4 = load(up, i)
 
-        // inner = sqrt(2/pi) * (x + 0.044715 * x^3)
         let g3: f32x4 = g .* g .* g
         let inner: f32x4 = v_coeff .* (g .+ v_cubic .* g3)
-
-        // tanh(inner) = 1 - 2 / (exp(2*inner) + 1), with clamp for exp_poly domain
-        let arg: f32x4 = max(v_clamp_lo, min(v_clamp_hi, v_two .* inner))
-        let e: f32x4 = exp_poly_f32(arg)
-        let th: f32x4 = v_one .- v_two ./ (e .+ v_one)
-
-        // GELU(x) = x * 0.5 * (1 + tanh(...))
+        let th: f32x4 = tanh_approx_f32(inner)
         let gelu: f32x4 = g .* v_half .* (v_one .+ th)
 
         store(out, i, gelu .* u)
         i = i + 4
     }
 
-    // Scalar tail
+    // Scalar tail: libm exp fallback (at most 3 elements per call).
     while i < n {
         let x: f32 = gate[i]
         let x3: f32 = x * x * x

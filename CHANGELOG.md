@@ -8,6 +8,51 @@ order.
 
 ## [Unreleased]
 
+## [2.0.5] — 2026-05-21
+
+`gemma4_gelu` kernel rewritten on top of the v1.14.0 `tanh_approx_f32`
+intrinsic.  The prior implementation derived tanh from
+`exp_poly_f32` via the identity `tanh(x) = 1 - 2 / (exp(2x) + 1)` plus
+a manual `[-50, 50]` clamp for the exp domain.  That identity is
+catastrophic-cancellation-prone near `x ≈ 0` — the numerator
+`exp(2x) - 1` and the denominator `exp(2x) + 1` both approach 2 from
+opposite directions, and small f32 rounding errors in `exp_poly_f32`
+get amplified by the subsequent division.  The v1.14.0 changelog
+named Olorin's `gemma4_gelu` as the motivating consumer for the
+replacement; this lands the swap.
+
+### Changed
+
+- **`kernels/gemma4_gelu.ea` — SIMD path now calls `tanh_approx_f32`
+  directly.**  Rational `P(x²) · x / Q(x²)` approximation, ~3e-7 max
+  abs error, internal clamp to `[-9, 9]` (where tanh saturates to ±1
+  within a few ulps).  Removes 3 splats (`v_two`, `v_clamp_hi`,
+  `v_clamp_lo`), the manual clamp, the `exp_poly_f32` call, and the
+  `1 - 2/(e+1)` reconstruction — one intrinsic call replaces the
+  composition.  Scalar tail (≤3 elements per call) is unchanged.
+- **`step14_gelu_vs_llama_ref` parity vs llama scalar reference:**
+  max abs 4.8e-7, max rel 5e-5 — well under the 1e-3 / 1e-4
+  test tolerances.
+
+### Performance
+
+- **Pi 5 (Cortex-A76, OLORIN_THREADS=3, performance governor pinned,
+  q3kffnimpl production model):** decode median 137.8 ms/token →
+  136.9 ms/token (-0.9 ms, +0.7 % t/s, 7.26 → 7.30 t/s).  The
+  improvement is consistent across every percentile (min/p25/median/
+  p75/p95 all -0.6 to -0.7 %), distributions translated rather than
+  reshaped.  ~3200 decode-timing samples per binary, 3 runs × 120 s
+  each.  GELU is 0.5 % of per-token decode time; the observed end-
+  to-end win exceeds the pure-GELU share, plausibly because the
+  smaller kernel reduces L1i pressure on the surrounding
+  `gemv_gate+up` bandwidth-bound path.
+
+### Requires
+
+- eacompute ≥ v1.14.0 at build time (`tanh_approx_f32` intrinsic).
+  `release.yml` checks out `petlukk/eacompute@main`, which is at
+  `v1.14.0-4` as of this release — covered.
+
 ## [2.0.4] — 2026-05-20
 
 Follow-up to v2.0.3's narration prompt-shape fix.  v2.0.3 stopped the
