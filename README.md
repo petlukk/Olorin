@@ -217,17 +217,22 @@ Olorin Pipe — same SIMD kernels, same vault, same audit log.
 Prebuilt binaries are published per release for **Linux x86_64**,
 **Linux aarch64** (Raspberry Pi 5), and **Windows x86_64**.
 
-Linux / macOS-WSL:
+**Linux / WSL** — open a terminal and run:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/petlukk/Olorin/main/scripts/install.sh | sh
 ```
 
-Windows (PowerShell):
+**Windows** — open a PowerShell window (`Win+X` → "Windows PowerShell"
+or "Terminal") and run:
 
 ```powershell
 iwr -useb https://raw.githubusercontent.com/petlukk/Olorin/main/scripts/install.ps1 | iex
 ```
+
+> Both commands download a small installer script and execute it. The
+> URLs intentionally serve plain text — clicking them in a browser
+> just shows the source. Run them in a shell.
 
 The installer downloads the latest release binary, verifies its SHA256
 against the published `SHA256SUMS`, optionally prompts for an
