@@ -320,7 +320,7 @@ surprises.
 | Tests | 15,966 lines (98 files, 582 tests) |
 | Runtime dependencies | 2 (libc, libloading) |
 | Release binary | 2.0 MB on x86_64 / 4.3 MB on ARM (all kernels embedded) |
-| Max file size | 500 lines (enforced) |
+| Max file size | 500 lines for Rust + tests (no exceptions); 2 Ea kernels exceed it |
 
 ## License
 
