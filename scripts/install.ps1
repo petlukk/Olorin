@@ -79,7 +79,37 @@ try {
 
 # 5. Install.
 $dest = Join-Path $InstallDir 'olorin.exe'
-Move-Item -Force $dlPath $dest
+try {
+    Move-Item -Force $dlPath $dest -ErrorAction Stop
+} catch {
+    # Windows Defender heuristic false-positive on unsigned MinGW-
+    # built Rust binaries. The exception message contains the word
+    # "virus" in every locale we've seen (English, Swedish, German,
+    # French, Spanish, Italian — all share the Latin root) so a
+    # case-insensitive substring match is robust enough.
+    if ($_.Exception.Message -match '(?i)virus') {
+        Write-Host ''
+        Write-Host 'Windows Defender flagged olorin.exe as potentially unwanted.' -ForegroundColor Yellow
+        Write-Host 'This is a known false positive for unsigned MinGW-built Rust binaries'
+        Write-Host 'that have not yet built SmartScreen reputation.'
+        Write-Host ''
+        Write-Host 'Defender said:' -ForegroundColor Yellow
+        Write-Host "  $($_.Exception.Message.Trim())"
+        Write-Host ''
+        Write-Host 'To unblock and continue, run this in an elevated PowerShell, then'
+        Write-Host 're-run the installer:' -ForegroundColor Cyan
+        Write-Host ''
+        Write-Host "  Add-MpPreference -ExclusionPath `"$InstallDir`""
+        Write-Host '  iwr -useb https://raw.githubusercontent.com/petlukk/Olorin/main/scripts/install.ps1 | iex'
+        Write-Host ''
+        Write-Host 'Also consider reporting the false positive to Microsoft so future'
+        Write-Host 'users do not hit this:' -ForegroundColor Cyan
+        Write-Host '  https://www.microsoft.com/en-us/wdsi/filesubmission'
+        Write-Host ''
+        Fail 'Install aborted by Windows Defender.'
+    }
+    Fail "Failed to move olorin.exe into place: $($_.Exception.Message)"
+}
 Info "Installed: $dest"
 
 # 6. Cloud fallback.
