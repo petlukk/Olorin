@@ -1,8 +1,17 @@
 // Argon2 G compression function (RFC 9106 §3.4) — one block step.
 // x86 AVX2 SIMD path (u64x4) — gated #[cfg(x86_64)] for build.rs.
-// ARM NEON path is in argon2_block_arm.ea (scalar; NEON has no u64×u64
-// SIMD multiply, so u64x2 SIMD regressed 1.7× vs scalar — bench
-// 2026-05-21 Pi 5).
+// ARM NEON path is in argon2_block_arm.ea (scalar).  Two SIMD attempts
+// ruled out on Cortex-A76:
+//   - 2026-05-21: naive u64x2 with `(a .& mask) .* (b .& mask)` — LLVM
+//     has no NEON pattern for masked u64 multiply, fell back to scalar
+//     mul via lane round-trip + 247 spills, regressed 1.7×.
+//   - 2026-05-22: clean wmul_u64_lo path (single `umull v.2d, v.2s,
+//     v.2s` per BlaMka, zero spills, full LLVM inlining) regressed 19%.
+//     A76 SWOG: umull throughput 0.5/cycle × 2 lanes = 1 mul/cycle
+//     effective, identical to scalar mul (throughput 1/cycle); umull
+//     latency 4 > scalar 3 hurts G's 4-deep serial chain.  SIMD rotate
+//     also loses (shrn+shl+usra = 3 ops vs scalar ror = 1).  A76 NEON
+//     is pipe-bound regardless of lane count.  Revive on Neoverse-V1/V2.
 //
 //   G(X, Y) -> Z, all three 1024-byte (128 × u64) blocks.
 //
