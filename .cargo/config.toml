@@ -9,3 +9,9 @@ linker = "x86_64-w64-mingw32-gcc"
 # layers. Reserve is virtual (no physical commit until used), so this
 # is free until needed.
 rustflags = ["-C", "link-arg=-Wl,--stack,16777216"]
+
+[target.x86_64-pc-windows-msvc]
+# Same 16 MB reserve as the GNU triple — link.exe's spelling.
+# CI builds with MSVC by default (windows-latest runner); without
+# this flag the forward pass crashes with a stack overflow.
+rustflags = ["-C", "link-arg=/STACK:16777216"]

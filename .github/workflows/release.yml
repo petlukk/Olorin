@@ -14,6 +14,11 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Windows-only — eacompute's llvm-sys-181 needs a real LLVM 18 dev
+  # distribution (headers + .libs + llvm-config.exe), not the binaries-
+  # only chocolatey package.  Mirrors petlukk/eacompute's own workflow.
+  LLVM_VERSION: "18.1.8"
+  LLVM_SYS_181_PREFIX: C:\llvm
 
 jobs:
   build:
@@ -31,11 +36,10 @@ jobs:
             runner: ubuntu-24.04-arm
             ext: ''
             os_family: linux
-          # Windows is deferred — eacompute requires an LLVM 18 MSVC dev
-          # distribution that is not available via chocolatey.  The recipe
-          # lives in petlukk/Ea_showcase/build-windows.bat (LLVM_SYS_*_PREFIX
-          # pointing at a real dev install plus a libxml2s.lib stub); CI
-          # needs the same setup before Windows can rejoin the matrix.
+          - target: windows-x86_64
+            runner: windows-latest
+            ext: '.exe'
+            os_family: windows
 
     steps:
       - name: Checkout Olorin
@@ -50,13 +54,34 @@ jobs:
           sudo apt-get install -y \
             llvm-18-dev clang-18 libpolly-18-dev libzstd-dev
 
-      - name: Install LLVM 18 (Windows)
+      # Windows LLVM setup — mirrors petlukk/eacompute's workflow exactly.
+      # Chocolatey LLVM is binaries-only; llvm-sys needs headers + .libs
+      # + llvm-config.exe, which only the official tarball ships.
+      - name: Download and extract LLVM 18 (Windows)
         if: matrix.os_family == 'windows'
-        # The windows-2022 image ships LLVM 20 by default; eacompute pins
-        # to LLVM 18 via llvm-sys, so we force the downgrade. `--force`
-        # makes choco accept the already-installed-but-newer state.
-        run: choco install llvm --version=18.1.8 --no-progress --allow-downgrade --force -y
         shell: pwsh
+        run: |
+          $url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-${{ env.LLVM_VERSION }}/clang+llvm-${{ env.LLVM_VERSION }}-x86_64-pc-windows-msvc.tar.xz"
+          Invoke-WebRequest -Uri $url -OutFile llvm.tar.xz -MaximumRetryCount 3 -RetryIntervalSec 10
+          7z x llvm.tar.xz
+          7z x llvm.tar
+          Move-Item "clang+llvm-${{ env.LLVM_VERSION }}-x86_64-pc-windows-msvc" C:\llvm
+
+      - name: Set up MSVC dev environment (Windows)
+        if: matrix.os_family == 'windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      # `llvm-config --system-libs` lists libxml2 and zstd on the MSVC
+      # tarball even when LLVM itself doesn't pull them — stub both with
+      # empty archives so the llvm-sys link step finds them.
+      - name: Create stub libs for LLVM link dependencies (Windows)
+        if: matrix.os_family == 'windows'
+        shell: pwsh
+        run: |
+          Set-Content -Path empty.c -Value "// stub"
+          cl /c /nologo empty.c
+          lib /NOLOGO /OUT:C:\llvm\lib\libxml2s.lib /MACHINE:X64 empty.obj
+          lib /NOLOGO /OUT:C:\llvm\lib\zstd.lib /MACHINE:X64 empty.obj
 
       - name: Install Rust toolchain (stable)
         uses: dtolnay/rust-toolchain@stable

@@ -72,3 +72,78 @@ jobs:
         # a second full rebuild for the test binaries. If specific tests
         # prove flaky on the runner, filter with `--skip <name>` here.
         run: cargo test --release --no-fail-fast
+
+  build-test-windows:
+    name: Build + test (Windows x86_64)
+    runs-on: windows-latest
+    env:
+      # See release.yml for the rationale — llvm-sys needs the real
+      # LLVM 18 dev distribution, not chocolatey's binaries-only build.
+      LLVM_VERSION: "18.1.8"
+      LLVM_SYS_181_PREFIX: C:\llvm
+    steps:
+      - name: Checkout Olorin
+        uses: actions/checkout@v4
+
+      - name: Download and extract LLVM 18
+        shell: pwsh
+        run: |
+          $url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-${{ env.LLVM_VERSION }}/clang+llvm-${{ env.LLVM_VERSION }}-x86_64-pc-windows-msvc.tar.xz"
+          Invoke-WebRequest -Uri $url -OutFile llvm.tar.xz -MaximumRetryCount 3 -RetryIntervalSec 10
+          7z x llvm.tar.xz
+          7z x llvm.tar
+          Move-Item "clang+llvm-${{ env.LLVM_VERSION }}-x86_64-pc-windows-msvc" C:\llvm
+
+      - name: Set up MSVC dev environment
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Create stub libs for LLVM link dependencies
+        shell: pwsh
+        run: |
+          Set-Content -Path empty.c -Value "// stub"
+          cl /c /nologo empty.c
+          lib /NOLOGO /OUT:C:\llvm\lib\libxml2s.lib /MACHINE:X64 empty.obj
+          lib /NOLOGO /OUT:C:\llvm\lib\zstd.lib /MACHINE:X64 empty.obj
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Checkout eacompute (sibling repo)
+        uses: actions/checkout@v4
+        with:
+          repository: petlukk/eacompute
+          path: eacompute
+          ref: main
+
+      - name: Cache eacompute build
+        uses: actions/cache@v4
+        with:
+          path: eacompute/target
+          key: eacompute-${{ runner.os }}-${{ hashFiles('eacompute/Cargo.lock', 'eacompute/Cargo.toml', 'eacompute/build.rs') }}-${{ hashFiles('eacompute/src/**') }}
+
+      - name: Build eacompute (release)
+        working-directory: eacompute
+        run: cargo build --release --features=llvm
+
+      - name: Add ea to PATH
+        shell: pwsh
+        run: |
+          "$env:GITHUB_WORKSPACE\eacompute\target\release" | Out-File -FilePath $env:GITHUB_PATH -Append
+
+      - name: Verify ea on PATH
+        shell: pwsh
+        run: |
+          Get-Command ea
+          ea --version
+
+      - name: Cache Olorin cargo + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: olorin-v1
+          shared-key: windows-x86_64
+
+      - name: Build Olorin (release)
+        run: cargo build --release
+
+      - name: Run tests (release)
+        run: cargo test --release --no-fail-fast
