@@ -286,6 +286,31 @@ cd bridge && go build -trimpath -ldflags='-s -w' -o ../wa-bridge
 See [`docs/architecture.md`](docs/architecture.md) for the full source
 layout, kernel inventory, and runtime contracts.
 
+## What isn't in the binary
+
+The 2 MB / 2-dep figure isn't aspirational — it's the result of deliberately
+not pulling in the things most LLM agents depend on.
+
+| Layer | Common choice | Olorin |
+|---|---|---|
+| Async runtime | `tokio` | `std::net` + work-stealing pool ([`inference/threadpool.rs`](src/inference/threadpool.rs)) |
+| HTTP server | `axum`, `actix`, `hyper`, `warp` | hand-rolled in [`interface/server.rs`](src/interface/server.rs) |
+| SSE streaming | `axum::response::sse` | raw `text/event-stream` frames |
+| Web terminal | `xterm.js` (~700 KB JS) | canvas + cell-grid emulator in [`web/chat.html`](web/chat.html) (527 lines total) |
+| HTTP client | `reqwest` | `curl` subprocess for cloud fallback ([`core/anthropic.rs`](src/core/anthropic.rs)) |
+| JSON | `serde` | minimal hand-rolled scanner ([`storage/json.rs`](src/storage/json.rs)) |
+| Crypto | `ring`, `rustcrypto` | ChaCha20-Poly1305 + Argon2id as Ea SIMD kernels |
+| Tokenizer | `tokenizers` (Hugging Face) | hand-rolled BPE ([`inference/tokenizer.rs`](src/inference/tokenizer.rs)) |
+| GGUF parser | `ggml` / `llama-cpp` bindings | hand-rolled ([`inference/gguf.rs`](src/inference/gguf.rs)) |
+| Inference engine | `candle`, `burn`, `llama.cpp` | hand-rolled Gemma 4 forward pass in Rust + Ea ([`inference/forward.rs`](src/inference/forward.rs)) |
+
+The runtime dependencies are `libc` and `libloading` — the latter only used
+to `dlopen` the embedded Ea SIMD kernels at startup. The release binary
+contains every SIMD kernel embedded via `include_bytes!`, the web UI
+embedded via `include_str!`, and the tokenizer / GGUF parser / forward pass
+inline. No CDN fetches, no runtime dependency resolution, no missing-DLL
+surprises.
+
 ## Project stats
 
 | Metric | Value |
