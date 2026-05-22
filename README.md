@@ -24,15 +24,17 @@ English.
 - **Honest scope** — Single binary, two dependencies (libc + libloading),
   ~2 MB release on x86_64 / ~4.3 MB on ARM. Runs on a Raspberry Pi 5.
 
-Current version: **v2.0.2** — adds the `curl | sh` install path and the
-public release pipeline (Linux x86_64 and aarch64 binaries are published
-per release; Windows users build from source for now). The vault key
-remains Argon2id-derived from a user passphrase + per-vault salt
-(arc #3, shipped in v2.0.0). The rune family, the `RuneOutput v1`
-schema, and the `--json` chaining contract remain stable. **Upgrading
-from v1.x:** v2.0 vaults are not read-compatible with v1.2.x — delete
-`~/.olorin/vault/default/` and you'll be prompted for a fresh passphrase
-on next run. See [`CHANGELOG.md`](CHANGELOG.md) for the full history.
+Current version: **v2.0.7** — Windows x86_64 returns to the release
+matrix, cross-compiled from Ubuntu via MinGW-w64; `olorin.exe` is
+published alongside the Linux x86_64 and aarch64 binaries on every
+release. The vault key remains Argon2id-derived from a user passphrase
++ per-vault salt (arc #3, shipped in v2.0.0). The rune family, the
+`RuneOutput v1` schema, and the `--json` chaining contract remain
+stable. **Upgrading from v1.x or pre-v2.0.0:** v3 vaults are not
+read-compatible with earlier formats — delete `~/.olorin/vault/default/`
+(or `%USERPROFILE%\.olorin\vault\default\` on Windows) and you'll be
+prompted for a fresh passphrase on next run. See
+[`CHANGELOG.md`](CHANGELOG.md) for the full history.
 
 ## Try it
 
@@ -212,27 +214,35 @@ Olorin Pipe — same SIMD kernels, same vault, same audit log.
 
 ## Install
 
-Prebuilt binaries are published per release for **Linux x86_64** and
-**Linux aarch64** (Raspberry Pi 5):
+Prebuilt binaries are published per release for **Linux x86_64**,
+**Linux aarch64** (Raspberry Pi 5), and **Windows x86_64**.
+
+Linux / macOS-WSL:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/petlukk/Olorin/main/scripts/install.sh | sh
 ```
 
-The installer downloads the latest release binary, optionally prompts for
-an `ANTHROPIC_API_KEY` (cloud fallback when no local model is loaded),
+Windows (PowerShell):
+
+```powershell
+iwr -useb https://raw.githubusercontent.com/petlukk/Olorin/main/scripts/install.ps1 | iex
+```
+
+The installer downloads the latest release binary, verifies its SHA256
+against the published `SHA256SUMS`, optionally prompts for an
+`ANTHROPIC_API_KEY` (cloud fallback when no local model is loaded),
 and optionally fetches the WhatsApp `/teleport` bridge. Cloud-fallback
-and bridge are both opt-in; the core binary is ~2 MB on x86 / ~4.3 MB on
-ARM with all SIMD kernels embedded. Olorin reads `~/.olorin/env` at
+and bridge are both opt-in; the core binary is ~2 MB on x86 / ~4.3 MB
+on ARM with all SIMD kernels embedded. Olorin reads `~/.olorin/env` at
 startup, so the key written by the installer is picked up without any
 shell-rc plumbing.
 
-> **Windows:** binaries are not yet published. The Rust + Ea code is
-> Windows-compatible (verified locally), but CI doesn't yet provide an
-> LLVM 18 MSVC developer distribution to build against. The
-> `scripts/install.ps1` script is in the repo, ready for when Windows
-> releases resume; for now Windows users should build from source per
-> the contributor section below.
+> **Windows note:** `wa-bridge.exe` is currently not shipped — the
+> bridge depends on `mattn/go-sqlite3` (CGo), pending a swap to
+> `modernc.org/sqlite` (pure Go). The `olorin.exe` core binary is
+> fully functional; WhatsApp `/teleport` simply isn't available on
+> Windows yet.
 
 Drop a GGUF model into `~/.olorin/models/` to use local inference:
 
