@@ -5,11 +5,21 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn find_ea() -> PathBuf {
-    if let Ok(output) = Command::new("which").arg("ea").output() {
-        if output.status.success() {
-            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !path.is_empty() {
-                return PathBuf::from(path);
+    if let Ok(p) = std::env::var("EA") {
+        let pb = PathBuf::from(p);
+        if pb.is_file() {
+            return pb;
+        }
+    }
+    let names: &[&str] = if cfg!(windows) { &["ea.exe", "ea"] } else { &["ea"] };
+    let sep = if cfg!(windows) { ';' } else { ':' };
+    if let Ok(path) = std::env::var("PATH") {
+        for dir in path.split(sep) {
+            for name in names {
+                let candidate = Path::new(dir).join(name);
+                if candidate.is_file() {
+                    return candidate;
+                }
             }
         }
     }
