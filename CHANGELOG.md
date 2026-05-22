@@ -8,6 +8,44 @@ order.
 
 ## [Unreleased]
 
+## [2.0.7] — 2026-05-22
+
+Windows x86_64 returns to the release matrix.  Previous attempts to
+build natively on `windows-latest` were blocked by eacompute's
+native-Windows linker passing `/NODEFAULTLIB` to `lld-link`, leaving
+`expf` and other libc-math symbols unresolved.  v2.0.7 sidesteps the
+issue by cross-compiling from Ubuntu via MinGW-w64, matching the
+local dev flow — eacompute's MinGW path (`src/lib.rs:219`)
+statically links MinGW's libc, so kernels calling `expf`/`fmaf`
+resolve cleanly.  No behavioral changes for Linux users.
+
+WhatsApp bridge (`wa-bridge.exe`) is still skipped on Windows
+pending the `mattn/go-sqlite3` → `modernc.org/sqlite` swap.
+
+### Changed
+
+- **`.github/workflows/release.yml` — Windows entry restored.**
+  Runs on `ubuntu-24.04` with `rust_target: x86_64-pc-windows-gnu`,
+  installs `mingw-w64` from apt, builds Olorin via
+  `cargo build --release --target x86_64-pc-windows-gnu`.  Staging
+  step looks in `target/<triple>/release/` when a `rust_target` is
+  set in the matrix.
+- **`.github/workflows/ci.yml` — new `build-windows-cross` job.**
+  Mirrors the release configuration so PRs catch Windows breakage
+  before tag day.  ~1 min build, no MSVC infrastructure.
+- **`build.rs::find_ea`** — replaced `Command::new("which")` with a
+  manual cross-platform PATH walk.  Git for Windows' `which` returns
+  MSYS-style paths that Windows `CreateProcess` rejects with OS
+  error 3.  Adds an `EA` env var override for explicit cross-compile
+  setups.
+
+### Verified
+
+- CI run 26273492385 green on `main`: Windows cross-build 1m15s,
+  Linux build+test 4m52s.
+- `olorin.exe` artifact produced at
+  `target/x86_64-pc-windows-gnu/release/olorin.exe`.
+
 ## [2.0.6] — 2026-05-21
 
 Argon2id `argon2_block_compress` x86 path rewritten from scalar
