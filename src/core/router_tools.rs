@@ -160,7 +160,7 @@ impl DispatchContext {
         match result {
             Ok(narr) => {
                 let trimmed = narr.trim();
-                if trimmed.is_empty() {
+                if trimmed.is_empty() || crate::runes::narration::is_grid_continuation(prompt, trimmed) {
                     return Response::text(head);
                 }
                 self.messages.push(handlers::user_message(input));
