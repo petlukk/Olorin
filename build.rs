@@ -224,7 +224,7 @@ fn main() {
             let name = entry.file_name().to_string_lossy().to_string();
             if !name.ends_with(".rs") { continue; }
             if name == "mod.rs" || name == "common.rs" || name == "output.rs"
-                || name == "eajson_aggregate.rs" { continue; }
+                || name == "eajson_aggregate.rs" || name == "narration.rs" { continue; }
             let stem = name.strip_suffix(".rs").unwrap();
             let contents = fs::read_to_string(entry.path()).unwrap_or_default();
             if !contents.contains("pub const RUNE") {

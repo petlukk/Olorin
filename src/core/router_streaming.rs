@@ -166,33 +166,43 @@ impl DispatchContext {
             return;
         }
 
-        let _ = tx.send(StreamEvent::Token("\n\n".to_string()));
-
-        let tx_ref = tx.clone();
-        let on_event = move |ev: crate::inference::generate::GenEvent| match ev {
+        // Buffer the narration instead of streaming it live: a grid-continuation
+        // (the model emitting a data row instead of a summary) must be suppressed
+        // before any of it reaches the user, and a streamed token can't be
+        // recalled. Thinking state still flows so the UI shows progress.
+        let buf = std::cell::RefCell::new(String::new());
+        let on_event = |ev: crate::inference::generate::GenEvent| match ev {
             crate::inference::generate::GenEvent::Token(t) => {
-                if safety::is_chatml_hallucination(t) { return; }
-                let _ = tx_ref.send(StreamEvent::Token(t.to_string()));
+                if !safety::is_chatml_hallucination(t) {
+                    buf.borrow_mut().push_str(t);
+                }
             }
             crate::inference::generate::GenEvent::Thinking(active) => {
-                let _ = tx_ref.send(StreamEvent::Thinking(active));
+                let _ = tx.send(StreamEvent::Thinking(active));
             }
         };
 
         let prior_max = engine.max_tokens;
         engine.max_tokens = crate::core::router_tools::NARRATION_DECODE_TOKEN_CAP;
-        let narration = engine.generate(prompt, system, &on_event).unwrap_or_default();
+        let _ = engine.generate(prompt, system, &on_event);
         engine.max_tokens = prior_max;
+        let narration = buf.into_inner();
         let trimmed = narration.trim();
-        if !trimmed.is_empty() {
-            self.messages.push(handlers::user_message(input));
-            self.messages.push(handlers::assistant_message(trimmed));
-            self.vault_save(b"assistant", trimmed.as_bytes());
+
+        // Empty or grid-continuation → discard the narration; kernel output
+        // stands alone, exactly as it did under the old length skip.
+        if trimmed.is_empty()
+            || crate::runes::narration::is_grid_continuation(prompt, trimmed)
+        {
+            let _ = tx.send(StreamEvent::Done { full_text: rune_text.to_string() });
+            return;
         }
-        let mut full = String::with_capacity(rune_text.len() + trimmed.len() + 2);
-        full.push_str(rune_text);
-        full.push_str("\n\n");
-        full.push_str(trimmed);
-        let _ = tx.send(StreamEvent::Done { full_text: full });
+
+        let _ = tx.send(StreamEvent::Token("\n\n".to_string()));
+        let _ = tx.send(StreamEvent::Token(trimmed.to_string()));
+        self.messages.push(handlers::user_message(input));
+        self.messages.push(handlers::assistant_message(trimmed));
+        self.vault_save(b"assistant", trimmed.as_bytes());
+        let _ = tx.send(StreamEvent::Done { full_text: format!("{rune_text}\n\n{trimmed}") });
     }
 }
