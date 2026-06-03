@@ -143,27 +143,39 @@ counts across both architectures.
 
 ## eatime — ISO-8601 timestamp histogram
 
-```
-/rune eatime ~/var/log/app.log
-/rune eatime --bucket weekday ~/var/log/app.log
+Grab a real input — a few hours of public GitHub event data (every event
+carries an ISO-8601 `created_at`):
+
+```bash
+curl -s https://data.gharchive.org/2015-01-01-{12,16,20}.json.gz | gunzip > ~/gharchive.log
 ```
 
 ```
-bytes:       1.2 GB
-timestamps:  47123891
-scan:        184 ms
+/rune eatime ~/gharchive.log
+/rune eatime --bucket weekday ~/gharchive.log
+```
+
+```
+bytes:       72.00 MB          # Raspberry Pi 5 Model B, aarch64
+timestamps:  68140
+scan:        27 ms
 
 hour-of-day:
-  00:00     1230891  ( 2.61%)
-  01:00     1198432  ( 2.54%)
+  11:00          681  ( 1.00%)
+  12:00        13750  (20.18%)   <- 12:00 archive
+  13:00          669  ( 0.98%)
   ...
-  06:00     8421902  (17.87%)
-  07:00     6122891  (12.99%)
+  16:00        20270  (29.75%)   <- 16:00 archive
   ...
-  23:00     1320012  ( 2.80%)
-
-peak: 06:00 (8421902 timestamps)
+  20:00        22179  (32.55%)   <- 20:00 archive
+  21:00          645  ( 0.95%)
+  ...
+peak: 20:00 (22179 timestamps)
 ```
+
+The three spikes are the hours pulled from the archive (the events' own
+`created_at`); the background counts are timestamps embedded in the event
+payloads — repo, comment, and actor times across the rest of the day.
 
 One SIMD pass to find every `YYYY-MM-DDTHH:MM:SS` occurrence in the buffer —
 log lines, CSV cells, JSONL values, any position. Per-hour counts bucketed
@@ -176,12 +188,19 @@ anchors (`-`, `-`, `T` at offsets 4, 7, 10) detected via SIMD `.==` lane masks,
 8 digit positions. Single `.ea` source; same primitives lower cleanly to x86
 SSE2 (Ryzen 7700X) and ARM NEON (Pi 5 Cortex-A76) with bit-exact bucket counts.
 
-**Measured 6.34 GB/s on Ryzen 7700X WSL2, 1.80 GB/s on Pi 5 Cortex-A76 NEON**
-on a 100 MB synthetic log with 1.45M timestamps (every line). The
-structural-anchor filter is cheaper per byte than `log_level_scan`'s keyword
-AND-chains — fewer SIMD lane masks per 16-byte chunk, scalar walk only on the
-(rare) candidate hits. Reproduce with `gcc -O2 benchmarks/timestamp_scan_bench.c
--ldl && ./a.out <path/to/libtimestamp_scan.so>`.
+**Kernel throughput (isolated): 6.34 GB/s on Ryzen 7700X WSL2, 1.80 GB/s on Pi 5
+Cortex-A76 NEON**, on a 100 MB synthetic log with 1.45M timestamps (every line).
+Reproduce with `gcc -O2 benchmarks/timestamp_scan_bench.c -ldl && ./a.out
+<path/to/libtimestamp_scan.so>`. End-to-end the rune is density-dependent: the GH
+Archive run above (~1 timestamp per KB) scans 72 MB in 27 ms (~2.7 GB/s) on the
+Pi 5; a dense every-line log shifts the cost to the per-match scalar walk and
+runs ~1.4 GB/s. The structural-anchor filter is cheaper per byte than
+`log_level_scan`'s keyword AND-chains — fewer SIMD lane masks per 16-byte chunk,
+scalar walk only on the (rare) candidate hits.
+
+Inputs must use the literal `T` separator (`YYYY-MM-DDTHH:MM:SS`): JSON logs,
+container/k8s output, and `journalctl -o short-iso` match; space-separated syslog
+and Apache common-log timestamps do not.
 
 `--bucket weekday` swaps the 24-hour histogram for a 7-bucket Mon..Sun view
 computed via Zeller's congruence on the year/month/day digits the kernel

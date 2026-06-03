@@ -19,8 +19,8 @@ English.
   The LLM is invoked only to phrase what the kernels already computed; it
   doesn't invent facts.
 - **Fast** — SIMD kernels summarize MB-scale data in milliseconds. eacrunch
-  is 11× faster end-to-end than pandas on a 100K-row CSV; eatime scans
-  timestamps at 6.34 GB/s on x86. See [`benchmarks/results.md`](benchmarks/results.md).
+  is 11× faster end-to-end than pandas on a 100K-row CSV; eatime's
+  `timestamp_scan` kernel scans at 6.34 GB/s on x86. See [`benchmarks/results.md`](benchmarks/results.md).
 - **Honest scope** — Single binary, two dependencies (libc + libloading),
   ~2 MB release on x86_64 / ~4.3 MB on ARM. Runs on a Raspberry Pi 5.
 
@@ -95,26 +95,60 @@ the model a compressed structural summary it can actually reason about. No
 Python, no pandas, no cloud.
 
 ```
-/rune eatime ~/var/log/app.log
+/rune eatime ~/gharchive.log
+```
+
+`eatime` bucketizes every ISO-8601 / RFC3339 timestamp in a file by hour-of-day
+(or weekday) in one SIMD pass. It matches `YYYY-MM-DDTHH:MM:SS` **anywhere** in a
+line — so it works on JSON logs, container/k8s output, and `journalctl -o
+short-iso`, but **not** space-separated syslog or Apache timestamps (no `T`
+anchor). Grab a real input — a few hours of public GitHub events:
+
+```bash
+curl -s https://data.gharchive.org/2015-01-01-{12,16,20}.json.gz | gunzip > ~/gharchive.log
+grep -om1 '"created_at":"[^"]*"' ~/gharchive.log     # "created_at":"2015-01-01T12:00:01Z"
 ```
 
 ```
-bytes:       1.2 GB
-timestamps:  47123891
-scan:        184 ms
+> /rune eatime ~/gharchive.log          # Raspberry Pi 5 Model B, aarch64
+bytes:       72.00 MB
+timestamps:  68140
+scan:        27 ms
 
 hour-of-day:
-  00:00     1230891  ( 2.61%)
+  11:00          681  ( 1.00%)
+  12:00        13750  (20.18%)   <- 12:00 archive
+  13:00          669  ( 0.98%)
   ...
-  06:00     8421902  (17.87%)  <-- peak
-  07:00     6122891  (12.99%)
+  16:00        20270  (29.75%)   <- 16:00 archive
   ...
-  23:00     1320012  ( 2.80%)
+  20:00        22179  (32.55%)   <- 20:00 archive
+  21:00          645  ( 0.95%)
+  ...
+peak: 20:00 (22179 timestamps)
 ```
 
-One SIMD pass over 1.2 GB. 47M timestamps bucketed in 184 ms. **6.34 GB/s on
-Ryzen, 1.80 GB/s on Pi 5 ARM NEON** — 14× faster than awk, 29× faster than
-pandas at small sizes.
+The three spikes are the hours pulled from the archive (the events' own
+`created_at`); the smaller background counts are timestamps embedded in the event
+payloads — repo, comment, and actor times spanning the rest of the day. A nice
+correctness signal that it's bucketing real data, not file order.
+
+**72 MB scanned in 27 ms on a Pi 5 (~20 ms warm).** End-to-end throughput tracks
+timestamp *density*: this log carries ~1 timestamp per KB so the scan dominates
+(~2.7 GB/s); on a dense every-line log (~1 per 70 B) the per-match bookkeeping
+takes over (~1.4 GB/s). The bare `timestamp_scan` **kernel**, benchmarked in
+isolation on a dense fixture, hits **6.34 GB/s on Ryzen 7700X (SSE2)** and **1.80
+GB/s on Pi 5 (NEON)** — see
+[`benchmarks/timestamp_scan_bench.c`](benchmarks/timestamp_scan_bench.c).
+
+Add `--json` for the stable schema that pipes into other runes (e.g. `eadiff`):
+
+```bash
+$ /rune eatime --json ~/gharchive.log
+{"rune":"eatime","source":{"bytes":75501657,"format":"iso8601"},
+ "totals":{"rows":68140,"scan_us":24826},
+ "categories":[{"name":"00:00","count":528}, … {"name":"20:00","count":22179}]}
+```
 
 Six v1 runes:
 
