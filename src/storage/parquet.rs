@@ -65,7 +65,8 @@ impl NumStat {
 pub struct ColumnSummary {
     pub name: String,
     pub physical_type: PhysicalType,
-    /// Total non-null values across all row groups, when known.
+    /// Total values across all row groups (includes nulls; equals the row
+    /// count for a top-level column).
     pub total_values: i64,
     /// Sum of null counts across row groups, when statistics were present.
     pub null_count: Option<i64>,
@@ -128,6 +129,9 @@ struct SchemaElement {
     name: String,
     physical_type: Option<PhysicalType>,
     num_children: i32,
+    /// Parquet ConvertedType (field 6). UINT_8/16/32/64 = 11..=14 — the
+    /// signal that an INT32/INT64 physical column holds unsigned values.
+    converted_type: Option<i32>,
 }
 
 #[derive(Debug, Default)]
@@ -200,6 +204,9 @@ fn read_schema_element(r: &mut ThriftReader) -> Result<SchemaElement, String> {
             }
             (5, CompactType::I32) => {
                 e.num_children = r.read_zigzag_i32()?;
+            }
+            (6, CompactType::I32) => {
+                e.converted_type = Some(r.read_zigzag_i32()?);
             }
             _ => r.skip_value(ty)?,
         }
@@ -282,15 +289,29 @@ fn read_statistics(r: &mut ThriftReader) -> Result<Statistics, String> {
 
 // ── Aggregation: row groups → per-column summary ──────────────────────────────
 
-fn decode_stat_value(pt: PhysicalType, bytes: &[u8]) -> Option<NumStat> {
+fn decode_stat_value(pt: PhysicalType, bytes: &[u8], unsigned: bool) -> Option<NumStat> {
     match pt {
         PhysicalType::Boolean if bytes.len() == 1 => Some(NumStat::Bool(bytes[0] != 0)),
         PhysicalType::Int32 if bytes.len() == 4 => {
-            Some(NumStat::I64(i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as i64))
+            let raw = [bytes[0], bytes[1], bytes[2], bytes[3]];
+            // UINT_8/16/32 share the INT32 physical type; decode unsigned so
+            // values above 2^31 don't wrap to negative. u32 fits in i64.
+            if unsigned {
+                Some(NumStat::I64(u32::from_le_bytes(raw) as i64))
+            } else {
+                Some(NumStat::I64(i32::from_le_bytes(raw) as i64))
+            }
         }
         PhysicalType::Int64 if bytes.len() == 8 => {
             let mut b = [0u8; 8]; b.copy_from_slice(bytes);
-            Some(NumStat::I64(i64::from_le_bytes(b)))
+            // UINT_64 can exceed i64::MAX; carry it as f64 (the stat pipeline
+            // reduces through f64 anyway, so >2^53 is approximate either way —
+            // but the value stays correct in sign and magnitude).
+            if unsigned {
+                Some(NumStat::F64(u64::from_le_bytes(b) as f64))
+            } else {
+                Some(NumStat::I64(i64::from_le_bytes(b)))
+            }
         }
         PhysicalType::Float if bytes.len() == 4 => {
             Some(NumStat::F64(f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as f64))
@@ -310,6 +331,7 @@ fn decode_stat_value(pt: PhysicalType, bytes: &[u8]) -> Option<NumStat> {
 /// equivalent to scalar but stays on the kernel-first dispatch path.
 struct ColumnScratch {
     physical_type: PhysicalType,
+    unsigned:    bool,
     total_values: i64,
     mins:        Vec<f64>,
     maxes:       Vec<f64>,
@@ -328,6 +350,14 @@ fn aggregate_summary(meta: FileMetaData) -> Result<ParquetSummary, String> {
         .filter(|e| e.num_children == 0)
         .filter_map(|e| e.physical_type.map(|t| (e.name.as_str(), t)))
         .collect();
+    // Columns whose ConvertedType is UINT_8/16/32/64 (11..=14) hold unsigned
+    // values in a signed INT32/INT64 physical type.
+    let name_to_unsigned: std::collections::HashMap<&str, bool> = meta.schema.iter()
+        .skip(1)
+        .filter(|e| e.num_children == 0)
+        .filter_map(|e| e.physical_type.map(|_|
+            (e.name.as_str(), matches!(e.converted_type, Some(11..=14)))))
+        .collect();
 
     // Phase 1: walk row groups, collect per-column f64 vectors of mins,
     // maxes, null_counts. No reduction yet — that's the SIMD step.
@@ -343,10 +373,12 @@ fn aggregate_summary(meta: FileMetaData) -> Result<ParquetSummary, String> {
                 Some(t) => t,
                 None => continue,
             };
+            let unsigned = name_to_unsigned.get(name.as_str()).copied().unwrap_or(false);
             let entry = scratches.entry(name.clone()).or_insert_with(|| {
                 order.push(name.clone());
                 ColumnScratch {
                     physical_type: pt,
+                    unsigned,
                     total_values: 0,
                     mins:        Vec::with_capacity(meta.row_groups.len()),
                     maxes:       Vec::with_capacity(meta.row_groups.len()),
@@ -359,12 +391,12 @@ fn aggregate_summary(meta: FileMetaData) -> Result<ParquetSummary, String> {
                     entry.null_counts.push(nc as f64);
                 }
                 if let Some(min_b) = &stats.min_value {
-                    if let Some(v) = decode_stat_value(pt, min_b) {
+                    if let Some(v) = decode_stat_value(pt, min_b, entry.unsigned) {
                         entry.mins.push(v.as_f64());
                     }
                 }
                 if let Some(max_b) = &stats.max_value {
-                    if let Some(v) = decode_stat_value(pt, max_b) {
+                    if let Some(v) = decode_stat_value(pt, max_b, entry.unsigned) {
                         entry.maxes.push(v.as_f64());
                     }
                 }

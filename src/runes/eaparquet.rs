@@ -189,7 +189,7 @@ fn format_field(f: &FieldStats) -> String {
                 f.name, f.count, n.min, n.max
             ),
             None => format!(
-                "{} (number): values={}{nulls} [INT96 timestamp; min/max not decoded]\n",
+                "{} (number): values={}{nulls} [min/max not available]\n",
                 f.name, f.count
             ),
         },

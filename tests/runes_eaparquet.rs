@@ -81,3 +81,32 @@ fn eaparquet_rejects_outside_allowlist() {
     assert!(result.answer.contains("outside allowlist"),
         "unexpected error: {}", result.answer);
 }
+
+#[test]
+fn eaparquet_decodes_unsigned_columns() {
+    // UINT32/UINT64 columns are physically INT32/INT64; without reading the
+    // ConvertedType they decode as signed and wrap to negative above the
+    // signed max. Verify unsigned values come back positive.
+    use olorin::storage::parquet::read_summary;
+    let bytes = std::fs::read(
+        std::env::current_dir().unwrap().join("tests/fixtures/runes/uint.parquet")
+    ).expect("uint fixture exists");
+    let s = read_summary(&bytes).expect("parse uint parquet");
+    let col = |name: &str| s.columns.iter().find(|c| c.name == name)
+        .unwrap_or_else(|| panic!("column {name} missing"));
+
+    // u32: values above 2^31 decode exactly (u32 fits in i64/f64).
+    let u32 = col("u32");
+    assert_eq!(u32.min.unwrap().as_f64(), 3_000_000_000.0, "u32 min wrong/negative");
+    assert_eq!(u32.max.unwrap().as_f64(), 4_000_000_000.0, "u32 max wrong/negative");
+
+    // u64: values above 2^63 must be POSITIVE (previously wrapped negative).
+    let u64c = col("u64");
+    assert!(u64c.min.unwrap().as_f64() > 0.0, "u64 min wrapped negative");
+    assert!(u64c.max.unwrap().as_f64() > 9.0e18, "u64 max not in unsigned range");
+
+    // Regression: a genuinely signed int64 column stays signed.
+    let sig = col("sig");
+    assert_eq!(sig.min.unwrap().as_f64(), -5.0);
+    assert_eq!(sig.max.unwrap().as_f64(), 50.0);
+}
