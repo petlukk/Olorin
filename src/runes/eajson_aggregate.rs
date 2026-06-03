@@ -100,8 +100,13 @@ pub fn process_line(
                 Some(e) => e,
                 None => break,
             };
-            if let Some(text) = decode_byte_array(&bytes[val_start..=arr_end]) {
-                ingest_scalar(&full_key, text.as_bytes(), ScalarKind::Text, agg);
+            // Only systemd binary MESSAGE fields are byte-decoded. An ordinary
+            // JSON array (numeric, string, object) is out of scope and skipped,
+            // never reinterpreted as a binary string.
+            if is_binary_message_key(&full_key) {
+                if let Some(text) = decode_byte_array(&bytes[val_start..=arr_end]) {
+                    ingest_scalar(&full_key, text.as_bytes(), ScalarKind::Text, agg);
+                }
             }
             while pair_i < line_quotes.len() && (line_quotes[pair_i] as usize) < arr_end {
                 pair_i += 1;
@@ -118,6 +123,14 @@ pub fn process_line(
             }
         }
     }
+}
+
+/// systemd journal export encodes non-UTF-8 fields (notably MESSAGE) as a
+/// JSON array of byte values. Only those keys are byte-decoded; an ordinary
+/// numeric array (latencies, ports, …) must not be reinterpreted as a binary
+/// string. Matches the leaf component so a nested `a.MESSAGE` also qualifies.
+fn is_binary_message_key(full_key: &str) -> bool {
+    full_key.rsplit('.').next().unwrap_or(full_key) == "MESSAGE"
 }
 
 fn ingest_scalar(full_key: &str, val_bytes: &[u8], kind: ScalarKind, agg: &mut Aggregator) {
