@@ -109,7 +109,7 @@ dependencies = [
 
 [[package]]
 name = "olorin"
-version = "2.0.7"
+version = "2.0.8"
 dependencies = [
  "chacha20poly1305",
  "libc",

@@ -8,6 +8,95 @@ order.
 
 ## [Unreleased]
 
+## [2.0.8] — 2026-06-03
+
+Correctness-hardening release for the rune family.  A real-input
+differential audit — each rune fed a realistic file, its output diffed
+against the incumbent tool (pandas, grep, pyarrow, python `json`) —
+surfaced a silent correctness failure in four of the six runes.  Each
+had passed its unit tests, which used clean fixtures (uppercase
+severities, unquoted CSV, signed ints, scalar JSON); none exercised the
+messy real-world shape that breaks them.  All four are fixed here with a
+real-input regression test and ground-truth verification.  `eatime`
+(validated on real GitHub-event data) and `eadiff` (directional deltas,
+timestamp shifts, malformed/empty inputs) were audited and confirmed
+correct.  No output contract changes for already-valid inputs — only
+previously-wrong outputs change.
+
+### Fixed
+
+- **`eacrunch` — RFC-4180 quoted CSV (PR #10).**  `csv_scan` counted
+  every comma and newline, including those inside double-quoted fields,
+  so a quoted value with an embedded delimiter (`"Smith, John"`)
+  silently mis-aligned every column after it — confident, wrong top-N
+  with no error.  `kernels/csv_scan.ea` now threads a quote-parity bit
+  through its existing scalar emit pass: a `"` toggles in-quote state,
+  in-quote delimiters are not emitted, and escaped `""` resolves by
+  double-toggle.  No new eacompute intrinsics; bit-identical across x86
+  SSE2 / ARM NEON.  `eacrunch` additionally strips surrounding quotes and
+  unescapes `""` from text values (via `Cow`, so the numeric hot path
+  stays allocation-free).  Now matches pandas on quoted input.
+- **`ealog` — case-insensitive severity matching (PR #11).**
+  `log_level_scan` compared candidate bytes against UPPERCASE-only codes,
+  so lowercase/mixed-case severities (`error`, `Error`, `warn`) counted
+  as zero — and the rune reported "no severity keywords found" on real
+  logs from Go (zap/logrus), Python `logging`, nginx, and journald, which
+  all emit lowercase.  Candidate letter bytes are now folded with
+  `| 0x20` before comparison in both the scalar and SIMD paths; only
+  upper/lower letter pairs share a folded value, so non-letters never
+  alias a keyword byte, and delimiter/newline checks keep the original
+  bytes (word-boundary rejection of `ERROR_HANDLER` unchanged).
+  Cross-arch bit-identical; uppercase goldens unchanged.
+- **`eaparquet` — unsigned integer columns; INT96 mislabel (PR #12).**
+  `UINT_8/16/32/64` columns are stored in a signed `INT32/INT64` physical
+  type, distinguished only by the schema's `ConvertedType`.  The footer
+  decoder ignored `ConvertedType` and decoded every stat as two's-
+  complement signed, so any unsigned value above the signed max wrapped
+  to a large negative number, reported with `success:true`.
+  `storage/parquet.rs` now reads `ConvertedType` (SchemaElement field 6)
+  and decodes `UINT` columns unsigned (correct sign and magnitude; the
+  f64 stat pipeline keeps its pre-existing >2^53 precision ceiling, the
+  same one signed `i64` already had).  Also fixes a cosmetic bug where
+  any statistics-less Number column was labeled `[INT96 timestamp;
+  min/max not decoded]`; now the neutral `[min/max not available]`.
+- **`eajson` — numeric arrays no longer byte-decoded (PR #13).**  eajson
+  ran every JSON array value through `decode_byte_array`, which accepts
+  any array of integers 0–255 — intended only for systemd's binary
+  `MESSAGE` field.  So an ordinary numeric array
+  (`{"latencies":[12,45,78]}`) was silently reinterpreted as a binary
+  string and rendered as garbage control characters.  The byte-decode is
+  now gated to keys whose leaf is `MESSAGE`; any other array is skipped,
+  consistent with the existing array-of-objects / array-of-strings
+  scope.  The structural scan itself was already correct — embedded
+  `,`/`:`/`{`/escaped-quote inside string values never desynced key
+  pairing (verified across 200 lines of real GitHub-event JSON).
+
+### Documentation
+
+- **README + `docs/runes.md` `eatime` example rewritten around real data
+  (PR #9).**  Replaces the synthetic 1.2 GB sample with a reproducible
+  run on public GitHub-event data from gharchive.org, measured on a
+  Raspberry Pi 5, including input acquisition (`curl … | gunzip`) and the
+  valid-input rule (RFC3339 `T` separator; space-separated syslog/Apache
+  not matched).  Throughput claims are now split into the isolated
+  `timestamp_scan` kernel figure (1.80 GB/s Pi 5 NEON, 6.34 GB/s Ryzen
+  SSE2) and the density-dependent end-to-end rune figure (~1.4–3 GB/s),
+  matching `benchmarks/results.md`.
+
+### Verified
+
+- Per-rune ground-truth diff: `eacrunch` vs pandas (quoted CSV), `ealog`
+  vs grep on real `/var/log`, `eaparquet` vs pyarrow (UINT32/UINT64),
+  `eajson` vs python `json`.
+- New regression tests: `csv_scan_skips_quoted_delimiters`,
+  `eacrunch_handles_quoted_csv`, `case_insensitive_lowercase` /
+  `case_insensitive_mixed` / `case_fold_no_false_positive`,
+  `ealog_counts_lowercase_and_mixed_case`,
+  `eaparquet_decodes_unsigned_columns`,
+  `eajson_does_not_byte_decode_numeric_arrays`.
+- Cross-arch parity gate green; all existing goldens unchanged (the
+  fixes only alter previously-wrong outputs).
+
 ## [2.0.7] — 2026-05-22
 
 Windows x86_64 returns to the release matrix.  Previous attempts to
