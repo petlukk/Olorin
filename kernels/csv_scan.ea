@@ -1,69 +1,92 @@
 // Byte-level CSV boundary scanner. Scans bytes linearly, records the
-// index of every `,` (44) into out_commas and every `\n` (10) into
-// out_newlines. Writes the populated counts to out_n_comma / out_n_newline.
+// index of every *unquoted* `,` (44) into out_commas and every *unquoted*
+// `\n` (10) into out_newlines. Writes the populated counts to
+// out_n_comma / out_n_newline.
 //
-// Scope (all out of scope for MVP — caller is responsible):
-//   - Unquoted CSV only. Quoted fields with embedded commas are not handled.
-//   - CRLF (`\r\n`) line endings: the scan finds `\n`; stray `\r` bytes are
-//     left at the end of the last field on each row. `str::trim()` on the
-//     field range in the caller strips them.
+// RFC-4180 quoting: a `"` (34) toggles a running in-quote parity bit;
+// commas and newlines seen while inside a quoted field are NOT emitted.
+// Escaped `""` toggles the bit twice (net no change), which is correct —
+// no delimiter sits between the pair, so parity alone resolves it. This
+// makes the scan correct on quoted CSV (embedded commas, quoted newlines)
+// without a separate parsing pass.
+//
+// Scope (caller's responsibility):
+//   - CRLF (`\r\n`) line endings: the scan finds `\n`; a stray `\r` is left
+//     at the end of the field and stripped by the caller's `str::trim()`.
+//   - Field *values* still include their surrounding quotes; unquoting /
+//     unescaping `""` is done by the caller (eacrunch) when extracting text.
 // The caller mmaps the file and allocates the two out arrays at size `len`
 // (the worst case is every byte being a delimiter).
 //
 // SIMD strategy (cross-arch — no movemask, no lane-extract primitive):
-// compare a 16-byte chunk against splat(',') and splat('\n') using u8x16
-// equality, encode the two match flags into bit 0 and bit 1 of a per-lane
-// u8, store the resulting 16-byte mask to caller-provided scratch, then
-// scalar-scan those 16 bytes to emit positions. The SIMD parallelism is in
-// the compares; position emission is inherently data-dependent because
-// writes to out_commas/out_newlines are stream-compaction and there is no
-// ARM NEON equivalent of x86 pmovmskb + tzcnt.
+// compare a 16-byte chunk against splat(',') / splat('\n') / splat('"')
+// using u8x16 equality, encode the three match flags into bits 0/1/2 of a
+// per-lane u8, store the 16-byte mask to caller-provided scratch, then
+// scalar-scan those 16 bytes carrying the quote-parity bit to emit only
+// unquoted delimiter positions. The SIMD parallelism is in the compares;
+// position emission is inherently serial (quote parity is a prefix
+// dependency, and there is no ARM NEON equivalent of x86 pmovmskb + tzcnt).
 
 export func csv_scan(text: *u8, len: i32, out_commas: *mut i32, out_newlines: *mut i32, out_n_comma: *mut i32, out_n_newline: *mut i32, scratch: *mut u8) {
     let v_comma: u8x16 = splat(44)
     let v_newl:  u8x16 = splat(10)
+    let v_quote: u8x16 = splat(34)
     let v_zero:  u8x16 = splat(0)
     let v_one:   u8x16 = splat(1)
     let v_two:   u8x16 = splat(2)
+    let v_four:  u8x16 = splat(4)
 
     let mut nc: i32 = 0
     let mut nn: i32 = 0
+    let mut in_quote: i32 = 0
 
     let n_full: i32 = (len / 16) * 16
     let mut i: i32 = 0
     while i < n_full {
         let c: u8x16 = load(text, i)
-        let m_c: u8x16 = select(c .== v_comma, v_one, v_zero)
-        let m_n: u8x16 = select(c .== v_newl,  v_two, v_zero)
-        let m:   u8x16 = m_c .| m_n
+        let m_c:  u8x16 = select(c .== v_comma, v_one,  v_zero)
+        let m_n:  u8x16 = select(c .== v_newl,  v_two,  v_zero)
+        let m_q:  u8x16 = select(c .== v_quote, v_four, v_zero)
+        let m_cn: u8x16 = m_c .| m_n
+        let m:    u8x16 = m_cn .| m_q
         store(scratch, 0, m)
 
         let mut k: i32 = 0
         while k < 16 {
             let b: i32 = to_i32(scratch[k])
-            if (b & 1) != 0 {
-                out_commas[nc] = i + k
-                nc = nc + 1
+            if (b & 4) != 0 {
+                in_quote = 1 - in_quote
             }
-            if (b & 2) != 0 {
-                out_newlines[nn] = i + k
-                nn = nn + 1
+            if in_quote == 0 {
+                if (b & 1) != 0 {
+                    out_commas[nc] = i + k
+                    nc = nc + 1
+                }
+                if (b & 2) != 0 {
+                    out_newlines[nn] = i + k
+                    nn = nn + 1
+                }
             }
             k = k + 1
         }
         i = i + 16
     }
 
-    // Scalar tail (< 16 bytes)
+    // Scalar tail (< 16 bytes) — same quote-parity carry.
     while i < len {
         let b: i32 = to_i32(text[i])
-        if b == 44 {
-            out_commas[nc] = i
-            nc = nc + 1
+        if b == 34 {
+            in_quote = 1 - in_quote
         }
-        if b == 10 {
-            out_newlines[nn] = i
-            nn = nn + 1
+        if in_quote == 0 {
+            if b == 44 {
+                out_commas[nc] = i
+                nc = nc + 1
+            }
+            if b == 10 {
+                out_newlines[nn] = i
+                nn = nn + 1
+            }
         }
         i = i + 1
     }

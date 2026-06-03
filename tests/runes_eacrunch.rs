@@ -361,3 +361,75 @@ fn eacrunch_scales_to_1000_rows() {
     // Must complete in under 100ms on 1000 rows.
     assert!(result.timing_us < 100_000, "too slow: {} µs", result.timing_us);
 }
+
+#[test]
+fn csv_scan_skips_quoted_delimiters() {
+    // RFC-4180: commas/newlines inside double-quoted fields are not
+    // structural. Input spans the SIMD path (>16 bytes) into the scalar tail
+    // and includes an escaped `""` pair (double toggle, net no change).
+    olorin::kernels::ffi::init().unwrap();
+    let input = b"a,\"b,c\",d\n\"x\"\"y\",z";
+    //            a , " b , c " , d \n " x " " y " ,  z
+    //            0 1 2 3 4 5 6 7 8 9  10        15 16 17
+    // unquoted commas:   1, 7, 16   (the comma at index 4 is inside quotes)
+    // unquoted newlines: 9
+    assert_eq!(input.len(), 18);
+    let mut commas  = vec![0i32; input.len()];
+    let mut nlines  = vec![0i32; input.len()];
+    let mut n_comma = 0i32;
+    let mut n_nline = 0i32;
+    let mut scratch = [0u8; 16];
+    unsafe {
+        olorin::kernels::ffi::csv_scan(
+            input.as_ptr(), input.len() as i32,
+            commas.as_mut_ptr(), nlines.as_mut_ptr(),
+            &mut n_comma, &mut n_nline,
+            scratch.as_mut_ptr(),
+        );
+    }
+    assert_eq!(n_comma, 3, "embedded comma inside quotes must be skipped");
+    assert_eq!(n_nline, 1);
+    assert_eq!(&commas[..3], &[1, 7, 16]);
+    assert_eq!(&nlines[..1], &[9]);
+}
+
+#[test]
+fn eacrunch_handles_quoted_csv() {
+    // Quoted text fields with embedded commas must not corrupt column
+    // alignment, and surrounding quotes must be stripped from text values.
+    olorin::kernels::ffi::init().unwrap();
+
+    let csv = "id,name,amount,note\n\
+               1,\"Smith, John\",100.50,\"a \"\"quoted\"\" note\"\n\
+               2,\"Doe, Jane\",200.00,plain\n\
+               3,\"Roe, Bob\",50.25,\"x, y, z\"\n";
+
+    let tmp = std::env::temp_dir()
+        .join(format!("olorin_eacrunch_quoted_{}.csv", std::process::id()));
+    std::fs::write(&tmp, csv).unwrap();
+
+    struct TmpFile(std::path::PathBuf);
+    impl Drop for TmpFile {
+        fn drop(&mut self) { let _ = std::fs::remove_file(&self.0); }
+    }
+    let _guard = TmpFile(tmp.clone());
+
+    let result = olorin::runes::run_rune("eacrunch", tmp.to_str().unwrap())
+        .expect("eacrunch exists");
+    assert!(result.success, "rune failed: {}", result.answer);
+
+    // 3 data rows, 4 columns — embedded commas did NOT split rows/fields.
+    assert!(result.answer.contains("rows: 3"),
+        "embedded commas split rows: {}", result.answer);
+    assert!(result.answer.contains("columns: 4"), "{}", result.answer);
+    // amount column parsed correctly (garbage if fields were misaligned).
+    assert!(result.answer.contains("count=3"), "{}", result.answer);
+    assert!(result.answer.contains("min=50.25"), "{}", result.answer);
+    assert!(result.answer.contains("max=200.00"), "{}", result.answer);
+    // Text value intact AND unquoted: embedded comma preserved, surrounding
+    // quotes stripped.
+    assert!(result.answer.contains("Smith, John"),
+        "quoted value not reconstructed/unquoted: {}", result.answer);
+    assert!(!result.answer.contains("\"Smith"),
+        "surrounding quote not stripped: {}", result.answer);
+}

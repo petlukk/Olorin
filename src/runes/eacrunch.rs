@@ -181,7 +181,10 @@ fn build_output(bytes: &[u8], path: String) -> Result<RuneOutput, String> {
     let header_fields = &rows_fields[0];
     let n_cols = header_fields.len();
     let headers: Vec<String> = header_fields.iter()
-        .map(|&(s, e)| String::from_utf8_lossy(&bytes[s..e]).trim().to_string())
+        .map(|&(s, e)| {
+            let raw = String::from_utf8_lossy(&bytes[s..e]);
+            unquote(raw.trim()).into_owned()
+        })
         .collect();
 
     if n_rows < 2 {
@@ -197,7 +200,8 @@ fn build_output(bytes: &[u8], path: String) -> Result<RuneOutput, String> {
         for r in 1..=sniff_rows {
             if c >= rows_fields[r].len() { continue; }
             let (s, e) = rows_fields[r][c];
-            let txt = std::str::from_utf8(&bytes[s..e]).unwrap_or("").trim();
+            let raw = std::str::from_utf8(&bytes[s..e]).unwrap_or("").trim();
+            let txt = unquote(raw);
             if txt.parse::<f64>().is_ok() { ok += 1; }
         }
         is_numeric[c] = ok * 100 >= (sniff_rows as u32) * 75;
@@ -212,15 +216,16 @@ fn build_output(bytes: &[u8], path: String) -> Result<RuneOutput, String> {
         for c in 0..n_cols {
             if c >= rows_fields[r].len() { continue; }
             let (s, e) = rows_fields[r][c];
-            let txt = std::str::from_utf8(&bytes[s..e]).unwrap_or("").trim();
+            let raw = std::str::from_utf8(&bytes[s..e]).unwrap_or("").trim();
+            let txt = unquote(raw);
             if is_numeric[c] {
                 if let Ok(v) = txt.parse::<f64>() {
                     numeric_vals[c].push(v);
                 }
-            } else if let Some(ct) = text_tops[c].get_mut(txt) {
+            } else if let Some(ct) = text_tops[c].get_mut(txt.as_ref()) {
                 *ct += 1;
             } else if text_tops[c].len() < TEXT_CARDINALITY_CAP {
-                text_tops[c].insert(txt.to_string(), 1);
+                text_tops[c].insert(txt.into_owned(), 1);
             }
         }
     }
@@ -287,6 +292,18 @@ fn build_output(bytes: &[u8], path: String) -> Result<RuneOutput, String> {
     out.totals = Totals { rows: n_data as u64, scan_us };
     out.fields = fields;
     Ok(out)
+}
+
+/// Strip RFC-4180 surrounding double-quotes and unescape `""` -> `"`.
+/// Borrows when the field isn't quoted, so the numeric hot path stays
+/// allocation-free.
+fn unquote(t: &str) -> std::borrow::Cow<'_, str> {
+    let b = t.as_bytes();
+    if b.len() >= 2 && b[0] == b'"' && b[b.len() - 1] == b'"' {
+        std::borrow::Cow::Owned(t[1..t.len() - 1].replace("\"\"", "\""))
+    } else {
+        std::borrow::Cow::Borrowed(t)
+    }
 }
 
 fn format_text(out: &RuneOutput) -> String {
