@@ -18,7 +18,8 @@ fn scalar_reference(text: &[u8]) -> [i32; 6] {
             if p + kw.len() > len {
                 continue;
             }
-            if &text[p..p + kw.len()] != *kw {
+            // Case-insensitive: the kernel folds candidate letters with |0x20.
+            if !text[p..p + kw.len()].eq_ignore_ascii_case(kw) {
                 continue;
             }
             let left_ok = p == 0 || is_delim(text[p - 1]);
@@ -74,7 +75,8 @@ fn scalar_high_severity_positions(text: &[u8]) -> Vec<i32> {
             if p + kw.len() > len {
                 continue;
             }
-            if &text[p..p + kw.len()] != *kw {
+            // Case-insensitive: the kernel folds candidate letters with |0x20.
+            if !text[p..p + kw.len()].eq_ignore_ascii_case(kw) {
                 continue;
             }
             let left_ok = p == 0 || is_delim(text[p - 1]);
@@ -350,4 +352,33 @@ fn positions_max_zero_means_no_recording() {
     }
     assert_eq!(out[3], 3, "counts must still work with max_positions=0");
     assert_eq!(n_pos, 0);
+}
+
+#[test]
+fn case_insensitive_lowercase() {
+    // Go/Python/nginx/journald emit lowercase severities — they must count.
+    assert_parity("lowercase short", b"error oops");
+    assert_parity(
+        "lowercase long (SIMD path)",
+        b"2026-06-03 error: db down; warn cache; info ok; debug trace; fatal abort\n",
+    );
+    // [DEBUG, INFO, WARN, ERROR, FATAL, NEWLINES]
+    let k = kernel_scan(b"error oops\ninfo ok\ndebug x\nwarn y\nfatal z\n");
+    assert_eq!(k, [1, 1, 1, 1, 1, 5], "lowercase severities each count once: {k:?}");
+}
+
+#[test]
+fn case_insensitive_mixed() {
+    assert_parity("mixed case", b"Error here\nWarn there\nInfo ok\nFatal bad\nDebug it\n");
+    // Mixed + lower in the same buffer; '[' / ']' are word delimiters.
+    let k = kernel_scan(b"[Error] x\n[INFO] y\n[error] z\n");
+    assert_eq!(k, [0, 1, 0, 2, 0, 3], "Error + error = 2 ERROR, 1 INFO: {k:?}");
+}
+
+#[test]
+fn case_fold_no_false_positive() {
+    // |0x20 only collides on letter pairs — non-letters must not alias a
+    // keyword byte. None of these should produce any severity count.
+    let k = kernel_scan(b"ERRO\x12 e\x12\x12or warX iNFP debuh fatap\n");
+    assert_eq!(k, [0, 0, 0, 0, 0, 1], "no spurious matches from folding: {k:?}");
 }

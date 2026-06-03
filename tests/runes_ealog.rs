@@ -243,3 +243,29 @@ fn ealog_sample_includes_fatal_alongside_error() {
     assert!(a.contains("aborting after 3 failures"), "FATAL sample missing: {a}");
     let _ = std::fs::remove_file(&dst);
 }
+
+#[test]
+fn ealog_counts_lowercase_and_mixed_case() {
+    // Real logs (Go zap/logrus, Python logging, nginx, journald) emit
+    // lowercase or mixed-case severities. They must be counted, not reported
+    // as "no severity keywords found".
+    ensure_kernels();
+    let dst = unique_path("lowercase");
+    let content = b"2026-06-03 error: connection refused\n\
+                    2026-06-03 warn: disk full\n\
+                    2026-06-03 info: started\n\
+                    2026-06-03 Error: retrying\n";
+    std::fs::write(&dst, content).unwrap();
+
+    let result = run_rune("ealog", &format!("--json {}", dst.to_string_lossy()))
+        .expect("ealog runnable");
+    assert!(result.success, "rune failed: {}", result.answer);
+    let a = &result.answer;
+    // lowercase `error` + mixed-case `Error` both count → 2 ERROR.
+    assert!(a.contains("\"name\":\"ERROR\",\"count\":2"),
+        "lowercase/mixed ERROR not counted: {a}");
+    assert!(a.contains("\"name\":\"WARN\",\"count\":1"), "lowercase WARN missing: {a}");
+    assert!(a.contains("\"name\":\"INFO\",\"count\":1"), "lowercase INFO missing: {a}");
+    assert!(!a.contains("no severity keywords found"), "{a}");
+    let _ = std::fs::remove_file(&dst);
+}
