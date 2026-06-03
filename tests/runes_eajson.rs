@@ -190,3 +190,35 @@ fn eajson_detects_iso8601_timestamps() {
         "timestamp range bounds missing or wrong: {a}");
     let _ = std::fs::remove_file(&dst);
 }
+
+#[test]
+fn eajson_does_not_byte_decode_numeric_arrays() {
+    // A JSON numeric array (latencies, ports) must NOT be reinterpreted as a
+    // systemd binary MESSAGE string. Only the MESSAGE key is byte-decoded;
+    // ordinary arrays are skipped, and the rest of the line still parses.
+    ensure_kernels();
+    let dst = std::env::temp_dir().join(format!(
+        "olorin_eajson_numarr_{}.jsonl", std::process::id()
+    ));
+    // `status` repeats (low cardinality) so it isn't high-cardinality-
+    // suppressed; it sits AFTER the array, proving the array skip doesn't
+    // drop the following key.
+    std::fs::write(&dst,
+        b"{\"id\":1,\"latencies\":[12,45,78],\"status\":\"ok\"}\n\
+          {\"id\":2,\"latencies\":[99,23,11],\"status\":\"ok\"}\n\
+          {\"id\":3,\"latencies\":[5,5,5],\"status\":\"err\"}\n\
+          {\"id\":4,\"latencies\":[1,2,3],\"status\":\"ok\"}\n").unwrap();
+    struct Tmp(std::path::PathBuf);
+    impl Drop for Tmp { fn drop(&mut self) { let _ = std::fs::remove_file(&self.0); } }
+    let _g = Tmp(dst.clone());
+
+    let result = run_rune("eajson", dst.to_string_lossy().as_ref())
+        .expect("eajson runnable");
+    assert!(result.success, "rune failed: {}", result.answer);
+    let a = &result.answer;
+    // The numeric array is skipped, NOT emitted as a garbage byte-string.
+    assert!(!a.contains("latencies"), "numeric array byte-decoded: {a}");
+    // The scalar fields around it still parse correctly.
+    assert!(a.contains("status (text):"), "field after array not parsed: {a}");
+    assert!(a.contains("id (number):"), "id not parsed: {a}");
+}
