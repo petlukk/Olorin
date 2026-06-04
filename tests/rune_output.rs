@@ -7,7 +7,7 @@
 //!    proving the schema actually enables composition (the entire point).
 
 use olorin::runes::output::{
-    BoolStats, Category, FieldKind, FieldStats, NumericStats, RuneOutput, Sample, Source,
+    Anomaly, BoolStats, Category, FieldKind, FieldStats, NumericStats, RuneOutput, Sample, Source,
     TextEntry, TextStats, TimestampStats, Totals, SCHEMA_VERSION,
 };
 
@@ -91,6 +91,15 @@ fn rich_fixture() -> RuneOutput {
                 line:        Some(42),
                 timestamp:   Some("2026-05-11T10:54:00".to_string()),
                 text:        "ERROR: bearing temp exceeds 85C".to_string(),
+            },
+        ],
+        anomalies: vec![
+            Anomaly {
+                bucket:   "2026-05-11T02:11:00".to_string(),
+                count:    4_200,
+                baseline: 50.0,
+                ratio:    84.0,
+                score:    37.5,
             },
         ],
         error: None,

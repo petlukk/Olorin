@@ -10,6 +10,8 @@ pub mod common;
 pub mod output;
 pub mod eajson_aggregate;
 pub mod narration;
+pub mod timekey;
+pub mod anomaly;
 
 /// Output safety classification for a rune's `answer` field.
 /// Declared per-rune, never computed at runtime.

@@ -23,6 +23,7 @@ use super::common::{resolve_path, open_capped, truncate_answer, PathError};
 use super::output::{
     Category, FieldKind, FieldStats, NumericStats, RuneOutput, Totals,
 };
+use super::timekey::iso_to_seconds;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -313,66 +314,6 @@ fn diff_text(name: &str, fa: &FieldStats, fb: &FieldStats) -> Vec<FieldStats> {
         }
     }
     out
-}
-
-// Parse `YYYY-MM-DDTHH:MM:SS` (any trailing timezone / fraction is
-// ignored) to seconds since 2000-01-01T00:00:00. Returns None on any
-// digit failure or out-of-range component. The fixed epoch only needs
-// to be monotonic across calls — eadiff only uses the difference of
-// two values, never the absolute number.
-fn iso_to_seconds(s: &str) -> Option<i64> {
-    let bytes = s.as_bytes();
-    if bytes.len() < 19 { return None; }
-    let year:   i64 = parse_uint(&bytes[0..4])?  as i64;
-    if bytes[4] != b'-' { return None; }
-    let month:  i64 = parse_uint(&bytes[5..7])?  as i64;
-    if bytes[7] != b'-' { return None; }
-    let day:    i64 = parse_uint(&bytes[8..10])? as i64;
-    if bytes[10] != b'T' { return None; }
-    let hour:   i64 = parse_uint(&bytes[11..13])? as i64;
-    if bytes[13] != b':' { return None; }
-    let minute: i64 = parse_uint(&bytes[14..16])? as i64;
-    if bytes[16] != b':' { return None; }
-    let second: i64 = parse_uint(&bytes[17..19])? as i64;
-    if month < 1 || month > 12 || day < 1 || day > 31 { return None; }
-    if hour > 23 || minute > 59 || second > 60 { return None; }
-    let days = days_since_2000(year, month, day);
-    Some(days * 86400 + hour * 3600 + minute * 60 + second)
-}
-
-fn parse_uint(s: &[u8]) -> Option<u32> {
-    let mut acc: u32 = 0;
-    for &b in s {
-        if !(b'0'..=b'9').contains(&b) { return None; }
-        acc = acc * 10 + (b - b'0') as u32;
-    }
-    Some(acc)
-}
-
-fn is_leap(y: i64) -> bool {
-    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
-}
-
-fn days_since_2000(year: i64, month: i64, day: i64) -> i64 {
-    const MONTH_DAYS: [i64; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-    let mut total: i64 = 0;
-    // Year accumulation. Supports years on either side of 2000 — pre-
-    // 2000 years count negatively. eadiff only uses the difference of
-    // two timestamps, so the absolute origin is arbitrary.
-    if year >= 2000 {
-        for y in 2000..year {
-            total += if is_leap(y) { 366 } else { 365 };
-        }
-    } else {
-        for y in year..2000 {
-            total -= if is_leap(y) { 366 } else { 365 };
-        }
-    }
-    for m in 0..(month - 1) as usize {
-        total += MONTH_DAYS[m];
-    }
-    if month > 2 && is_leap(year) { total += 1; }
-    total + (day - 1)
 }
 
 // Helper: emit a Number FieldStats carrying a single signed value in
