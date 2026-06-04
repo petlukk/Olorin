@@ -98,11 +98,13 @@ Python, no pandas, no cloud.
 /rune eatime ~/gharchive.log
 ```
 
-`eatime` bucketizes every ISO-8601 / RFC3339 timestamp in a file by hour-of-day
-(or weekday) in one SIMD pass. It matches `YYYY-MM-DDTHH:MM:SS` **anywhere** in a
-line — so it works on JSON logs, container/k8s output, and `journalctl -o
-short-iso`, but **not** space-separated syslog or Apache timestamps (no `T`
-anchor). Grab a real input — a few hours of public GitHub events:
+`eatime` bucketizes every timestamp in a file by hour-of-day (or weekday) in one
+SIMD pass. It auto-detects two grammars: **ISO-8601** `YYYY-MM-DDTHH:MM:SS`
+(JSON logs, container/k8s output, `journalctl -o short-iso`) and **Common Log
+Format** `[dd/MMM/yyyy:hh:mm:ss]` (the Apache/nginx access-log default), each
+with its own SIMD kernel; force one with `--format iso|clf`. Legacy
+space-separated syslog (`Jun  4 02:13:01`, no year) is still out of scope. Grab a
+real input — a few hours of public GitHub events:
 
 ```bash
 curl -s https://data.gharchive.org/2015-01-01-{12,16,20}.json.gz | gunzip > ~/gharchive.log
@@ -181,7 +183,7 @@ Six v1 runes:
 - **`eajson`** — JSON Lines summarizer (handles systemd / container / web-server shapes)
 - **`eaparquet`** — Parquet metadata (per-column min/max/null_count from the footer)
 - **`ealog`** — log severity scanner (DEBUG/INFO/WARN/ERROR/FATAL + sample lines)
-- **`eatime`** — ISO-8601 timestamp histogram (hour-of-day, weekday, or chronological `series` buckets with robust spike detection)
+- **`eatime`** — timestamp histogram (ISO-8601 + Apache/nginx CLF, auto-detected); hour-of-day, weekday, or chronological `series` buckets with robust spike detection
 - **`eadiff`** — structural delta between any two `--json` rune outputs
 
 Each rune also accepts `--json` for piping into another rune. See

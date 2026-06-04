@@ -54,6 +54,48 @@ pub fn seconds_to_iso(secs: i64) -> String {
     format!("{y:04}-{m:02}-{d:02}T{h:02}:{mi:02}:{s:02}")
 }
 
+/// Parse a Common Log Format instant `[dd/MMM/yyyy:hh:mm:ss` from the
+/// front of `b` to seconds since 2000-01-01. The trailing ` ±HHMM` zone
+/// is ignored — within a single log it is constant and cancels out of
+/// bucket indices, so bucketing happens on the log's own wall clock.
+/// Returns `None` on any malformed field.
+pub fn clf_bytes_to_seconds(b: &[u8]) -> Option<i64> {
+    if b.len() < 21 { return None; }
+    if b[0] != b'[' { return None; }
+    let day:   i64 = parse_uint(&b[1..3])? as i64;
+    if b[3] != b'/' { return None; }
+    let month: i64 = month_from_name(&b[4..7])? as i64;
+    if b[7] != b'/' { return None; }
+    let year:  i64 = parse_uint(&b[8..12])? as i64;
+    if b[12] != b':' { return None; }
+    let hour:   i64 = parse_uint(&b[13..15])? as i64;
+    if b[15] != b':' { return None; }
+    let minute: i64 = parse_uint(&b[16..18])? as i64;
+    if b[18] != b':' { return None; }
+    let second: i64 = parse_uint(&b[19..21])? as i64;
+    if day < 1 || day > 31 { return None; }
+    if hour > 23 || minute > 59 || second > 60 { return None; }
+    let days = days_since_2000(year, month, day);
+    Some(days * 86400 + hour * 3600 + minute * 60 + second)
+}
+
+/// Three-letter English month abbreviation → 1..12, case-insensitive.
+/// Folds each byte with `| 0x20` (the same letter-fold idiom as
+/// `log_level_scan`) so `Oct`/`OCT`/`oct` all match. `None` if not a month.
+fn month_from_name(b: &[u8]) -> Option<u32> {
+    const MONTHS: [&[u8; 3]; 12] = [
+        b"jan", b"feb", b"mar", b"apr", b"may", b"jun",
+        b"jul", b"aug", b"sep", b"oct", b"nov", b"dec",
+    ];
+    let folded = [b[0] | 0x20, b[1] | 0x20, b[2] | 0x20];
+    for (i, m) in MONTHS.iter().enumerate() {
+        if folded == **m {
+            return Some(i as u32 + 1);
+        }
+    }
+    None
+}
+
 fn parse_uint(s: &[u8]) -> Option<u32> {
     let mut acc: u32 = 0;
     for &b in s {

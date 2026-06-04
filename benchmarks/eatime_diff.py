@@ -2,7 +2,8 @@
 """Differential gate: eatime --bucket series bucket counts vs an
 independent regex+pandas grouping on the SAME real file. Validates the
 chronological bucketization (the part most prone to off-by-one / epoch
-bugs), independent of the detection heuristic."""
+bugs), independent of the detection heuristic. Handles both ISO-8601 and
+Common Log Format inputs, picking the dominant grammar like eatime does."""
 import re, json, sys
 import pandas as pd
 from datetime import datetime
@@ -22,15 +23,37 @@ def auto_width(span):
     return NICE[-1]
 
 raw = open(LOG, 'rb').read().decode('utf-8', 'replace')
-pat = re.compile(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}')
-epochs = []
-for m in pat.finditer(raw):
-    try:
-        dt = datetime.strptime(m.group(0), '%Y-%m-%dT%H:%M:%S')  # rejects out-of-range
-    except ValueError:
-        continue  # mirrors eatime's iso_bytes_to_seconds returning None
-    epochs.append(int((dt - EPOCH0).total_seconds()))
+MONTHS = {m: i + 1 for i, m in enumerate(
+    ["jan", "feb", "mar", "apr", "may", "jun",
+     "jul", "aug", "sep", "oct", "nov", "dec"])}
 
+def iso_epochs(text):
+    out = []
+    for m in re.finditer(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}', text):
+        try:
+            dt = datetime.strptime(m.group(0), '%Y-%m-%dT%H:%M:%S')
+        except ValueError:
+            continue  # mirrors iso_bytes_to_seconds returning None
+        out.append(int((dt - EPOCH0).total_seconds()))
+    return out
+
+def clf_epochs(text):
+    out = []
+    pat = re.compile(r'\[(\d{2})/([A-Za-z]{3})/(\d{4}):(\d{2}):(\d{2}):(\d{2})')
+    for d, mon, y, hh, mm, ss in pat.findall(text):
+        month = MONTHS.get(mon.lower())
+        if month is None:
+            continue
+        try:
+            dt = datetime(int(y), month, int(d), int(hh), int(mm), int(ss))
+        except ValueError:
+            continue
+        out.append(int((dt - EPOCH0).total_seconds()))
+    return out
+
+# Pick the dominant grammar, mirroring eatime's detect_format.
+iso, clf = iso_epochs(raw), clf_epochs(raw)
+epochs = clf if len(clf) > len(iso) else iso
 epochs.sort()
 mn, mx = epochs[0], epochs[-1]
 width = auto_width(mx - mn)

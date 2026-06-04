@@ -154,6 +154,7 @@ curl -s https://data.gharchive.org/2015-01-01-{12,16,20}.json.gz | gunzip > ~/gh
 /rune eatime ~/gharchive.log
 /rune eatime --bucket weekday ~/gharchive.log
 /rune eatime --bucket series ~/gharchive.log
+/rune eatime --bucket series ~/access.log     # Apache/nginx CLF, auto-detected
 ```
 
 ```
@@ -199,14 +200,20 @@ runs ~1.4 GB/s. The structural-anchor filter is cheaper per byte than
 `log_level_scan`'s keyword AND-chains — fewer SIMD lane masks per 16-byte chunk,
 scalar walk only on the (rare) candidate hits.
 
-Inputs must use the literal `T` separator (`YYYY-MM-DDTHH:MM:SS`): JSON logs,
-container/k8s output, and `journalctl -o short-iso` match; space-separated syslog
-and Apache common-log timestamps do not.
+eatime auto-detects two timestamp grammars and dispatches the matching SIMD
+kernel: **ISO-8601** `YYYY-MM-DDTHH:MM:SS` (JSON logs, container/k8s output,
+`journalctl -o short-iso`) via `timestamp_scan`, and **Common Log Format**
+`[dd/MMM/yyyy:hh:mm:ss]` (the Apache/nginx access-log default) via `clf_scan`.
+Detection runs both kernels over a 64 KB head and picks whichever matches more,
+so the sniff can never disagree with the scan; force it with `--format iso|clf`.
+Every hit is decoded to epoch-seconds, so all three bucket modes work on both
+grammars. Legacy space-separated syslog (`Jun  4 02:13:01`, no year) stays out
+of scope — extending it needs a per-format kernel and a year-inference policy.
 
 `--bucket weekday` swaps the 24-hour histogram for a 7-bucket Mon..Sun view
-computed via Zeller's congruence on the year/month/day digits the kernel
-already extracted. Same kernel pass, different scalar post-processing. Use it
-for "Tuesday-morning errors" style questions.
+derived from the decoded instant (epoch day 0, 2000-01-01, is a Saturday). Same
+kernel pass, different scalar post-processing. Use it for "Tuesday-morning
+errors" style questions.
 
 ### `--bucket series` — chronological histogram + spike detection
 
@@ -365,12 +372,12 @@ entries) are blocked regardless of format.
   token). Severity values inside JSON-style logs (`"level":"info"`) *do* count,
   since `"` and `:` are boundaries. Sample buffer caps at 5 lines; counts
   remain accurate past that.
-- **eatime**: ISO-8601 prefix `YYYY-MM-DDTHH:MM:SS` only. Other timestamp
-  formats (syslog `May 11 10:54:00`, Unix epoch, RFC 2822, freeform) are
-  intentionally out of scope — extending requires per-format kernels, not a
-  flag. `--bucket hour` validates hour ≤ 23; `--bucket weekday` validates
-  month 1-12 and day 1-31 but doesn't reject impossible dates like
-  `2026-02-30T...` (Zeller produces a weekday anyway). Buckets cap at 16M
+- **eatime**: two grammars, auto-detected (or forced with `--format iso|clf`):
+  ISO-8601 `YYYY-MM-DDTHH:MM:SS` and Common Log Format `[dd/MMM/yyyy:hh:mm:ss]`.
+  Other formats (legacy syslog `May 11 10:54:00`, Unix epoch, RFC 2822, freeform)
+  are out of scope — each needs its own kernel, and yearless formats need a
+  year-inference policy. CLF's `±HHMM` zone is ignored (bucketing is on the log's
+  own wall clock; a constant zone cancels out of bucket indices). Buckets cap at 16M
   positions per call. `--bucket series` auto-selects bucket width (1s…1w,
   ~120 buckets), flags upward spikes only via a robust median/MAD z-score
   (threshold 4, with a ≥3×/10-event ratio fallback for flat series), and

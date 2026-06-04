@@ -15,7 +15,7 @@
 use super::{Rune, RuneResult, OutputSafety};
 use super::common::{resolve_path, open_capped, truncate_answer, PathError};
 use super::output::{Anomaly, Category, RuneOutput, Source, Totals};
-use super::timekey::{iso_bytes_to_seconds, seconds_to_iso};
+use super::timekey::{clf_bytes_to_seconds, iso_bytes_to_seconds, seconds_to_iso};
 use super::anomaly;
 use crate::kernels::ffi;
 use std::path::PathBuf;
@@ -40,19 +40,20 @@ impl Rune for Eatime {
          Zeller's congruence on the kernel positions; --bucket series \
          emits a chronological histogram (auto bucket width) with \
          robust spike detection — buckets where the event rate broke \
-         from baseline are reported as anomalies. Recognizes \
-         YYYY-MM-DDTHH:MM:SS anywhere in the file. Args: \
-         [--json] [--bucket hour|weekday|series] <path>."
+         from baseline are reported as anomalies. Auto-detects ISO-8601 \
+         (YYYY-MM-DDTHH:MM:SS) and Common Log Format ([dd/MMM/yyyy:hh:mm:ss], \
+         the Apache/nginx access-log default); force with --format. Args: \
+         [--json] [--bucket hour|weekday|series] [--format iso|clf|auto] <path>."
     }
-    fn usage(&self) -> &'static str { "eatime [--json] [--bucket hour|weekday|series] <path>" }
+    fn usage(&self) -> &'static str { "eatime [--json] [--bucket hour|weekday|series] [--format iso|clf|auto] <path>" }
     fn output_safety(&self) -> OutputSafety { OutputSafety::UntrustedQuoted }
 
     fn run(&self, args: &str) -> RuneResult {
         let t0 = Instant::now();
         let parsed = parse_args(args);
         let output = match parsed {
-            Ok((path, json_mode, bucket)) => {
-                let r = execute(&path, bucket);
+            Ok((path, json_mode, bucket, format)) => {
+                let r = execute(&path, bucket, format);
                 (r, json_mode)
             }
             Err((msg, json_mode)) => (error_output(&msg), json_mode),
@@ -78,9 +79,21 @@ impl Rune for Eatime {
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Bucket { Hour, Weekday, Series }
 
-fn parse_args(args: &str) -> Result<(String, bool, Bucket), (String, bool)> {
+/// Timestamp grammar. `Iso` = `YYYY-MM-DDTHH:MM:SS` (timestamp_scan kernel);
+/// `Clf` = `[dd/MMM/yyyy:hh:mm:ss` Common Log Format (clf_scan kernel).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Format { Iso, Clf }
+
+impl Format {
+    fn tag(self) -> &'static str {
+        match self { Format::Iso => "iso8601", Format::Clf => "clf" }
+    }
+}
+
+fn parse_args(args: &str) -> Result<(String, bool, Bucket, Option<Format>), (String, bool)> {
     let mut json_mode = false;
     let mut bucket = Bucket::Hour;
+    let mut format: Option<Format> = None;
     let mut path_tokens: Vec<&str> = Vec::new();
     let mut tokens = args.split_whitespace();
     while let Some(tok) = tokens.next() {
@@ -99,21 +112,34 @@ fn parse_args(args: &str) -> Result<(String, bool, Bucket), (String, bool)> {
                     json_mode,
                 )),
             },
+            "--format" => match tokens.next() {
+                Some("auto")               => format = None,
+                Some("iso") | Some("iso8601") => format = Some(Format::Iso),
+                Some("clf")                => format = Some(Format::Clf),
+                Some(other) => return Err((
+                    format!("unknown --format: {other} (expected iso|clf|auto)"),
+                    json_mode,
+                )),
+                None => return Err((
+                    "missing value after --format".to_string(),
+                    json_mode,
+                )),
+            },
             other => path_tokens.push(other),
         }
     }
     if path_tokens.is_empty() {
         return Err((
-            "usage: eatime [--json] [--bucket hour|weekday|series] <path>".to_string(),
+            "usage: eatime [--json] [--bucket hour|weekday|series] [--format iso|clf|auto] <path>".to_string(),
             json_mode,
         ));
     }
-    Ok((path_tokens.join(" "), json_mode, bucket))
+    Ok((path_tokens.join(" "), json_mode, bucket, format))
 }
 
-fn execute(path: &str, bucket: Bucket) -> RuneOutput {
+fn execute(path: &str, bucket: Bucket, format: Option<Format>) -> RuneOutput {
     if path.is_empty() {
-        return error_output("usage: eatime [--json] [--bucket hour|weekday|series] <path>");
+        return error_output("usage: eatime [--json] [--bucket hour|weekday|series] [--format iso|clf|auto] <path>");
     }
     let home = crate::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
     let resolved = match resolve_path(path, &home) {
@@ -146,7 +172,7 @@ fn execute(path: &str, bucket: Bucket) -> RuneOutput {
         ));
     }
 
-    build_output(&bytes, resolved_str, bucket)
+    build_output(&bytes, resolved_str, bucket, format)
 }
 
 fn error_output(msg: &str) -> RuneOutput {
@@ -156,16 +182,21 @@ fn error_output(msg: &str) -> RuneOutput {
     out
 }
 
-fn build_output(bytes: &[u8], path: String, bucket: Bucket) -> RuneOutput {
-    let positions = scan_timestamps(bytes);
-    let scan_us = positions.scan_us;
+fn build_output(bytes: &[u8], path: String, bucket: Bucket, fmt: Option<Format>) -> RuneOutput {
+    // Auto-detect the grammar when not forced, then scan with that kernel
+    // and decode every hit to epoch-seconds. All three bucket modes work
+    // off the epoch list, so CLF and ISO share one code path.
+    let format = fmt.unwrap_or_else(|| detect_format(bytes));
+    let scan = scan_for(bytes, format, MAX_POSITIONS);
+    let scan_us = scan.scan_us;
+    let epochs = positions_to_epochs(bytes, &scan.positions, format);
 
     let mut out = RuneOutput::new("eatime", RUNE_VERSION);
-    let (categories, total_timestamps) = match bucket {
-        Bucket::Hour    => hour_buckets(bytes, &positions.positions),
-        Bucket::Weekday => weekday_buckets(bytes, &positions.positions),
+    let (categories, total) = match bucket {
+        Bucket::Hour    => hour_buckets(&epochs),
+        Bucket::Weekday => weekday_buckets(&epochs),
         Bucket::Series  => {
-            let (cats, total, anomalies) = series_buckets(bytes, &positions.positions);
+            let (cats, total, anomalies) = series_buckets(&epochs);
             out.anomalies = anomalies;
             (cats, total)
         }
@@ -174,9 +205,9 @@ fn build_output(bytes: &[u8], path: String, bucket: Bucket) -> RuneOutput {
     out.source = Some(Source {
         path,
         bytes:  bytes.len() as u64,
-        format: "iso8601".to_string(),
+        format: format.tag().to_string(),
     });
-    out.totals = Totals { rows: total_timestamps, scan_us };
+    out.totals = Totals { rows: total, scan_us };
     out.categories = categories;
     out
 }
@@ -186,18 +217,27 @@ struct ScanResult {
     scan_us:   u64,
 }
 
-fn scan_timestamps(bytes: &[u8]) -> ScanResult {
+/// FFI signature shared by every position-scan kernel.
+type ScanFn = unsafe fn(*const u8, i32, *mut i32, i32, *mut i32, *mut u8);
+
+/// Run the format's position kernel over `bytes`, capturing up to
+/// `max_positions` hits.
+fn scan_for(bytes: &[u8], format: Format, max_positions: usize) -> ScanResult {
     if bytes.is_empty() {
         return ScanResult { positions: Vec::new(), scan_us: 0 };
     }
+    let kernel: ScanFn = match format {
+        Format::Iso => ffi::timestamp_scan,
+        Format::Clf => ffi::clf_scan,
+    };
     let t_scan = Instant::now();
-    let mut positions = vec![0i32; MAX_POSITIONS];
+    let mut positions = vec![0i32; max_positions];
     let mut n_positions = 0i32;
     let mut scratch = [0u8; 16];
     unsafe {
-        ffi::timestamp_scan(
+        kernel(
             bytes.as_ptr(), bytes.len() as i32,
-            positions.as_mut_ptr(), MAX_POSITIONS as i32, &mut n_positions,
+            positions.as_mut_ptr(), max_positions as i32, &mut n_positions,
             scratch.as_mut_ptr(),
         );
     }
@@ -205,60 +245,66 @@ fn scan_timestamps(bytes: &[u8]) -> ScanResult {
     ScanResult { positions, scan_us: t_scan.elapsed().as_micros() as u64 }
 }
 
-fn hour_buckets(bytes: &[u8], positions: &[i32]) -> (Vec<Category>, u64) {
-    let mut counts = [0u64; 24];
-    let mut total = 0u64;
+/// Sniff the timestamp grammar by running both kernels over a head sample
+/// and picking whichever matches more. Using the kernels themselves means
+/// the sniff can never disagree with the scan that follows.
+fn detect_format(bytes: &[u8]) -> Format {
+    const SNIFF_BYTES: usize = 64 * 1024;
+    const SNIFF_CAP: usize = 4096;
+    let head = &bytes[..bytes.len().min(SNIFF_BYTES)];
+    let iso = scan_for(head, Format::Iso, SNIFF_CAP).positions.len();
+    let clf = scan_for(head, Format::Clf, SNIFF_CAP).positions.len();
+    if clf > iso { Format::Clf } else { Format::Iso }
+}
+
+/// Decode each kernel position to epoch-seconds with the format's decoder;
+/// positions that don't decode (truncated / out-of-range) are dropped.
+fn positions_to_epochs(bytes: &[u8], positions: &[i32], format: Format) -> Vec<i64> {
+    let mut epochs: Vec<i64> = Vec::with_capacity(positions.len());
     for &pos in positions {
         let p = pos as usize;
-        if p + 13 > bytes.len() { continue; }
-        let h_tens = bytes[p + 11].wrapping_sub(b'0');
-        let h_ones = bytes[p + 12].wrapping_sub(b'0');
-        if h_tens > 9 || h_ones > 9 { continue; }
-        let hour = (h_tens as usize) * 10 + (h_ones as usize);
-        if hour >= 24 { continue; }
+        if p >= bytes.len() { continue; }
+        let decoded = match format {
+            Format::Iso => iso_bytes_to_seconds(&bytes[p..]),
+            Format::Clf => clf_bytes_to_seconds(&bytes[p..]),
+        };
+        if let Some(secs) = decoded { epochs.push(secs); }
+    }
+    epochs
+}
+
+fn hour_buckets(epochs: &[i64]) -> (Vec<Category>, u64) {
+    let mut counts = [0u64; 24];
+    for &e in epochs {
+        let hour = (e.rem_euclid(86400) / 3600) as usize;
         counts[hour] += 1;
-        total += 1;
     }
     let categories = (0..24).map(|h| Category {
         name:  format!("{h:02}:00"),
         count: counts[h],
     }).collect();
-    (categories, total)
+    (categories, epochs.len() as u64)
 }
 
 const WEEKDAY_NAMES: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
-fn weekday_buckets(bytes: &[u8], positions: &[i32]) -> (Vec<Category>, u64) {
+fn weekday_buckets(epochs: &[i64]) -> (Vec<Category>, u64) {
     let mut counts = [0u64; 7];
-    let mut total  = 0u64;
-    for &pos in positions {
-        let p = pos as usize;
-        if p + 10 > bytes.len() { continue; }
-        // YYYY at p+0..p+4, MM at p+5..p+7, DD at p+8..p+10.
-        let (Some(year), Some(month), Some(day)) = (
-            parse_uint(&bytes[p..p + 4]),
-            parse_uint(&bytes[p + 5..p + 7]),
-            parse_uint(&bytes[p + 8..p + 10]),
-        ) else { continue };
-        if month < 1 || month > 12 || day < 1 || day > 31 { continue; }
-        let wd = zeller_weekday(year as i64, month as i64, day as i64);
-        counts[wd] += 1;
-        total += 1;
+    for &e in epochs {
+        counts[weekday_index(e)] += 1;
     }
     let categories = (0..7).map(|i| Category {
         name:  WEEKDAY_NAMES[i].to_string(),
         count: counts[i],
     }).collect();
-    (categories, total)
+    (categories, epochs.len() as u64)
 }
 
-fn parse_uint(s: &[u8]) -> Option<u32> {
-    let mut acc: u32 = 0;
-    for &b in s {
-        if !(b'0'..=b'9').contains(&b) { return None; }
-        acc = acc * 10 + (b - b'0') as u32;
-    }
-    Some(acc)
+/// Epoch day 0 (2000-01-01) was a Saturday = index 5 in WEEKDAY_NAMES
+/// (Mon=0). Works for negative epochs via floored div/mod.
+fn weekday_index(epoch: i64) -> usize {
+    let days = epoch.div_euclid(86400);
+    (days.rem_euclid(7) as usize + 5) % 7
 }
 
 /// Candidate chronological bucket widths in seconds: 1s, 5s, 10s, 30s,
@@ -281,15 +327,7 @@ fn auto_width(span_secs: i64) -> i64 {
 /// position to epoch-seconds, bins the span into auto-width buckets, and
 /// hands the count series to `anomaly::detect`. Buckets are labelled with
 /// the ISO timestamp of their start instant.
-fn series_buckets(bytes: &[u8], positions: &[i32]) -> (Vec<Category>, u64, Vec<Anomaly>) {
-    let mut epochs: Vec<i64> = Vec::with_capacity(positions.len());
-    for &pos in positions {
-        let p = pos as usize;
-        if p + 19 > bytes.len() { continue; }
-        if let Some(secs) = iso_bytes_to_seconds(&bytes[p..]) {
-            epochs.push(secs);
-        }
-    }
+fn series_buckets(epochs: &[i64]) -> (Vec<Category>, u64, Vec<Anomaly>) {
     if epochs.is_empty() {
         return (Vec::new(), 0, Vec::new());
     }
@@ -298,27 +336,15 @@ fn series_buckets(bytes: &[u8], positions: &[i32]) -> (Vec<Category>, u64, Vec<A
     let width = auto_width(max - min);
     let n = ((max - min) / width) as usize + 1;
     let mut counts = vec![0u64; n];
-    for &e in &epochs {
+    for &e in epochs {
         counts[((e - min) / width) as usize] += 1;
     }
-    let total = epochs.len() as u64;
     let categories = (0..n).map(|i| Category {
         name:  seconds_to_iso(min + (i as i64) * width),
         count: counts[i],
     }).collect();
     let anomalies = anomaly::detect(&counts, min, width);
-    (categories, total, anomalies)
-}
-
-// Zeller's congruence (Gregorian). Returns 0=Mon..6=Sun so the
-// emitted category order matches the WEEKDAY_NAMES array.
-fn zeller_weekday(mut year: i64, mut month: i64, day: i64) -> usize {
-    if month < 3 { month += 12; year -= 1; }
-    let k = year % 100;
-    let j = year / 100;
-    let h = (day + 13 * (month + 1) / 5 + k + k / 4 + j / 4 + 5 * j) % 7;
-    // Zeller h: 0=Sat, 1=Sun, 2=Mon, ..., 6=Fri.
-    ((h + 5) % 7) as usize
+    (categories, epochs.len() as u64, anomalies)
 }
 
 fn format_text(out: &RuneOutput) -> String {

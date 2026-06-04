@@ -118,6 +118,28 @@ pub unsafe fn timestamp_scan(
     );
 }
 
+/// Scan `text` for Common Log Format timestamps (`[dd/MMM/yyyy:hh:mm:ss`,
+/// the Apache/nginx access-log default) and emit each match's `[` byte
+/// offset. Used by `eatime` — the caller decodes the fixed-width fields
+/// (textual month, zone) from `text[offset..offset+21]`.
+///
+/// # Safety
+/// Identical contract to [`timestamp_scan`]: `text` readable for `len`
+/// bytes; `out_positions` writable for `max_positions` `i32`s when
+/// positive; `out_n_positions` a writable `i32` (zeroed on entry);
+/// `scratch` writable for 16 bytes (touched only when the SIMD body runs).
+pub unsafe fn clf_scan(
+    text: *const u8, len: i32,
+    out_positions: *mut i32, max_positions: i32, out_n_positions: *mut i32,
+    scratch: *mut u8,
+) {
+    (k().clf_scan)(
+        text, len,
+        out_positions, max_positions, out_n_positions,
+        scratch,
+    );
+}
+
 /// Streaming stats over `len` f32 elements. Writes count, sum, min, max.
 ///
 /// # Safety
