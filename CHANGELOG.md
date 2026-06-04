@@ -8,6 +8,38 @@ order.
 
 ## [Unreleased]
 
+## [2.1.0] — 2026-06-04
+
+Feature release for `eatime`: the rune graduates from *describing* a log
+to *detecting when its rate broke*, and learns a second timestamp
+grammar.
+
+- **`--bucket series` — chronological spike detection.**  Where `hour`
+  and `weekday` collapse the time axis, `series` keeps it: it bins the
+  file's span into auto-width buckets (1s…1w, ~120 buckets) and flags the
+  buckets where the event rate broke from a **robust median/MAD
+  baseline**.  Median-not-mean by design, so a large spike cannot inflate
+  its own threshold and hide; a flat (MAD = 0) series falls back to a
+  ratio test.  Spikes surface in `--json` as an additive `anomalies[]`
+  array (`bucket`, `count`, `baseline`, `ratio`, `score`), emitted only
+  when non-empty so every existing `--json` consumer and `eadiff` are
+  byte-for-byte unaffected.
+- **Common Log Format support.**  `eatime` now auto-detects ISO-8601 and
+  the Apache/nginx access-log format `[dd/MMM/yyyy:hh:mm:ss]` (new
+  `clf_scan` SIMD kernel, same cross-arch anchor idiom as
+  `timestamp_scan`, zero new compiler intrinsics), and dispatches the
+  matching kernel.  Detection runs both kernels over a 64 KB head and
+  picks the dominant grammar, so the sniff can never disagree with the
+  scan; force it with `--format iso|clf|auto`.  All three bucket modes
+  work on both grammars via a unified epoch path.
+- **Tooling.**  `benchmarks/eatime_diff.py` validates `series` bucket
+  counts bit-for-bit against an independent pandas/regex grouping (ISO and
+  CLF); verified on a 313K-timestamp systemd journal and cross-arch
+  byte-identical on Raspberry Pi 5 (aarch64 NEON) vs x86_64.
+
+No output contract changes for existing modes — `anomalies[]` is purely
+additive and the ISO hour/weekday/`--json` output is unchanged.
+
 ## [2.0.8] — 2026-06-03
 
 Correctness-hardening release for the rune family.  A real-input
