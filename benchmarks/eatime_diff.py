@@ -62,5 +62,9 @@ if ok:
     anoms = j.get('anomalies', [])
     print(f"      anomalies reported: {len(anoms)}")
     for a in anoms:
-        print(f"        {a['bucket']} count={a['count']} ratio={a['ratio']:.2f} z={a['score']:.1f}")
+        # ratio/score are JSON null on a median=0 baseline (infinite ratio);
+        # the schema emits non-finite floats as null by design.
+        rstr = f"{a['ratio']:.2f}x" if isinstance(a.get('ratio'), (int, float)) else "inf"
+        sstr = f"{a['score']:.1f}" if isinstance(a.get('score'), (int, float)) else "n/a"
+        print(f"        {a['bucket']} count={a['count']} ratio={rstr} z={sstr} baseline={a['baseline']}")
 sys.exit(0 if ok else 1)
