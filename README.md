@@ -168,6 +168,34 @@ the point — a large spike can't inflate its own threshold and hide. Flat or
 naturally-bursty data produces zero anomalies. Spikes appear in `--json` as an
 additive `anomalies[]` array; older `--json` consumers are unaffected.
 
+**Two grammars, auto-detected.** eatime reads both ISO-8601 and **Common Log
+Format** (`[dd/MMM/yyyy:hh:mm:ss]`, the Apache/nginx access-log default) — a
+separate SIMD kernel each, picked by sniffing the file. Force one with
+`--format iso|clf`. So pointing it at a raw web-server log just works.
+
+**Then the model narrates it.** Without `--json`, the SIMD-detected anomalies go
+to the on-board Gemma model, which turns the numbers into an incident summary —
+the whole pipeline in one 4 MB binary, no cloud. Here it is on a **Raspberry Pi
+5** reading an Apache access log:
+
+```
+> /rune eatime --bucket series ~/access.log     # CLF auto-detected, Pi 5 aarch64 NEON
+timestamps:  1292
+scan:        0 ms                               # SIMD scan: 716 µs
+peak bucket: 2026-06-11T14:08:36 (342 timestamps)
+anomalies:   2 spike(s) detected
+  2026-06-11T13:08:36 count=79  (4.5× baseline 18)
+  2026-06-11T14:08:36 count=342 (19.5× baseline 18)
+
+  Significant spikes in activity were detected during this period, with one
+  time frame showing nearly twenty times the normal volume. The busiest
+  moment occurred during the afternoon of June 11th.
+```
+
+The narration is grounded in deterministic SIMD output — the model summarizes
+numbers it cannot fabricate, not a freeform read of the log. "Nearly twenty
+times" is the measured 19.5×; "the afternoon of June 11th" is the 14:08 bucket.
+
 Add `--json` for the stable schema that pipes into other runes (e.g. `eadiff`):
 
 ```bash
