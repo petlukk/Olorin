@@ -14,7 +14,9 @@
 
 use super::{Rune, RuneResult, OutputSafety};
 use super::common::{resolve_path, open_capped, truncate_answer, PathError};
-use super::output::{Category, RuneOutput, Source, Totals};
+use super::output::{Anomaly, Category, RuneOutput, Source, Totals};
+use super::timekey::{iso_bytes_to_seconds, seconds_to_iso};
+use super::anomaly;
 use crate::kernels::ffi;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -35,11 +37,14 @@ impl Rune for Eatime {
         "Bucketize ISO-8601 timestamps in a file via SIMD. Default \
          --bucket hour emits a 24-slot hour-of-day histogram; \
          --bucket weekday emits a 7-slot Mon..Sun histogram via \
-         Zeller's congruence on the kernel positions. Recognizes \
+         Zeller's congruence on the kernel positions; --bucket series \
+         emits a chronological histogram (auto bucket width) with \
+         robust spike detection — buckets where the event rate broke \
+         from baseline are reported as anomalies. Recognizes \
          YYYY-MM-DDTHH:MM:SS anywhere in the file. Args: \
-         [--json] [--bucket hour|weekday] <path>."
+         [--json] [--bucket hour|weekday|series] <path>."
     }
-    fn usage(&self) -> &'static str { "eatime [--json] [--bucket hour|weekday] <path>" }
+    fn usage(&self) -> &'static str { "eatime [--json] [--bucket hour|weekday|series] <path>" }
     fn output_safety(&self) -> OutputSafety { OutputSafety::UntrustedQuoted }
 
     fn run(&self, args: &str) -> RuneResult {
@@ -71,7 +76,7 @@ impl Rune for Eatime {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum Bucket { Hour, Weekday }
+enum Bucket { Hour, Weekday, Series }
 
 fn parse_args(args: &str) -> Result<(String, bool, Bucket), (String, bool)> {
     let mut json_mode = false;
@@ -84,8 +89,9 @@ fn parse_args(args: &str) -> Result<(String, bool, Bucket), (String, bool)> {
             "--bucket" => match tokens.next() {
                 Some("hour")    => bucket = Bucket::Hour,
                 Some("weekday") => bucket = Bucket::Weekday,
+                Some("series")  => bucket = Bucket::Series,
                 Some(other) => return Err((
-                    format!("unknown --bucket: {other} (expected hour|weekday)"),
+                    format!("unknown --bucket: {other} (expected hour|weekday|series)"),
                     json_mode,
                 )),
                 None => return Err((
@@ -98,7 +104,7 @@ fn parse_args(args: &str) -> Result<(String, bool, Bucket), (String, bool)> {
     }
     if path_tokens.is_empty() {
         return Err((
-            "usage: eatime [--json] [--bucket hour|weekday] <path>".to_string(),
+            "usage: eatime [--json] [--bucket hour|weekday|series] <path>".to_string(),
             json_mode,
         ));
     }
@@ -107,7 +113,7 @@ fn parse_args(args: &str) -> Result<(String, bool, Bucket), (String, bool)> {
 
 fn execute(path: &str, bucket: Bucket) -> RuneOutput {
     if path.is_empty() {
-        return error_output("usage: eatime [--json] [--bucket hour|weekday] <path>");
+        return error_output("usage: eatime [--json] [--bucket hour|weekday|series] <path>");
     }
     let home = crate::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
     let resolved = match resolve_path(path, &home) {
@@ -154,12 +160,17 @@ fn build_output(bytes: &[u8], path: String, bucket: Bucket) -> RuneOutput {
     let positions = scan_timestamps(bytes);
     let scan_us = positions.scan_us;
 
+    let mut out = RuneOutput::new("eatime", RUNE_VERSION);
     let (categories, total_timestamps) = match bucket {
         Bucket::Hour    => hour_buckets(bytes, &positions.positions),
         Bucket::Weekday => weekday_buckets(bytes, &positions.positions),
+        Bucket::Series  => {
+            let (cats, total, anomalies) = series_buckets(bytes, &positions.positions);
+            out.anomalies = anomalies;
+            (cats, total)
+        }
     };
 
-    let mut out = RuneOutput::new("eatime", RUNE_VERSION);
     out.source = Some(Source {
         path,
         bytes:  bytes.len() as u64,
@@ -250,6 +261,55 @@ fn parse_uint(s: &[u8]) -> Option<u32> {
     Some(acc)
 }
 
+/// Candidate chronological bucket widths in seconds: 1s, 5s, 10s, 30s,
+/// 1m, 5m, 10m, 30m, 1h, 6h, 12h, 1d, 1w. `auto_width` snaps up to the
+/// first width that keeps the series near `TARGET_BUCKETS`.
+const NICE_WIDTHS: [i64; 13] =
+    [1, 5, 10, 30, 60, 300, 600, 1800, 3600, 21600, 43200, 86400, 604800];
+const TARGET_BUCKETS: i64 = 120;
+
+fn auto_width(span_secs: i64) -> i64 {
+    if span_secs <= 0 { return 1; }
+    let raw = span_secs / TARGET_BUCKETS;
+    for w in NICE_WIDTHS {
+        if w >= raw { return w; }
+    }
+    NICE_WIDTHS[NICE_WIDTHS.len() - 1]
+}
+
+/// Chronological histogram with spike detection. Decodes each kernel
+/// position to epoch-seconds, bins the span into auto-width buckets, and
+/// hands the count series to `anomaly::detect`. Buckets are labelled with
+/// the ISO timestamp of their start instant.
+fn series_buckets(bytes: &[u8], positions: &[i32]) -> (Vec<Category>, u64, Vec<Anomaly>) {
+    let mut epochs: Vec<i64> = Vec::with_capacity(positions.len());
+    for &pos in positions {
+        let p = pos as usize;
+        if p + 19 > bytes.len() { continue; }
+        if let Some(secs) = iso_bytes_to_seconds(&bytes[p..]) {
+            epochs.push(secs);
+        }
+    }
+    if epochs.is_empty() {
+        return (Vec::new(), 0, Vec::new());
+    }
+    let min = *epochs.iter().min().unwrap();
+    let max = *epochs.iter().max().unwrap();
+    let width = auto_width(max - min);
+    let n = ((max - min) / width) as usize + 1;
+    let mut counts = vec![0u64; n];
+    for &e in &epochs {
+        counts[((e - min) / width) as usize] += 1;
+    }
+    let total = epochs.len() as u64;
+    let categories = (0..n).map(|i| Category {
+        name:  seconds_to_iso(min + (i as i64) * width),
+        count: counts[i],
+    }).collect();
+    let anomalies = anomaly::detect(&counts, min, width);
+    (categories, total, anomalies)
+}
+
 // Zeller's congruence (Gregorian). Returns 0=Mon..6=Sun so the
 // emitted category order matches the WEEKDAY_NAMES array.
 fn zeller_weekday(mut year: i64, mut month: i64, day: i64) -> usize {
@@ -262,6 +322,12 @@ fn zeller_weekday(mut year: i64, mut month: i64, day: i64) -> usize {
 }
 
 fn format_text(out: &RuneOutput) -> String {
+    // Series labels are ISO instants (contain 'T'); they also end in
+    // ":00" at minute/hour widths, so this branch must precede the
+    // hour-of-day heuristic below or a timeline would mislabel itself.
+    if out.categories.first().map_or(false, |c| c.name.contains('T')) {
+        return format_series_text(out);
+    }
     let src = out.source.as_ref().expect("build_output populates source on success");
     let total = out.totals.rows;
     let mut buf = String::with_capacity(512);
@@ -298,6 +364,49 @@ fn format_text(out: &RuneOutput) -> String {
     }
     if peak > 0 {
         buf.push_str(&format!("\npeak: {peak_name} ({peak} timestamps)\n"));
+    }
+    buf
+}
+
+// Series mode prints a compact incident summary — span, peak bucket,
+// and the flagged spikes — rather than every bucket (the full series
+// lives in `categories[]` for `--json` consumers).
+fn format_series_text(out: &RuneOutput) -> String {
+    let src = out.source.as_ref().expect("build_output populates source on success");
+    let total = out.totals.rows;
+    let mut buf = String::with_capacity(512);
+    buf.push_str(&format!("bytes:       {}\n", format_bytes(src.bytes as usize)));
+    buf.push_str(&format!("timestamps:  {total}\n"));
+    buf.push_str(&format!("buckets:     {}\n", out.categories.len()));
+    buf.push_str(&format!("scan:        {} ms\n", out.totals.scan_us / 1000));
+    buf.push('\n');
+    if total == 0 {
+        buf.push_str("(no ISO-8601 timestamps found)\n");
+        return buf;
+    }
+    if let (Some(first), Some(last)) = (out.categories.first(), out.categories.last()) {
+        buf.push_str(&format!("span:        {} .. {}\n", first.name, last.name));
+    }
+    let peak = out.categories.iter().max_by_key(|c| c.count);
+    if let Some(p) = peak {
+        buf.push_str(&format!("peak bucket: {} ({} timestamps)\n", p.name, p.count));
+    }
+    buf.push('\n');
+    if out.anomalies.is_empty() {
+        buf.push_str("anomalies:   none (rate within baseline)\n");
+    } else {
+        buf.push_str(&format!("anomalies:   {} spike(s) detected\n", out.anomalies.len()));
+        for a in &out.anomalies {
+            let ratio = if a.ratio.is_finite() {
+                format!("{:.1}×", a.ratio)
+            } else {
+                "∞".to_string()
+            };
+            buf.push_str(&format!(
+                "  {} count={} ({ratio} baseline {:.0})\n",
+                a.bucket, a.count, a.baseline
+            ));
+        }
     }
     buf
 }

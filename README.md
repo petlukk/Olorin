@@ -141,6 +141,31 @@ isolation on a dense fixture, hits **6.34 GB/s on Ryzen 7700X (SSE2)** and **1.8
 GB/s on Pi 5 (NEON)** — see
 [`benchmarks/timestamp_scan_bench.c`](benchmarks/timestamp_scan_bench.c).
 
+**Spike detection.** `--bucket series` swaps the hour-of-day view for a
+chronological histogram (bucket width auto-selected to ~120 buckets) and flags
+the buckets where the event rate broke from a robust **median/MAD** baseline —
+so eatime goes from *describing* a log to *finding the moment it broke*:
+
+```
+> /rune eatime --bucket series ~/journal-24h.log    # real systemd journal, last 24h
+timestamps:  7629
+buckets:     48
+scan:        1 ms
+span:        2026-06-03T09:01:37 .. 2026-06-04T08:31:37
+peak bucket: 2026-06-03T23:01:37 (207 timestamps)
+anomalies:   4 spike(s) detected
+  2026-06-03T13:01:37 count=206 (1.3× baseline 154)
+  2026-06-03T22:31:37 count=199 (1.3× baseline 154)
+  2026-06-03T23:01:37 count=207 (1.3× baseline 154)
+  ...
+```
+
+The flags are 7–9σ events: the journal's rate is normally so steady that a 30 %
+bump is a genuine statistical outlier. A *robust* baseline (median, not mean) is
+the point — a large spike can't inflate its own threshold and hide. Flat or
+naturally-bursty data produces zero anomalies. Spikes appear in `--json` as an
+additive `anomalies[]` array; older `--json` consumers are unaffected.
+
 Add `--json` for the stable schema that pipes into other runes (e.g. `eadiff`):
 
 ```bash
@@ -156,7 +181,7 @@ Six v1 runes:
 - **`eajson`** — JSON Lines summarizer (handles systemd / container / web-server shapes)
 - **`eaparquet`** — Parquet metadata (per-column min/max/null_count from the footer)
 - **`ealog`** — log severity scanner (DEBUG/INFO/WARN/ERROR/FATAL + sample lines)
-- **`eatime`** — ISO-8601 timestamp histogram (hour-of-day or weekday buckets)
+- **`eatime`** — ISO-8601 timestamp histogram (hour-of-day, weekday, or chronological `series` buckets with robust spike detection)
 - **`eadiff`** — structural delta between any two `--json` rune outputs
 
 Each rune also accepts `--json` for piping into another rune. See

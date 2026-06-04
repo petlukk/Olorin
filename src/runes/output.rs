@@ -136,6 +136,19 @@ pub struct Totals {
     pub scan_us: u64,
 }
 
+/// A bucket whose count broke from the robust baseline. eatime's
+/// `--bucket series` emits these for upward rate spikes; `score` is the
+/// robust z-score `(count − baseline) / (1.4826·MAD)`, or the ratio to
+/// baseline when MAD is zero (a perfectly flat series).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Anomaly {
+    pub bucket:   String,
+    pub count:    u64,
+    pub baseline: f64,
+    pub ratio:    f64,
+    pub score:    f64,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuneOutput {
     pub schema_version: i64,
@@ -147,6 +160,9 @@ pub struct RuneOutput {
     pub fields:         Vec<FieldStats>,
     pub categories:     Vec<Category>,
     pub samples:        Vec<Sample>,
+    /// Detected spikes (eatime series mode). Serialized only when
+    /// non-empty, so every other rune's JSON is byte-identical to v1.
+    pub anomalies:      Vec<Anomaly>,
     pub error:          Option<String>,
 }
 
@@ -162,6 +178,7 @@ impl RuneOutput {
             fields:         Vec::new(),
             categories:     Vec::new(),
             samples:        Vec::new(),
+            anomalies:      Vec::new(),
             error:          None,
         }
     }
@@ -179,6 +196,11 @@ impl RuneOutput {
         o.set("fields",     Value::Array(self.fields.iter().map(|f| obj_value(field_to_obj(f))).collect()));
         o.set("categories", Value::Array(self.categories.iter().map(|c| obj_value(category_to_obj(c))).collect()));
         o.set("samples",    Value::Array(self.samples.iter().map(|s| obj_value(sample_to_obj(s))).collect()));
+        if !self.anomalies.is_empty() {
+            o.set("anomalies", Value::Array(
+                self.anomalies.iter().map(|a| obj_value(anomaly_to_obj(a))).collect(),
+            ));
+        }
         if let Some(e) = &self.error {
             o.set("error", Value::Str(e.clone()));
         }
@@ -201,6 +223,7 @@ impl RuneOutput {
             fields:       array_of(&obj, "fields",     field_from_obj)?,
             categories:   array_of(&obj, "categories", category_from_obj)?,
             samples:      array_of(&obj, "samples",    sample_from_obj)?,
+            anomalies:    array_of(&obj, "anomalies",  anomaly_from_obj)?,
             error:        obj.get_str("error").map(str::to_string),
         })
     }
@@ -281,6 +304,16 @@ fn category_to_obj(c: &Category) -> Object {
     let mut o = Object::new();
     o.set("name",  Value::Str(c.name.clone()));
     o.set("count", u64_value(c.count));
+    o
+}
+
+fn anomaly_to_obj(a: &Anomaly) -> Object {
+    let mut o = Object::new();
+    o.set("bucket",   Value::Str(a.bucket.clone()));
+    o.set("count",    u64_value(a.count));
+    o.set("baseline", finite_f64(a.baseline));
+    o.set("ratio",    finite_f64(a.ratio));
+    o.set("score",    finite_f64(a.score));
     o
 }
 
@@ -402,6 +435,16 @@ fn category_from_obj(o: &Object) -> Result<Category, String> {
     Ok(Category {
         name:  o.get_str("name").ok_or("category.name missing")?.to_string(),
         count: u64_from(o, "count")?,
+    })
+}
+
+fn anomaly_from_obj(o: &Object) -> Result<Anomaly, String> {
+    Ok(Anomaly {
+        bucket:   o.get_str("bucket").ok_or("anomaly.bucket missing")?.to_string(),
+        count:    u64_from(o, "count")?,
+        baseline: f64_or_zero(o, "baseline"),
+        ratio:    f64_or_zero(o, "ratio"),
+        score:    f64_or_zero(o, "score"),
     })
 }
 

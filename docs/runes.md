@@ -21,7 +21,7 @@ The six v1 runes:
 - [`eajson`](#eajson--json-lines-summarizer) — JSON Lines summarizer
 - [`eaparquet`](#eaparquet--parquet-metadata-summarizer) — Parquet metadata
 - [`ealog`](#ealog--log-severity-scanner) — log severity scanner
-- [`eatime`](#eatime--iso-8601-timestamp-histogram) — timestamp histogram
+- [`eatime`](#eatime--iso-8601-timestamp-histogram) — timestamp histogram + chronological spike detection
 - [`eadiff`](#eadiff--structural-delta-between-two-rune-runs) — structural delta between two rune runs
 
 The `--json` flag on any rune emits the same data as machine-readable JSON Lines
@@ -153,6 +153,7 @@ curl -s https://data.gharchive.org/2015-01-01-{12,16,20}.json.gz | gunzip > ~/gh
 ```
 /rune eatime ~/gharchive.log
 /rune eatime --bucket weekday ~/gharchive.log
+/rune eatime --bucket series ~/gharchive.log
 ```
 
 ```
@@ -206,6 +207,46 @@ and Apache common-log timestamps do not.
 computed via Zeller's congruence on the year/month/day digits the kernel
 already extracted. Same kernel pass, different scalar post-processing. Use it
 for "Tuesday-morning errors" style questions.
+
+### `--bucket series` — chronological histogram + spike detection
+
+Where `hour`/`weekday` collapse the time axis (every Monday lands in one slot),
+`--bucket series` keeps it. It decodes each kernel position to a full instant,
+bins the file's span into auto-width buckets (snapped to a "nice" width —
+1s/5s/…/1h/1d/1w — targeting ~120 buckets), and runs a deterministic spike pass
+over the count series. eatime stops *describing* the file and starts telling you
+*when the rate broke*:
+
+```
+> /rune eatime --bucket series ~/journal-24h.log    # real systemd journal, last 24h
+timestamps:  7629
+buckets:     48
+scan:        1 ms
+span:        2026-06-03T09:01:37 .. 2026-06-04T08:31:37
+peak bucket: 2026-06-03T23:01:37 (207 timestamps)
+anomalies:   4 spike(s) detected
+  2026-06-03T13:01:37 count=206 (1.3× baseline 154)
+  2026-06-03T22:31:37 count=199 (1.3× baseline 154)
+  2026-06-03T23:01:37 count=207 (1.3× baseline 154)
+  ...
+```
+
+The baseline is the **median** bucket count and the spread is the **MAD**
+(median absolute deviation) — robust by construction, so a large spike can't
+inflate its own threshold and hide the way a mean/σ pair would. A bucket is
+flagged when its robust z-score `(count − median) / (1.4826·MAD)` clears 4
+(`Z_THRESHOLD`). Only upward spikes are reported; dips are out of scope. When
+the series is perfectly flat (MAD = 0) the z-score is undefined, so detection
+falls back to a ratio test (≥ 3× median, with a 10-event absolute floor). The
+flags above are 7–9σ events — modest in ratio (1.3×) but statistically
+unmistakable because the journal's baseline rate is so stable.
+
+In `--json` mode each spike is an entry in an additive `anomalies[]` array
+(`bucket`, `count`, `baseline`, `ratio`, `score`); the array is omitted when
+empty, so every pre-existing `--json` consumer (and `eadiff`) is byte-for-byte
+unaffected. The full chronological series is always in `categories[]`. Bucket
+counts are validated bit-for-bit against an independent pandas/regex grouping on
+real data (313K-timestamp systemd journal) via `benchmarks/eatime_diff.py`.
 
 ## eadiff — structural delta between two rune runs
 
@@ -265,7 +306,8 @@ Every rune accepts `--json`:
 
 Output is one compact JSON object per line — a `RuneOutput v1` serialization
 with stable keys (`schema_version`, `rune`, `source`, `totals`, `fields[]`,
-`categories[]`, `samples[]`). Refusal paths emit JSON too (with `success:false`
+`categories[]`, `samples[]`, and the optional `anomalies[]` — emitted only by
+`eatime --bucket series` and only when non-empty). Refusal paths emit JSON too (with `success:false`
 and `error`), so a chained downstream rune always reads a parseable
 `RuneOutput` instead of choking on free-form text.
 
@@ -316,18 +358,23 @@ entries) are blocked regardless of format.
   be present in the file footer. BYTE_ARRAY (string) and INT96 (legacy
   timestamp) min/max are not decoded. Flat schemas only; nested groups
   (LIST/MAP/STRUCT children) are skipped from the column list.
-- **ealog**: severity keywords matched case-sensitively in upper-case form
-  (`DEBUG/INFO/WARN/ERROR/FATAL`) bounded by `space/tab/newline/CR/[/]/"/:`
-  only. Lowercase `info`/`warn` and embedded mentions inside JSON string
-  payloads are intentionally not counted. Sample buffer caps at 5 lines;
-  counts remain accurate past that.
+- **ealog**: severity keywords (`DEBUG/INFO/WARN/ERROR/FATAL`) matched
+  **case-insensitively** since v2.0.8 — `info`, `INFO`, and `Error` all count —
+  bounded by `space/tab/newline/CR/[/]/"/:`. Compound identifiers like
+  `ERROR_HANDLER` are not counted (`_` is not a boundary, so they stay one
+  token). Severity values inside JSON-style logs (`"level":"info"`) *do* count,
+  since `"` and `:` are boundaries. Sample buffer caps at 5 lines; counts
+  remain accurate past that.
 - **eatime**: ISO-8601 prefix `YYYY-MM-DDTHH:MM:SS` only. Other timestamp
   formats (syslog `May 11 10:54:00`, Unix epoch, RFC 2822, freeform) are
   intentionally out of scope — extending requires per-format kernels, not a
   flag. `--bucket hour` validates hour ≤ 23; `--bucket weekday` validates
   month 1-12 and day 1-31 but doesn't reject impossible dates like
   `2026-02-30T...` (Zeller produces a weekday anyway). Buckets cap at 16M
-  positions per call.
+  positions per call. `--bucket series` auto-selects bucket width (1s…1w,
+  ~120 buckets), flags upward spikes only via a robust median/MAD z-score
+  (threshold 4, with a ≥3×/10-event ratio fallback for flat series), and
+  needs ≥ 8 buckets before it will flag anything.
 - **eadiff**: matches by exact field/category name across the two inputs.
   Every `FieldKind` is diffable. Stdin chaining (`-` for one of the two path
   args) is not yet wired through the rune dispatcher — both inputs must be
