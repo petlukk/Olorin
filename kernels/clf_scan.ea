@@ -1,0 +1,135 @@
+// Common Log Format (CLF) timestamp position scanner. Emits byte
+// offsets of the opening '[' for each `[dd/MMM/yyyy:hh:mm:ss` occurrence
+// in `text` — the timestamp Apache and nginx access logs use by default.
+// Caller decodes the fixed-width fields (textual month, zone) scalar
+// from text[offset..offset+21].
+//
+// SIMD strategy: identical cross-arch .==-only idiom as timestamp_scan.
+// Per 16-byte chunk at position i, load four shifted views and build
+// lane masks for the structural anchors '[' (offset 0), '/' (offset 3),
+// '/' (offset 7), ':' (offset 12). AND them into one candidate mask;
+// lanes that pass are scalar-walked through `clf_scan_pos`, which
+// validates the digit and letter positions and emits the offset on a
+// full match. Four anchors at fixed offsets make the joint false-match
+// probability tiny, so the scalar validator runs on genuine hits only.
+//
+// out_positions      = byte offsets of '[' starting a CLF timestamp.
+// out_n_positions[0] = number of positions written (<= max_positions);
+//                       always reset to 0 at the head of the kernel.
+// scratch (16 bytes) holds the per-chunk filter mask; contents after the
+// call are unspecified.
+
+func is_digit_byte(b: i32) -> i32 {
+    if b < 48 { return 0 }
+    if b > 57 { return 0 }
+    return 1
+}
+
+func is_letter_byte(b: i32) -> i32 {
+    if b >= 65 {
+        if b <= 90 { return 1 }
+    }
+    if b >= 97 {
+        if b <= 122 { return 1 }
+    }
+    return 0
+}
+
+func clf_scan_pos(text: *u8, p: i32, len: i32, positions: *mut i32, max_positions: i32, n_positions: *mut i32) {
+    if p + 21 > len { return }
+    if max_positions <= 0 { return }
+
+    // '[' dd '/' MMM '/' yyyy ':' hh ':' mm ':' ss
+    if to_i32(text[p + 0]) != 91 { return }
+    if is_digit_byte(to_i32(text[p + 1])) == 0 { return }
+    if is_digit_byte(to_i32(text[p + 2])) == 0 { return }
+    if to_i32(text[p + 3]) != 47 { return }
+    if is_letter_byte(to_i32(text[p + 4])) == 0 { return }
+    if is_letter_byte(to_i32(text[p + 5])) == 0 { return }
+    if is_letter_byte(to_i32(text[p + 6])) == 0 { return }
+    if to_i32(text[p + 7]) != 47 { return }
+    if is_digit_byte(to_i32(text[p + 8])) == 0 { return }
+    if is_digit_byte(to_i32(text[p + 9])) == 0 { return }
+    if is_digit_byte(to_i32(text[p + 10])) == 0 { return }
+    if is_digit_byte(to_i32(text[p + 11])) == 0 { return }
+    if to_i32(text[p + 12]) != 58 { return }
+    if is_digit_byte(to_i32(text[p + 13])) == 0 { return }
+    if is_digit_byte(to_i32(text[p + 14])) == 0 { return }
+    if to_i32(text[p + 15]) != 58 { return }
+    if is_digit_byte(to_i32(text[p + 16])) == 0 { return }
+    if is_digit_byte(to_i32(text[p + 17])) == 0 { return }
+    if to_i32(text[p + 18]) != 58 { return }
+    if is_digit_byte(to_i32(text[p + 19])) == 0 { return }
+    if is_digit_byte(to_i32(text[p + 20])) == 0 { return }
+
+    let cur: i32 = n_positions[0]
+    if cur < max_positions {
+        positions[cur] = p
+        n_positions[0] = cur + 1
+    }
+}
+
+export func clf_scan(text: *u8, len: i32, out_positions: *mut i32, max_positions: i32, out_n_positions: *mut i32, scratch: *mut u8) {
+    out_n_positions[0] = 0
+
+    if len < 32 {
+        let mut p: i32 = 0
+        while p + 21 <= len {
+            clf_scan_pos(text, p, len, out_positions, max_positions, out_n_positions)
+            p = p + 1
+        }
+        return
+    }
+
+    let v_lbrack: u8x16 = splat(91)
+    let v_slash:  u8x16 = splat(47)
+    let v_colon:  u8x16 = splat(58)
+    let v_zero:   u8x16 = splat(0)
+    let v_one:    u8x16 = splat(1)
+
+    // Scalar prologue: positions [0..16).
+    let mut p: i32 = 0
+    while p < 16 {
+        clf_scan_pos(text, p, len, out_positions, max_positions, out_n_positions)
+        p = p + 1
+    }
+
+    // SIMD body: chunks at i=16, 32, ... while the deepest anchor load
+    // (at i+12, covering lanes through i+27) stays in bounds.
+    let mut i: i32 = 16
+    while i + 28 <= len {
+        let c0:  u8x16 = load(text, i + 0)
+        let c3:  u8x16 = load(text, i + 3)
+        let c7:  u8x16 = load(text, i + 7)
+        let c12: u8x16 = load(text, i + 12)
+
+        let m0:  u8x16 = select(c0  .== v_lbrack, v_one, v_zero)
+        let m3:  u8x16 = select(c3  .== v_slash,  v_one, v_zero)
+        let m7:  u8x16 = select(c7  .== v_slash,  v_one, v_zero)
+        let m12: u8x16 = select(c12 .== v_colon,  v_one, v_zero)
+
+        let cand: u8x16 = m0 .& m3 .& m7 .& m12
+        let any:  u8    = reduce_add(cand)
+
+        if to_i32(any) > 0 {
+            store(scratch, 0, cand)
+            let mut k: i32 = 0
+            while k < 16 {
+                if to_i32(scratch[k]) > 0 {
+                    clf_scan_pos(text, i + k, len, out_positions, max_positions, out_n_positions)
+                }
+                k = k + 1
+            }
+        }
+
+        i = i + 16
+    }
+
+    // Scalar epilogue: positions past the last SIMD chunk with room for
+    // the 21-byte CLF timestamp.
+    p = i
+    while p + 21 <= len {
+        clf_scan_pos(text, p, len, out_positions, max_positions, out_n_positions)
+        p = p + 1
+    }
+}

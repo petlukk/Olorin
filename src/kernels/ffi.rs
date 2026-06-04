@@ -119,6 +119,7 @@ pub struct KernelTable {
     pub jsonl_struct_scan:        JsonlStructFn,
     pub log_level_scan:           LogLevelScanFn,
     pub timestamp_scan:           TimestampScanFn,
+    pub clf_scan:                 TimestampScanFn,
     pub f32_stats:                F32StatsFn,
     pub f64_stats:                F64StatsFn,
     pub eval_expr:                EvalExprFn,
@@ -189,6 +190,7 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
     let jsonl_struct_lib = load("jsonl_struct")?;
     let log_level_scan_lib = load("log_level_scan")?;
     let timestamp_scan_lib = load("timestamp_scan")?;
+    let clf_scan_lib    = load("clf_scan")?;
     let f32_stats_lib   = load("f32_stats")?;
     let f64_stats_lib   = load("f64_stats")?;
     let expr_eval       = load("expr_eval")?;
@@ -242,6 +244,8 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
                 sym(&log_level_scan_lib, b"log_level_scan\0")?),
             timestamp_scan: std::mem::transmute(
                 sym(&timestamp_scan_lib, b"timestamp_scan\0")?),
+            clf_scan: std::mem::transmute(
+                sym(&clf_scan_lib, b"clf_scan\0")?),
             f32_stats: std::mem::transmute(
                 sym(&f32_stats_lib, b"f32_stats\0")?),
             f64_stats: std::mem::transmute(
@@ -283,7 +287,7 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
                 chacha20_lib, chacha20_sv2, pretokenize_lib,
                 ansi_parser_lib, terminal_diff_lib,
                 csv_scan_lib, jsonl_struct_lib, log_level_scan_lib,
-                timestamp_scan_lib,
+                timestamp_scan_lib, clf_scan_lib,
                 f32_stats_lib, f64_stats_lib,
                 poly1305_lib,
                 blake2b_lib,
@@ -410,7 +414,7 @@ pub unsafe fn chacha20_search_v2(
 // this file under the 500-LOC cap. Re-exported here so existing
 // `kernels::ffi::<name>` call sites continue to compile unchanged.
 pub use super::ffi_data::{
-    csv_scan, f32_stats, f64_stats, jsonl_struct_scan,
+    clf_scan, csv_scan, f32_stats, f64_stats, jsonl_struct_scan,
     log_level_scan, timestamp_scan,
 };
 
