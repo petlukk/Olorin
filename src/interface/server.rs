@@ -117,10 +117,29 @@ fn handle_connection(stream: &mut std::net::TcpStream, ctx: Arc<Mutex<DispatchCo
             serve_json(stream, r#"{"name":"olorin","backend":"pipe"}"#);
         }
         ("GET", "/api/system") => {
-            let c = ctx.lock().unwrap_or_else(|e| e.into_inner());
-            let recall_level = c.recall_level();
-            let config_json = c.get_config();
-            drop(c);
+            // Never block on the ctx mutex here. A long analysis/generation holds
+            // it for minutes, which would freeze the live cpu/temp/mem heartbeat
+            // exactly when the Pi is working hardest. Refresh recall/config
+            // opportunistically (try_lock) and reuse the last-known values when
+            // busy; the system telemetry below never needs the lock.
+            static LAST: std::sync::Mutex<(usize, String)> =
+                std::sync::Mutex::new((0, String::new()));
+            let guard = match ctx.try_lock() {
+                Ok(c) => Some(c),
+                Err(std::sync::TryLockError::Poisoned(p)) => Some(p.into_inner()),
+                Err(std::sync::TryLockError::WouldBlock) => None,
+            };
+            if let Some(c) = guard {
+                let r = c.recall_level();
+                let cfg = c.get_config();
+                drop(c);
+                if let Ok(mut last) = LAST.lock() { *last = (r, cfg); }
+            }
+            let (recall_level, mut config_json) = {
+                let last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+                last.clone()
+            };
+            if config_json.is_empty() { config_json = "{}".to_string(); }
             let body = build_system_json(recall_level, &config_json);
             serve_json(stream, &body);
         }
