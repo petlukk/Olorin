@@ -60,3 +60,15 @@ pub fn is_grid_continuation(rune_output: &str, narration: &str) -> bool {
         .lines()
         .any(|l| !l.trim().is_empty() && line_shape(l) == dom)
 }
+
+/// True when the narration is a reformatted data dump rather than the requested
+/// 1-2 sentence prose. Small models fed SEVERAL dense rune outputs at once
+/// (multi-file correlation) sometimes restructure them into a markdown table
+/// instead of summarizing — a NEW shape, so `is_grid_continuation` (which keys
+/// on the input's shape) misses it. A real summary is a couple of short lines
+/// with no table syntax, so two markdown-table rows or a long block is a dump.
+pub fn looks_like_data_dump(narration: &str) -> bool {
+    let lines: Vec<&str> = narration.lines().filter(|l| !l.trim().is_empty()).collect();
+    let table_rows = lines.iter().filter(|l| l.matches('|').count() >= 2).count();
+    table_rows >= 2 || lines.len() > 6
+}
