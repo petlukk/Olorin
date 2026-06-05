@@ -139,6 +139,97 @@ pub fn base64_decode(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Streaming single-file cap (disk-bound, not RAM): matches the rune's
+/// `MAX_INPUT_BYTES`. The raw path streams to /tmp in chunks, so this is about
+/// disk space, not the 128 MB in-memory base64 cap on `/api/analyze`.
+const MAX_STREAM_UPLOAD: u64 = 4 * 1024 * 1024 * 1024;
+
+/// `POST /api/analyze_raw` — one file streamed straight to /tmp (no base64, no
+/// in-memory JSON), so multi-GB logs upload without exhausting RAM. The
+/// filename comes from the `X-Filename` header.
+pub(crate) fn handle_analyze_raw(
+    stream: &mut std::net::TcpStream,
+    req: &str,
+    buf: &[u8],
+    n: usize,
+    ctx: Arc<Mutex<DispatchContext>>,
+) {
+    let _ = write!(stream, "{SSE_HEADERS}");
+    let _ = stream.flush();
+
+    let name = header_value(req, "x-filename").unwrap_or_else(|| "dropped-file".to_string());
+    let content_len = crate::interface::server::parse_content_length(req) as u64;
+    if content_len == 0 {
+        send_error(stream, "Empty upload.");
+        return;
+    }
+    if content_len > MAX_STREAM_UPLOAD {
+        send_error(stream, "File too large (max 4 GB).");
+        return;
+    }
+
+    let path = temp_path_for(&name);
+    let header_end = req.find("\r\n\r\n").map(|i| i + 4).unwrap_or(n).min(n);
+    if let Err(e) = drain_to_file(stream, &buf[header_end..n], content_len, &path) {
+        send_error(stream, &format!("Upload failed: {e}"));
+        return;
+    }
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let ctx_clone = ctx.clone();
+    let sender = std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            let mut guard = ctx_clone.lock().unwrap_or_else(|e| e.into_inner());
+            guard.analyze_files_streaming(&[(name, path)], &tx);
+        })
+        .expect("failed to spawn analyze thread");
+    relay_sse(stream, rx);
+    let _ = sender.join();
+}
+
+/// Write `leftover` (body bytes already read alongside the headers) then stream
+/// the remaining `content_len` bytes from `reader` to `path` in 64 KB chunks —
+/// never holding the whole body in memory.
+pub fn drain_to_file<R: std::io::Read>(
+    reader: &mut R,
+    leftover: &[u8],
+    content_len: u64,
+    path: &str,
+) -> std::io::Result<u64> {
+    let mut file = std::fs::File::create(path)?;
+    let mut written = 0u64;
+    let take = (leftover.len() as u64).min(content_len) as usize;
+    if take > 0 {
+        file.write_all(&leftover[..take])?;
+        written += take as u64;
+    }
+    let mut chunk = [0u8; 64 * 1024];
+    while written < content_len {
+        let r = reader.read(&mut chunk)?;
+        if r == 0 {
+            break;
+        }
+        let r = (r as u64).min(content_len - written) as usize;
+        file.write_all(&chunk[..r])?;
+        written += r as u64;
+    }
+    file.flush()?;
+    Ok(written)
+}
+
+/// Case-insensitive lookup of an HTTP header value in the raw request text.
+pub fn header_value(req: &str, name_lower: &str) -> Option<String> {
+    for line in req.lines() {
+        if let Some((k, v)) = line.split_once(':') {
+            if k.trim().eq_ignore_ascii_case(name_lower) {
+                return Some(v.trim().to_string());
+            }
+        }
+    }
+    None
+}
+
 fn send_error(stream: &mut std::net::TcpStream, msg: &str) {
     let mut esc = String::with_capacity(msg.len());
     for c in msg.chars() {

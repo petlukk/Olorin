@@ -192,9 +192,16 @@ async function analyzeFiles(id,body,files){
   const bubble=addChatMsg(body,'assistant','');
   const cursor=el('span','cursor-blink');bubble.after(cursor);
   try{
-    const payload=await Promise.all(list.map(async f=>({name:f.name,b64:await fileToB64(f)})));
-    const res=await fetch('/api/analyze',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({files:payload})});
+    let res;
+    if(list.length===1){
+      // single file: stream the raw bytes (no base64) so multi-GB logs work
+      res=await fetch('/api/analyze_raw',{method:'POST',headers:{'X-Filename':list[0].name},body:list[0]});
+    }else{
+      // multiple files: base64 JSON for cross-file correlation
+      const payload=await Promise.all(list.map(async f=>({name:f.name,b64:await fileToB64(f)})));
+      res=await fetch('/api/analyze',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({files:payload})});
+    }
     await renderSSE(res,bubble,cursor,body);
   }catch(e){bubble.textContent+=' [error: '+e.message+']';}
   cursor.remove();

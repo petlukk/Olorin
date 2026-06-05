@@ -3,7 +3,9 @@
 //! wiring and the analysis itself are covered by step 2's tests; here we pin
 //! the new decoding/staging logic that turns an upload into a /tmp file.
 
-use olorin::interface::server_analyze::{base64_decode, parse_and_stage, sanitize_filename};
+use olorin::interface::server_analyze::{
+    base64_decode, drain_to_file, header_value, parse_and_stage, sanitize_filename,
+};
 
 #[test]
 fn base64_known_vectors() {
@@ -64,6 +66,35 @@ fn parse_and_stage_rejects_bad_input() {
     assert!(parse_and_stage(br#"{"files":[]}"#).is_err());
     assert!(parse_and_stage(br#"{"nope":1}"#).is_err());
     assert!(parse_and_stage(br#"{"files":[{"name":"x.csv"}]}"#).is_err()); // no b64
+}
+
+#[test]
+fn drain_to_file_writes_leftover_then_stream() {
+    let path = "/tmp/filedrop_drain_a";
+    // leftover holds the body bytes that arrived with the headers; the rest
+    // comes from the reader.
+    let mut reader = std::io::Cursor::new(b"world".to_vec());
+    let written = drain_to_file(&mut reader, b"hello ", 11, path).unwrap();
+    assert_eq!(written, 11);
+    assert_eq!(std::fs::read(path).unwrap(), b"hello world");
+}
+
+#[test]
+fn drain_to_file_stops_at_content_len() {
+    let path = "/tmp/filedrop_drain_b";
+    // content_len shorter than available bytes — must not over-read.
+    let mut reader = std::io::Cursor::new(b"world EXTRA".to_vec());
+    let written = drain_to_file(&mut reader, b"hello ", 8, path).unwrap();
+    assert_eq!(written, 8);
+    assert_eq!(std::fs::read(path).unwrap(), b"hello wo");
+}
+
+#[test]
+fn header_value_is_case_insensitive() {
+    let req = "POST /api/analyze_raw HTTP/1.1\r\nHost: x\r\nX-Filename: nasa_1gb.log\r\nContent-Length: 5\r\n\r\n";
+    assert_eq!(header_value(req, "x-filename").as_deref(), Some("nasa_1gb.log"));
+    assert_eq!(header_value(req, "content-length").as_deref(), Some("5"));
+    assert_eq!(header_value(req, "nope"), None);
 }
 
 #[test]

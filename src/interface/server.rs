@@ -133,6 +133,9 @@ fn handle_connection(stream: &mut std::net::TcpStream, ctx: Arc<Mutex<DispatchCo
         ("POST", "/api/analyze") => {
             crate::interface::server_analyze::handle_analyze(stream, req, &buf[..n], n, ctx);
         }
+        ("POST", "/api/analyze_raw") => {
+            crate::interface::server_analyze::handle_analyze_raw(stream, req, &buf[..n], n, ctx);
+        }
         ("POST", "/api/term/open") => {
             term_stream::handle_term_open(stream);
         }
