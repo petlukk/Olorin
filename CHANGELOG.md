@@ -8,6 +8,46 @@ order.
 
 ## [Unreleased]
 
+## [2.2.0] — 2026-06-05
+
+The file-drop analyst: drop a file into the web UI and Olorin analyzes it
+on-device — a **deterministic rune pick**, a **SIMD kernel scan**, and a
+**local-model narration**, with no autonomous tool-call in the loop. The
+user's drop gesture *is* the "analyze this" decision, which is what makes
+the whole flow reliable on a Raspberry Pi.
+
+- **Deterministic rune selection (`pick_rune`).**  Maps a dropped file to
+  the right rune by extension, with an ISO-8601 / CLF timestamp sniff that
+  splits logs between `eatime` (timing spikes) and `ealog` (severities).
+  No model call — so it's arch-independent and reliable on NEON.
+- **Web UI drop zone + 📎 attach button.**  Drag a file (or several) onto
+  the chat; each file's kernel output streams in, followed by a one- or
+  two-sentence explanation from the local model.
+- **`/api/analyze` + `/api/analyze_raw`.**  Multi-file drops go through a
+  base64 JSON endpoint (with one cross-file correlation narration);
+  single files **stream raw to disk in 64 KB chunks** (no base64, no
+  in-memory JSON), so multi-GB logs upload without exhausting RAM. Body
+  cap is configurable via `OLORIN_MAX_UPLOAD` (default 128 MB; raw path up
+  to 4 GB). Staged uploads are deleted after analysis.
+- Verified on a Raspberry Pi 5: a **1 GB real access log** (9.46 M CLF
+  timestamps) SIMD-scanned in **768 ms**, a genuine traffic spike flagged
+  and narrated locally, zero cloud.
+
+### Fixed
+
+- **`ealog` percentages** are now a share of all lines, not of the
+  matched-severity subset — a log dominated by an untracked level (e.g.
+  Apache `[notice]`) no longer reports the lone present level at 100%.
+- **`ealog` samples** are deduplicated by line, so a line with two matched
+  keywords (`[error] … in error state`) is no longer shown twice.
+- **Multi-file narration** drops its synthesis line when the small model
+  reformats the inputs into a table or over-thinks to silence, instead of
+  emitting a garbled summary; the per-file rune outputs stand clean.
+- **Web UI**: `no-cache` headers on served HTML (embedded `chat.html`
+  changes every deploy); **live cpu/temp heartbeat during analysis**
+  (`/api/system` no longer blocks on the ctx mutex the dispatch thread
+  holds for the duration of a run).
+
 ## [2.1.0] — 2026-06-04
 
 Feature release for `eatime`: the rune graduates from *describing* a log
