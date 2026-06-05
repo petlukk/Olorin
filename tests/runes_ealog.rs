@@ -13,6 +13,18 @@ fn unique_path(stem: &str) -> std::path::PathBuf {
 }
 
 #[test]
+fn scan_time_keeps_sub_millisecond_resolution() {
+    use olorin::runes::common::format_scan_time;
+    // Below a millisecond → microseconds (was an uninformative "0 ms").
+    assert_eq!(format_scan_time(716), "716 µs");
+    assert_eq!(format_scan_time(0), "0 µs");
+    assert_eq!(format_scan_time(999), "999 µs");
+    // A millisecond and above → milliseconds.
+    assert_eq!(format_scan_time(1000), "1 ms");
+    assert_eq!(format_scan_time(768_000), "768 ms");
+}
+
+#[test]
 fn ealog_is_registered() {
     let found = RUNES.iter().any(|r| r.name() == "ealog");
     assert!(found, "ealog rune missing from registry");

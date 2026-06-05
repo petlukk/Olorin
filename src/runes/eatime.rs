@@ -359,7 +359,7 @@ fn format_text(out: &RuneOutput) -> String {
     let mut buf = String::with_capacity(512);
     buf.push_str(&format!("bytes:       {}\n", format_bytes(src.bytes as usize)));
     buf.push_str(&format!("timestamps:  {total}\n"));
-    buf.push_str(&format!("scan:        {} ms\n", out.totals.scan_us / 1000));
+    buf.push_str(&format!("scan:        {}\n", super::common::format_scan_time(out.totals.scan_us)));
     buf.push('\n');
     if total == 0 {
         buf.push_str("(no ISO-8601 timestamps found)\n");
@@ -404,7 +404,7 @@ fn format_series_text(out: &RuneOutput) -> String {
     buf.push_str(&format!("bytes:       {}\n", format_bytes(src.bytes as usize)));
     buf.push_str(&format!("timestamps:  {total}\n"));
     buf.push_str(&format!("buckets:     {}\n", out.categories.len()));
-    buf.push_str(&format!("scan:        {} ms\n", out.totals.scan_us / 1000));
+    buf.push_str(&format!("scan:        {}\n", super::common::format_scan_time(out.totals.scan_us)));
     buf.push('\n');
     if total == 0 {
         buf.push_str("(no ISO-8601 timestamps found)\n");

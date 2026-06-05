@@ -8,6 +8,16 @@ order.
 
 ## [Unreleased]
 
+## [2.2.1] — 2026-06-05
+
+### Fixed
+
+- **Scan time keeps sub-millisecond resolution.**  `eatime` and `ealog`
+  rounded the SIMD scan to whole milliseconds, so a sub-millisecond pass
+  displayed as an uninformative `0 ms` — exactly when the kernel is
+  fastest. They now print microseconds below a millisecond
+  (`scan: 716 µs`) and milliseconds above, via a shared `format_scan_time`.
+
 ## [2.2.0] — 2026-06-05
 
 The file-drop analyst: drop a file into the web UI and Olorin analyzes it
