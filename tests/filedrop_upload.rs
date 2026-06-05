@@ -37,10 +37,25 @@ fn sanitize_strips_paths_and_unsafe_chars() {
 fn parse_and_stage_writes_tmp_file() {
     // b64("hello") = aGVsbG8=
     let body = br#"{"files":[{"name":"note.txt","b64":"aGVsbG8="}]}"#;
-    let (name, path) = parse_and_stage(body).expect("should stage");
+    let staged = parse_and_stage(body).expect("should stage");
+    assert_eq!(staged.len(), 1);
+    let (name, path) = &staged[0];
     assert_eq!(name, "note.txt");
     assert!(path.starts_with("/tmp/"), "staged under /tmp: {path}");
-    assert_eq!(std::fs::read(&path).unwrap(), b"hello");
+    assert_eq!(std::fs::read(path).unwrap(), b"hello");
+}
+
+#[test]
+fn parse_and_stage_handles_multiple_files() {
+    // b64("hi")=aGk=, b64("yo")=eW8=
+    let body = br#"{"files":[{"name":"a.log","b64":"aGk="},{"name":"b.log","b64":"eW8="}]}"#;
+    let staged = parse_and_stage(body).expect("should stage both");
+    assert_eq!(staged.len(), 2);
+    assert_eq!(staged[0].0, "a.log");
+    assert_eq!(staged[1].0, "b.log");
+    assert_eq!(std::fs::read(&staged[0].1).unwrap(), b"hi");
+    assert_eq!(std::fs::read(&staged[1].1).unwrap(), b"yo");
+    assert_ne!(staged[0].1, staged[1].1, "each file gets a distinct path");
 }
 
 #[test]
@@ -54,7 +69,8 @@ fn parse_and_stage_rejects_bad_input() {
 #[test]
 fn parse_and_stage_traversal_name_stays_in_tmp() {
     let body = br#"{"files":[{"name":"../../../etc/cron.d/evil","b64":"aGk="}]}"#;
-    let (_name, path) = parse_and_stage(body).expect("should stage");
+    let staged = parse_and_stage(body).expect("should stage");
+    let path = &staged[0].1;
     // The sanitized basename must keep the write under the /tmp drop dir.
     assert!(path.starts_with("/tmp/olorin-drop-"), "no escape: {path}");
     assert!(!path.contains(".."), "no traversal in path: {path}");

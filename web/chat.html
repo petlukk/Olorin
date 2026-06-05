@@ -120,7 +120,7 @@ function createChatTile(id){
   const inp=el('input','chat-input');inp.placeholder='Message Olorin, or drop a file to analyze...';inp.autocomplete='off';
   inp.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendChat(id,body,inp)}});
   // Attach button + hidden file input for click-to-pick.
-  const fileInp=el('input');fileInp.type='file';fileInp.style.display='none';
+  const fileInp=el('input');fileInp.type='file';fileInp.multiple=true;fileInp.style.display='none';
   fileInp.addEventListener('change',()=>{analyzeFiles(id,body,fileInp.files);fileInp.value=''});
   const clip=el('button','chat-send','📎');clip.title='Analyze a file';clip.onclick=()=>fileInp.click();
   const btn=el('button','chat-send','↑');btn.onclick=()=>sendChat(id,body,inp);
@@ -187,14 +187,14 @@ function fileToB64(file){
 // Drop/attach handler: analyze a file via /api/analyze, rendering into the chat.
 async function analyzeFiles(id,body,files){
   if(!files||!files.length)return;
-  const file=files[0]; // single file for now; correlation across files is a later step
-  addChatMsg(body,'user','\ud83d\udcce '+file.name);
+  const list=Array.from(files);
+  addChatMsg(body,'user','\ud83d\udcce '+list.map(f=>f.name).join(', '));
   const bubble=addChatMsg(body,'assistant','');
   const cursor=el('span','cursor-blink');bubble.after(cursor);
   try{
-    const b64=await fileToB64(file);
+    const payload=await Promise.all(list.map(async f=>({name:f.name,b64:await fileToB64(f)})));
     const res=await fetch('/api/analyze',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({files:[{name:file.name,b64:b64}]})});
+      body:JSON.stringify({files:payload})});
     await renderSSE(res,bubble,cursor,body);
   }catch(e){bubble.textContent+=' [error: '+e.message+']';}
   cursor.remove();

@@ -141,28 +141,92 @@ impl DispatchContext {
         let _ = tx.send(StreamEvent::Done { full_text: String::new() });
     }
 
-    /// File-drop analyst (single file): the user dropped a file, so the
-    /// "analyze this" decision is already made — pick the rune deterministically
-    /// (no autonomous model tool-call, which is what makes this reliable on the
-    /// Pi), run it, stream the kernel output, then narrate via the proven
-    /// narration path. `tmp_path` MUST be under the rune path allowlist (~ or
-    /// /tmp); the rune enforces it on read.
+    /// File-drop analyst (single file). Thin wrapper over the multi-file path.
+    /// The user dropped a file, so the "analyze this" decision is already made —
+    /// no autonomous model tool-call, which is what makes this reliable on the
+    /// Pi. `tmp_path` MUST be under the rune path allowlist (~ or /tmp).
     pub fn analyze_file_streaming(
         &mut self,
         display_name: &str,
         tmp_path: &str,
         tx: &std::sync::mpsc::Sender<StreamEvent>,
     ) {
-        // Sniff a bounded prefix to choose the rune (extension + timestamp).
+        self.analyze_files_streaming(&[(display_name.to_string(), tmp_path.to_string())], tx);
+    }
+
+    /// File-drop analyst (one or more files): pick + run each file's rune
+    /// deterministically, stream every kernel output, then narrate — a single
+    /// summary for one file, or one correlation pass across the combined
+    /// compact answers for several. The correlation step is reasoning over
+    /// already-computed results (i.e. narration), which works on the Pi.
+    pub fn analyze_files_streaming(
+        &mut self,
+        files: &[(String, String)],
+        tx: &std::sync::mpsc::Sender<StreamEvent>,
+    ) {
+        if files.is_empty() {
+            let _ = tx.send(StreamEvent::Done { full_text: String::new() });
+            return;
+        }
+        let descriptor = if files.len() == 1 {
+            format!("analyze {}", files[0].0)
+        } else {
+            format!("analyze {} files", files.len())
+        };
+        self.vault_save(b"user", descriptor.as_bytes());
+
+        let mut runs: Vec<FileRun> = Vec::new();
+        let mut rune_text = String::new();
+        for (i, (name, path)) in files.iter().enumerate() {
+            if i > 0 {
+                let _ = tx.send(StreamEvent::Token("\n\n".to_string()));
+                rune_text.push_str("\n\n");
+            }
+            if let Some(run) = self.run_file_rune(name, path, tx) {
+                rune_text.push_str(&run.streamed);
+                runs.push(run);
+            }
+        }
+
+        // No rune produced output (all skipped/blocked) — nothing to narrate.
+        if runs.is_empty() {
+            let _ = tx.send(StreamEvent::Done { full_text: rune_text });
+            return;
+        }
+
+        // One file → single-rune narration; several → one correlation pass.
+        if runs.len() == 1 {
+            let r = runs.pop().unwrap();
+            let scratch = crate::runes::RuneResult {
+                answer: r.answer, details: None,
+                success: r.success, timing_us: r.timing_us, structured: r.structured,
+            };
+            match crate::runes::build_narration_prompt(r.rune, r.safety, scratch) {
+                Some(prompt) => self.run_followup_streaming(&descriptor, &rune_text, &prompt, tx),
+                None => { let _ = tx.send(StreamEvent::Done { full_text: rune_text }); }
+            }
+        } else {
+            let prompt = correlation_prompt(&runs);
+            self.run_followup_streaming(&descriptor, &rune_text, &prompt, tx);
+        }
+    }
+
+    /// Pick + run the rune for one staged file and stream its kernel output.
+    /// Returns the result for the narration step, or None if no rune matched or
+    /// the output was blocked (a notice is streamed in those cases).
+    fn run_file_rune(
+        &mut self,
+        display_name: &str,
+        tmp_path: &str,
+        tx: &std::sync::mpsc::Sender<StreamEvent>,
+    ) -> Option<FileRun> {
         let prefix = read_prefix(tmp_path, 8192);
         let Some(rune) = crate::runes::select::pick_rune(display_name, &prefix) else {
-            let msg = format!(
-                "I don't have a rune that analyzes '{display_name}'. I can summarize \
-                 CSVs, JSON Lines, Parquet, and log files."
-            );
-            let _ = tx.send(StreamEvent::Token(msg.clone()));
-            let _ = tx.send(StreamEvent::Done { full_text: msg });
-            return;
+            let _ = tx.send(StreamEvent::Token(format!(
+                "(no rune matched {display_name} — I can analyze CSV, JSON Lines, \
+                 Parquet, and log files.)"
+            )));
+            return None;
         };
 
         let name = rune.name();
@@ -194,27 +258,24 @@ impl DispatchContext {
             let _ = tx.send(StreamEvent::Error(
                 "Analysis output blocked by safety scan.".to_string(),
             ));
-            let _ = tx.send(StreamEvent::Done { full_text: String::new() });
-            return;
+            return None;
         }
 
-        let header = format!("📎 ran `{name}` on {display_name}\n\n");
-        let descriptor = format!("analyze {display_name} ({name})");
-        self.vault_save(b"user", descriptor.as_bytes());
         self.vault_save(b"tool", body.as_bytes());
-
-        // Stream the kernel output, then narrate it.
+        let header = format!("📎 ran `{name}` on {display_name}\n\n");
         let _ = tx.send(StreamEvent::Token(header.clone()));
         let _ = tx.send(StreamEvent::Token(body.clone()));
 
-        let rune_text = format!("{header}{body}");
-        let scratch = crate::runes::RuneResult {
-            answer, details: None, success: result.success, timing_us, structured,
-        };
-        match crate::runes::build_narration_prompt(name, safety_class, scratch) {
-            Some(prompt) => self.run_followup_streaming(&descriptor, &rune_text, &prompt, tx),
-            None => { let _ = tx.send(StreamEvent::Done { full_text: rune_text }); }
-        }
+        Some(FileRun {
+            display: display_name.to_string(),
+            rune: name,
+            safety: safety_class,
+            answer,
+            success: result.success,
+            timing_us,
+            structured,
+            streamed: format!("{header}{body}"),
+        })
     }
 
     /// Stream a model narration after a rune's kernel output. Persists
@@ -281,6 +342,35 @@ impl DispatchContext {
         self.vault_save(b"assistant", trimmed.as_bytes());
         let _ = tx.send(StreamEvent::Done { full_text: format!("{rune_text}\n\n{trimmed}") });
     }
+}
+
+/// One file's analysis, carried from the per-file rune run to the narration
+/// step. `streamed` is the header+body already sent to the client (for the
+/// final `Done` full_text); `answer` is the compact summary fed to the model.
+struct FileRun {
+    display: String,
+    rune: &'static str,
+    safety: crate::runes::OutputSafety,
+    answer: String,
+    success: bool,
+    timing_us: u64,
+    structured: bool,
+    streamed: String,
+}
+
+/// Build the cross-file correlation narration prompt from the compact answers.
+/// Data-then-question shape (what Gemma 4 narrates best), kept tiny so several
+/// files still fit the narration token budget.
+fn correlation_prompt(runs: &[FileRun]) -> String {
+    let mut p = format!("I ran SIMD analysis tools on {} files:\n\n", runs.len());
+    for r in runs {
+        p.push_str(&format!("{} (via {}):\n{}\n\n", r.display, r.rune, r.answer));
+    }
+    p.push_str(
+        "In 1-2 plain sentences, tell me what stands out across these files — \
+         which one looks anomalous and roughly when.",
+    );
+    p
 }
 
 /// Read up to `max` bytes from a file for content sniffing. Returns an empty

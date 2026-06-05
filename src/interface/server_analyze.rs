@@ -32,10 +32,9 @@ pub(crate) fn handle_analyze(
     let _ = write!(stream, "{SSE_HEADERS}");
     let _ = stream.flush();
 
-    // Parse {"files":[{"name","b64"}]} and stage the first file under /tmp.
-    let staged = parse_and_stage(&body);
-    let (display_name, tmp_path) = match staged {
-        Ok(pair) => pair,
+    // Parse {"files":[{"name","b64"}]} and stage every file under /tmp.
+    let staged = match parse_and_stage(&body) {
+        Ok(v) => v,
         Err(msg) => {
             send_error(stream, &msg);
             return;
@@ -44,14 +43,12 @@ pub(crate) fn handle_analyze(
 
     let (tx, rx) = std::sync::mpsc::channel();
     let ctx_clone = ctx.clone();
-    let name_owned = display_name.clone();
-    let path_owned = tmp_path.clone();
     // Forward-pass-bearing thread (narration) — 16 MB stack like /api/generate.
     let sender = std::thread::Builder::new()
         .stack_size(16 * 1024 * 1024)
         .spawn(move || {
             let mut guard = ctx_clone.lock().unwrap_or_else(|e| e.into_inner());
-            guard.analyze_file_streaming(&name_owned, &path_owned, &tx);
+            guard.analyze_files_streaming(&staged, &tx);
         })
         .expect("failed to spawn analyze thread");
 
@@ -59,28 +56,32 @@ pub(crate) fn handle_analyze(
     let _ = sender.join();
 }
 
-/// Decode the first file from the request body and write it under /tmp.
-/// Returns (display_name, tmp_path) or a user-facing error message.
-pub fn parse_and_stage(body: &[u8]) -> Result<(String, String), String> {
+/// Decode every file in the request body and write each under /tmp.
+/// Returns a (display_name, tmp_path) per file, or a user-facing error.
+pub fn parse_and_stage(body: &[u8]) -> Result<Vec<(String, String)>, String> {
     let obj = json::parse(body).map_err(|_| "Couldn't read the upload (bad JSON).".to_string())?;
     let files = obj.get_array("files")
         .ok_or_else(|| "No files in the request.".to_string())?;
-    let first = files.first()
-        .ok_or_else(|| "No files in the request.".to_string())?;
-    let entry = match first {
-        json::Value::Object(o) => o.as_ref(),
-        _ => return Err("Malformed file entry.".to_string()),
-    };
-    let name = entry.get_str("name").unwrap_or("dropped-file").to_string();
-    let b64 = entry.get_str("b64").ok_or_else(|| "File has no content.".to_string())?;
-    let bytes = base64_decode(b64).ok_or_else(|| "File content isn't valid base64.".to_string())?;
-    if bytes.is_empty() {
-        return Err("The dropped file is empty.".to_string());
+    if files.is_empty() {
+        return Err("No files in the request.".to_string());
     }
-
-    let path = temp_path_for(&name);
-    std::fs::write(&path, &bytes).map_err(|e| format!("Couldn't stage the file: {e}"))?;
-    Ok((name, path))
+    let mut staged = Vec::with_capacity(files.len());
+    for entry_val in files {
+        let entry = match entry_val {
+            json::Value::Object(o) => o.as_ref(),
+            _ => return Err("Malformed file entry.".to_string()),
+        };
+        let name = entry.get_str("name").unwrap_or("dropped-file").to_string();
+        let b64 = entry.get_str("b64").ok_or_else(|| "File has no content.".to_string())?;
+        let bytes = base64_decode(b64).ok_or_else(|| "File content isn't valid base64.".to_string())?;
+        if bytes.is_empty() {
+            return Err("A dropped file is empty.".to_string());
+        }
+        let path = temp_path_for(&name);
+        std::fs::write(&path, &bytes).map_err(|e| format!("Couldn't stage a file: {e}"))?;
+        staged.push((name, path));
+    }
+    Ok(staged)
 }
 
 /// Build a collision-free `/tmp` path with a sanitized basename.
