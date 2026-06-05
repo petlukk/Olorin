@@ -130,6 +130,9 @@ fn handle_connection(stream: &mut std::net::TcpStream, ctx: Arc<Mutex<DispatchCo
         ("POST", "/api/command") => {
             handle_command(stream, req, &buf[..n], n, ctx, teleported);
         }
+        ("POST", "/api/analyze") => {
+            crate::interface::server_analyze::handle_analyze(stream, req, &buf[..n], n, ctx);
+        }
         ("POST", "/api/term/open") => {
             term_stream::handle_term_open(stream);
         }
@@ -279,6 +282,16 @@ fn handle_generate(
         })
         .expect("failed to spawn dispatch thread");
 
+    relay_sse(stream, rx);
+    let _ = sender.join();
+}
+
+/// Relay a `StreamEvent` channel to the client as Server-Sent Events, ending
+/// with `[DONE]`. Shared by `/api/generate` and `/api/analyze`.
+pub(crate) fn relay_sse(
+    stream: &mut std::net::TcpStream,
+    rx: std::sync::mpsc::Receiver<crate::core::router::StreamEvent>,
+) {
     let mut token_count: u64 = 0;
     let mut decode_start: Option<std::time::Instant> = None;
     let mut sse_buf = String::with_capacity(256);
@@ -322,7 +335,6 @@ fn handle_generate(
 
     let _ = stream.write_all(b"data: [DONE]\n\n");
     let _ = stream.flush();
-    let _ = sender.join();
 }
 
 fn handle_command(
