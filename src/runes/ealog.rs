@@ -162,7 +162,12 @@ fn build_output(bytes: &[u8], path: String) -> RuneOutput {
 
 fn format_text(out: &RuneOutput) -> String {
     let src = out.source.as_ref().expect("build_output populates source on success");
-    let total: u64 = out.categories.iter().map(|c| c.count).sum();
+    // Percentages are a share of ALL lines, not of the matched-severity subset.
+    // Otherwise a log dominated by an untracked level (e.g. Apache `[notice]`)
+    // reports "ERROR 100%" when errors are a minority of the file, which
+    // misleads the narration. `matched` is kept only to detect a non-log file.
+    let matched: u64 = out.categories.iter().map(|c| c.count).sum();
+    let lines = out.totals.rows;
 
     let mut buf = String::with_capacity(512);
     buf.push_str(&format!("bytes:   {}\n", format_bytes(src.bytes as usize)));
@@ -172,9 +177,9 @@ fn format_text(out: &RuneOutput) -> String {
     buf.push('\n');
     buf.push_str("severity:\n");
     for c in &out.categories {
-        buf.push_str(&fmt_level(&c.name, c.count, total));
+        buf.push_str(&fmt_level(&c.name, c.count, lines));
     }
-    if total == 0 {
+    if matched == 0 {
         buf.push_str("  (no severity keywords found — file may not be a log)\n");
     }
     if !out.samples.is_empty() {

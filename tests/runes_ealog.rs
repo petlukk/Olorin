@@ -54,6 +54,36 @@ fn ealog_summarizes_synthetic_log() {
 }
 
 #[test]
+fn ealog_percentage_is_of_total_lines_not_matched_subset() {
+    ensure_kernels();
+    // 70 untracked Apache `[notice]` lines + 30 `[error]` lines = 100 total.
+    // ERROR must read 30% of the file, not 100% of the matched subset — the
+    // old denominator (sum of severities) reported ERROR=100% here and led the
+    // model to narrate "nearly all entries are errors". Regression for the
+    // Apache_2k.log finding.
+    let dst = unique_path("pct");
+    let mut buf = String::new();
+    for i in 0..70 {
+        buf.push_str(&format!("2026-05-11T00:{:02}:00 [notice] worker {i} ready\n", i % 60));
+    }
+    for i in 0..30 {
+        buf.push_str(&format!("2026-05-11T01:{:02}:00 [error] upstream timeout {i}\n", i % 60));
+    }
+    std::fs::write(&dst, &buf).unwrap();
+    let result = run_rune("ealog", dst.to_string_lossy().as_ref())
+        .expect("ealog runnable");
+    assert!(result.success, "rune failed: {}", result.answer);
+    let a = &result.answer;
+
+    assert!(a.contains("lines:   100"), "wrong line count: {a}");
+    assert!(a.contains("30.00%"), "ERROR should be 30% of all lines, not 100%: {a}");
+    assert!(!a.contains("100.00%"),
+        "no level should read 100% — the [notice] lines are untracked: {a}");
+
+    let _ = std::fs::remove_file(&dst);
+}
+
+#[test]
 fn ealog_detects_jsonl_format() {
     ensure_kernels();
     let dst = unique_path("jsonl");
