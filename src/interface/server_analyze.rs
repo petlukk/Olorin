@@ -41,6 +41,9 @@ pub(crate) fn handle_analyze(
         }
     };
 
+    // Paths to delete once analysis finishes — staged copies must not pile up.
+    let cleanup: Vec<String> = staged.iter().map(|(_, p)| p.clone()).collect();
+
     let (tx, rx) = std::sync::mpsc::channel();
     let ctx_clone = ctx.clone();
     // Forward-pass-bearing thread (narration) — 16 MB stack like /api/generate.
@@ -54,6 +57,17 @@ pub(crate) fn handle_analyze(
 
     relay_sse(stream, rx);
     let _ = sender.join();
+    cleanup_staged(&cleanup);
+}
+
+/// Remove each staged file's unique /tmp drop directory after analysis, so
+/// uploads (which can be GB each) don't accumulate and fill the disk.
+fn cleanup_staged(paths: &[String]) {
+    for p in paths {
+        if let Some(dir) = std::path::Path::new(p).parent() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
 }
 
 /// Decode every file in the request body and write each under /tmp.
@@ -175,6 +189,7 @@ pub(crate) fn handle_analyze_raw(
         return;
     }
 
+    let cleanup = vec![path.clone()];
     let (tx, rx) = std::sync::mpsc::channel();
     let ctx_clone = ctx.clone();
     let sender = std::thread::Builder::new()
@@ -186,6 +201,7 @@ pub(crate) fn handle_analyze_raw(
         .expect("failed to spawn analyze thread");
     relay_sse(stream, rx);
     let _ = sender.join();
+    cleanup_staged(&cleanup);
 }
 
 /// Write `leftover` (body bytes already read alongside the headers) then stream
