@@ -191,11 +191,19 @@ pub(crate) fn serve_json(stream: &mut std::net::TcpStream, body: &str) {
     );
 }
 
-const MAX_BODY_SIZE: usize = 1024 * 1024; // 1 MB
+/// Max request body, in bytes. Default 128 MB so the file-drop analyst can
+/// accept real logs (base64 inflates ~33%, so ~95 MB of file). Override with
+/// `OLORIN_MAX_UPLOAD=<bytes>`.
+fn max_body_size() -> usize {
+    std::env::var("OLORIN_MAX_UPLOAD")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(128 * 1024 * 1024)
+}
 
 pub(crate) fn read_body(stream: &mut std::net::TcpStream, req: &str, buf: &[u8], n: usize) -> Vec<u8> {
     let content_len = parse_content_length(req);
-    if content_len > MAX_BODY_SIZE { return Vec::new(); }
+    if content_len > max_body_size() { return Vec::new(); }
     let header_end  = req.find("\r\n\r\n").unwrap_or(n) + 4;
     let already     = n.saturating_sub(header_end);
     let mut body_buf = vec![0u8; content_len];
