@@ -1,5 +1,12 @@
 # Runes — the full catalog
 
+![A 1 GB web access log analyzed on a Raspberry Pi](images/filedrop-1gb-nasa.jpg)
+
+*Drop a file into the web UI and a rune analyzes it on-device: here a 1 GB
+NASA-HTTP access log (July 1995) is SIMD-scanned in 755 ms, a real traffic
+spike flagged on the 13th, and narrated by the local model — zero cloud,
+on a Raspberry Pi.*
+
 > A *rune* is a SIMD-first command. Each one is one Ea kernel plus a thin Rust
 > orchestrator that turns MB-scale raw data into a small structured summary
 > in sub-second time. The language model never sees the raw bytes — only the

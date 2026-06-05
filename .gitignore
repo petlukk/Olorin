@@ -14,5 +14,7 @@
 /docs/*
 !/docs/runes.md
 !/docs/architecture.md
+!/docs/images/
+!/docs/images/**
 /.claude/
 *.pdf
