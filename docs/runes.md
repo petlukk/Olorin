@@ -13,7 +13,7 @@ on a Raspberry Pi.*
 > kernel's output, which it phrases in one or two plain-English sentences.
 
 Runes are how Olorin reasons over data larger than the model's context window.
-Gemma 4 E2B has ~128K tokens of context; a modest bank statement is 50 MB.
+Olorin runs Gemma 4 E2B with a 2,048-token window; a modest bank statement is 50 MB.
 A rune compresses the file losslessly along the dimensions that matter
 (counts, ranges, top-N values, distributions), so the model can narrate
 findings without ever holding the full file in its head.
