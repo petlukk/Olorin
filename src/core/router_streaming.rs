@@ -141,6 +141,82 @@ impl DispatchContext {
         let _ = tx.send(StreamEvent::Done { full_text: String::new() });
     }
 
+    /// File-drop analyst (single file): the user dropped a file, so the
+    /// "analyze this" decision is already made — pick the rune deterministically
+    /// (no autonomous model tool-call, which is what makes this reliable on the
+    /// Pi), run it, stream the kernel output, then narrate via the proven
+    /// narration path. `tmp_path` MUST be under the rune path allowlist (~ or
+    /// /tmp); the rune enforces it on read.
+    pub fn analyze_file_streaming(
+        &mut self,
+        display_name: &str,
+        tmp_path: &str,
+        tx: &std::sync::mpsc::Sender<StreamEvent>,
+    ) {
+        // Sniff a bounded prefix to choose the rune (extension + timestamp).
+        let prefix = read_prefix(tmp_path, 8192);
+        let Some(rune) = crate::runes::select::pick_rune(display_name, &prefix) else {
+            let msg = format!(
+                "I don't have a rune that analyzes '{display_name}'. I can summarize \
+                 CSVs, JSON Lines, Parquet, and log files."
+            );
+            let _ = tx.send(StreamEvent::Token(msg.clone()));
+            let _ = tx.send(StreamEvent::Done { full_text: msg });
+            return;
+        };
+
+        let name = rune.name();
+        let flags = crate::runes::select::default_args(name);
+        let args = if flags.is_empty() {
+            tmp_path.to_string()
+        } else {
+            format!("{flags} {tmp_path}")
+        };
+        let result = rune.run(&args);
+        let safety_class = rune.output_safety();
+        let answer = result.answer.clone();
+        let timing_us = result.timing_us;
+        let structured = result.structured;
+
+        // User-visible kernel output (mirrors handle_rune's body shape).
+        let body = if structured {
+            result.answer
+        } else {
+            let mut b = result.answer;
+            if let Some(d) = result.details {
+                b.push_str("\n\n---\n");
+                b.push_str(&d);
+            }
+            b.push_str(&format!("\n[timing: {timing_us}µs]"));
+            b
+        };
+        if safety::scan(body.as_bytes()).blocked {
+            let _ = tx.send(StreamEvent::Error(
+                "Analysis output blocked by safety scan.".to_string(),
+            ));
+            let _ = tx.send(StreamEvent::Done { full_text: String::new() });
+            return;
+        }
+
+        let header = format!("📎 ran `{name}` on {display_name}\n\n");
+        let descriptor = format!("analyze {display_name} ({name})");
+        self.vault_save(b"user", descriptor.as_bytes());
+        self.vault_save(b"tool", body.as_bytes());
+
+        // Stream the kernel output, then narrate it.
+        let _ = tx.send(StreamEvent::Token(header.clone()));
+        let _ = tx.send(StreamEvent::Token(body.clone()));
+
+        let rune_text = format!("{header}{body}");
+        let scratch = crate::runes::RuneResult {
+            answer, details: None, success: result.success, timing_us, structured,
+        };
+        match crate::runes::build_narration_prompt(name, safety_class, scratch) {
+            Some(prompt) => self.run_followup_streaming(&descriptor, &rune_text, &prompt, tx),
+            None => { let _ = tx.send(StreamEvent::Done { full_text: rune_text }); }
+        }
+    }
+
     /// Stream a model narration after a rune's kernel output. Persists
     /// the rune turn + narration to messages/vault on success.
     pub(crate) fn run_followup_streaming(
@@ -204,5 +280,17 @@ impl DispatchContext {
         self.messages.push(handlers::assistant_message(trimmed));
         self.vault_save(b"assistant", trimmed.as_bytes());
         let _ = tx.send(StreamEvent::Done { full_text: format!("{rune_text}\n\n{trimmed}") });
+    }
+}
+
+/// Read up to `max` bytes from a file for content sniffing. Returns an empty
+/// vec on any error — `pick_rune` then falls back to extension-only routing.
+fn read_prefix(path: &str, max: usize) -> Vec<u8> {
+    use std::io::Read;
+    let Ok(mut f) = std::fs::File::open(path) else { return Vec::new() };
+    let mut buf = vec![0u8; max];
+    match f.read(&mut buf) {
+        Ok(n) => { buf.truncate(n); buf }
+        Err(_) => Vec::new(),
     }
 }

@@ -36,6 +36,17 @@ pub fn pick_rune_name(filename: &str, bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
+/// Default rune arguments for a file-drop analysis (flags only; the file path
+/// is appended by the caller). For `eatime` we lead with spike detection —
+/// the forensic "when did the rate break" story — rather than the plain
+/// hour-of-day histogram. Other runes need no flags by default.
+pub fn default_args(rune_name: &str) -> &'static str {
+    match rune_name {
+        "eatime" => "--bucket series",
+        _ => "",
+    }
+}
+
 /// Lowercased extension (no dot) of a filename's basename, or `None` if it has
 /// no extension.
 fn extension(filename: &str) -> Option<String> {
