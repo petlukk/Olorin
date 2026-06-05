@@ -182,7 +182,7 @@ fn format_text(out: &RuneOutput) -> String {
     buf.push_str(&format!("bytes:   {}\n", format_bytes(src.bytes as usize)));
     buf.push_str(&format!("lines:   {}\n", out.totals.rows));
     buf.push_str(&format!("format:  {}\n", src.format));
-    buf.push_str(&format!("scan:    {} ms\n", out.totals.scan_us / 1000));
+    buf.push_str(&format!("scan:    {}\n", super::common::format_scan_time(out.totals.scan_us)));
     buf.push('\n');
     buf.push_str("severity:\n");
     for c in &out.categories {

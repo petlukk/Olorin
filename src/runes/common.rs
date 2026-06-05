@@ -11,6 +11,17 @@ pub const MAX_INPUT_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 /// Cap for `RuneResult.answer` — this is what reaches the LLM.
 pub const MAX_ANSWER_BYTES: usize = 32 * 1024;
 
+/// Render a scan time, keeping resolution: microseconds below a millisecond,
+/// milliseconds above. Whole-millisecond rounding made a sub-millisecond SIMD
+/// pass display as an uninformative `0 ms` — exactly when the kernel is fastest.
+pub fn format_scan_time(scan_us: u64) -> String {
+    if scan_us < 1000 {
+        format!("{scan_us} µs")
+    } else {
+        format!("{} ms", scan_us / 1000)
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub enum PathError {
     OutsideAllowlist,
