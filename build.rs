@@ -225,7 +225,8 @@ fn main() {
             if !name.ends_with(".rs") { continue; }
             if name == "mod.rs" || name == "common.rs" || name == "output.rs"
                 || name == "eajson_aggregate.rs" || name == "narration.rs"
-                || name == "timekey.rs" || name == "anomaly.rs" { continue; }
+                || name == "timekey.rs" || name == "anomaly.rs"
+                || name == "select.rs" { continue; }
             let stem = name.strip_suffix(".rs").unwrap();
             let contents = fs::read_to_string(entry.path()).unwrap_or_default();
             if !contents.contains("pub const RUNE") {

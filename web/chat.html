@@ -24,6 +24,7 @@ body{background:var(--crust);color:var(--text);font-family:'Inter',system-ui,san
 .tile-close{background:none;border:none;color:var(--overlay0);cursor:pointer;font:14px monospace;padding:0 2px}
 .tile-close:hover{color:var(--red)}
 .chat-body{display:flex;flex-direction:column;gap:24px;font-family:'Inter',system-ui,sans-serif;overflow-y:auto;padding:24px 20px;flex:1;min-height:0}
+.chat-body.drag-over{outline:2px dashed var(--teal,#94e2d5);outline-offset:-8px;background:rgba(148,226,213,0.06)}
 .chat-msg{display:flex;gap:14px}
 .chat-avatar{width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;font:600 14px 'JetBrains Mono',monospace;flex-shrink:0}
 .chat-avatar.user{background:var(--surface1);color:var(--lavender)}
@@ -110,12 +111,21 @@ function createChatTile(id){
   const cb=el('button','tile-close','×');cb.onclick=()=>closeTile(id);hdr.appendChild(cb);
   t.appendChild(hdr);
   const body=el('div','chat-body');body.id='chat-body-'+id;t.appendChild(body);
+  // Drop a file anywhere in the chat body to analyze it.
+  body.addEventListener('dragover',e=>{e.preventDefault();body.classList.add('drag-over')});
+  body.addEventListener('dragleave',()=>body.classList.remove('drag-over'));
+  body.addEventListener('drop',e=>{e.preventDefault();body.classList.remove('drag-over');analyzeFiles(id,body,e.dataTransfer.files)});
   const area=el('div','chat-input-area');
   const box=el('div','chat-input-box');
-  const inp=el('input','chat-input');inp.placeholder='Message Olorin...';inp.autocomplete='off';
+  const inp=el('input','chat-input');inp.placeholder='Message Olorin, or drop a file to analyze...';inp.autocomplete='off';
   inp.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendChat(id,body,inp)}});
+  // Attach button + hidden file input for click-to-pick.
+  const fileInp=el('input');fileInp.type='file';fileInp.multiple=true;fileInp.style.display='none';
+  fileInp.addEventListener('change',()=>{analyzeFiles(id,body,fileInp.files);fileInp.value=''});
+  const clip=el('button','chat-send','📎');clip.title='Analyze a file';clip.onclick=()=>fileInp.click();
   const btn=el('button','chat-send','↑');btn.onclick=()=>sendChat(id,body,inp);
-  box.appendChild(inp);box.appendChild(btn);area.appendChild(box);t.appendChild(area);
+  box.appendChild(inp);box.appendChild(clip);box.appendChild(btn);box.appendChild(fileInp);
+  area.appendChild(box);t.appendChild(area);
   return t;
 }
 
@@ -130,6 +140,27 @@ function addChatMsg(body,role,text){
   return bubble;
 }
 
+// Render an SSE token stream from `res` into `bubble`, driving the thinking cursor.
+async function renderSSE(res,bubble,cursor,body){
+  const reader=res.body.getReader();const dec=new TextDecoder();let buf='';
+  while(true){
+    const{done,value}=await reader.read();if(done)break;
+    buf+=dec.decode(value,{stream:true});
+    const lines=buf.split('\n');buf=lines.pop();
+    for(const line of lines){
+      if(!line.startsWith('data: ')||line==='data: [DONE]')continue;
+      try{const ev=JSON.parse(line.slice(6));
+        if(ev.thinking===true){cursor.textContent=' \u2026pondering';cursor.className='cursor-thinking';}
+        else if(ev.thinking===false){cursor.textContent='';cursor.className='cursor-blink';}
+        else if(ev.error){bubble.textContent+=ev.error;}
+        else if(ev.token!=null){bubble.textContent+=ev.token;cursor.textContent='';cursor.className='cursor-blink';}
+        if(ev.tps)document.getElementById('hb-tps').textContent=ev.tps.toFixed(1);
+        body.scrollTop=body.scrollHeight;
+      }catch(_){}
+    }
+  }
+}
+
 async function sendChat(id,body,input){
   const text=input.value.trim();if(!text)return;input.value='';
   addChatMsg(body,'user',text);
@@ -138,23 +169,40 @@ async function sendChat(id,body,input){
   try{
     const res=await fetch('/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify(Object.assign({prompt:text},tileConfig(id)))});
-    const reader=res.body.getReader();const dec=new TextDecoder();let buf='';
-    while(true){
-      const{done,value}=await reader.read();if(done)break;
-      buf+=dec.decode(value,{stream:true});
-      const lines=buf.split('\n');buf=lines.pop();
-      for(const line of lines){
-        if(!line.startsWith('data: ')||line==='data: [DONE]')continue;
-        try{const ev=JSON.parse(line.slice(6));
-          if(ev.thinking===true){cursor.textContent=' \u2026pondering';cursor.className='cursor-thinking';}
-          else if(ev.thinking===false){cursor.textContent='';cursor.className='cursor-blink';}
-          else if(ev.error){bubble.textContent+=ev.error;}
-          else if(ev.token!=null){bubble.textContent+=ev.token;cursor.textContent='';cursor.className='cursor-blink';}
-          if(ev.tps)document.getElementById('hb-tps').textContent=ev.tps.toFixed(1);
-          body.scrollTop=body.scrollHeight;
-        }catch(_){}
-      }
+    await renderSSE(res,bubble,cursor,body);
+  }catch(e){bubble.textContent+=' [error: '+e.message+']';}
+  cursor.remove();
+}
+
+// Read a File as base64 (strip the data: URL prefix the server tolerates anyway).
+function fileToB64(file){
+  return new Promise((resolve,reject)=>{
+    const r=new FileReader();
+    r.onload=()=>resolve(String(r.result).split(',').pop());
+    r.onerror=()=>reject(r.error||new Error('read failed'));
+    r.readAsDataURL(file);
+  });
+}
+
+// Drop/attach handler: analyze a file via /api/analyze, rendering into the chat.
+async function analyzeFiles(id,body,files){
+  if(!files||!files.length)return;
+  const list=Array.from(files);
+  addChatMsg(body,'user','\ud83d\udcce '+list.map(f=>f.name).join(', '));
+  const bubble=addChatMsg(body,'assistant','');
+  const cursor=el('span','cursor-blink');bubble.after(cursor);
+  try{
+    let res;
+    if(list.length===1){
+      // single file: stream the raw bytes (no base64) so multi-GB logs work
+      res=await fetch('/api/analyze_raw',{method:'POST',headers:{'X-Filename':list[0].name},body:list[0]});
+    }else{
+      // multiple files: base64 JSON for cross-file correlation
+      const payload=await Promise.all(list.map(async f=>({name:f.name,b64:await fileToB64(f)})));
+      res=await fetch('/api/analyze',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({files:payload})});
     }
+    await renderSSE(res,bubble,cursor,body);
   }catch(e){bubble.textContent+=' [error: '+e.message+']';}
   cursor.remove();
 }

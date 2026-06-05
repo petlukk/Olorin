@@ -117,10 +117,29 @@ fn handle_connection(stream: &mut std::net::TcpStream, ctx: Arc<Mutex<DispatchCo
             serve_json(stream, r#"{"name":"olorin","backend":"pipe"}"#);
         }
         ("GET", "/api/system") => {
-            let c = ctx.lock().unwrap_or_else(|e| e.into_inner());
-            let recall_level = c.recall_level();
-            let config_json = c.get_config();
-            drop(c);
+            // Never block on the ctx mutex here. A long analysis/generation holds
+            // it for minutes, which would freeze the live cpu/temp/mem heartbeat
+            // exactly when the Pi is working hardest. Refresh recall/config
+            // opportunistically (try_lock) and reuse the last-known values when
+            // busy; the system telemetry below never needs the lock.
+            static LAST: std::sync::Mutex<(usize, String)> =
+                std::sync::Mutex::new((0, String::new()));
+            let guard = match ctx.try_lock() {
+                Ok(c) => Some(c),
+                Err(std::sync::TryLockError::Poisoned(p)) => Some(p.into_inner()),
+                Err(std::sync::TryLockError::WouldBlock) => None,
+            };
+            if let Some(c) = guard {
+                let r = c.recall_level();
+                let cfg = c.get_config();
+                drop(c);
+                if let Ok(mut last) = LAST.lock() { *last = (r, cfg); }
+            }
+            let (recall_level, mut config_json) = {
+                let last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+                last.clone()
+            };
+            if config_json.is_empty() { config_json = "{}".to_string(); }
             let body = build_system_json(recall_level, &config_json);
             serve_json(stream, &body);
         }
@@ -129,6 +148,12 @@ fn handle_connection(stream: &mut std::net::TcpStream, ctx: Arc<Mutex<DispatchCo
         }
         ("POST", "/api/command") => {
             handle_command(stream, req, &buf[..n], n, ctx, teleported);
+        }
+        ("POST", "/api/analyze") => {
+            crate::interface::server_analyze::handle_analyze(stream, req, &buf[..n], n, ctx);
+        }
+        ("POST", "/api/analyze_raw") => {
+            crate::interface::server_analyze::handle_analyze_raw(stream, req, &buf[..n], n, ctx);
         }
         ("POST", "/api/term/open") => {
             term_stream::handle_term_open(stream);
@@ -170,9 +195,13 @@ fn handle_connection(stream: &mut std::net::TcpStream, ctx: Arc<Mutex<DispatchCo
 
 fn serve_html(stream: &mut std::net::TcpStream) {
     let body = get_chat_html();
+    // The HTML is embedded in the binary (include_str!), so it changes on every
+    // deploy — never let the browser serve a stale copy, or new frontend code
+    // (e.g. a new upload path) silently won't load.
     let _ = write!(
         stream,
         "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\
+         Cache-Control: no-cache, no-store, must-revalidate\r\n\
          Content-Length: {}\r\nConnection: close\r\n\r\n{}",
         body.len(), body
     );
@@ -188,11 +217,19 @@ pub(crate) fn serve_json(stream: &mut std::net::TcpStream, body: &str) {
     );
 }
 
-const MAX_BODY_SIZE: usize = 1024 * 1024; // 1 MB
+/// Max request body, in bytes. Default 128 MB so the file-drop analyst can
+/// accept real logs (base64 inflates ~33%, so ~95 MB of file). Override with
+/// `OLORIN_MAX_UPLOAD=<bytes>`.
+fn max_body_size() -> usize {
+    std::env::var("OLORIN_MAX_UPLOAD")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(128 * 1024 * 1024)
+}
 
 pub(crate) fn read_body(stream: &mut std::net::TcpStream, req: &str, buf: &[u8], n: usize) -> Vec<u8> {
     let content_len = parse_content_length(req);
-    if content_len > MAX_BODY_SIZE { return Vec::new(); }
+    if content_len > max_body_size() { return Vec::new(); }
     let header_end  = req.find("\r\n\r\n").unwrap_or(n) + 4;
     let already     = n.saturating_sub(header_end);
     let mut body_buf = vec![0u8; content_len];
@@ -279,6 +316,16 @@ fn handle_generate(
         })
         .expect("failed to spawn dispatch thread");
 
+    relay_sse(stream, rx);
+    let _ = sender.join();
+}
+
+/// Relay a `StreamEvent` channel to the client as Server-Sent Events, ending
+/// with `[DONE]`. Shared by `/api/generate` and `/api/analyze`.
+pub(crate) fn relay_sse(
+    stream: &mut std::net::TcpStream,
+    rx: std::sync::mpsc::Receiver<crate::core::router::StreamEvent>,
+) {
     let mut token_count: u64 = 0;
     let mut decode_start: Option<std::time::Instant> = None;
     let mut sse_buf = String::with_capacity(256);
@@ -322,7 +369,6 @@ fn handle_generate(
 
     let _ = stream.write_all(b"data: [DONE]\n\n");
     let _ = stream.flush();
-    let _ = sender.join();
 }
 
 fn handle_command(
