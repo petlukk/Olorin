@@ -326,10 +326,11 @@ impl DispatchContext {
         let narration = buf.into_inner();
         let trimmed = narration.trim();
 
-        // Empty or grid-continuation → discard the narration; kernel output
-        // stands alone, exactly as it did under the old length skip.
+        // Empty, grid-continuation, or a reformatted data dump (the multi-file
+        // failure mode) → discard the narration; the kernel output stands alone.
         if trimmed.is_empty()
             || crate::runes::narration::is_grid_continuation(prompt, trimmed)
+            || crate::runes::narration::looks_like_data_dump(trimmed)
         {
             let _ = tx.send(StreamEvent::Done { full_text: rune_text.to_string() });
             return;
@@ -359,17 +360,15 @@ struct FileRun {
 }
 
 /// Build the cross-file correlation narration prompt from the compact answers.
-/// Data-then-question shape (what Gemma 4 narrates best), kept tiny so several
-/// files still fit the narration token budget.
+/// DATA ONLY, no trailing instruction: the narration system prompt already asks
+/// for a 1-2 sentence summary, and appending the instruction here makes Gemma 4
+/// echo it back instead of answering (same trap `build_narration_prompt`
+/// documents for the single-file case).
 fn correlation_prompt(runs: &[FileRun]) -> String {
-    let mut p = format!("I ran SIMD analysis tools on {} files:\n\n", runs.len());
+    let mut p = format!("Output of analysis tools on {} files:\n", runs.len());
     for r in runs {
-        p.push_str(&format!("{} (via {}):\n{}\n\n", r.display, r.rune, r.answer));
+        p.push_str(&format!("\n{} (via {}):\n{}\n", r.display, r.rune, r.answer));
     }
-    p.push_str(
-        "In 1-2 plain sentences, tell me what stands out across these files — \
-         which one looks anomalous and roughly when.",
-    );
     p
 }
 

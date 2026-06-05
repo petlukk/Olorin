@@ -6,7 +6,21 @@
 //! the tests/narration_length_vs_structure.rs harness). Model-free: it
 //! exercises the detector logic directly.
 
-use olorin::runes::narration::is_grid_continuation;
+use olorin::runes::narration::{is_grid_continuation, looks_like_data_dump};
+
+#[test]
+fn data_dump_guard_flags_markdown_table_but_not_prose() {
+    // The multi-file failure mode: the model reformats into a markdown table.
+    let table = "| attribute | value |\n|---|---|\n| status | mean=217.65 |";
+    assert!(looks_like_data_dump(table), "markdown table should be discarded");
+    // A real 1-2 sentence summary must pass.
+    let prose = "The backend log shows two spikes around 8:10 AM, while the \
+                 frontend looks normal.";
+    assert!(!looks_like_data_dump(prose), "prose summary must NOT be discarded");
+    // A long restructured block is also a dump.
+    let long = (0..8).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+    assert!(looks_like_data_dump(&long), "long multi-line block should be discarded");
+}
 
 /// A 24-row hour grid in the shape that fails on the production quant. The
 /// `Output of` header mirrors what build_narration_prompt prepends.
