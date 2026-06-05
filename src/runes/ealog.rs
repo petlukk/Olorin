@@ -148,11 +148,20 @@ fn build_output(bytes: &[u8], path: String) -> RuneOutput {
         Category { name: "ERROR".to_string(), count: c_error },
         Category { name: "FATAL".to_string(), count: c_fatal },
     ];
+    // Dedup samples by line: a line with two matched keywords (e.g.
+    // "[error] ... in error state") records two offsets in the same line, which
+    // would otherwise emit the identical sample twice.
+    let mut seen_lines: Vec<u64> = Vec::with_capacity(n_pos as usize);
     for &offset in &positions[..n_pos as usize] {
         let (line_num, line) = extract_line_at(bytes, offset as usize);
+        let line_num = line_num as u64;
+        if seen_lines.contains(&line_num) {
+            continue;
+        }
+        seen_lines.push(line_num);
         out.samples.push(Sample {
             byte_offset: Some(offset as u64),
-            line:        Some(line_num as u64),
+            line:        Some(line_num),
             timestamp:   None,
             text:        truncate_line(line),
         });

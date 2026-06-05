@@ -84,6 +84,29 @@ fn ealog_percentage_is_of_total_lines_not_matched_subset() {
 }
 
 #[test]
+fn ealog_samples_dedupe_multi_keyword_lines() {
+    ensure_kernels();
+    // A line with TWO matched keywords (mirrors Apache "[error] ... in error
+    // state 6") records two offsets in the same line; the high-severity sample
+    // must show it once, not twice. Regression for the Apache_2k.log finding.
+    let dst = unique_path("dedupe");
+    let mut buf = String::from("[error] mod_jk child workerEnv in error state 6\n");
+    for i in 0..5 {
+        buf.push_str(&format!("2026-05-11T00:00:0{i} [info] ok {i}\n"));
+    }
+    std::fs::write(&dst, &buf).unwrap();
+    let result = run_rune("ealog", dst.to_string_lossy().as_ref())
+        .expect("ealog runnable");
+    assert!(result.success, "rune failed: {}", result.answer);
+
+    let occurrences = result.answer.matches("mod_jk child workerEnv").count();
+    assert_eq!(occurrences, 1,
+        "multi-keyword line must be sampled once, not twice: {}", result.answer);
+
+    let _ = std::fs::remove_file(&dst);
+}
+
+#[test]
 fn ealog_detects_jsonl_format() {
     ensure_kernels();
     let dst = unique_path("jsonl");
