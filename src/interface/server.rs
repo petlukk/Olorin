@@ -176,9 +176,13 @@ fn handle_connection(stream: &mut std::net::TcpStream, ctx: Arc<Mutex<DispatchCo
 
 fn serve_html(stream: &mut std::net::TcpStream) {
     let body = get_chat_html();
+    // The HTML is embedded in the binary (include_str!), so it changes on every
+    // deploy — never let the browser serve a stale copy, or new frontend code
+    // (e.g. a new upload path) silently won't load.
     let _ = write!(
         stream,
         "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\
+         Cache-Control: no-cache, no-store, must-revalidate\r\n\
          Content-Length: {}\r\nConnection: close\r\n\r\n{}",
         body.len(), body
     );
