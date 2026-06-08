@@ -42,6 +42,9 @@ pub struct Engine {
     pub top_p: f32,
     pub min_p: f32,
     pub repetition_penalty: f32,
+    /// Emit Gemma 4's `<|think|>` chain-of-thought token. On for hard reasoning,
+    /// off for tasks that don't need it (e.g. narration) to cut decode tokens.
+    pub thinking: bool,
 }
 
 impl Engine {
@@ -81,6 +84,7 @@ impl Engine {
             top_p: 0.95,
             min_p: 0.05,
             repetition_penalty: 1.0,
+            thinking: true,
         })
     }
 
@@ -93,7 +97,7 @@ impl Engine {
     /// and return the resulting token count. Used by callers that need to
     /// budget against `max_seq_len` before invoking generation.
     pub fn count_prompt_tokens(&self, prompt: &str, system: &str) -> usize {
-        let formatted = format_chat(prompt, system);
+        let formatted = format_chat(prompt, system, self.thinking);
         // +1 for the BOS id that `generate` prepends.
         1 + self.tokenizer.encode(&formatted).len()
     }
@@ -111,7 +115,7 @@ impl Engine {
         on_event: &dyn Fn(GenEvent),
     ) -> Result<String> {
         // 1. Format as Gemma chat template
-        let formatted = format_chat(prompt, system);
+        let formatted = format_chat(prompt, system, self.thinking);
 
         // 2. Tokenize. The Gemma 4 jinja chat_template emits {{ bos_token }}
         //    at the start, so we prepend BOS as a token id (matches what the
@@ -233,9 +237,11 @@ impl Engine {
 // Chat template
 // ---------------------------------------------------------------------------
 
-fn format_chat(user: &str, system: &str) -> String {
-    // Gemma 4 chat format with enable_thinking=1 (the default for this
-    // instruction-tuned model). Jinja chat_template emits:
+fn format_chat(user: &str, system: &str, thinking: bool) -> String {
+    // Gemma 4 chat format. `thinking` mirrors the jinja `enable_thinking`
+    // flag — when off, the `<|think|>` token is omitted and the model answers
+    // directly (no hidden chain-of-thought), trading some reasoning depth for
+    // far fewer decode tokens. Jinja chat_template emits:
     //   {{ bos_token }}                           <- caller adds bos_id
     //   if enable_thinking or system or tools:
     //     <|turn>system\n
@@ -253,7 +259,9 @@ fn format_chat(user: &str, system: &str) -> String {
     let mut out = String::with_capacity(system.len() + user.len() + 96);
     let sys_trim = system.trim();
     out.push_str("<|turn>system\n");
-    out.push_str("<|think|>");
+    if thinking {
+        out.push_str("<|think|>");
+    }
     if !sys_trim.is_empty() {
         out.push_str(sys_trim);
     }
