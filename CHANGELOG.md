@@ -8,6 +8,32 @@ order.
 
 ## [Unreleased]
 
+## [2.3.0] — 2026-06-08
+
+Faster on the Pi. Two independent latency wins that together cut local
+narration and chat response time several-fold — by spending **fewer model
+tokens**, not chasing per-token speed (decode is already at the
+memory-bandwidth floor, so token count is the only lever left).
+
+### Changed
+
+- **Narration skips chain-of-thought.**  Narration restates a rune's
+  already-computed result, so Gemma 4's `<|think|>` reasoning is pure cost.
+  Disabling it for narration cut a Pi 5 narration from ~82s to ~18s (4.5×) —
+  and the summaries got *sharper*, since the model stops abstracting away
+  from the concrete numbers the kernel handed it.
+
+- **Minimal chat system prompt on aarch64.**  The ~2.6 KB tools-framing
+  system prompt was re-prefilled every chat turn — ~30s of the Pi's "30-40s"
+  chat latency (a trivial answer took 32s with the block, 2s without). On
+  aarch64 the NEON forward pass can't emit the `<tool_call>` XML that block
+  frames anyway, so the Pi now uses a one-line identity prompt: factual chat
+  32s → 19.5s, and reasoning accuracy improved (the block had been priming
+  the model to reconcile non-existent tool context). x86_64 keeps the full
+  block for autonomous tool-calling. The working Pi tool paths — `/weather`,
+  the intent classifier ("weather haparanda"), and file-drop analysis — are
+  unaffected.
+
 ## [2.2.1] — 2026-06-05
 
 ### Fixed
