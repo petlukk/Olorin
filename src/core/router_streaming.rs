@@ -306,7 +306,8 @@ impl DispatchContext {
         // Buffer the narration instead of streaming it live: a grid-continuation
         // (the model emitting a data row instead of a summary) must be suppressed
         // before any of it reaches the user, and a streamed token can't be
-        // recalled. Thinking state still flows so the UI shows progress.
+        // recalled. Narration runs thinking-off (see below), so there's no
+        // chain-of-thought phase to surface — the Thinking handler is a no-op here.
         let buf = std::cell::RefCell::new(String::new());
         let on_event = |ev: crate::inference::generate::GenEvent| match ev {
             crate::inference::generate::GenEvent::Token(t) => {
@@ -320,9 +321,12 @@ impl DispatchContext {
         };
 
         let prior_max = engine.max_tokens;
+        let prior_thinking = engine.thinking;
         engine.max_tokens = crate::core::router_tools::NARRATION_DECODE_TOKEN_CAP;
+        engine.thinking = false; // no chain-of-thought for restating a rune result
         let _ = engine.generate(prompt, system, &on_event);
         engine.max_tokens = prior_max;
+        engine.thinking = prior_thinking;
         let narration = buf.into_inner();
         let trimmed = narration.trim();
 

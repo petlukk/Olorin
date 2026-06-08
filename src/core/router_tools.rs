@@ -13,9 +13,11 @@ use std::time::Instant;
 const FOLLOWUP_CLOSER: &str =
     "Now answer my original question using the tool result above. Do NOT call another tool.";
 
-/// 768 = ~600 thinking + ~120 answer + margin. Gemma 4's thinking-mode
-/// tokens count against decode but get filtered out of the returned string,
-/// so we need headroom for both.
+/// Safety ceiling for narration decode. Narration runs with thinking
+/// disabled (the rune already did the analysis; the model only restates
+/// it), so this is now pure headroom over the ~120-token answer — the
+/// model hits EOS long before the cap. Measured on the Pi: disabling
+/// thinking cut narration from ~82s to ~18s with no quality loss.
 pub(crate) const NARRATION_DECODE_TOKEN_CAP: usize = 768;
 
 /// Analyst-role system. The full runes_prompt_block (with tools framing)
@@ -153,10 +155,13 @@ impl DispatchContext {
             ));
         }
         let prior_max = engine.max_tokens;
+        let prior_thinking = engine.thinking;
         engine.max_tokens = NARRATION_DECODE_TOKEN_CAP;
+        engine.thinking = false; // no chain-of-thought for restating a rune result
         let no_op = |_ev: crate::inference::generate::GenEvent| {};
         let result = engine.generate(prompt, system, &no_op);
         engine.max_tokens = prior_max;
+        engine.thinking = prior_thinking;
         match result {
             Ok(narr) => {
                 let trimmed = narr.trim();
