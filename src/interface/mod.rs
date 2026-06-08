@@ -3,6 +3,7 @@ pub mod server;
 pub mod server_analyze;
 pub mod whatsapp;
 pub mod term_stream;
+pub mod ws;
 pub mod spawner;
 #[cfg(unix)]
 pub mod spawner_unix;
