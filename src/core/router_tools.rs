@@ -13,11 +13,9 @@ use std::time::Instant;
 const FOLLOWUP_CLOSER: &str =
     "Now answer my original question using the tool result above. Do NOT call another tool.";
 
-/// Safety ceiling for narration decode. Narration runs with thinking
-/// disabled (the rune already did the analysis; the model only restates
-/// it), so this is now pure headroom over the ~120-token answer — the
-/// model hits EOS long before the cap. Measured on the Pi: disabling
-/// thinking cut narration from ~82s to ~18s with no quality loss.
+/// Safety ceiling for narration decode. Narration runs thinking-off (the rune
+/// did the analysis; the model only restates it), so this is pure headroom over
+/// the ~120-token answer — EOS hits long before the cap. Pi: ~82s → ~18s.
 pub(crate) const NARRATION_DECODE_TOKEN_CAP: usize = 768;
 
 /// Analyst-role system. The full runes_prompt_block (with tools framing)
@@ -348,21 +346,12 @@ Agent: Olorin")
 
     // ── Post-inference tool-call wiring ──────────────────────────────────────
 
-    /// After local `engine.generate()` returns `first_output`, detect any
-    /// `<tool_call>` and run the dispatch + synthetic follow-up generate.
-    ///
-    /// Returns `Some(final_text)` if a tool was called and follow-up succeeded
-    /// (the caller should use this as the text to finalize + send Done).
-    /// Returns `None` if there was no tool call in `first_output` (caller
-    /// falls through to its normal path).
-    ///
-    /// When `tx` is `Some`, follow-up tokens are streamed through the channel
-    /// (Web UI / WhatsApp path). When `tx` is `None`, the follow-up runs
-    /// synchronously and the final text is returned inline (terminal REPL path).
-    /// In both cases the outbound scan is applied exactly once inside this helper;
-    /// callers must NOT apply a second scan on the returned text.
-    /// On outbound-block the helper returns `Some(String::new())` — the caller
-    /// is responsible for surfacing this as a blocked response to the user.
+    /// Detect a `<tool_call>` in `first_output` and run dispatch + a synthetic
+    /// follow-up generate. `None` = no tool call (caller uses its normal path).
+    /// `Some(String::new())` is the outbound-block sentinel the caller must
+    /// surface as blocked. The outbound scan runs exactly once in here —
+    /// callers must NOT re-scan. `tx = Some` streams follow-up tokens (Web/
+    /// WhatsApp); `tx = None` runs sync and returns inline (REPL).
     pub(crate) fn run_local_followup_if_tool_call(
         &mut self,
         user_input: &str,

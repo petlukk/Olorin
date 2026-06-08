@@ -46,6 +46,35 @@ impl Response {
     }
 }
 
+/// The chat system prompt for this build's target architecture.
+///
+/// aarch64 (the Pi) can't emit the `<tool_call>` XML the runes block frames —
+/// the NEON forward pass produces 0/16 tool calls at production sampling (the
+/// finding behind the file-drop analyst). So on aarch64 the ~2.6 KB tools
+/// block is pure dead prefill: ~30s/turn on a Pi 5, and it measurably degrades
+/// reasoning (it primes the model to reconcile non-existent tool context).
+/// aarch64 therefore uses a minimal identity prompt; the working tool paths
+/// there — explicit `/weather`, the intent kernel ("weather haparanda"), and
+/// file-drop analysis — don't depend on the block.
+///
+/// x86_64 emits tool calls reliably (16/16), so it keeps the full block for
+/// autonomous tool-calling (local dev chat + the cloud fallback path).
+#[cfg(target_arch = "aarch64")]
+fn default_system_prompt() -> String {
+    llm::MINIMAL_SYSTEM_PROMPT.to_string()
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+fn default_system_prompt() -> String {
+    let base = llm::SYSTEM_PROMPT;
+    let runes_block = crate::runes::runes_prompt_block();
+    if base.is_empty() {
+        runes_block.to_string()
+    } else {
+        format!("{base}\n\n{runes_block}")
+    }
+}
+
 /// Central dispatch context — holds all state needed for the pipeline.
 pub struct DispatchContext {
     pub(crate) messages:      Vec<Message>,
@@ -120,15 +149,7 @@ impl DispatchContext {
             engine:        None,
             anthropic,
             last_timing:   None,
-            system_prompt: {
-                let base = llm::SYSTEM_PROMPT;
-                let runes_block = crate::runes::runes_prompt_block();
-                if base.is_empty() {
-                    runes_block.to_string()
-                } else {
-                    format!("{base}\n\n{runes_block}")
-                }
-            },
+            system_prompt: default_system_prompt(),
             recall_level:  0,
             _max_turns:    8,
             teleported:        false,
@@ -193,17 +214,6 @@ impl DispatchContext {
             fields.extend_from_slice(extras);
             a.emit(turn, phase, &fields);
         }
-    }
-
-    pub fn with_system_prompt(mut self, prompt: &str) -> Self {
-        let runes_block = crate::runes::runes_prompt_block();
-        let base = llm::SYSTEM_PROMPT;
-        self.system_prompt = if base.is_empty() {
-            format!("{prompt}\n\n{runes_block}")
-        } else {
-            format!("{base}\n\n{prompt}\n\n{runes_block}")
-        };
-        self
     }
 
     #[doc(hidden)]
