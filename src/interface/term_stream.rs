@@ -113,15 +113,16 @@ pub fn handle_term_stream(stream: &mut std::net::TcpStream, id: u32) {
     let _ = stream.set_read_timeout(None);
 
     let mut prev_cursor: (u16, u16) = (0, 0);
-    eprintln!("[term-stream] starting SSE loop for session {id}");
     loop {
-        let readable = session.lock().unwrap().wait_readable(16);
+        // Sleep without holding the session lock — otherwise every keystroke
+        // POST waits up to 16ms for this thread to release the mutex.
+        std::thread::sleep(std::time::Duration::from_millis(16));
+        let readable = session.lock().unwrap().wait_readable(0);
 
         if readable {
-            // Brief grace period so ConPTY's burst of small VT escape
-            // sequences (cursor positioning, color changes) coalesces
-            // into one SSE frame instead of hundreds. Below the 16ms
-            // perception threshold so it's not felt as latency.
+            // Grace period so ConPTY's burst of small VT escape sequences
+            // coalesces into one SSE frame. Not needed on Unix PTYs.
+            #[cfg(windows)]
             std::thread::sleep(std::time::Duration::from_millis(5));
 
             let mut s = session.lock().unwrap();
@@ -132,7 +133,6 @@ pub fn handle_term_stream(stream: &mut std::net::TcpStream, id: u32) {
             let (crow, ccol) = grid.cursor();
             let cursor_moved = prev_cursor != (ccol, crow);
             prev_cursor = (ccol, crow);
-            eprintln!("[term-stream] read: {dirty_count} dirty cells, cursor_moved={cursor_moved}");
 
             if dirty_count > 0 || cursor_moved {
 

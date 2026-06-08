@@ -364,7 +364,6 @@ function startTermStream(t){
   const canvas=t._canvas;
   es.onmessage=function(ev){
     const d=JSON.parse(ev.data);
-    console.log('[term]',JSON.stringify(d).slice(0,300));
     if(d.type==='frame'){
       const ctx=canvas.getContext('2d');
       ctx.font='13px "JetBrains Mono",monospace';
