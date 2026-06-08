@@ -42,6 +42,7 @@ pub const CMD_GIT:       i32 = 25;
 pub const CMD_REMIND:    i32 = 26;
 pub const CMD_TELEPORT:  i32 = 27;
 pub const CMD_RUNE:      i32 = 28;
+pub const CMD_THINK:     i32 = 29;
 // Range
 pub const CMD_TOOL_FIRST: i32 = CMD_TIME;
 pub const CMD_TOOL_LAST:  i32 = CMD_RUNE;
@@ -66,7 +67,7 @@ const ALL_CMD_NAMES: &[(i32, &str)] = &[
     (CMD_TRANSLATE, "translate"), (CMD_DEFINE, "define"),
     (CMD_SUMMARIZE, "summarize"), (CMD_GREP, "grep"),
     (CMD_GIT, "git"),       (CMD_REMIND, "remind"),   (CMD_TELEPORT, "teleport"),
-    (CMD_RUNE, "rune"),
+    (CMD_RUNE, "rune"),     (CMD_THINK, "think"),
 ];
 
 // ── Slash command matching ───────────────────────────────────────────────────

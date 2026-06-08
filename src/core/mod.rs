@@ -1,6 +1,7 @@
 pub mod router;
 mod router_streaming;
 mod router_tools;
+mod router_toolcall;
 mod router_config;
 mod vault_open;
 pub mod session;

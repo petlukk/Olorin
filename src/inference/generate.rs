@@ -44,6 +44,7 @@ pub struct Engine {
     pub repetition_penalty: f32,
     /// Emit Gemma 4's `<|think|>` chain-of-thought token. On for hard reasoning,
     /// off for tasks that don't need it (e.g. narration) to cut decode tokens.
+    /// Default is arch-gated (see `Engine::load`); `/think` overrides per session.
     pub thinking: bool,
 }
 
@@ -84,7 +85,11 @@ impl Engine {
             top_p: 0.95,
             min_p: 0.05,
             repetition_penalty: 1.0,
-            thinking: true,
+            // aarch64 (Pi): chain-of-thought buys little — tool calls don't fire
+            // and reasoning holds without it (measured: factual chat 17s → 1.6s,
+            // reasoning still correct) — so default off there. x86 keeps it on.
+            // `/think` flips it per session either way.
+            thinking: cfg!(not(target_arch = "aarch64")),
         })
     }
 
