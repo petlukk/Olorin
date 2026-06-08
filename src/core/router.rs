@@ -244,6 +244,9 @@ impl DispatchContext {
         if cmd_id >= dispatch::CMD_HELP && cmd_id <= dispatch::CMD_PROFILE {
             return Err(self.handle_meta(cmd_id));
         }
+        if cmd_id == dispatch::CMD_THINK {
+            return Err(self.handle_think(cmd_arg));
+        }
         if cmd_id == dispatch::CMD_TASKS {
             return Err(Response::text("No background tasks."));
         }
