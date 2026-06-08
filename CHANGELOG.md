@@ -8,6 +8,29 @@ order.
 
 ## [Unreleased]
 
+## [2.4.0] — 2026-06-08
+
+Fast chat on the Pi. The third and final latency win in the series: with the
+prefill tax gone (2.3.0), the remaining cost was the model's chain-of-thought,
+so on aarch64 it's now off by default.
+
+### Changed
+
+- **Thinking off by default on aarch64.**  Once the minimal system prompt
+  removed the prefill tax, Gemma 4's `<|think|>` reasoning was the entire
+  remaining chat cost. On the Pi it buys nothing — tool calls don't fire and
+  reasoning holds without it — so it now defaults off there (x86 keeps it on).
+  Measured on a Pi 5: a factual question went from 17.1s to **1.6s**, and the
+  reasoning answer stayed correct *and* started showing its work (the
+  chain-of-thought now lands in the visible answer instead of a discarded
+  hidden block). The full series arc for a factual chat: 32s → 17s → 1.6s.
+
+### Added
+
+- **`/think` toggle.**  `/think` flips the model's chain-of-thought for the
+  session; `/think on` / `/think off` set it explicitly. The fast path is the
+  default; turn thinking on for a genuinely hard reasoning question.
+
 ## [2.3.0] — 2026-06-08
 
 Faster on the Pi. Two independent latency wins that together cut local
