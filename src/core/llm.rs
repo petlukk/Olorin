@@ -194,3 +194,12 @@ pub fn format_chatml(messages: &[Message], tools: &[ToolDef], system: &str) -> S
 // ── System prompt ────────────────────────────────────────────────────────────
 
 pub const SYSTEM_PROMPT: &str = "";
+
+/// Minimal chat system prompt for local inference that can't emit autonomous
+/// tool calls (the NEON forward pass — 0/16 — which is why the file-drop
+/// analyst exists). The full `runes_prompt_block` is ~2.6 KB of tools framing
+/// that costs ~30s of prefill per turn on the Pi to enable a capability the
+/// hardware can't use. This drops that to a one-line identity; file analysis
+/// still works via the file-drop gesture, which has its own narration path.
+pub const MINIMAL_SYSTEM_PROMPT: &str =
+    "You are Olorin, a local AI assistant. Answer the user clearly and concisely.";
