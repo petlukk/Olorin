@@ -8,6 +8,20 @@ order.
 
 ## [Unreleased]
 
+## [2.6.0] — 2026-06-09
+
+A recall correctness fix: updating a fact mid-conversation now takes effect.
+
+### Fixed
+
+- **Recall surfaced a stale fact after an update.**  With recall on, telling
+  Olorin "my name is now X" and then asking again still returned the *old*
+  value. The recall context builder deduplicated results *before* filtering
+  out the question's own echo, so the freshest answer was dropped as a
+  near-duplicate of that echo — which was then itself filtered, leaving a
+  stale entry. Self-matches are now filtered before dedup, so the most recent
+  fact wins.
+
 ## [2.5.0] — 2026-06-09
 
 Instant web terminal. The shell tile in the web UI was slow and didn't echo
