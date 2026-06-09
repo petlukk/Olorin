@@ -11,7 +11,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::core::router::DispatchContext;
-use crate::interface::server::{read_body, relay_sse};
+use crate::interface::server::relay_sse;
+use crate::interface::server_http::read_body;
 use crate::storage::json;
 
 const SSE_HEADERS: &str =
@@ -172,7 +173,7 @@ pub(crate) fn handle_analyze_raw(
     let _ = stream.flush();
 
     let name = header_value(req, "x-filename").unwrap_or_else(|| "dropped-file".to_string());
-    let content_len = crate::interface::server::parse_content_length(req) as u64;
+    let content_len = crate::interface::server_http::parse_content_length(req) as u64;
     if content_len == 0 {
         send_error(stream, "Empty upload.");
         return;

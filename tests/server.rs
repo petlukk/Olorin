@@ -1,7 +1,5 @@
-use olorin::interface::server::{
-    parse_content_length, extract_json_string,
-    build_system_json, get_chat_html,
-};
+use olorin::interface::server::{build_system_json, get_chat_html};
+use olorin::interface::server_http::{parse_content_length, extract_json_string};
 
 #[test]
 fn test_parse_content_length() {

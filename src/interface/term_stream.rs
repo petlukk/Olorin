@@ -4,7 +4,8 @@ use std::io::Write;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::collections::HashMap;
-use crate::interface::server::{serve_json, read_body, escape_json};
+use crate::interface::server::serve_json;
+use crate::interface::server_http::{read_body, escape_json};
 use crate::interface::pty::PtySession;
 use crate::interface::ws;
 

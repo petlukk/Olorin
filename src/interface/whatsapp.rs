@@ -2,7 +2,7 @@
 
 use crate::core::router::{DispatchContext, Response, StreamEvent};
 use crate::interface::spawner::{default_spawner, ChildProcess};
-use crate::interface::server::{extract_json_string, escape_json};
+use crate::interface::server_http::{extract_json_string, escape_json};
 
 /// Sentinel returned by strip_trigger for the /teleport command.
 pub const TRIGGER_TELEPORT: &str = "__teleport__";
