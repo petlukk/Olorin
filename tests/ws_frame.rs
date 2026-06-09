@@ -66,10 +66,10 @@ fn read_masked_text_frame_unmasks() {
 
 #[test]
 fn read_frame_rejects_oversized_length() {
-    // FIN+Binary, masked, 127-length prefix declaring 2 MiB (> 1 MiB cap).
+    // FIN+Binary, masked, 127-length prefix declaring 1 TiB (>> 16 MiB cap).
     // Must error before allocating, so only the 10-byte header is needed.
     let mut frame = vec![0x82u8, 0x80 | 127];
-    frame.extend_from_slice(&(2u64 * 1024 * 1024).to_be_bytes());
+    frame.extend_from_slice(&(1u64 << 40).to_be_bytes());
     let err = read_frame(&mut Cursor::new(frame)).unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
 }

@@ -175,10 +175,16 @@ pub fn handle_term_ws(stream: &mut std::net::TcpStream, req: &str, id: u32) {
         .spawn(move || ws_reader_loop(read_stream, reader_session, reader_shared))
         .ok();
     let mut prev_cursor: (u16, u16) = (0, 0);
+    let mut ticks: u32 = 0;
     loop {
         std::thread::sleep(std::time::Duration::from_millis(16));
         // Client gone — stop before spinning forever (the reader detected it).
         if shared.disconnected.load(Ordering::Relaxed) { break; }
+        // ~every 20s send a Ping. The reader's read_frame can't observe a
+        // half-open socket (no FIN), but a failed Ping write reveals it so we
+        // don't spin forever and leak the session at an idle prompt.
+        ticks = ticks.wrapping_add(1);
+        if ticks % 1250 == 0 && ws::write_ping(stream).is_err() { break; }
         if shared.blocked.swap(false, Ordering::Relaxed) {
             if ws::write_text(stream, r#"{"type":"blocked"}"#).is_err() { break; }
             if stream.flush().is_err() { break; }
@@ -202,6 +208,9 @@ pub fn handle_term_ws(stream: &mut std::net::TcpStream, req: &str, id: u32) {
     // Tear down the reader so its blocking read_frame returns.
     let _ = stream.shutdown(std::net::Shutdown::Both);
     if let Some(h) = reader_handle { let _ = h.join(); }
+    // Drop the session: frees the slot (8-session cap) and SIGTERMs the bash
+    // child via PtySession::Drop, instead of leaking both until /close.
+    term_sessions().lock().unwrap().remove(&id);
 }
 
 fn ws_reader_loop(mut stream: std::net::TcpStream, session: Arc<Mutex<PtySession>>, shared: Arc<WsShared>) {

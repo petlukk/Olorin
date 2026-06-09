@@ -87,10 +87,10 @@ pub fn read_frame(stream: &mut impl Read) -> io::Result<Option<Frame>> {
     if !masked {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "unmasked client frame"));
     }
-    // Terminal input frames are tiny (keystrokes, small pastes). Cap the
-    // declared length before allocating so a malicious/buggy peer can't
-    // request a multi-exabyte Vec and abort the process.
-    const MAX_PAYLOAD: usize = 1 << 20; // 1 MiB
+    // Cap the declared length before allocating so a malicious/buggy peer
+    // can't request a multi-exabyte Vec and abort the process. 16 MiB is far
+    // above any real keystroke/paste yet still bounds the allocation.
+    const MAX_PAYLOAD: usize = 16 << 20; // 16 MiB
     if payload_len > MAX_PAYLOAD {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "frame too large"));
     }
@@ -112,6 +112,14 @@ pub fn write_text(stream: &mut impl Write, text: &str) -> io::Result<()> {
 /// Write a Close frame and flush.
 pub fn write_close(stream: &mut impl Write) -> io::Result<()> {
     write_frame(stream, Opcode::Close, &[])?;
+    stream.flush()
+}
+
+/// Write an empty Ping frame and flush. Browsers auto-reply with Pong and
+/// never surface it to JS, so it's an invisible liveness probe — a failed
+/// write reveals a half-open socket the reader's blocking read can't detect.
+pub fn write_ping(stream: &mut impl Write) -> io::Result<()> {
+    write_frame(stream, Opcode::Ping, &[])?;
     stream.flush()
 }
 
