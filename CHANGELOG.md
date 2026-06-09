@@ -8,6 +8,44 @@ order.
 
 ## [Unreleased]
 
+## [2.5.0] — 2026-06-09
+
+Instant web terminal. The shell tile in the web UI was slow and didn't echo
+typed input — every keystroke was a fresh HTTP POST. It now streams over a
+single WebSocket, so typing is instant on the Pi kiosk, and the path is
+hardened against leaks and a couple of sharp edges the rework surfaced.
+
+### Changed
+
+- **Web terminal streams over WebSocket.**  Replaces the per-keystroke HTTP
+  POST + Server-Sent-Events transport with one persistent WebSocket
+  connection. Typing is instant; the old per-keystroke round-trip and missing
+  echo are gone. Verified on a Pi 5 kiosk.
+
+### Fixed
+
+- **Web-terminal connection and session leaks.**  Closing a terminal tab now
+  reliably tears down the server-side streaming thread, frees the session slot
+  (the 8-session cap no longer fills up over time), and SIGTERMs the shell
+  child — previously all three leaked until the process exited. A periodic
+  WebSocket keepalive also detects a half-open socket so an idle, silently-
+  dropped connection can't spin forever.
+- **Blocked-command feedback restored.**  A command rejected by the safety
+  scanner flashes the terminal tile border red again (the signal was lost in
+  the transport rework).
+
+### Security
+
+- **Passwords no longer linger in the web terminal.**  Optimistic client-side
+  echo could paint a typed character at a no-echo prompt (`sudo`, `ssh`),
+  where the shell never overwrites it — leaving plaintext on screen. The
+  client can't distinguish a normal prompt from a no-echo read (readline keeps
+  `ECHO` off at the prompt too), so local echo was removed; the terminal now
+  shows only what the shell itself echoes.
+- **WebSocket frame-size bound.**  Inbound frames are capped at 16 MiB before
+  allocation, so a malformed or malicious declared length can't trigger an
+  unbounded allocation and abort the process.
+
 ## [2.4.0] — 2026-06-08
 
 Fast chat on the Pi. The third and final latency win in the series: with the
