@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout Olorin
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install eacompute system deps (LLVM 18)
         run: |
@@ -34,14 +34,14 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Checkout eacompute (sibling repo)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: petlukk/eacompute
           path: eacompute
           ref: main
 
       - name: Cache eacompute build
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: eacompute/target
           key: eacompute-${{ runner.os }}-${{ hashFiles('eacompute/Cargo.lock', 'eacompute/Cargo.toml', 'eacompute/build.rs') }}-${{ hashFiles('eacompute/src/**') }}
@@ -85,7 +85,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout Olorin
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install eacompute system deps + MinGW-w64
         run: |
@@ -100,14 +100,14 @@ jobs:
           targets: x86_64-pc-windows-gnu
 
       - name: Checkout eacompute (sibling repo)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: petlukk/eacompute
           path: eacompute
           ref: main
 
       - name: Cache eacompute build
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: eacompute/target
           key: eacompute-${{ runner.os }}-${{ hashFiles('eacompute/Cargo.lock', 'eacompute/Cargo.toml', 'eacompute/build.rs') }}-${{ hashFiles('eacompute/src/**') }}
