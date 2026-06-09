@@ -134,6 +134,7 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version: '1.25'
+          cache-dependency-path: bridge/go.sum
 
       - name: Build wa-bridge (release, stripped)
         if: matrix.os_family != 'windows'
