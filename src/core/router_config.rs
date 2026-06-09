@@ -16,7 +16,7 @@ impl DispatchContext {
             Some(a) => (a.model(), a.max_tokens(), a.has_key()),
             None => ("claude-3-5-haiku-latest", 4096, false),
         };
-        let system_prompt = crate::interface::server::escape_json(&self.system_prompt);
+        let system_prompt = crate::interface::server_http::escape_json(&self.system_prompt);
         let available = crate::inference::generate::available_models();
         let models_json: String = available.iter()
             .map(|m| format!("\"{m}\""))
@@ -34,7 +34,7 @@ impl DispatchContext {
     }
 
     pub fn update_config(&mut self, json: &str) {
-        use crate::interface::server::extract_json_string;
+        use crate::interface::server_http::extract_json_string;
         use crate::storage::json::{extract_json_float, extract_json_int};
 
         // Model change requires full engine reload
