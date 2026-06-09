@@ -60,6 +60,44 @@ fn nice_ceil(x: f32) -> f32 {
     nice * base
 }
 
+/// Largest "nice" number (1/1.5/2/2.5/3/4/5/6/8 ×10^k) at or below x.
+fn nice_floor(x: f32) -> f32 {
+    if x <= 0.0 {
+        return 0.0;
+    }
+    let exp = x.log10().floor();
+    let base = 10f32.powf(exp);
+    let frac = x / base; // in [1, 10)
+    const STEPS: [f32; 9] = [1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0];
+    let nice = STEPS.iter().rev().copied().find(|&s| s <= frac + 1e-6).unwrap_or(1.0);
+    nice * base
+}
+
+/// Choose the y-axis floor. Returns 0 for a normal zero-based chart, or a
+/// lifted "nice" floor when the bulk of the series sits high above zero so
+/// the variation band uses the full canvas height instead of a solid block.
+/// Uses a robust 10th-percentile low so one near-empty bucket can't veto the
+/// zoom, lifts only when that low clears 30% of the ceiling (spiky low-floor
+/// series stay zero-based), and never when the nice floor would collapse the
+/// range (flat series).
+fn baseline_floor(heights: &[f32], y_max: f32) -> f32 {
+    if heights.len() < 4 {
+        return 0.0;
+    }
+    let mut sorted: Vec<f32> = heights.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let p10 = sorted[sorted.len() / 10];
+    if p10 <= 0.30 * y_max {
+        return 0.0;
+    }
+    let floor = nice_floor(p10);
+    if floor < y_max {
+        floor
+    } else {
+        0.0
+    }
+}
+
 /// Filled eighths for column `c` at row `r` (0 = bottom row), given the
 /// total eighths the bar occupies and the row's eighth offset.
 fn cell_eighths(total_eighths: i32, r: usize) -> i32 {
@@ -74,8 +112,13 @@ pub fn render(b: &Bars) -> String {
     }
     let rows = b.height_rows;
 
-    // Vertical scale: the tallest bar (or the median line, if higher) sets
-    // the ceiling so nothing clips off the top.
+    // Vertical scale. The ceiling is a nice number above the tallest bar
+    // (or the median, if higher) so nothing clips. The floor auto-lifts off
+    // zero when the bulk of the series sits high above it — a time-bucketed
+    // rate is a level signal, so the variation band matters more than
+    // magnitude-from-zero, and a high baseline would otherwise waste the
+    // bottom of the canvas on identical solid fill. Spiky low-floor series
+    // (peak >> bulk) keep a zero baseline so a spike still reads true.
     let peak = b
         .heights
         .iter()
@@ -83,18 +126,22 @@ pub fn render(b: &Bars) -> String {
         .fold(0.0f32, f32::max)
         .max(b.median.unwrap_or(0.0));
     let y_max = nice_ceil(peak);
+    let y_min = baseline_floor(b.heights, y_max);
+    let range = (y_max - y_min).max(f32::EPSILON);
 
-    // Pre-compute per-column total eighths once.
+    // Per-column total eighths over [y_min, y_max]. Bars below the floor
+    // clamp to empty (cell_eighths floors at 0).
     let total_eighths: Vec<i32> = b
         .heights
         .iter()
-        .map(|&h| ((h / y_max) * (rows as f32) * 8.0).round() as i32)
+        .map(|&h| (((h - y_min) / range) * (rows as f32) * 8.0).round() as i32)
         .collect();
 
     // Row that the median baseline falls in (its dashed line is drawn
     // through the gaps where no bar reaches).
     let med_row: Option<usize> = b.median.map(|m| {
-        (((m / y_max) * rows as f32).floor() as usize).min(rows.saturating_sub(1))
+        ((((m - y_min) / range) * rows as f32).floor().max(0.0) as usize)
+            .min(rows.saturating_sub(1))
     });
 
     // y-axis gutter: width of the widest label (the ceiling value).
@@ -115,7 +162,7 @@ pub fn render(b: &Bars) -> String {
         // y-axis label at the boundary at the TOP of this row.
         let show_label = (rows - 1 - r) % label_step == 0;
         if show_label {
-            let val = ((r + 1) as f32 / rows as f32) * y_max;
+            let val = y_min + ((r + 1) as f32 / rows as f32) * range;
             out.push_str(&format!("{:>width$} ", val.round() as i64, width = gutter));
         } else {
             out.push_str(&" ".repeat(gutter + 1));
@@ -173,25 +220,37 @@ pub fn render(b: &Bars) -> String {
 /// each tick's column and skipping any that would overlap the previous one.
 fn render_xticks(ticks: &[XTick], lead: usize, width: usize) -> String {
     let mut line = vec![b' '; lead + width];
-    let mut next_free = 0usize;
-    for t in ticks {
-        let mut start = lead + t.col.min(width.saturating_sub(1));
-        // Right-anchor labels that would spill past the canvas edge so the
-        // last tick (e.g. under the final column) stays fully on-screen.
-        if start + t.label.len() > lead + width {
-            start = (lead + width).saturating_sub(t.label.len());
+    // Place ticks in priority order — first, last, then inner — so the span
+    // endpoints (which carry the dates on a multi-day axis) survive when
+    // wide labels would otherwise collide and drop the right-anchored end.
+    let mut order: Vec<usize> = Vec::new();
+    if !ticks.is_empty() {
+        order.push(0);
+    }
+    if ticks.len() > 1 {
+        order.push(ticks.len() - 1);
+    }
+    order.extend(1..ticks.len().saturating_sub(1));
+
+    let mut placed: Vec<(usize, usize)> = Vec::new();
+    for &idx in &order {
+        let label = &ticks[idx].label;
+        let mut start = lead + ticks[idx].col.min(width.saturating_sub(1));
+        // Right-anchor labels that would spill past the canvas edge.
+        if start + label.len() > lead + width {
+            start = (lead + width).saturating_sub(label.len());
         }
-        if start < next_free {
-            continue; // would collide with the prior label
+        let end = start + label.len();
+        // Skip if it would touch an already-placed label (need a 1-col gap).
+        if placed.iter().any(|&(s, e)| start < e + 1 && end + 1 > s) {
+            continue;
         }
-        for (i, ch) in t.label.bytes().enumerate() {
-            let pos = start + i;
-            if pos >= line.len() {
-                break;
+        for (i, ch) in label.bytes().enumerate() {
+            if start + i < line.len() {
+                line[start + i] = ch;
             }
-            line[pos] = ch;
         }
-        next_free = start + t.label.len() + 1;
+        placed.push((start, end));
     }
     let mut s = String::from_utf8(line).unwrap_or_default();
     s.push('\n');
@@ -301,7 +360,17 @@ fn robust_median(counts: &[f32]) -> f32 {
 /// Four evenly-spaced x-axis ticks from the source category names,
 /// shortened to keep the axis readable.
 fn x_ticks(out: &RuneOutput, cols: usize, n_src: usize) -> Vec<XTick> {
-    let n_ticks = 4.min(cols);
+    // A span crossing midnight needs the date in labels, else HH:MM-only
+    // ticks read backwards (18:30 → 04:30). Detect it from first vs last
+    // ISO date prefix.
+    let multi_day = match (out.categories.first(), out.categories.last()) {
+        (Some(a), Some(b)) => date_prefix(&a.name) != date_prefix(&b.name),
+        _ => false,
+    };
+    // Multi-day labels are wider ("MM-DD HH:MM"), so use fewer of them —
+    // otherwise the right-anchored end tick collides and gets dropped,
+    // leaving both endpoints showing the same date.
+    let n_ticks = (if multi_day { 3 } else { 4 }).min(cols);
     if n_ticks == 0 {
         return Vec::new();
     }
@@ -313,19 +382,32 @@ fn x_ticks(out: &RuneOutput, cols: usize, n_src: usize) -> Vec<XTick> {
                 i * (cols - 1) / (n_ticks - 1)
             };
             let src = (col * n_src) / cols;
-            let label = short_label(&out.categories[src.min(n_src - 1)].name);
+            let label = short_label(&out.categories[src.min(n_src - 1)].name, multi_day);
             XTick { col, label }
         })
         .collect()
 }
 
+/// The `YYYY-MM-DD` date portion of an ISO instant, or the whole name.
+fn date_prefix(name: &str) -> &str {
+    match name.find('T') {
+        Some(t) => &name[..t],
+        None => name,
+    }
+}
+
 /// Trim a category label to something axis-sized. ISO instants
-/// (`2024-07-13T13:00:00`) collapse to `HH:MM`; everything else is
-/// truncated to 8 chars.
-fn short_label(name: &str) -> String {
+/// (`2024-07-13T13:00:00`) collapse to `HH:MM`, or `MM-DD HH:MM` when the
+/// span crosses days; everything else is truncated to 8 chars.
+fn short_label(name: &str, multi_day: bool) -> String {
     if let Some(t) = name.find('T') {
-        let rest = &name[t + 1..];
-        return rest.get(..5).unwrap_or(rest).to_string();
+        let time = name[t + 1..].get(..5).unwrap_or(&name[t + 1..]);
+        if multi_day {
+            // MM-DD from the YYYY-MM-DD prefix (chars 5..10).
+            let mmdd = name.get(5..10).unwrap_or(&name[..t]);
+            return format!("{mmdd} {time}");
+        }
+        return time.to_string();
     }
     name.chars().take(8).collect()
 }
