@@ -31,7 +31,11 @@ body{background:var(--crust);color:var(--text);font-family:'Inter',system-ui,san
 .chat-avatar.assistant{background:var(--teal);color:var(--crust)}
 .chat-sender{font-size:13px;font-weight:600;color:var(--subtext1);margin-bottom:6px}
 .chat-sender.assistant{color:var(--teal)}
-.chat-bubble{font-size:13px;line-height:1.5;color:var(--text);white-space:pre-wrap;word-wrap:break-word;font-family:'JetBrains Mono',monospace}
+/* System monospace (not the Google-subsetted JetBrains Mono, which lacks
+   the Block Elements ▁▂▃▄▅▆▇█ and Box Drawing ─ used by plot charts and so
+   falls back to a metrically-different font, skewing the grid). A single
+   block-covering mono keeps every chart row's cells vertically aligned. */
+.chat-bubble{font-size:13px;line-height:1.5;color:var(--text);white-space:pre-wrap;word-wrap:break-word;font-family:'DejaVu Sans Mono',ui-monospace,'Liberation Mono',Menlo,Consolas,monospace}
 .chat-input-area{padding:16px 20px;border-top:1px solid var(--surface0);background:var(--mantle)}
 .chat-input-box{display:flex;align-items:center;background:var(--base);border:1px solid var(--surface1);border-radius:12px;padding:10px 16px}
 .chat-input-box:focus-within{border-color:var(--lavender)}
