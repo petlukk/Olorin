@@ -171,3 +171,22 @@ pub unsafe fn f64_stats(
 ) {
     (k().f64_stats)(data, len, out_count, out_sum, out_min, out_max);
 }
+
+/// Downsample-reduce an f32 series into `n_cols` plot columns, writing the
+/// per-column (min, max, mean) envelope a bar renderer needs. This is the
+/// DOWNSAMPLE path — each column owns >= 1 sample.
+///
+/// # Safety
+/// - `data` must point to `len` readable `f32` elements; may be dangling
+///   only when `len == 0` (the kernel returns without dereferencing it).
+/// - `out_min`, `out_max`, `out_mean` must each be valid for `n_cols`
+///   writable `f32` elements.
+/// - Callers must pass `n_cols >= 1` and `len >= n_cols`; with `len < 1`
+///   or `n_cols < 1` the kernel returns leaving the out arrays untouched,
+///   so the caller pre-fills them.
+pub unsafe fn col_reduce(
+    data: *const f32, len: i32, n_cols: i32,
+    out_min: *mut f32, out_max: *mut f32, out_mean: *mut f32,
+) {
+    (k().col_reduce)(data, len, n_cols, out_min, out_max, out_mean);
+}

@@ -264,6 +264,16 @@ impl DispatchContext {
         self.vault_save(b"tool", body.as_bytes());
         let header = format!("📎 ran `{name}` on {display_name}\n\n");
         let _ = tx.send(StreamEvent::Token(header.clone()));
+        // A chronological series renders as a block-bar chart above the
+        // text body. Presentation only — not folded into `streamed`, so it
+        // never reaches the model's narration context (block glyphs would
+        // just confuse it). color=false: the web chat bubble is monospace
+        // but not ANSI-aware (it appends via textContent).
+        if let Some(chart) = chart_for(name, &args, Some(display_name), false) {
+            if !safety::scan(chart.as_bytes()).blocked {
+                let _ = tx.send(StreamEvent::Token(format!("{chart}\n")));
+            }
+        }
         let _ = tx.send(StreamEvent::Token(body.clone()));
 
         Some(FileRun {
@@ -386,4 +396,38 @@ fn read_prefix(path: &str, max: usize) -> Vec<u8> {
         Ok(n) => { buf.truncate(n); buf }
         Err(_) => Vec::new(),
     }
+}
+
+/// Render a block-bar chart for a rune run, or `None` when it produced no
+/// chronological series to plot. Re-runs the rune with `--json` (a second
+/// µs-scale scan on the page-cached file) and parses the v1 `RuneOutput`
+/// contract — the same JSON seam a standalone plotter consumes. `title`
+/// overrides the heading (web passes the friendly filename; REPL passes
+/// None and lets it fall back to the file path). `color` enables ANSI for
+/// the REPL and stays off for the not-ANSI-aware web chat bubble.
+///
+/// Shared by the streaming (web file-drop) and non-streaming (REPL `/rune`)
+/// surfaces. Only `eatime --bucket series` yields a time chart today.
+pub(crate) fn chart_for(
+    rune_name: &str,
+    rune_args: &str,
+    title: Option<&str>,
+    color: bool,
+) -> Option<String> {
+    if rune_name != "eatime" {
+        return None;
+    }
+    let result = crate::runes::run_rune("eatime", &format!("{rune_args} --json"))?;
+    if !result.success {
+        return None;
+    }
+    let out = crate::runes::output::RuneOutput::from_json(result.answer.as_bytes()).ok()?;
+    // Chart only a real chronological series (ISO-instant labels carry a
+    // 'T'), matching eatime's own series detection; skip hour/weekday
+    // histograms and anything too short to read as a timeline.
+    let is_series = out.categories.first().is_some_and(|c| c.name.contains('T'));
+    if !is_series || out.categories.len() < 2 {
+        return None;
+    }
+    Some(crate::runes::plot::render_series(&out, 56, 10, color, title))
 }

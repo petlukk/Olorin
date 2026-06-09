@@ -1,0 +1,79 @@
+// Downsample-reduce an f32 series into a fixed number of canvas columns.
+//
+// For a plot W characters wide, the renderer needs one (min, max, mean)
+// triple per column. This kernel maps `len` input samples onto `n_cols`
+// columns and reduces each column's slice in SIMD registers, producing
+// the vertical envelope (min/max) plus the column mean.
+//
+// Column boundaries use integer arithmetic — lo = (c*len)/n_cols,
+// hi = ((c+1)*len)/n_cols — so every input sample lands in exactly one
+// column with no floating-point drift and full coverage of [0, len).
+//
+// Contract: this is the DOWNSAMPLE path, so callers must pass
+// n_cols >= 1 and len >= n_cols (each column owns >= 1 sample). The
+// inverse case (few samples, wide canvas) has nothing to reduce and is
+// handled scalar in the renderer. Empty input (len < 1) zeros nothing
+// and returns immediately; the caller pre-zeros the out arrays.
+//
+// SIMD strategy mirrors f32_stats: per column, f32x4 accumulators for
+// sum/min/max updated 4-at-a-time, horizontal reduce via reduce_add /
+// reduce_min / reduce_max, then a scalar tail (< 4 remaining). reduce_add
+// (not reduce_add_fast) keeps the mean associativity-ordered so x86 SSE2
+// and ARM NEON agree to ULP. Single-line signature appeases the current
+// Eä parser (multi-line parameter lists fail with `expected parameter
+// name`).
+
+export func col_reduce(data: *f32, len: i32, n_cols: i32, out_min: *mut f32, out_max: *mut f32, out_mean: *mut f32) {
+    if len < 1 {
+        return
+    }
+    if n_cols < 1 {
+        return
+    }
+
+    let mut c: i32 = 0
+    while c < n_cols {
+        // Integer column bounds: every sample lands in exactly one column.
+        let lo: i32 = (c * len) / n_cols
+        let hi: i32 = ((c + 1) * len) / n_cols
+
+        let first: f32 = data[lo]
+        let mut v_sum: f32x4 = splat(0.0)
+        let mut v_min: f32x4 = splat(first)
+        let mut v_max: f32x4 = splat(first)
+
+        // Vector body over this column's slice, 4 samples at a time.
+        let span: i32 = hi - lo
+        let n_full: i32 = lo + (span / 4) * 4
+        let mut i: i32 = lo
+        while i < n_full {
+            let v: f32x4 = load(data, i)
+            v_sum = v_sum .+ v
+            v_min = min(v_min, v)
+            v_max = max(v_max, v)
+            i = i + 4
+        }
+
+        let mut s:  f32 = reduce_add(v_sum)
+        let mut mn: f32 = reduce_min(v_min)
+        let mut mx: f32 = reduce_max(v_max)
+
+        // Scalar tail (< 4 remaining in this column).
+        while i < hi {
+            let v: f32 = data[i]
+            s = s + v
+            if v < mn {
+                mn = v
+            }
+            if v > mx {
+                mx = v
+            }
+            i = i + 1
+        }
+
+        out_min[c]  = mn
+        out_max[c]  = mx
+        out_mean[c] = s / to_f32(span)
+        c = c + 1
+    }
+}

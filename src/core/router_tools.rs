@@ -247,6 +247,23 @@ impl DispatchContext {
         if safety::scan(body.as_bytes()).blocked {
             return Response::blocked("Rune output blocked by safety scan.");
         }
+
+        // A chronological series renders as a color block-bar chart above
+        // the text body in the REPL. Never for `--json` (structured) runs —
+        // that output must stay clean JSONL. The chart is presentation only:
+        // it is not vault-saved or fed to narration (block glyphs would just
+        // confuse the model), so `body` below is unchanged for both.
+        let display = if structured {
+            body.clone()
+        } else {
+            match crate::core::router_streaming::chart_for(name, args, None, true) {
+                Some(chart) if !safety::scan(chart.as_bytes()).blocked => {
+                    format!("{chart}\n{body}")
+                }
+                _ => body.clone(),
+            }
+        };
+
         self.vault_save(b"user", full.as_bytes());
         self.vault_save(b"tool", body.as_bytes());
 
@@ -255,7 +272,7 @@ impl DispatchContext {
             success: result.success, timing_us, structured,
         };
         let followup = crate::runes::build_narration_prompt(name, safety_class, scratch);
-        let resp = Response::text(body);
+        let resp = Response::text(display);
         match followup {
             Some(p) => resp.with_followup(p),
             None    => resp,
