@@ -6,6 +6,15 @@ fn main() {
 
     let args: Vec<String> = std::env::args().collect();
 
+    // One-shot rune subcommand: `olorin rune <name> [rune args…]` runs a rune
+    // and writes ONLY its answer to stdout — no banner, no model load, no REPL
+    // chrome — so `olorin rune eatime --bucket series --json file.log > out.json`
+    // yields clean JSON for downstream tools (matplotlib, jq, …). Kernel-init
+    // diagnostics go to stderr, so stdout stays pure.
+    if args.get(1).map(String::as_str) == Some("rune") {
+        run_rune_cli(&args[2..]); // never returns
+    }
+
     let serve    = args.contains(&"--serve".into());
     let whatsapp = args.contains(&"--whatsapp".into());
     let strict   = args.contains(&"--strict".into());
@@ -38,6 +47,32 @@ fn main() {
         interface::whatsapp::run_whatsapp(model_arg);
     } else {
         interface::terminal::run(model_arg, strict, audit_path);
+    }
+}
+
+/// Run a single rune non-interactively and print only its answer to stdout.
+/// `rest` is everything after `rune` on the command line: `<name> [args…]`.
+/// Exit codes: 0 success, 1 rune failure / unknown rune, 2 usage error.
+fn run_rune_cli(rest: &[String]) -> ! {
+    let Some(name) = rest.first() else {
+        eprintln!(
+            "usage: olorin rune <name> [args…]\n  \
+             e.g. olorin rune eatime --bucket series --json access.log > out.json"
+        );
+        std::process::exit(2);
+    };
+    // Kernels are required for every rune; init prints only to stderr.
+    ffi::init().expect("kernel init failed");
+    let rune_args = rest[1..].join(" ");
+    match olorin::runes::run_rune(name, &rune_args) {
+        Some(result) => {
+            println!("{}", result.answer);
+            std::process::exit(if result.success { 0 } else { 1 });
+        }
+        None => {
+            eprintln!("unknown rune: {name}");
+            std::process::exit(1);
+        }
     }
 }
 
