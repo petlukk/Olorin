@@ -156,3 +156,51 @@ fn cli_eadiff_chain_through_two_subprocess_eatime_runs() {
     let _ = std::fs::remove_file(&y_json);
     let _ = std::fs::remove_file(&t_json);
 }
+
+/// Spawn `olorin rune <args…>` (the non-interactive one-shot subcommand,
+/// no stdin) and return (stdout, exit-success).
+fn run_olorin_rune(args: &[&str]) -> (String, bool) {
+    let out = Command::new(OLORIN)
+        .arg("rune")
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("spawn olorin rune");
+    (String::from_utf8(out.stdout).expect("utf8 stdout"), out.status.success())
+}
+
+#[test]
+fn cli_rune_subcommand_emits_only_clean_json() {
+    let log = b"\
+2026-05-11T06:00:00 a
+2026-05-11T06:30:00 b
+2026-05-11T07:00:00 c
+";
+    let path = write_tmp("olorin_rune_cli_eatime.log", log);
+    let (stdout, ok) = run_olorin_rune(&["eatime", "--bucket", "series", "--json", &path]);
+
+    // Exit 0 and stdout is ONLY the JSON: no banner, no `olorin> ` prompt, no
+    // `Type /help` chrome — the whole point of the subcommand. A downstream
+    // `> file.json` must be valid JSON with nothing to strip.
+    assert!(ok, "olorin rune should exit 0; stdout:\n{stdout}");
+    assert!(stdout.trim_start().starts_with('{'),
+        "stdout must start with JSON, not a banner:\n{stdout}");
+    assert!(!stdout.contains("[Olorin]"), "no banner on stdout:\n{stdout}");
+    assert!(!stdout.contains("olorin>"), "no REPL prompt on stdout:\n{stdout}");
+
+    // The single stdout line parses as a RuneOutput.
+    let out = olorin::runes::output::RuneOutput::from_json(stdout.trim().as_bytes())
+        .unwrap_or_else(|e| panic!("stdout is not parseable RuneOutput: {e}\n{stdout}"));
+    assert_eq!(out.rune, "eatime");
+    assert_eq!(out.totals.rows, 3);
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn cli_rune_unknown_name_exits_nonzero() {
+    let (stdout, ok) = run_olorin_rune(&["definitely_not_a_rune"]);
+    assert!(!ok, "unknown rune must exit non-zero");
+    assert!(stdout.is_empty(), "nothing should reach stdout for an unknown rune:\n{stdout}");
+}
