@@ -174,6 +174,10 @@ fn handle_connection(stream: &mut std::net::TcpStream, ctx: Arc<Mutex<DispatchCo
             let id = term_stream::parse_term_id(path);
             term_stream::handle_term_stream(stream, id);
         }
+        ("GET", path) if path.starts_with("/api/term/") && path.ends_with("/ws") => {
+            let id = term_stream::parse_term_id(path);
+            term_stream::handle_term_ws(stream, req, id);
+        }
         ("GET", "/api/config") => {
             let body = ctx.lock().unwrap_or_else(|e| e.into_inner()).get_config();
             serve_json(stream, &body);

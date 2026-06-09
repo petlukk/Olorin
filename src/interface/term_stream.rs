@@ -1,4 +1,4 @@
-//! Terminal session handlers — PTY open/input/resize/close/stream.
+//! Terminal session handlers — PTY open/input/resize/close/stream + WS.
 
 use std::io::Write;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::collections::HashMap;
 use crate::interface::server::{serve_json, read_body, escape_json};
 use crate::interface::pty::PtySession;
+use crate::interface::ws;
 
 static NEXT_TERM_ID: AtomicU32 = AtomicU32::new(0);
 
@@ -90,6 +91,57 @@ fn extract_json_number(json: &str, key: &str) -> Option<u32> {
     rest[..end].parse().ok()
 }
 
+/// Build the inner JSON for a frame event. Used by both SSE and WS senders.
+/// Returns `None` if nothing changed since the previous call.
+fn poll_frame_json(session: &Arc<Mutex<PtySession>>, prev_cursor: &mut (u16, u16)) -> Option<String> {
+    let mut s = session.lock().unwrap();
+    let dirty: Vec<u8> = s.read_and_apply().to_vec();
+    let dirty_count = dirty.iter().filter(|&&d| d != 0).count();
+    let grid = s.grid();
+    let cols = grid.cols;
+    let (crow, ccol) = grid.cursor();
+    let cursor_moved = *prev_cursor != (ccol, crow);
+    *prev_cursor = (ccol, crow);
+
+    if dirty_count == 0 && !cursor_moved {
+        return None;
+    }
+
+    let mut cells_json = String::with_capacity(dirty_count * 64 + 16);
+    cells_json.push('[');
+    let mut first = true;
+    for (i, &d) in dirty.iter().enumerate() {
+        if d == 0 { continue; }
+        let row = i / cols as usize;
+        let col = i % cols as usize;
+        let cell = grid.cell(row as u16, col as u16);
+        if !first { cells_json.push(','); }
+        first = false;
+        let ch = if cell.ch == 0 || cell.ch == 32 {
+            " ".to_string()
+        } else if let Some(c) = char::from_u32(cell.ch) {
+            match c {
+                '"' => "\\\"".to_string(),
+                '\\' => "\\\\".to_string(),
+                '\n' => "\\n".to_string(),
+                '\r' => "\\r".to_string(),
+                '\t' => "\\t".to_string(),
+                _ => c.to_string(),
+            }
+        } else {
+            " ".to_string()
+        };
+        cells_json.push_str(&format!(
+            "{{\"r\":{row},\"c\":{col},\"ch\":\"{ch}\",\"fg\":\"#{:06x}\",\"bg\":\"#{:06x}\",\"fl\":{}}}",
+            cell.fg, cell.bg, cell.flags
+        ));
+    }
+    cells_json.push(']');
+    Some(format!(
+        "{{\"type\":\"frame\",\"cursor\":[{ccol},{crow}],\"cells\":{cells_json}}}"
+    ))
+}
+
 pub fn handle_term_stream(stream: &mut std::net::TcpStream, id: u32) {
     let _ = write!(
         stream,
@@ -99,87 +151,115 @@ pub fn handle_term_stream(stream: &mut std::net::TcpStream, id: u32) {
     );
     let _ = stream.flush();
 
-    let session = {
-        let sessions = term_sessions().lock().unwrap();
-        match sessions.get(&id) {
-            Some(s) => s.clone(),
-            None => {
-                let _ = write!(stream, "data: {{\"type\":\"error\",\"msg\":\"no such session\"}}\n\n");
-                return;
-            }
+    let session = match get_session(id) {
+        Some(s) => s,
+        None => {
+            let _ = write!(stream, "data: {{\"type\":\"error\",\"msg\":\"no such session\"}}\n\n");
+            return;
         }
     };
 
     let _ = stream.set_read_timeout(None);
 
     let mut prev_cursor: (u16, u16) = (0, 0);
-    eprintln!("[term-stream] starting SSE loop for session {id}");
     loop {
-        let readable = session.lock().unwrap().wait_readable(16);
+        // Sleep without holding the session lock — otherwise every keystroke
+        // POST waits up to 16ms for this thread to release the mutex.
+        std::thread::sleep(std::time::Duration::from_millis(16));
+        let readable = session.lock().unwrap().wait_readable(0);
+        if !readable { continue; }
 
-        if readable {
-            // Brief grace period so ConPTY's burst of small VT escape
-            // sequences (cursor positioning, color changes) coalesces
-            // into one SSE frame instead of hundreds. Below the 16ms
-            // perception threshold so it's not felt as latency.
-            std::thread::sleep(std::time::Duration::from_millis(5));
+        #[cfg(windows)]
+        std::thread::sleep(std::time::Duration::from_millis(5));
 
-            let mut s = session.lock().unwrap();
-            let dirty: Vec<u8> = s.read_and_apply().to_vec();
-            let dirty_count = dirty.iter().filter(|&&d| d != 0).count();
-            let grid = s.grid();
-            let cols = grid.cols;
-            let (crow, ccol) = grid.cursor();
-            let cursor_moved = prev_cursor != (ccol, crow);
-            prev_cursor = (ccol, crow);
-            eprintln!("[term-stream] read: {dirty_count} dirty cells, cursor_moved={cursor_moved}");
+        if let Some(json) = poll_frame_json(&session, &mut prev_cursor) {
+            if write!(stream, "data: {json}\n\n").is_err() { break; }
+            if stream.flush().is_err() { break; }
+        }
 
-            if dirty_count > 0 || cursor_moved {
-
-                let mut cells_json = String::with_capacity(1024);
-                cells_json.push('[');
-                let mut first = true;
-                for (i, &d) in dirty.iter().enumerate() {
-                    if d != 0 {
-                        let row = i / cols as usize;
-                        let col = i % cols as usize;
-                        let cell = grid.cell(row as u16, col as u16);
-                        if !first { cells_json.push(','); }
-                        first = false;
-                        let ch = if cell.ch == 0 || cell.ch == 32 {
-                            " ".to_string()
-                        } else if let Some(c) = char::from_u32(cell.ch) {
-                            match c {
-                                '"' => "\\\"".to_string(),
-                                '\\' => "\\\\".to_string(),
-                                '\n' => "\\n".to_string(),
-                                '\r' => "\\r".to_string(),
-                                '\t' => "\\t".to_string(),
-                                _ => c.to_string(),
-                            }
-                        } else {
-                            " ".to_string()
-                        };
-                        cells_json.push_str(&format!(
-                            "{{\"r\":{row},\"c\":{col},\"ch\":\"{ch}\",\"fg\":\"#{:06x}\",\"bg\":\"#{:06x}\",\"fl\":{}}}",
-                            cell.fg, cell.bg, cell.flags
-                        ));
-                    }
-                }
-                cells_json.push(']');
-
-                let frame = format!(
-                    "data: {{\"type\":\"frame\",\"cursor\":[{ccol},{crow}],\"cells\":{cells_json}}}\n\n"
-                );
-                if write!(stream, "{frame}").is_err() { break; }
-                if stream.flush().is_err() { break; }
-            }
-
-            if !s.child_alive() {
-                let _ = write!(stream, "data: {{\"type\":\"exit\",\"code\":0}}\n\n");
-                let _ = stream.flush();
-                break;
-            }
+        if !session.lock().unwrap().child_alive() {
+            let _ = write!(stream, "data: {{\"type\":\"exit\",\"code\":0}}\n\n");
+            let _ = stream.flush();
+            break;
         }
     }
+}
+
+fn get_session(id: u32) -> Option<Arc<Mutex<PtySession>>> {
+    term_sessions().lock().unwrap().get(&id).cloned()
+}
+
+/// WebSocket variant of the term stream. Same frame JSON as SSE but the
+/// client can also send input bytes back over the same socket, eliminating
+/// the per-keystroke fetch POST.
+pub fn handle_term_ws(stream: &mut std::net::TcpStream, req: &str, id: u32) {
+    if ws::handshake(stream, req).is_err() {
+        return;
+    }
+    let session = match get_session(id) {
+        Some(s) => s,
+        None => {
+            let _ = ws::write_text(stream, r#"{"type":"error","msg":"no such session"}"#);
+            let _ = ws::write_close(stream);
+            return;
+        }
+    };
+
+    // Clear the connection-level 10s read timeout before cloning for the
+    // reader thread — otherwise the reader's blocking read_frame errors out
+    // on every idle period.
+    let _ = stream.set_read_timeout(None);
+    let read_stream = match stream.try_clone() {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let reader_session = session.clone();
+    let reader_handle = std::thread::Builder::new()
+        .stack_size(1024 * 1024)
+        .spawn(move || ws_reader_loop(read_stream, reader_session))
+        .ok();
+    let mut prev_cursor: (u16, u16) = (0, 0);
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(16));
+        let readable = session.lock().unwrap().wait_readable(0);
+        if !readable { continue; }
+
+        #[cfg(windows)]
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        if let Some(json) = poll_frame_json(&session, &mut prev_cursor) {
+            if ws::write_text(stream, &json).is_err() { break; }
+            if stream.flush().is_err() { break; }
+        }
+        if !session.lock().unwrap().child_alive() {
+            let _ = ws::write_text(stream, r#"{"type":"exit","code":0}"#);
+            let _ = ws::write_close(stream);
+            break;
+        }
+    }
+    // Tear down the reader so its blocking read_frame returns.
+    let _ = stream.shutdown(std::net::Shutdown::Both);
+    if let Some(h) = reader_handle { let _ = h.join(); }
+}
+
+fn ws_reader_loop(mut stream: std::net::TcpStream, session: Arc<Mutex<PtySession>>) {
+    loop {
+        let frame = match ws::read_frame(&mut stream) {
+            Ok(Some(f)) => f,
+            Ok(None) | Err(_) => break,
+        };
+        match frame.opcode {
+            ws::Opcode::Text | ws::Opcode::Binary => {
+                let mut s = session.lock().unwrap();
+                if s.write_guarded(&frame.payload).is_err() {
+                    // Blocked input is silently dropped — the writer side will
+                    // not show any echo, which is the user-visible signal.
+                }
+            }
+            ws::Opcode::Close => break,
+            // Ping/Pong from browsers is rare in practice; ignore for now.
+            _ => {}
+        }
+    }
+    let _ = stream.shutdown(std::net::Shutdown::Both);
 }
