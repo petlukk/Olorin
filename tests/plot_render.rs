@@ -90,6 +90,85 @@ fn color_wraps_spike_columns_in_red() {
     assert!(got.contains("\x1b[0m"), "expected reset:\n{got:?}");
 }
 
+/// Extract the y-axis gridline label values from a chart (lines of the form
+/// `<spaces><digits> <chart cells>`). Skips title, x-ticks (contain ':'),
+/// and the median legend.
+fn y_labels(chart: &str) -> Vec<i64> {
+    chart
+        .lines()
+        .filter_map(|l| {
+            let trimmed = l.trim_start();
+            let digits: String = trimmed.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if digits.is_empty() {
+                return None;
+            }
+            let rest = &trimmed[digits.len()..];
+            // A y-label is "<num> <cells>"; a time tick is "08:00" (digit then ':').
+            if !rest.starts_with(' ') || rest.contains(':') {
+                return None;
+            }
+            digits.parse::<i64>().ok()
+        })
+        .collect()
+}
+
+/// Ratio of the lowest to highest y-axis label — near 0 for a zero-based
+/// chart, near 1 when the floor has been lifted close to the ceiling.
+fn label_floor_ratio(chart: &str) -> f64 {
+    let labels = y_labels(chart);
+    match (labels.iter().min(), labels.iter().max()) {
+        (Some(&lo), Some(&hi)) if hi > 0 => lo as f64 / hi as f64,
+        _ => 0.0,
+    }
+}
+
+#[test]
+fn high_floor_series_auto_zooms_off_zero() {
+    // A dense high-floor band (1500..1900): the axis should lift its floor so
+    // the variation band uses the canvas instead of a solid block from zero.
+    let heights: Vec<f32> = (0..24).map(|i| 1500.0 + (i % 5) as f32 * 100.0).collect();
+    let spike = vec![false; heights.len()];
+    let bars = Bars {
+        title: None,
+        heights: &heights,
+        spike: &spike,
+        median: Some(1700.0),
+        x_ticks: &[],
+        height_rows: 8,
+        color: false,
+    };
+    let got = render(&bars);
+    // Floor sits high relative to the ceiling → the band, not zero, anchors.
+    assert!(
+        label_floor_ratio(&got) > 0.5,
+        "high-floor series should lift its baseline near the data band:\n{got}"
+    );
+}
+
+#[test]
+fn spiky_low_floor_series_keeps_zero_baseline() {
+    // A low baseline (~200) with a big spike (5000): keep a zero baseline so
+    // the spike's magnitude reads true rather than being zoomed away.
+    let mut heights = vec![200.0f32; 24];
+    heights[12] = 5000.0;
+    let spike: Vec<bool> = heights.iter().map(|&h| h > 1000.0).collect();
+    let bars = Bars {
+        title: None,
+        heights: &heights,
+        spike: &spike,
+        median: Some(200.0),
+        x_ticks: &[],
+        height_rows: 8,
+        color: false,
+    };
+    let got = render(&bars);
+    // Floor near zero → the lowest gridline is a small fraction of the top.
+    assert!(
+        label_floor_ratio(&got) < 0.4,
+        "spiky low-floor series should keep a near-zero baseline:\n{got}"
+    );
+}
+
 #[test]
 fn empty_series_is_graceful() {
     let bars = Bars {

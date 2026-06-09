@@ -32,6 +32,20 @@ body{background:var(--crust);color:var(--text);font-family:'Inter',system-ui,san
 .chat-sender{font-size:13px;font-weight:600;color:var(--subtext1);margin-bottom:6px}
 .chat-sender.assistant{color:var(--teal)}
 .chat-bubble{font-size:13px;line-height:1.5;color:var(--text);white-space:pre-wrap;word-wrap:break-word;font-family:'JetBrains Mono',monospace}
+/* Plot charts render in their own block: line-height 1 so the block glyphs
+   (▁▂▃▄▅▆▇█) touch vertically into solid bars (1.5 leaves gaps that shatter
+   them), white-space:pre so the grid never wraps, and a single block-covering
+   monospace (the Google-subsetted JetBrains Mono lacks Block Elements + Box
+   Drawing, which would fall back to a metrically-different font and skew the
+   columns). overflow-x lets a wide chart scroll instead of breaking. */
+/* line-height 0.8 (not 1.0): DejaVu's block glyphs don't fill the line box, so
+   at integer-pixel rendering 1.0 leaves hairline gaps that break the bars — and
+   the gap is sub-pixel-position-dependent, so a value just under 1 isn't
+   reliable. 0.8 overlaps rows enough to stay solid at any alignment (overlapping
+   solid blocks remain solid — only gaps are wrong). overflow-y:hidden because
+   overflow-x:auto otherwise forces overflow-y to auto and a sub-pixel overflow
+   spawns a stray vertical scrollbar. */
+.chart{line-height:0.8;white-space:pre;overflow-x:auto;overflow-y:hidden;font-family:'DejaVu Sans Mono',ui-monospace,'Liberation Mono',Menlo,Consolas,monospace}
 .chat-input-area{padding:16px 20px;border-top:1px solid var(--surface0);background:var(--mantle)}
 .chat-input-box{display:flex;align-items:center;background:var(--base);border:1px solid var(--surface1);border-radius:12px;padding:10px 16px}
 .chat-input-box:focus-within{border-color:var(--lavender)}
@@ -134,10 +148,31 @@ function addChatMsg(body,role,text){
   const av=el('div','chat-avatar '+role);av.textContent=role==='user'?'P':'◆';
   const content=el('div','');
   const sender=el('div','chat-sender'+(role==='assistant'?' assistant':''));sender.textContent=role==='user'?'You':'Olorin';
-  const bubble=el('div','chat-bubble');bubble.textContent=text;
+  const bubble=el('div','chat-bubble');bubble._raw=text||'';renderBubble(bubble);
   content.appendChild(sender);content.appendChild(bubble);row.appendChild(av);row.appendChild(content);
   body.appendChild(row);body.scrollTop=body.scrollHeight;
   return bubble;
+}
+
+// Plot charts arrive in the SSE stream wrapped in RS-delimited markers (the
+// server emits them only for the web surface). Render those segments in a
+// dedicated .chart block (line-height 1, no wrap) so the block-bar grid lines
+// up; everything else stays prose text in the bubble. Re-renders from the
+// accumulated `_raw` each token so a marker that is still mid-stream is handled.
+const PLOT_OPEN='',PLOT_CLOSE='';
+function renderBubble(bubble){
+  const raw=bubble._raw||'';bubble.textContent='';
+  let i=0;
+  while(i<raw.length){
+    const o=raw.indexOf(PLOT_OPEN,i);
+    if(o<0){bubble.appendChild(document.createTextNode(raw.slice(i)));break;}
+    if(o>i)bubble.appendChild(document.createTextNode(raw.slice(i,o)));
+    const c=raw.indexOf(PLOT_CLOSE,o+PLOT_OPEN.length);
+    const pre=el('div','chart');
+    if(c<0){pre.textContent=raw.slice(o+PLOT_OPEN.length);bubble.appendChild(pre);break;}
+    pre.textContent=raw.slice(o+PLOT_OPEN.length,c);bubble.appendChild(pre);
+    i=c+PLOT_CLOSE.length;
+  }
 }
 
 // Render an SSE token stream from `res` into `bubble`, driving the thinking cursor.
@@ -152,8 +187,8 @@ async function renderSSE(res,bubble,cursor,body){
       try{const ev=JSON.parse(line.slice(6));
         if(ev.thinking===true){cursor.textContent=' \u2026pondering';cursor.className='cursor-thinking';}
         else if(ev.thinking===false){cursor.textContent='';cursor.className='cursor-blink';}
-        else if(ev.error){bubble.textContent+=ev.error;}
-        else if(ev.token!=null){bubble.textContent+=ev.token;cursor.textContent='';cursor.className='cursor-blink';}
+        else if(ev.error){bubble._raw=(bubble._raw||'')+ev.error;renderBubble(bubble);}
+        else if(ev.token!=null){bubble._raw=(bubble._raw||'')+ev.token;renderBubble(bubble);cursor.textContent='';cursor.className='cursor-blink';}
         if(ev.tps)document.getElementById('hb-tps').textContent=ev.tps.toFixed(1);
         body.scrollTop=body.scrollHeight;
       }catch(_){}

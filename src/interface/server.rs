@@ -473,6 +473,13 @@ fn escape_json_into(s: &str, out: &mut String) {
             '\n' => out.push_str("\\n"),
             '\t' => out.push_str("\\t"),
             '\r' => out.push_str("\\r"),
+            // JSON requires all control chars U+0000–U+001F to be escaped.
+            // Without this, a stray control byte (from file-derived data, or
+            // an internal marker) produces invalid JSON and the browser's
+            // JSON.parse silently drops the whole token.
+            c if (c as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
             _    => out.push(c),
         }
     }
