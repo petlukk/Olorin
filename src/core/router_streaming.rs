@@ -271,10 +271,12 @@ impl DispatchContext {
         // but not ANSI-aware (it appends via textContent).
         if let Some(chart) = chart_for(name, &args, Some(display_name), false) {
             if !safety::scan(chart.as_bytes()).blocked {
-                // RS-delimited markers so the web UI renders the chart in a
-                // dedicated line-height:1 block (block bars only connect into
-                // solid columns at line-height 1; the prose bubble uses 1.5).
-                let _ = tx.send(StreamEvent::Token(format!("\x1e[plot]\x1e{chart}\x1e[/plot]\x1e")));
+                // Private-Use-Area sentinels (U+E000/E001) bracket the chart so
+                // the web UI renders it in a dedicated line-height:1 block (block
+                // bars only connect into solid columns at line-height 1; the prose
+                // bubble uses 1.5). PUA chars survive JSON unescaped and never
+                // occur in chart or prose text; the frontend slices them out.
+                let _ = tx.send(StreamEvent::Token(format!("\u{E000}{chart}\u{E001}")));
             }
         }
         let _ = tx.send(StreamEvent::Token(body.clone()));

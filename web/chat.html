@@ -152,7 +152,7 @@ function addChatMsg(body,role,text){
 // dedicated .chart block (line-height 1, no wrap) so the block-bar grid lines
 // up; everything else stays prose text in the bubble. Re-renders from the
 // accumulated `_raw` each token so a marker that is still mid-stream is handled.
-const PLOT_OPEN='\x1e[plot]\x1e',PLOT_CLOSE='\x1e[/plot]\x1e';
+const PLOT_OPEN='',PLOT_CLOSE='';
 function renderBubble(bubble){
   const raw=bubble._raw||'';bubble.textContent='';
   let i=0;
