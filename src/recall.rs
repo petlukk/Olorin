@@ -161,6 +161,15 @@ impl VectorStore {
     /// Search with deduplication of near-identical results.
     pub fn search_dedup(&mut self, query: &str, k: usize) -> Vec<RecallResult> {
         let results = self.search(query, k);
+        self.dedup_results(results)
+    }
+
+    /// Drop near-duplicate results (pairwise cosine > DEDUP_THRESHOLD), keeping
+    /// the higher-scored entry of each pair. Operates on already-scored results
+    /// so callers can filter the set (e.g. remove query self-matches) *before*
+    /// dedup — otherwise a kept entry can absorb a distinct entry as a
+    /// "duplicate" and then itself be filtered out, dropping the survivor.
+    fn dedup_results(&self, results: Vec<RecallResult>) -> Vec<RecallResult> {
         if results.len() <= 1 { return results; }
 
         let n = results.len();
@@ -220,11 +229,18 @@ impl VectorStore {
     /// that are near-duplicates of the query itself (prior copies of the
     /// same question would self-match at score 1.0 and crowd out real facts).
     pub fn synthesize_context(&mut self, query: &str, k: usize) -> Option<String> {
-        // Oversearch so filtering still leaves k usable entries.
-        let raw = self.search_dedup(query, k.saturating_mul(2).saturating_add(1));
+        // Oversearch so filtering + dedup still leave k usable entries.
+        let raw = self.search(query, k.saturating_mul(2).saturating_add(1));
         let query_norm = normalize_context_line(query);
-        let results: Vec<_> = raw.into_iter()
+        // Drop the query's own prior copies BEFORE dedup. A self-match question
+        // ("what is my name") sits at the top of the results and is >threshold
+        // similar to the freshest answer ("my name is now Retep"), so dedup
+        // would eat the answer as a duplicate — then the self-match filter
+        // removes the question, leaving a stale older fact. Filter first.
+        let filtered: Vec<_> = raw.into_iter()
             .filter(|r| normalize_context_line(&r.text) != query_norm)
+            .collect();
+        let results: Vec<_> = self.dedup_results(filtered).into_iter()
             .take(k)
             .collect();
         if results.is_empty() { return None; }
