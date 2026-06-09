@@ -38,7 +38,14 @@ body{background:var(--crust);color:var(--text);font-family:'Inter',system-ui,san
    monospace (the Google-subsetted JetBrains Mono lacks Block Elements + Box
    Drawing, which would fall back to a metrically-different font and skew the
    columns). overflow-x lets a wide chart scroll instead of breaking. */
-.chart{line-height:1;white-space:pre;overflow-x:auto;font-family:'DejaVu Sans Mono',ui-monospace,'Liberation Mono',Menlo,Consolas,monospace}
+/* line-height 0.8 (not 1.0): DejaVu's block glyphs don't fill the line box, so
+   at integer-pixel rendering 1.0 leaves hairline gaps that break the bars — and
+   the gap is sub-pixel-position-dependent, so a value just under 1 isn't
+   reliable. 0.8 overlaps rows enough to stay solid at any alignment (overlapping
+   solid blocks remain solid — only gaps are wrong). overflow-y:hidden because
+   overflow-x:auto otherwise forces overflow-y to auto and a sub-pixel overflow
+   spawns a stray vertical scrollbar. */
+.chart{line-height:0.8;white-space:pre;overflow-x:auto;overflow-y:hidden;font-family:'DejaVu Sans Mono',ui-monospace,'Liberation Mono',Menlo,Consolas,monospace}
 .chat-input-area{padding:16px 20px;border-top:1px solid var(--surface0);background:var(--mantle)}
 .chat-input-box{display:flex;align-items:center;background:var(--base);border:1px solid var(--surface1);border-radius:12px;padding:10px 16px}
 .chat-input-box:focus-within{border-color:var(--lavender)}
