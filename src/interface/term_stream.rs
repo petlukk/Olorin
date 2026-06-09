@@ -1,8 +1,8 @@
-//! Terminal session handlers — PTY open/input/resize/close/stream + WS.
+//! Terminal session handlers — PTY open/resize/close + WebSocket stream.
 
 use std::io::Write;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::collections::HashMap;
 use crate::interface::server::{serve_json, read_body, escape_json};
 use crate::interface::pty::PtySession;
@@ -42,23 +42,6 @@ pub fn handle_term_open(stream: &mut std::net::TcpStream) {
             let body = format!("{{\"error\":\"{escaped}\"}}");
             serve_json(stream, &body);
         }
-    }
-}
-
-pub fn handle_term_input(stream: &mut std::net::TcpStream, req: &str, buf: &[u8], n: usize, id: u32) {
-    let body_bytes = read_body(stream, req, buf, n);
-    let sessions = term_sessions().lock().unwrap();
-    if let Some(session) = sessions.get(&id) {
-        let mut s = session.lock().unwrap();
-        match s.write_guarded(&body_bytes) {
-            Ok(()) => serve_json(stream, r#"{"ok":true}"#),
-            Err(reason) => {
-                let escaped = escape_json(&reason);
-                serve_json(stream, &format!("{{\"ok\":false,\"blocked\":\"{escaped}\"}}"));
-            }
-        }
-    } else {
-        serve_json(stream, r#"{"ok":false,"error":"no session"}"#);
     }
 }
 
@@ -142,56 +125,24 @@ fn poll_frame_json(session: &Arc<Mutex<PtySession>>, prev_cursor: &mut (u16, u16
     ))
 }
 
-pub fn handle_term_stream(stream: &mut std::net::TcpStream, id: u32) {
-    let _ = write!(
-        stream,
-        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
-         Cache-Control: no-cache\r\nAccess-Control-Allow-Origin: *\r\n\
-         Connection: keep-alive\r\n\r\n"
-    );
-    let _ = stream.flush();
-
-    let session = match get_session(id) {
-        Some(s) => s,
-        None => {
-            let _ = write!(stream, "data: {{\"type\":\"error\",\"msg\":\"no such session\"}}\n\n");
-            return;
-        }
-    };
-
-    let _ = stream.set_read_timeout(None);
-
-    let mut prev_cursor: (u16, u16) = (0, 0);
-    loop {
-        // Sleep without holding the session lock — otherwise every keystroke
-        // POST waits up to 16ms for this thread to release the mutex.
-        std::thread::sleep(std::time::Duration::from_millis(16));
-        let readable = session.lock().unwrap().wait_readable(0);
-        if !readable { continue; }
-
-        #[cfg(windows)]
-        std::thread::sleep(std::time::Duration::from_millis(5));
-
-        if let Some(json) = poll_frame_json(&session, &mut prev_cursor) {
-            if write!(stream, "data: {json}\n\n").is_err() { break; }
-            if stream.flush().is_err() { break; }
-        }
-
-        if !session.lock().unwrap().child_alive() {
-            let _ = write!(stream, "data: {{\"type\":\"exit\",\"code\":0}}\n\n");
-            let _ = stream.flush();
-            break;
-        }
-    }
-}
-
 fn get_session(id: u32) -> Option<Arc<Mutex<PtySession>>> {
     term_sessions().lock().unwrap().get(&id).cloned()
 }
 
-/// WebSocket variant of the term stream. Same frame JSON as SSE but the
-/// client can also send input bytes back over the same socket, eliminating
-/// the per-keystroke fetch POST.
+/// Shared between the WS writer loop (this thread) and the reader thread.
+/// Only the writer touches the socket for frames — the reader signals through
+/// these flags so we never have two threads writing frames concurrently.
+struct WsShared {
+    /// Reader sets this on EOF/Close so the writer stops instead of spinning
+    /// forever when the client disconnects at an idle prompt.
+    disconnected: AtomicBool,
+    /// Reader sets this when write_guarded blocks a line; the writer emits a
+    /// `blocked` frame so the client can flash the user-visible signal.
+    blocked: AtomicBool,
+}
+
+/// WebSocket terminal stream. Streams frame JSON to the client and reads input
+/// bytes back over the same socket, eliminating the per-keystroke fetch POST.
 pub fn handle_term_ws(stream: &mut std::net::TcpStream, req: &str, id: u32) {
     if ws::handshake(stream, req).is_err() {
         return;
@@ -213,14 +164,25 @@ pub fn handle_term_ws(stream: &mut std::net::TcpStream, req: &str, id: u32) {
         Ok(s) => s,
         Err(_) => return,
     };
+    let shared = Arc::new(WsShared {
+        disconnected: AtomicBool::new(false),
+        blocked: AtomicBool::new(false),
+    });
     let reader_session = session.clone();
+    let reader_shared = shared.clone();
     let reader_handle = std::thread::Builder::new()
         .stack_size(1024 * 1024)
-        .spawn(move || ws_reader_loop(read_stream, reader_session))
+        .spawn(move || ws_reader_loop(read_stream, reader_session, reader_shared))
         .ok();
     let mut prev_cursor: (u16, u16) = (0, 0);
     loop {
         std::thread::sleep(std::time::Duration::from_millis(16));
+        // Client gone — stop before spinning forever (the reader detected it).
+        if shared.disconnected.load(Ordering::Relaxed) { break; }
+        if shared.blocked.swap(false, Ordering::Relaxed) {
+            if ws::write_text(stream, r#"{"type":"blocked"}"#).is_err() { break; }
+            if stream.flush().is_err() { break; }
+        }
         let readable = session.lock().unwrap().wait_readable(0);
         if !readable { continue; }
 
@@ -242,7 +204,7 @@ pub fn handle_term_ws(stream: &mut std::net::TcpStream, req: &str, id: u32) {
     if let Some(h) = reader_handle { let _ = h.join(); }
 }
 
-fn ws_reader_loop(mut stream: std::net::TcpStream, session: Arc<Mutex<PtySession>>) {
+fn ws_reader_loop(mut stream: std::net::TcpStream, session: Arc<Mutex<PtySession>>, shared: Arc<WsShared>) {
     loop {
         let frame = match ws::read_frame(&mut stream) {
             Ok(Some(f)) => f,
@@ -252,8 +214,9 @@ fn ws_reader_loop(mut stream: std::net::TcpStream, session: Arc<Mutex<PtySession
             ws::Opcode::Text | ws::Opcode::Binary => {
                 let mut s = session.lock().unwrap();
                 if s.write_guarded(&frame.payload).is_err() {
-                    // Blocked input is silently dropped — the writer side will
-                    // not show any echo, which is the user-visible signal.
+                    // Signal the writer to emit a `blocked` frame — we can't
+                    // write it here without racing the writer on the socket.
+                    shared.blocked.store(true, Ordering::Relaxed);
                 }
             }
             ws::Opcode::Close => break,
@@ -261,5 +224,7 @@ fn ws_reader_loop(mut stream: std::net::TcpStream, session: Arc<Mutex<PtySession
             _ => {}
         }
     }
+    // Let the writer loop break out of its 16ms poll instead of spinning.
+    shared.disconnected.store(true, Ordering::Relaxed);
     let _ = stream.shutdown(std::net::Shutdown::Both);
 }

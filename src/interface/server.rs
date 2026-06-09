@@ -158,10 +158,6 @@ fn handle_connection(stream: &mut std::net::TcpStream, ctx: Arc<Mutex<DispatchCo
         ("POST", "/api/term/open") => {
             term_stream::handle_term_open(stream);
         }
-        ("POST", path) if path.starts_with("/api/term/") && path.ends_with("/input") => {
-            let id = term_stream::parse_term_id(path);
-            term_stream::handle_term_input(stream, req, &buf[..n], n, id);
-        }
         ("POST", path) if path.starts_with("/api/term/") && path.ends_with("/resize") => {
             let id = term_stream::parse_term_id(path);
             term_stream::handle_term_resize(stream, req, &buf[..n], n, id);
@@ -169,10 +165,6 @@ fn handle_connection(stream: &mut std::net::TcpStream, ctx: Arc<Mutex<DispatchCo
         ("POST", path) if path.starts_with("/api/term/") && path.ends_with("/close") => {
             let id = term_stream::parse_term_id(path);
             term_stream::handle_term_close(stream, id);
-        }
-        ("GET", path) if path.starts_with("/api/term/") && path.ends_with("/stream") => {
-            let id = term_stream::parse_term_id(path);
-            term_stream::handle_term_stream(stream, id);
         }
         ("GET", path) if path.starts_with("/api/term/") && path.ends_with("/ws") => {
             let id = term_stream::parse_term_id(path);

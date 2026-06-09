@@ -44,6 +44,7 @@ pub enum Opcode {
     Pong = 10,
 }
 
+#[derive(Debug)]
 pub struct Frame {
     pub opcode: Opcode,
     pub payload: Vec<u8>,
@@ -85,6 +86,13 @@ pub fn read_frame(stream: &mut impl Read) -> io::Result<Option<Frame>> {
     // RFC 6455: client frames MUST be masked. Reject unmasked client frames.
     if !masked {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "unmasked client frame"));
+    }
+    // Terminal input frames are tiny (keystrokes, small pastes). Cap the
+    // declared length before allocating so a malicious/buggy peer can't
+    // request a multi-exabyte Vec and abort the process.
+    const MAX_PAYLOAD: usize = 1 << 20; // 1 MiB
+    if payload_len > MAX_PAYLOAD {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "frame too large"));
     }
     let mut mask = [0u8; 4];
     stream.read_exact(&mut mask)?;
