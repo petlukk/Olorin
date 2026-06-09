@@ -327,15 +327,10 @@ function initTermCanvas(t){
       if(code>0&&code<27)seq=String.fromCharCode(code);
     }
     if(seq&&t._ws&&t._ws.readyState===WebSocket.OPEN){
-      const enc=new TextEncoder();
-      t._ws.send(enc.encode(seq));
-      // Optimistic local echo for printable chars — server frame will
-      // overwrite with the authoritative cell shortly. Skipped for control
-      // sequences (arrows, ctrl-keys) where the server response moves the
-      // cursor instead of writing a glyph.
-      if(seq.length===1&&seq>=' '&&seq!=='\x7f'&&t._prevCursor){
-        localEcho(t,seq);
-      }
+      // Send over the WebSocket; the authoritative server frame renders the
+      // result. No optimistic local echo — it can't tell a normal prompt from
+      // a no-echo password read, so it would paint plaintext on screen.
+      t._ws.send(new TextEncoder().encode(seq));
     }
     tinp.value='';
   });
@@ -359,16 +354,6 @@ function initTermCanvas(t){
       }
     }
   }).observe(t);
-}
-
-function localEcho(t,ch){
-  const ctx=t._canvas.getContext('2d');
-  ctx.font='13px "JetBrains Mono",monospace';
-  ctx.textBaseline='alphabetic';
-  const cw=t._cellW,h=t._cellH;
-  const[cc,cr]=t._prevCursor;
-  ctx.fillStyle='#1e1e2e';ctx.fillRect(cc*cw,cr*h,cw,h);
-  ctx.fillStyle='#cdd6f4';ctx.fillText(ch,cc*cw,cr*h+12);
 }
 
 function startTermStream(t){
@@ -417,6 +402,11 @@ function startTermStream(t){
       const cur=t._cellCache[cr+','+cc];
       if(cur){ctx.fillStyle='#1e1e2e';ctx.fillText(cur.ch,cc*cw,cr*ch+12);}
       t._prevCursor=d.cursor;
+    }else if(d.type==='blocked'){
+      // Safety scan rejected the line — flash the tile border (the feedback
+      // the old /input POST path used to provide).
+      canvas.style.boxShadow='0 0 0 2px #f38ba8';
+      setTimeout(()=>{canvas.style.boxShadow='';},500);
     }else if(d.type==='exit'){
       ws.close();
     }

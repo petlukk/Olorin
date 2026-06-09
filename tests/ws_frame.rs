@@ -1,7 +1,9 @@
 //! WebSocket primitive tests — SHA-1 (FIPS 180-4 vectors), RFC 6455 accept-key
-//! derivation, and base64. Moved out of src/ per the zero-`#[cfg(test)]`-in-src rule.
+//! derivation, base64, and frame read (masking + size bound).
+//! Moved out of src/ per the zero-`#[cfg(test)]`-in-src rule.
 
-use olorin::interface::ws::{base64_encode, sha1};
+use olorin::interface::ws::{base64_encode, read_frame, sha1, Opcode};
+use std::io::Cursor;
 
 #[test]
 fn sha1_empty() {
@@ -45,4 +47,36 @@ fn base64_basic() {
     assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
     assert_eq!(base64_encode(b"fooba"), "Zm9vYmE=");
     assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+}
+
+#[test]
+fn read_masked_text_frame_unmasks() {
+    // FIN+Text, masked, len 5, mask [1,2,3,4], payload "hello" XOR mask.
+    let mask = [1u8, 2, 3, 4];
+    let payload = b"hello";
+    let mut frame = vec![0x81u8, 0x80 | 5];
+    frame.extend_from_slice(&mask);
+    for (i, &b) in payload.iter().enumerate() {
+        frame.push(b ^ mask[i & 3]);
+    }
+    let f = read_frame(&mut Cursor::new(frame)).unwrap().unwrap();
+    assert_eq!(f.opcode, Opcode::Text);
+    assert_eq!(f.payload, b"hello");
+}
+
+#[test]
+fn read_frame_rejects_oversized_length() {
+    // FIN+Binary, masked, 127-length prefix declaring 1 TiB (>> 16 MiB cap).
+    // Must error before allocating, so only the 10-byte header is needed.
+    let mut frame = vec![0x82u8, 0x80 | 127];
+    frame.extend_from_slice(&(1u64 << 40).to_be_bytes());
+    let err = read_frame(&mut Cursor::new(frame)).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+}
+
+#[test]
+fn read_frame_rejects_unmasked_client_frame() {
+    // FIN+Text, NOT masked, len 1 — RFC 6455 requires client frames be masked.
+    let err = read_frame(&mut Cursor::new(vec![0x81u8, 0x01, b'x'])).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
 }
