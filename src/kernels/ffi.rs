@@ -53,6 +53,10 @@ type F64StatsFn         = unsafe extern "C" fn(
     *mut i32,
     *mut f64, *mut f64, *mut f64,
 );
+type ColReduceFn        = unsafe extern "C" fn(
+    *const f32, i32, i32,
+    *mut f32, *mut f32, *mut f32,
+);
 type EvalExprFn         = unsafe extern "C" fn(*const u8, i32, *mut i64, *mut i32, *mut i64, *mut i32);
 type ZeroizeFn          = unsafe extern "C" fn(*mut u8, i32);
 type AnsiClassifyFn     = unsafe extern "C" fn(*const u8, *mut u8, i32);
@@ -122,6 +126,7 @@ pub struct KernelTable {
     pub clf_scan:                 TimestampScanFn,
     pub f32_stats:                F32StatsFn,
     pub f64_stats:                F64StatsFn,
+    pub col_reduce:               ColReduceFn,
     pub eval_expr:                EvalExprFn,
     pub zeroize:                  ZeroizeFn,
     pub batch_cosine:             BatchCosineFn,
@@ -193,6 +198,7 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
     let clf_scan_lib    = load("clf_scan")?;
     let f32_stats_lib   = load("f32_stats")?;
     let f64_stats_lib   = load("f64_stats")?;
+    let col_reduce_lib  = load("col_reduce")?;
     let expr_eval       = load("expr_eval")?;
     let zeroize_lib     = load("zeroize")?;
     let jl_project_lib  = load("jl_project")?;
@@ -250,6 +256,8 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
                 sym(&f32_stats_lib, b"f32_stats\0")?),
             f64_stats: std::mem::transmute(
                 sym(&f64_stats_lib, b"f64_stats\0")?),
+            col_reduce: std::mem::transmute(
+                sym(&col_reduce_lib, b"col_reduce\0")?),
             eval_expr: std::mem::transmute(
                 sym(&expr_eval, b"eval_expr\0")?),
             zeroize: std::mem::transmute(
@@ -288,7 +296,7 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
                 ansi_parser_lib, terminal_diff_lib,
                 csv_scan_lib, jsonl_struct_lib, log_level_scan_lib,
                 timestamp_scan_lib, clf_scan_lib,
-                f32_stats_lib, f64_stats_lib,
+                f32_stats_lib, f64_stats_lib, col_reduce_lib,
                 poly1305_lib,
                 blake2b_lib,
                 argon2_block_lib,
@@ -414,7 +422,7 @@ pub unsafe fn chacha20_search_v2(
 // this file under the 500-LOC cap. Re-exported here so existing
 // `kernels::ffi::<name>` call sites continue to compile unchanged.
 pub use super::ffi_data::{
-    clf_scan, csv_scan, f32_stats, f64_stats, jsonl_struct_scan,
+    clf_scan, col_reduce, csv_scan, f32_stats, f64_stats, jsonl_struct_scan,
     log_level_scan, timestamp_scan,
 };
 
