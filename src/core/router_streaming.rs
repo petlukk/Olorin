@@ -271,7 +271,10 @@ impl DispatchContext {
         // but not ANSI-aware (it appends via textContent).
         if let Some(chart) = chart_for(name, &args, Some(display_name), false) {
             if !safety::scan(chart.as_bytes()).blocked {
-                let _ = tx.send(StreamEvent::Token(format!("{chart}\n")));
+                // RS-delimited markers so the web UI renders the chart in a
+                // dedicated line-height:1 block (block bars only connect into
+                // solid columns at line-height 1; the prose bubble uses 1.5).
+                let _ = tx.send(StreamEvent::Token(format!("\x1e[plot]\x1e{chart}\x1e[/plot]\x1e")));
             }
         }
         let _ = tx.send(StreamEvent::Token(body.clone()));
