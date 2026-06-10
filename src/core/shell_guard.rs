@@ -96,8 +96,13 @@ const SHELL_FORBIDDEN_PATHS: &[(&str, &str)] = &[
 ];
 
 fn contains_sensitive_path(cmd: &str) -> Option<&'static str> {
+    // Match against the raw command AND a quote-stripped copy, so shell
+    // quote-splitting (`cat ~/.s""sh/id_rsa` → `~/.ssh/id_rsa` after the
+    // shell removes the empty quotes) can't slip a needle past the literal
+    // substring match. False positives on innocent echoes stay tolerable.
+    let unquoted: String = cmd.chars().filter(|&c| c != '"' && c != '\'').collect();
     for &(needle, label) in SHELL_FORBIDDEN_PATHS {
-        if cmd.contains(needle) {
+        if cmd.contains(needle) || unquoted.contains(needle) {
             return Some(label);
         }
     }
@@ -165,12 +170,63 @@ fn classify(command: &str) -> CommandRisk {
     }
 
     let mut worst = CommandRisk::Allow;
+
+    // Command substitutions run their own commands — `echo $(rm -rf ~)` would
+    // otherwise classify as a harmless `echo`. Classify each substitution body
+    // (recursively, so nested `$()` is covered) and fold it into the verdict.
+    for sub in extract_substitutions(command) {
+        worst = worst_risk(worst, classify(&sub));
+        if worst == CommandRisk::Destructive { return CommandRisk::Destructive; }
+    }
+
     for segment in split_compound(command) {
         let risk = classify_single(segment.trim());
         worst = worst_risk(worst, risk);
         if worst == CommandRisk::Destructive { return CommandRisk::Destructive; }
     }
     worst
+}
+
+/// Extract the command bodies of `$(...)` and backtick substitutions so the
+/// classifier can see commands the outer command would otherwise hide. `$(` is
+/// matched with paren-depth tracking (handles nesting); backticks are matched
+/// to the next backtick. `${VAR}` (parameter expansion, not a command) is left
+/// alone.
+fn extract_substitutions(cmd: &str) -> Vec<String> {
+    let bytes = cmd.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'$' && i + 1 < bytes.len() && bytes[i + 1] == b'(' {
+            let start = i + 2;
+            let mut depth = 1;
+            let mut j = start;
+            while j < bytes.len() && depth > 0 {
+                match bytes[j] {
+                    b'(' => depth += 1,
+                    b')' => depth -= 1,
+                    _ => {}
+                }
+                j += 1;
+            }
+            let end = if depth == 0 { j - 1 } else { bytes.len() };
+            if end > start {
+                out.push(cmd[start..end].to_string());
+            }
+            i = j;
+        } else if bytes[i] == b'`' {
+            let start = i + 1;
+            let mut j = start;
+            while j < bytes.len() && bytes[j] != b'`' { j += 1; }
+            if j > start {
+                out.push(cmd[start..j].to_string());
+            }
+            i = j + 1;
+        } else {
+            i += 1;
+        }
+    }
+    out
 }
 
 fn targets_dangerous_redirect(command: &str) -> bool {
@@ -251,7 +307,9 @@ fn split_compound(cmd: &str) -> Vec<&str> {
         } else {
             match b {
                 b'\'' | b'"' => { in_quote = true; quote_char = b; }
-                b';' => { segments.push(&cmd[start..i]); start = i + 1; }
+                // `sh -c` terminates a command at a newline just like `;`,
+                // so a newline-hidden second command must be classified too.
+                b';' | b'\n' | b'\r' => { segments.push(&cmd[start..i]); start = i + 1; }
                 b'&' if i + 1 < bytes.len() && bytes[i + 1] == b'&' => {
                     segments.push(&cmd[start..i]); start = i + 2; i += 1;
                 }
