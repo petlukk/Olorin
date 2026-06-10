@@ -27,10 +27,9 @@ impl Rune for Ealog {
     fn name(&self) -> &'static str { "ealog" }
     fn description(&self) -> &'static str {
         "Summarize a log file via SIMD: per-severity counts \
-         (DEBUG/INFO/WARN/ERROR/FATAL, case-insensitive; WARNING folds into \
-         WARN and CRITICAL into FATAL), total line count, and bytes scanned. \
-         Word-bounded matching ignores compound identifiers like \
-         ERROR_HANDLER. Args: [--json] <path.log>."
+         (DEBUG/INFO/WARN/ERROR/FATAL, case-insensitive), total line \
+         count, and bytes scanned. Word-bounded matching ignores compound \
+         identifiers like ERROR_HANDLER. Args: [--json] <path.log>."
     }
     fn usage(&self) -> &'static str { "ealog [--json] <path.log>" }
     fn output_safety(&self) -> OutputSafety { OutputSafety::UntrustedQuoted }
