@@ -51,6 +51,25 @@ fn non_loopback_is_fail_closed_then_token_enforced() {
     assert!(gate.authorized(&format!("GET / HTTP/1.1\r\nCookie: theme=dark; olorin_auth={TOKEN}\r\n\r\n")));
     assert!(gate.authorized(&format!("GET /?token={TOKEN} HTTP/1.1\r\nHost: x\r\n\r\n")));
 
+    // ── Regression: a stale/wrong cookie must NOT shadow a valid credential ──
+    // A browser holding an old olorin_auth cookie (e.g. after the server was
+    // restarted with a new token) must be able to re-authenticate by pasting
+    // the correct ?token= URL, even though it also sends the stale cookie.
+    assert!(
+        gate.authorized(&format!(
+            "GET /?token={TOKEN} HTTP/1.1\r\nCookie: olorin_auth=STALEWRONG\r\n\r\n"
+        )),
+        "fresh ?token= must override a stale cookie"
+    );
+    assert!(
+        gate.authorized(&format!(
+            "GET / HTTP/1.1\r\nAuthorization: Bearer {TOKEN}\r\nCookie: olorin_auth=STALEWRONG\r\n\r\n"
+        )),
+        "valid Bearer must override a stale cookie"
+    );
+    // A wrong cookie with no other valid credential is still rejected.
+    assert!(!gate.authorized("GET / HTTP/1.1\r\nCookie: olorin_auth=STALEWRONG\r\n\r\n"));
+
     // ── Browser bootstrap cookie: only for a valid query token ──────────────
     let cookie = gate
         .bootstrap_cookie(&format!("GET /?token={TOKEN} HTTP/1.1\r\nHost: x\r\n\r\n"))
