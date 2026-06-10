@@ -29,6 +29,15 @@ order.
   the column summarizes its finite values consistently (count/min/max/sum/mean
   all agree). Found by differential testing against pandas during the runes
   robustness pass.
+- **Web auth gate: a stale `olorin_auth` cookie no longer shadows a valid
+  `?token=`.** When the server was restarted with a new `OLORIN_AUTH_TOKEN`, a
+  browser still holding the previous session's cookie could not re-authenticate
+  by pasting the correct `?token=` URL — the gate checked only the first
+  presented credential (cookie before query) and returned `401`. It now accepts
+  if *any* of Bearer header / cookie / query token matches, so a fresh
+  `?token=` always recovers a browser with a stale cookie (and re-sets the
+  cookie on the way in). Workaround on 2.8.0: open in a private window or clear
+  the `olorin_auth` cookie.
 
 ## [2.8.0] — 2026-06-10
 

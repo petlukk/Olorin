@@ -49,14 +49,21 @@ impl AuthGate {
     }
 
     /// Whether `request` (raw HTTP request head) carries the required token.
-    /// Always true when the gate is open. Constant-time compares the presented
-    /// token against the configured one.
+    /// Always true when the gate is open. Accepts if **any** presented
+    /// credential matches — `Authorization: Bearer`, an `olorin_auth` cookie,
+    /// or a `?token=` query param — each constant-time compared.
+    ///
+    /// Checking all three (not just the first present) is deliberate: a stale
+    /// `olorin_auth` cookie from an earlier session must not shadow a fresh
+    /// `?token=` bootstrap, or a browser holding an old cookie could never
+    /// re-authenticate by pasting the correct URL (it would keep getting 401
+    /// while sending both a wrong cookie and the right query token).
     pub fn authorized(&self, request: &str) -> bool {
         let Some(token) = &self.token else { return true; };
-        match presented_token(request) {
-            Some(p) => ct_eq(p.as_bytes(), token.as_bytes()),
-            None => false,
-        }
+        let want = token.as_bytes();
+        matches(bearer_token(request), want)
+            || matches(cookie_token(request), want)
+            || matches(query_token(request), want)
     }
 
     /// `Set-Cookie` header *value* to persist the token in the browser, when a
@@ -88,12 +95,12 @@ fn is_loopback(host: &str) -> bool {
     h.parse::<std::net::IpAddr>().map(|ip| ip.is_loopback()).unwrap_or(false)
 }
 
-/// The token presented on a request, checked in order: `Authorization: Bearer`,
-/// then an `olorin_auth` cookie, then a `?token=` query param.
-fn presented_token(request: &str) -> Option<String> {
-    bearer_token(request)
-        .or_else(|| cookie_token(request))
-        .or_else(|| query_token(request))
+/// Constant-time check that a presented credential (if any) equals `want`.
+fn matches(presented: Option<String>, want: &[u8]) -> bool {
+    match presented {
+        Some(p) => ct_eq(p.as_bytes(), want),
+        None => false,
+    }
 }
 
 fn bearer_token(request: &str) -> Option<String> {
