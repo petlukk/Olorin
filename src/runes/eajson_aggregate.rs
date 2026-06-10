@@ -152,8 +152,17 @@ fn ingest_scalar(full_key: &str, val_bytes: &[u8], kind: ScalarKind, agg: &mut A
     match kind {
         ScalarKind::Number => {
             let txt = std::str::from_utf8(val_bytes).unwrap_or("");
+            // Exclude non-finite values. A JSON number that overflows f64
+            // (e.g. `1e400`) parses to ±inf, and a single such value otherwise
+            // poisons the additive stats — NaN/inf propagates through
+            // `sum`/`mean` (serialized as null) while `min`/`max` survive,
+            // leaving an internally inconsistent column summary. Same guard as
+            // eacrunch; drop non-finite so the field summarizes its finite
+            // values consistently.
             if let Ok(v) = txt.parse::<f64>() {
-                agg.numeric_vals.entry(full_key.to_string()).or_default().push(v);
+                if v.is_finite() {
+                    agg.numeric_vals.entry(full_key.to_string()).or_default().push(v);
+                }
             }
         }
         ScalarKind::Text => {
