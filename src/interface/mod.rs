@@ -1,5 +1,7 @@
 pub mod terminal;
 pub mod server;
+pub mod server_http;
+pub mod server_auth;
 pub mod server_analyze;
 pub mod whatsapp;
 pub mod term_stream;
