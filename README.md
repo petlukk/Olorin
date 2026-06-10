@@ -240,6 +240,41 @@ Olorin Pipe — same SIMD kernels, same vault, same audit log.
   subprocess; scan the QR with WhatsApp on your phone, then any message to
   the linked number gets dispatched through the same Pipe.
 
+### Exposing the Web UI on a network
+
+`--serve` binds `127.0.0.1` by default — local-only, no authentication, the
+right default for a single user on their own machine. To reach the UI from
+another device (a phone, a laptop on the LAN), bind a non-loopback address.
+Olorin is **fail-closed** here: a non-loopback bind *requires* an auth token,
+or the server refuses to start — so the tool-running endpoints are never
+exposed unauthenticated by accident.
+
+Set the token (and the bind address) in `~/.olorin/env`, which Olorin loads at
+startup:
+
+```bash
+printf 'OLORIN_AUTH_TOKEN=%s\nOLORIN_BIND=0.0.0.0\n' "$(openssl rand -hex 32)" >> ~/.olorin/env
+chmod 600 ~/.olorin/env
+grep OLORIN_AUTH_TOKEN ~/.olorin/env   # the token you'll put in the URL
+```
+
+Then `./olorin --serve` and, from the other device, open
+`http://<host-lan-ip>:8080/?token=<token>` **once**. That sets an `HttpOnly`
+cookie, and every later request — page load, SSE stream, terminal WebSocket —
+carries it automatically. Requests without the token get `401`; the check is
+constant-time and runs before any dispatch, so it covers every endpoint.
+
+For a throwaway session, pass them inline instead of persisting:
+
+```bash
+OLORIN_AUTH_TOKEN=$(openssl rand -hex 32) OLORIN_BIND=0.0.0.0 ./olorin --serve
+```
+
+Notes: restart `--serve` after editing the env file (a running process won't
+reload it); an empty `OLORIN_AUTH_TOKEN` counts as "no token" and is refused on
+a non-loopback bind; loopback binds (the default) need no token. The token in
+`~/.olorin/env` is plaintext — `chmod 600` keeps it owner-only.
+
 ## Install
 
 Prebuilt binaries are published per release for **Linux x86_64**,
