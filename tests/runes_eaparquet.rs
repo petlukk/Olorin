@@ -100,10 +100,19 @@ fn eaparquet_decodes_unsigned_columns() {
     assert_eq!(u32.min.unwrap().as_f64(), 3_000_000_000.0, "u32 min wrong/negative");
     assert_eq!(u32.max.unwrap().as_f64(), 4_000_000_000.0, "u32 max wrong/negative");
 
-    // u64: values above 2^63 must be POSITIVE (previously wrapped negative).
+    // u64: values above 2^63 must be POSITIVE (previously wrapped negative)
+    // AND carry their true magnitude. The fixture's u64 max is ~1.8e19. A weak
+    // `> 9.0e18` check passed even when the stat-reduction round-tripped the
+    // f64 back through `as i64`, whose saturating cast pinned anything above
+    // i64::MAX to 2^63 (~9.22e18) — so assert the true magnitude. f64 tolerance
+    // because >2^53 isn't exactly representable.
     let u64c = col("u64");
     assert!(u64c.min.unwrap().as_f64() > 0.0, "u64 min wrapped negative");
-    assert!(u64c.max.unwrap().as_f64() > 9.0e18, "u64 max not in unsigned range");
+    let u64_max = u64c.max.unwrap().as_f64();
+    assert!(
+        (u64_max - 1.8e19).abs() < 1.0e16,
+        "u64 max wrong: {u64_max} (expected ~1.8e19, not saturated to i64::MAX ~9.22e18)"
+    );
 
     // Regression: a genuinely signed int64 column stays signed.
     let sig = col("sig");

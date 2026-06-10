@@ -17,6 +17,12 @@ order.
   internally-inconsistent, silently-wrong summary fixed in eacrunch. Non-finite
   values are now excluded, so the field summarizes its finite values
   consistently. Found by differential testing during the runes robustness pass.
+- **eaparquet: a `u64` column's max stat no longer saturates to `i64::MAX`.**
+  The per-row-group stat reduction round-trips the value through `f64` and then
+  back via `as i64`, whose saturating float→int cast pinned any value above
+  `i64::MAX` to `2^63` (~9.22e18) — so a `u64` max of `2^64-1` reported as ~half
+  its true magnitude. Out-of-`i64`-range reduced values now stay `f64`. Found by
+  differential testing against pyarrow during the runes robustness pass.
 
 ## [2.8.3] — 2026-06-10
 
