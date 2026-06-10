@@ -10,6 +10,14 @@ order.
 
 ### Fixed
 
+- **eacrunch: a `nan`/`inf` cell no longer poisons a numeric column's stats.**
+  Rust's `f64::parse` accepts the literals `nan`/`inf`/`infinity`, so a single
+  such cell in an otherwise-numeric column propagated `NaN` through `sum`/`mean`
+  (serialized as `null`) while `min`/`max` survived — an internally
+  inconsistent, silently-wrong summary. Non-finite parses are now excluded, so
+  the column summarizes its finite values consistently (count/min/max/sum/mean
+  all agree). Found by differential testing against pandas during the runes
+  robustness pass.
 - **Web auth gate: a stale `olorin_auth` cookie no longer shadows a valid
   `?token=`.** When the server was restarted with a new `OLORIN_AUTH_TOKEN`, a
   browser still holding the previous session's cookie could not re-authenticate
