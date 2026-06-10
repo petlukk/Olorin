@@ -19,6 +19,17 @@ order.
   (`WARNINGS`/`CRITICALLY`/`UNCRITICAL` still don't match). Verified on x86 and
   Raspberry Pi 5 (NEON). Found by the runes robustness pass.
 
+### Fixed
+
+- **eacrunch: a `nan`/`inf` cell no longer poisons a numeric column's stats.**
+  Rust's `f64::parse` accepts the literals `nan`/`inf`/`infinity`, so a single
+  such cell in an otherwise-numeric column propagated `NaN` through `sum`/`mean`
+  (serialized as `null`) while `min`/`max` survived — an internally
+  inconsistent, silently-wrong summary. Non-finite parses are now excluded, so
+  the column summarizes its finite values consistently (count/min/max/sum/mean
+  all agree). Found by differential testing against pandas during the runes
+  robustness pass.
+
 ## [2.8.0] — 2026-06-10
 
 Security hardening across the agent tool sandbox and the web server, from a
