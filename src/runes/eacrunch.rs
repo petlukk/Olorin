@@ -219,8 +219,18 @@ fn build_output(bytes: &[u8], path: String) -> Result<RuneOutput, String> {
             let raw = std::str::from_utf8(&bytes[s..e]).unwrap_or("").trim();
             let txt = unquote(raw);
             if is_numeric[c] {
+                // Exclude non-finite parses. Rust's `f64::parse` accepts the
+                // literals "nan"/"inf"/"infinity" (case-insensitive), and a
+                // single such cell otherwise poisons the additive stats — NaN
+                // propagates through `sum`/`mean` (→ serialized as null) while
+                // `min`/`max` survive, leaving an internally inconsistent
+                // column summary. Treat them as junk: drop from the numeric
+                // vector so count/min/max/sum/mean stay consistent over the
+                // finite values (matching pandas' skipna behavior).
                 if let Ok(v) = txt.parse::<f64>() {
-                    numeric_vals[c].push(v);
+                    if v.is_finite() {
+                        numeric_vals[c].push(v);
+                    }
                 }
             } else if let Some(ct) = text_tops[c].get_mut(txt.as_ref()) {
                 *ct += 1;
