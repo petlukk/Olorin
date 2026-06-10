@@ -8,6 +8,11 @@ order.
 
 ## [Unreleased]
 
+## [2.8.4] — 2026-06-10
+
+Two rune correctness fixes from the robustness pass (differential vs
+pandas/pyarrow). No format or behavior changes.
+
 ### Fixed
 
 - **eajson: a JSON number that overflows f64 no longer poisons a field's
