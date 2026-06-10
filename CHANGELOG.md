@@ -8,6 +8,11 @@ order.
 
 ## [Unreleased]
 
+## [2.8.1] — 2026-06-10
+
+Bug-fix release. Corrections surfaced by the runes robustness pass (rune
+correctness vs ground-truth tools) and by live use of the v2.8.0 web auth gate.
+
 ### Added
 
 - **ealog now counts the `WARNING` and `CRITICAL` spellings.** Python's
