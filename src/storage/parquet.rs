@@ -484,7 +484,19 @@ fn simd_min_max(vals: &[f64]) -> Option<(f64, f64)> {
 fn typed_stat(pt: PhysicalType, v: f64) -> NumStat {
     match pt {
         PhysicalType::Boolean => NumStat::Bool(v != 0.0),
-        PhysicalType::Int32 | PhysicalType::Int64 | PhysicalType::Int96 => NumStat::I64(v as i64),
+        PhysicalType::Int32 | PhysicalType::Int64 | PhysicalType::Int96 => {
+            // A reduced UINT_64 stat can exceed i64::MAX (decode_stat_value
+            // carries it as f64). `v as i64` SATURATES — Rust's float→int cast
+            // pins anything above i64::MAX to i64::MAX, so u64 maxima > 2^63
+            // would collapse to ~9.22e18. Keep out-of-range values as F64 so
+            // the magnitude survives; as_f64() (the only consumer) is identical
+            // either way for in-range values.
+            if (i64::MIN as f64..=i64::MAX as f64).contains(&v) {
+                NumStat::I64(v as i64)
+            } else {
+                NumStat::F64(v)
+            }
+        }
         PhysicalType::Float | PhysicalType::Double => NumStat::F64(v),
         _ => NumStat::F64(v),
     }
