@@ -8,6 +8,10 @@ order.
 
 ## [Unreleased]
 
+## [2.8.2] — 2026-06-10
+
+Web-UI chart rendering fix for non-Linux viewers.
+
 ### Fixed
 
 - **Block-bar charts no longer shear in the web UI on non-Linux clients.** The
