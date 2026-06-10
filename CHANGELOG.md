@@ -10,6 +10,13 @@ order.
 
 ### Fixed
 
+- **eajson: a JSON number that overflows f64 no longer poisons a field's
+  stats.** JSON can't write `inf`, but a value like `1e400` parses to
+  `f64::INFINITY`, and a single such value otherwise propagated through
+  `sum`/`mean` (serialized as null) while `min`/`max` survived — the same
+  internally-inconsistent, silently-wrong summary fixed in eacrunch. Non-finite
+  values are now excluded, so the field summarizes its finite values
+  consistently. Found by differential testing during the runes robustness pass.
 - **eaparquet: a `u64` column's max stat no longer saturates to `i64::MAX`.**
   The per-row-group stat reduction round-trips the value through `f64` and then
   back via `as i64`, whose saturating float→int cast pinned any value above
