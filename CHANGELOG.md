@@ -17,6 +17,21 @@ order.
   its true magnitude. Out-of-`i64`-range reduced values now stay `f64`. Found by
   differential testing against pyarrow during the runes robustness pass.
 
+## [2.8.3] — 2026-06-10
+
+Hotfix: revert the ealog WARNING/CRITICAL kernel change to stop a crash.
+
+### Fixed
+
+- **ealog no longer crashes (stack overflow) on logs ≥ ~1 MB.** The
+  `WARNING`/`CRITICAL` matching added to the `log_level_scan` SIMD kernel in
+  v2.8.1 made the per-chunk SIMD body large enough that stack usage grew with
+  the input, overflowing the main thread's stack on any log of roughly a
+  megabyte or more — i.e. most real logs. The kernel and the rune are reverted
+  to their pre-v2.8.1 form (the five base levels `DEBUG`/`INFO`/`WARN`/`ERROR`/
+  `FATAL`). `WARNING`/`CRITICAL` detection is temporarily removed and will
+  return with a stack-safe implementation.
+
 ## [2.8.2] — 2026-06-10
 
 Web-UI chart rendering fix for non-Linux viewers.
