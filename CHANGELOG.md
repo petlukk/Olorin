@@ -8,6 +8,48 @@ order.
 
 ## [Unreleased]
 
+## [2.8.0] — 2026-06-10
+
+Security hardening across the agent tool sandbox and the web server, from a
+full-codebase audit. No format, schema, or rune-output changes; one operational
+behavior change for networked deployments (see Changed).
+
+### Security
+
+- **Agent tool sandbox hardened against prompt-injection abuse.** Three gaps
+  where the file/network tools could be steered past their guards are closed.
+  The `http`/`fetch` tool now refuses any non-`http(s)` URL — previously
+  `http file:///etc/shadow` read arbitrary local files (bypassing the path
+  guard) and other schemes opened SSRF/exfil channels; curl is additionally
+  pinned with `--proto`/`--proto-redir` so a redirect can't reach `file://`.
+  The shell command classifier no longer misses destructive or exfil commands
+  hidden behind newlines or `$(…)`/backtick substitution, nor sensitive paths
+  split by shell quotes (`~/.s""sh/id_rsa`). The `read`/`write`/`grep`/`ls`
+  path guard now resolves symlinks and re-checks the real target, so a link
+  under `$HOME` pointing into `~/.ssh` or `~/.olorin` can no longer slip past
+  the denylist.
+- **Web server is fail-closed when exposed off-loopback.** Binding a
+  non-loopback address now requires `OLORIN_AUTH_TOKEN`, and every request must
+  present it (`Authorization: Bearer`, an `olorin_auth` cookie, or a `?token=`
+  bootstrap that sets the cookie). Loopback binds — the default — are unchanged
+  and need no token. The token check is constant-time and runs before any
+  dispatch, covering every endpoint including the term WebSocket.
+
+### Changed
+
+- **`OLORIN_BIND` to a non-loopback address now requires `OLORIN_AUTH_TOKEN`.**
+  Previously the web UI could bind `0.0.0.0` with no authentication, exposing
+  the shell/http/write tools to the network. If you run Olorin on a LAN
+  address, set `OLORIN_AUTH_TOKEN=<secret>` and open
+  `http://<host>:<port>/?token=<secret>` once; otherwise the server now exits
+  at startup rather than expose the tool-running endpoints unauthenticated.
+  Local (loopback) use is unaffected.
+
+### Removed
+
+- Dead `platform/hwid.rs` — the machine-id vault-key path it backed was
+  superseded by passphrase + Argon2id in v2.0.0.
+
 ## [2.7.0] — 2026-06-10
 
 SIMD charts and a scriptable rune CLI. The file-drop analyst now *draws* the
