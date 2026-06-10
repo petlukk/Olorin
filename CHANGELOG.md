@@ -8,6 +8,19 @@ order.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Block-bar charts no longer shear in the web UI on non-Linux clients.** The
+  chart `.chart` CSS led with `DejaVu Sans Mono`, a font present on Linux/the Pi
+  but not on Windows/macOS; remote viewers fell back to a font whose Block
+  Elements glyphs (`▁▂▃▄▅▆▇█`) render at a different advance width than the
+  digits/spaces, so the columns drifted and the bars looked sheared. A ~9 KB
+  subset of DejaVu Sans Mono (ASCII + Box Drawing + Block Elements) is now
+  embedded in `chat.html` via `@font-face`, so the grid renders at uniform
+  width on every client OS. No new runtime/build dependency; the binary grows
+  ~9 KB. Verified vertical on a Windows browser viewing the Pi. (The plot text
+  itself was always column-aligned — this was purely a client-font fallback.)
+
 ## [2.8.1] — 2026-06-10
 
 Bug-fix release. Corrections surfaced by the runes robustness pass (rune
