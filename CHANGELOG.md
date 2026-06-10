@@ -8,6 +8,27 @@ order.
 
 ## [Unreleased]
 
+## [2.7.0] — 2026-06-10
+
+SIMD charts and a scriptable rune CLI. The file-drop analyst now *draws* the
+event rate over time, and any rune can be run one-shot straight from the shell.
+
+### Added
+
+- **Block-bar charts for time-series runes.** Drop a timestamped log into the
+  web UI — or run `eatime --bucket series` in the REPL — and Olorin renders the
+  event rate over time as a block-bar chart with spikes flagged and the median
+  baseline drawn. A new `col_reduce` SIMD kernel downsamples the series to the
+  canvas width (peak-per-column, so a one-bucket spike still towers); a single
+  renderer serves both surfaces — ANSI colour in the REPL, monospace in the web
+  chat. The y-axis auto-zooms for high-floor rate series and the x-axis carries
+  dates across multi-day spans. Verified on a Pi 5 (NEON), both surfaces.
+- **`olorin rune <name> [args…]` one-shot CLI.** Runs a single rune
+  non-interactively and writes only its answer to stdout — no banner, no model
+  load, no REPL — so `olorin rune eatime --bucket series --json access.log >
+  out.json` yields clean JSON for matplotlib / jq / pandas. Works for every
+  rune; exit codes 0 success / 1 failure / 2 usage.
+
 ## [2.6.0] — 2026-06-09
 
 A recall correctness fix: updating a fact mid-conversation now takes effect.
