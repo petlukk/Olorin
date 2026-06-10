@@ -7,7 +7,14 @@ use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use crate::core::router::DispatchContext;
+use crate::interface::server_auth::AuthGate;
 use crate::interface::term_stream;
+
+// JSON/HTTP helpers live in `server_http` (split out to keep this file under
+// the 500-line cap). Re-exported here so existing `interface::server::…`
+// call sites across the crate keep resolving.
+pub use crate::interface::server_http::{build_system_json, extract_json_string, parse_content_length};
+pub(crate) use crate::interface::server_http::{escape_json, escape_json_into, read_body};
 
 // ── Hybrid embed for chat.html ────────────────────────────────────────────────
 
@@ -54,12 +61,25 @@ pub fn run(port: u16, model_arg: Option<&str>, strict: bool, audit_path: Option<
     ctx.lock().unwrap_or_else(|e| e.into_inner()).server_teleported = Some(teleported.clone());
 
     let bind_host = std::env::var("OLORIN_BIND").unwrap_or_else(|_| "127.0.0.1".to_string());
+    // Resolve the network auth policy BEFORE binding: a non-loopback bind
+    // without OLORIN_AUTH_TOKEN is refused here, so the socket never opens.
+    let auth = match AuthGate::resolve(&bind_host) {
+        Ok(a) => a,
+        Err(msg) => {
+            eprintln!("[olorin] {msg}");
+            std::process::exit(1);
+        }
+    };
     let addr = format!("{bind_host}:{port}");
     let listener = TcpListener::bind(&addr).unwrap_or_else(|e| {
         eprintln!("[olorin] cannot bind {addr}: {e}");
         std::process::exit(1);
     });
-    println!("[Olorin] Web UI at http://{addr}");
+    if auth.is_open() {
+        println!("[Olorin] Web UI at http://{addr}");
+    } else {
+        println!("[Olorin] Web UI at http://{addr}  (token required — first visit: http://{addr}/?token=$OLORIN_AUTH_TOKEN)");
+    }
 
     for stream in listener.incoming() {
         let mut stream = match stream {
@@ -70,6 +90,7 @@ pub fn run(port: u16, model_arg: Option<&str>, strict: bool, audit_path: Option<
         let _ = stream.set_nodelay(true);
         let ctx = ctx.clone();
         let teleported = teleported.clone();
+        let auth = auth.clone();
 
         // 16 MB matches the main thread's PE stack reserve. The
         // dispatch path nested below this can hit the forward pass,
@@ -77,12 +98,12 @@ pub fn run(port: u16, model_arg: Option<&str>, strict: bool, audit_path: Option<
         let _ = std::thread::Builder::new()
             .stack_size(16 * 1024 * 1024)
             .spawn(move || {
-                handle_connection(&mut stream, ctx, &teleported);
+                handle_connection(&mut stream, ctx, &teleported, &auth);
             });
     }
 }
 
-fn handle_connection(stream: &mut std::net::TcpStream, ctx: Arc<Mutex<DispatchContext>>, teleported: &AtomicBool) {
+fn handle_connection(stream: &mut std::net::TcpStream, ctx: Arc<Mutex<DispatchContext>>, teleported: &AtomicBool, auth: &AuthGate) {
     let mut buf = [0u8; 8192];
     let mut n = 0;
     loop {
@@ -109,10 +130,17 @@ fn handle_connection(stream: &mut std::net::TcpStream, ctx: Arc<Mutex<DispatchCo
     let method = parts.next().unwrap_or("");
     let path   = parts.next().unwrap_or("/");
 
+    // Network auth gate. Open (loopback) binds short-circuit to authorized;
+    // exposed binds require the token on every request before any dispatch.
+    if !auth.authorized(req) {
+        serve_401(stream);
+        return;
+    }
+
     let path = path.split('?').next().unwrap_or("/");
 
     match (method, path) {
-        ("GET", "/") => serve_html(stream),
+        ("GET", "/") => serve_html(stream, auth.bootstrap_cookie(req)),
         ("GET", "/api/model") => {
             serve_json(stream, r#"{"name":"olorin","backend":"pipe"}"#);
         }
@@ -189,8 +217,14 @@ fn handle_connection(stream: &mut std::net::TcpStream, ctx: Arc<Mutex<DispatchCo
     }
 }
 
-fn serve_html(stream: &mut std::net::TcpStream) {
+fn serve_html(stream: &mut std::net::TcpStream, set_cookie: Option<String>) {
     let body = get_chat_html();
+    // When the visitor authenticated via `?token=`, persist it as a cookie so
+    // same-origin fetch/EventSource/WebSocket carry it on every later request.
+    let cookie_hdr = match set_cookie {
+        Some(c) => format!("Set-Cookie: {c}\r\n"),
+        None => String::new(),
+    };
     // The HTML is embedded in the binary (include_str!), so it changes on every
     // deploy — never let the browser serve a stale copy, or new frontend code
     // (e.g. a new upload path) silently won't load.
@@ -198,6 +232,20 @@ fn serve_html(stream: &mut std::net::TcpStream) {
         stream,
         "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\
          Cache-Control: no-cache, no-store, must-revalidate\r\n\
+         {cookie_hdr}\
+         Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(), body
+    );
+}
+
+/// 401 for a request that failed the auth gate. `WWW-Authenticate: Bearer`
+/// signals the expected scheme to API clients.
+fn serve_401(stream: &mut std::net::TcpStream) {
+    let body = "Unauthorized: a valid OLORIN_AUTH_TOKEN is required to reach this server.";
+    let _ = write!(
+        stream,
+        "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Bearer\r\n\
+         Content-Type: text/plain; charset=utf-8\r\n\
          Content-Length: {}\r\nConnection: close\r\n\r\n{}",
         body.len(), body
     );
@@ -211,31 +259,6 @@ pub(crate) fn serve_json(stream: &mut std::net::TcpStream, body: &str) {
          Content-Length: {}\r\nConnection: close\r\n\r\n{}",
         body.len(), body
     );
-}
-
-/// Max request body, in bytes. Default 128 MB so the file-drop analyst can
-/// accept real logs (base64 inflates ~33%, so ~95 MB of file). Override with
-/// `OLORIN_MAX_UPLOAD=<bytes>`.
-fn max_body_size() -> usize {
-    std::env::var("OLORIN_MAX_UPLOAD")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(128 * 1024 * 1024)
-}
-
-pub(crate) fn read_body(stream: &mut std::net::TcpStream, req: &str, buf: &[u8], n: usize) -> Vec<u8> {
-    let content_len = parse_content_length(req);
-    if content_len > max_body_size() { return Vec::new(); }
-    let header_end  = req.find("\r\n\r\n").unwrap_or(n) + 4;
-    let already     = n.saturating_sub(header_end);
-    let mut body_buf = vec![0u8; content_len];
-    if already > 0 && already <= content_len {
-        body_buf[..already].copy_from_slice(&buf[header_end..n]);
-    }
-    if already < content_len {
-        let _ = stream.read_exact(&mut body_buf[already..]);
-    }
-    body_buf
 }
 
 fn handle_generate(
@@ -398,91 +421,6 @@ fn handle_command(
     let escaped = escape_json(&output);
     let body    = format!("{{\"output\":\"{escaped}\",\"success\":{success}}}");
     serve_json(stream, &body);
-}
-
-// ── System info ───────────────────────────────────────────────────────────────
-
-pub fn build_system_json(recall_level: usize, config_json: &str) -> String {
-    use crate::platform::sysinfo;
-    let (mem_used, mem_total) = sysinfo::memory_usage_mb().unwrap_or((0, 0));
-    let uptime      = sysinfo::uptime_seconds().unwrap_or(0);
-    let os          = std::env::consts::OS;
-    let arch        = std::env::consts::ARCH;
-    let cpu_temp    = match sysinfo::cpu_temp_c() {
-        Some(t) => t.to_string(),
-        None    => "null".to_string(),
-    };
-    let cpu_percent = sysinfo::cpu_percent().unwrap_or(0);
-    format!(
-        "{{\"cpu_percent\":{cpu_percent},\"cpu_temp\":{cpu_temp},\
-         \"memory_used_mb\":{mem_used},\"memory_total_mb\":{mem_total},\
-         \"os\":\"{os}\",\"arch\":\"{arch}\",\"uptime_seconds\":{uptime},\
-         \"recall_level\":{recall_level},\"config\":{config_json}}}"
-    )
-}
-
-// ── JSON helpers ──────────────────────────────────────────────────────────────
-
-pub fn parse_content_length(req: &str) -> usize {
-    for line in req.lines() {
-        if line.to_ascii_lowercase().starts_with("content-length:") {
-            return line[15..].trim().parse().unwrap_or(0);
-        }
-    }
-    0
-}
-
-pub fn extract_json_string(json: &str, key: &str) -> Option<String> {
-    let pattern   = format!("\"{}\"", key);
-    let start     = json.find(&pattern)?;
-    let after_key = &json[start + pattern.len()..];
-    let colon     = after_key.find(':')?;
-    let rest      = after_key[colon + 1..].trim_start();
-    if !rest.starts_with('"') { return None; }
-    let mut result = String::new();
-    let mut chars  = rest[1..].chars();
-    while let Some(c) = chars.next() {
-        match c {
-            '\\' => if let Some(esc) = chars.next() {
-                match esc {
-                    '"'  => result.push('"'),
-                    '\\' => result.push('\\'),
-                    'n'  => result.push('\n'),
-                    't'  => result.push('\t'),
-                    c    => { result.push('\\'); result.push(c); }
-                }
-            },
-            '"' => break,
-            _   => result.push(c),
-        }
-    }
-    Some(result)
-}
-
-pub(crate) fn escape_json(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    escape_json_into(s, &mut out);
-    out
-}
-
-fn escape_json_into(s: &str, out: &mut String) {
-    for c in s.chars() {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '"'  => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\t' => out.push_str("\\t"),
-            '\r' => out.push_str("\\r"),
-            // JSON requires all control chars U+0000–U+001F to be escaped.
-            // Without this, a stray control byte (from file-derived data, or
-            // an internal marker) produces invalid JSON and the browser's
-            // JSON.parse silently drops the whole token.
-            c if (c as u32) < 0x20 => {
-                out.push_str(&format!("\\u{:04x}", c as u32));
-            }
-            _    => out.push(c),
-        }
-    }
 }
 
 // ── Config handlers ──────────────────────────────────────────────────────────
