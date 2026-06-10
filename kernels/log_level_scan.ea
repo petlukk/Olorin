@@ -1,8 +1,14 @@
 // Multi-keyword log-severity scanner. Counts word-bounded occurrences of
 // DEBUG, INFO, WARN, ERROR, FATAL (ASCII case-insensitive) across a byte
 // buffer plus the total newline byte count (used for line-count reporting),
-// and optionally records positions of valid ERROR / FATAL matches into a
-// caller-sized buffer (capped at `max_positions`).
+// and optionally records positions of valid high-severity (ERROR / FATAL /
+// CRITICAL) matches into a caller-sized buffer (capped at `max_positions`).
+//
+// The long spellings WARNING and CRITICAL (used by Python `logging` and
+// syslog) fold into the same tiers: WARNING -> WARN (counts[2]), CRITICAL ->
+// FATAL (counts[4]). Their first letters don't collide with the 5 base
+// keywords, so word-bounded matching keeps them mutually exclusive (e.g.
+// "WARN" with a delimiter after position 4 is never also "WARNING").
 //
 // Case handling: candidate letter bytes are folded with `| 0x20` before
 // comparison, so `ERROR`, `error`, and `Error` all match. The fold maps
@@ -67,6 +73,51 @@ func record_high(p: i32, positions: *mut i32, max_positions: i32, n_positions: *
 func scan_pos(text: *u8, p: i32, len: i32, counters: *mut i32, positions: *mut i32, max_positions: i32, n_positions: *mut i32) {
     if p > 0 {
         if is_delim_byte(to_i32(text[p - 1])) == 0 { return }
+    }
+
+    // CRITICAL (8) -> FATAL bucket. Same severity tier as FATAL (Python's
+    // CRITICAL is FATAL's alias); high-severity, so it records a position.
+    if p + 8 <= len {
+        let g0: i32 = to_i32(text[p + 0]) | 32
+        let g1: i32 = to_i32(text[p + 1]) | 32
+        let g2: i32 = to_i32(text[p + 2]) | 32
+        let g3: i32 = to_i32(text[p + 3]) | 32
+        let g4: i32 = to_i32(text[p + 4]) | 32
+        let g5: i32 = to_i32(text[p + 5]) | 32
+        let g6: i32 = to_i32(text[p + 6]) | 32
+        let g7: i32 = to_i32(text[p + 7]) | 32
+        if g0 == 99 && g1 == 114 && g2 == 105 && g3 == 116 && g4 == 105 && g5 == 99 && g6 == 97 && g7 == 108 {
+            if p + 8 == len {
+                counters[4] = counters[4] + 1
+                record_high(p, positions, max_positions, n_positions)
+                return
+            }
+            if is_delim_byte(to_i32(text[p + 8])) == 1 {
+                counters[4] = counters[4] + 1
+                record_high(p, positions, max_positions, n_positions)
+                return
+            }
+        }
+    }
+    // WARNING (7) -> WARN bucket (the long spelling Python logging / syslog use).
+    if p + 7 <= len {
+        let h0: i32 = to_i32(text[p + 0]) | 32
+        let h1: i32 = to_i32(text[p + 1]) | 32
+        let h2: i32 = to_i32(text[p + 2]) | 32
+        let h3: i32 = to_i32(text[p + 3]) | 32
+        let h4: i32 = to_i32(text[p + 4]) | 32
+        let h5: i32 = to_i32(text[p + 5]) | 32
+        let h6: i32 = to_i32(text[p + 6]) | 32
+        if h0 == 119 && h1 == 97 && h2 == 114 && h3 == 110 && h4 == 105 && h5 == 110 && h6 == 103 {
+            if p + 7 == len {
+                counters[2] = counters[2] + 1
+                return
+            }
+            if is_delim_byte(to_i32(text[p + 7])) == 1 {
+                counters[2] = counters[2] + 1
+                return
+            }
+        }
     }
 
     if p + 5 <= len {
@@ -195,6 +246,7 @@ export func log_level_scan(text: *u8, len: i32, out_counts: *mut i32, out_positi
     let v_R: u8x16 = splat(114)
     let v_T: u8x16 = splat(116)
     let v_L: u8x16 = splat(108)
+    let v_C: u8x16 = splat(99)
 
     let v_or: u8x16 = splat(32)
 
@@ -225,15 +277,21 @@ export func log_level_scan(text: *u8, len: i32, out_counts: *mut i32, out_positi
         p = p + 1
     }
 
-    // SIMD body: chunks at i = 16, 32, 48, ... while i + 20 < len.
+    // SIMD body: chunks at i = 16, 32, 48, ... while i + 24 < len.
+    // The window reaches text[i+lane+8] (CRITICAL's right delimiter at the
+    // last lane = i+23), so the bound is i+24; the scalar epilogue picks up
+    // the few tail positions the wider window cedes.
     let mut i: i32 = 16
-    while i + 20 < len {
+    while i + 24 < len {
         let c0:  u8x16 = load(text, i)
         let c1:  u8x16 = load(text, i + 1)
         let c2:  u8x16 = load(text, i + 2)
         let c3:  u8x16 = load(text, i + 3)
         let c4:  u8x16 = load(text, i + 4)
         let c5:  u8x16 = load(text, i + 5)
+        let c6:  u8x16 = load(text, i + 6)
+        let c7:  u8x16 = load(text, i + 7)
+        let c8:  u8x16 = load(text, i + 8)
         let cm1: u8x16 = load(text, i - 1)
 
         // Case-folded letter views; originals kept for delimiter/newline.
@@ -242,6 +300,9 @@ export func log_level_scan(text: *u8, len: i32, out_counts: *mut i32, out_positi
         let f2: u8x16 = c2 .| v_or
         let f3: u8x16 = c3 .| v_or
         let f4: u8x16 = c4 .| v_or
+        let f5: u8x16 = c5 .| v_or
+        let f6: u8x16 = c6 .| v_or
+        let f7: u8x16 = c7 .| v_or
 
         // Build a 0x01-where-delim mask from any of the 8 delimiter bytes.
         let l_sp: u8x16 = select(cm1 .== v_sp, v_one, v_zero)
@@ -273,6 +334,26 @@ export func log_level_scan(text: *u8, len: i32, out_counts: *mut i32, out_positi
         let r5_qt: u8x16 = select(c5 .== v_qt, v_one, v_zero)
         let r5_co: u8x16 = select(c5 .== v_co, v_one, v_zero)
         let rdelim5: u8x16 = r5_sp .| r5_lf .| r5_tb .| r5_cr .| r5_lb .| r5_rb .| r5_qt .| r5_co
+
+        let r7_sp: u8x16 = select(c7 .== v_sp, v_one, v_zero)
+        let r7_lf: u8x16 = select(c7 .== v_lf, v_one, v_zero)
+        let r7_tb: u8x16 = select(c7 .== v_tb, v_one, v_zero)
+        let r7_cr: u8x16 = select(c7 .== v_cr, v_one, v_zero)
+        let r7_lb: u8x16 = select(c7 .== v_lb, v_one, v_zero)
+        let r7_rb: u8x16 = select(c7 .== v_rb, v_one, v_zero)
+        let r7_qt: u8x16 = select(c7 .== v_qt, v_one, v_zero)
+        let r7_co: u8x16 = select(c7 .== v_co, v_one, v_zero)
+        let rdelim7: u8x16 = r7_sp .| r7_lf .| r7_tb .| r7_cr .| r7_lb .| r7_rb .| r7_qt .| r7_co
+
+        let r8_sp: u8x16 = select(c8 .== v_sp, v_one, v_zero)
+        let r8_lf: u8x16 = select(c8 .== v_lf, v_one, v_zero)
+        let r8_tb: u8x16 = select(c8 .== v_tb, v_one, v_zero)
+        let r8_cr: u8x16 = select(c8 .== v_cr, v_one, v_zero)
+        let r8_lb: u8x16 = select(c8 .== v_lb, v_one, v_zero)
+        let r8_rb: u8x16 = select(c8 .== v_rb, v_one, v_zero)
+        let r8_qt: u8x16 = select(c8 .== v_qt, v_one, v_zero)
+        let r8_co: u8x16 = select(c8 .== v_co, v_one, v_zero)
+        let rdelim8: u8x16 = r8_sp .| r8_lf .| r8_tb .| r8_cr .| r8_lb .| r8_rb .| r8_qt .| r8_co
 
         let d_D: u8x16 = select(f0 .== v_D, v_one, v_zero)
         let d_E: u8x16 = select(f1 .== v_E, v_one, v_zero)
@@ -317,6 +398,31 @@ export func log_level_scan(text: *u8, len: i32, out_counts: *mut i32, out_positi
         let valid_FATAL: u8x16 = kw_FATAL .& ldelim .& rdelim5
         c_fatal = c_fatal + to_i32(reduce_add(valid_FATAL))
 
+        // WARNING (W A R N I N G) -> WARN bucket. Right delimiter at offset 7.
+        let g_W: u8x16 = select(f0 .== v_W, v_one, v_zero)
+        let g_A: u8x16 = select(f1 .== v_A, v_one, v_zero)
+        let g_R: u8x16 = select(f2 .== v_R, v_one, v_zero)
+        let g_N1: u8x16 = select(f3 .== v_N, v_one, v_zero)
+        let g_I: u8x16 = select(f4 .== v_I, v_one, v_zero)
+        let g_N2: u8x16 = select(f5 .== v_N, v_one, v_zero)
+        let g_G: u8x16 = select(f6 .== v_G, v_one, v_zero)
+        let kw_WARNING: u8x16 = g_W .& g_A .& g_R .& g_N1 .& g_I .& g_N2 .& g_G
+        let valid_WARNING: u8x16 = kw_WARNING .& ldelim .& rdelim7
+        c_warn = c_warn + to_i32(reduce_add(valid_WARNING))
+
+        // CRITICAL (C R I T I C A L) -> FATAL bucket. Right delimiter at offset 8.
+        let k_C1: u8x16 = select(f0 .== v_C, v_one, v_zero)
+        let k_R:  u8x16 = select(f1 .== v_R, v_one, v_zero)
+        let k_I1: u8x16 = select(f2 .== v_I, v_one, v_zero)
+        let k_T:  u8x16 = select(f3 .== v_T, v_one, v_zero)
+        let k_I2: u8x16 = select(f4 .== v_I, v_one, v_zero)
+        let k_C2: u8x16 = select(f5 .== v_C, v_one, v_zero)
+        let k_A:  u8x16 = select(f6 .== v_A, v_one, v_zero)
+        let k_L:  u8x16 = select(f7 .== v_L, v_one, v_zero)
+        let kw_CRITICAL: u8x16 = k_C1 .& k_R .& k_I1 .& k_T .& k_I2 .& k_C2 .& k_A .& k_L
+        let valid_CRITICAL: u8x16 = kw_CRITICAL .& ldelim .& rdelim8
+        c_fatal = c_fatal + to_i32(reduce_add(valid_CRITICAL))
+
         let nl: u8x16 = select(c0 .== v_lf, v_one, v_zero)
         c_nl = c_nl + to_i32(reduce_add(nl))
 
@@ -324,7 +430,7 @@ export func log_level_scan(text: *u8, len: i32, out_counts: *mut i32, out_positi
         // reduce_add early-out keeps the no-match common case scratch-free.
         if max_positions > 0 {
             if out_n_positions[0] < max_positions {
-                let valid_high: u8x16 = valid_ERROR .| valid_FATAL
+                let valid_high: u8x16 = valid_ERROR .| valid_FATAL .| valid_CRITICAL
                 let high_count: i32 = to_i32(reduce_add(valid_high))
                 if high_count > 0 {
                     store(scratch, 0, valid_high)

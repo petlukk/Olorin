@@ -8,6 +8,17 @@ order.
 
 ## [Unreleased]
 
+### Added
+
+- **ealog now counts the `WARNING` and `CRITICAL` spellings.** Python's
+  `logging` and syslog emit `WARNING`/`CRITICAL` as their literal level names,
+  which the scanner previously missed (it matched only `WARN`/.../`FATAL`),
+  silently undercounting those logs. `WARNING` folds into the WARN bucket and
+  `CRITICAL` into FATAL (same severity tiers). Added to the `log_level_scan`
+  SIMD kernel — scalar and SIMD-body paths — with word boundaries preserved
+  (`WARNINGS`/`CRITICALLY`/`UNCRITICAL` still don't match). Verified on x86 and
+  Raspberry Pi 5 (NEON). Found by the runes robustness pass.
+
 ## [2.8.0] — 2026-06-10
 
 Security hardening across the agent tool sandbox and the web server, from a
