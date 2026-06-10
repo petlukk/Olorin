@@ -1,5 +1,5 @@
 use super::ToolResult;
-use crate::core::path_guard::{resolve_safe_path, AccessMode};
+use crate::core::path_guard::{resolve_safe_path_checked, AccessMode};
 
 pub fn run(args: &str) -> ToolResult {
     let path = args.trim();
@@ -7,7 +7,7 @@ pub fn run(args: &str) -> ToolResult {
         return ToolResult { output: "usage: read <path>".to_string(), success: false };
     }
 
-    let resolved = match resolve_safe_path(path, AccessMode::Read) {
+    let resolved = match resolve_safe_path_checked(path, AccessMode::Read) {
         Ok(p) => p,
         Err(e) => return ToolResult { output: e.refusal_message(), success: false },
     };

@@ -1,5 +1,5 @@
 use super::ToolResult;
-use crate::core::path_guard::{resolve_safe_path, AccessMode};
+use crate::core::path_guard::{resolve_safe_path_checked, AccessMode};
 
 const MAX_OUTPUT: usize = 32 * 1024;
 
@@ -27,7 +27,7 @@ pub fn run(args: &str) -> ToolResult {
 
     let raw_path = if raw_path.is_empty() { "." } else { raw_path };
 
-    let resolved = match resolve_safe_path(raw_path, AccessMode::Read) {
+    let resolved = match resolve_safe_path_checked(raw_path, AccessMode::Read) {
         Ok(p) => p,
         Err(e) => return ToolResult { output: e.refusal_message(), success: false },
     };
