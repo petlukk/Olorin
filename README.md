@@ -22,28 +22,25 @@ English.
   is 11× faster end-to-end than pandas on a 100K-row CSV; eatime's
   `timestamp_scan` kernel scans at 6.34 GB/s on x86. See [`benchmarks/results.md`](benchmarks/results.md).
 - **Honest scope** — Single binary, two dependencies (libc + libloading),
-  ~2 MB release on x86_64 / ~4.3 MB on ARM. Runs on a Raspberry Pi 5.
+  ~2 MB release on x86_64 / ~4.4 MB on ARM. Runs on a Raspberry Pi 5.
 
-Current version: **v2.0.7** — Windows x86_64 returns to the release
-matrix, cross-compiled from Ubuntu via MinGW-w64; `olorin.exe` is
-published alongside the Linux x86_64 and aarch64 binaries on every
-release. The vault key remains Argon2id-derived from a user passphrase
-+ per-vault salt (arc #3, shipped in v2.0.0). The rune family, the
-`RuneOutput v1` schema, and the `--json` chaining contract remain
-stable. **Upgrading from v1.x or pre-v2.0.0:** v3 vaults are not
-read-compatible with earlier formats — delete `~/.olorin/vault/default/`
-(or `%USERPROFILE%\.olorin\vault\default\` on Windows) and you'll be
-prompted for a fresh passphrase on next run. See
-[`CHANGELOG.md`](CHANGELOG.md) for the full history.
+Prebuilt for Linux x86_64, Linux aarch64 (Pi 5), and Windows x86_64. See
+[`CHANGELOG.md`](CHANGELOG.md) for version history; the `RuneOutput v1`
+schema and `--json` chaining contract are stable across releases.
 
 ## Try it
 
 ```
-./olorin                                              # interactive REPL
-echo '/rune eajson ~/access.log.jsonl' | ./olorin     # one-shot summarization
-./olorin --serve                                      # HTTP + web UI on :8080
-./olorin --strict                                     # LLM disabled (~25ms startup)
+./olorin                                          # interactive REPL
+./olorin rune eajson ~/access.log.jsonl           # one-shot: rune output to stdout
+./olorin rune eatime --bucket series --json x.log > out.json   # clean JSON for jq/matplotlib
+./olorin --serve                                  # HTTP + web UI on :8080
+./olorin --strict                                 # LLM disabled (~25ms startup)
 ```
+
+`olorin rune <name> [args…]` runs a single rune non-interactively and writes
+only its answer to stdout — no banner, no model load — so `--json` output
+pipes straight into a file for downstream tools.
 
 `--strict` disables the LLM entirely: no model load, no narration, only
 deterministic dispatch. Starts in ~25 ms vs ~25 s with the model. Useful for
@@ -83,139 +80,81 @@ rune calls and tool invocations never touch the model.
 
 ## Runes — the differentiator
 
-A *rune* is a SIMD-first command that turns megabyte-to-gigabyte scale raw
-data into a small structured summary in sub-second time. The model never sees
-the raw bytes — only the kernel's output, which it phrases in one or two
-plain-English sentences.
+A *rune* is a SIMD-first command that turns megabyte-to-gigabyte raw data into
+a small structured summary in sub-second time. The model never sees the raw
+bytes — only the kernel's output, which it phrases in a sentence or two.
 
-This is what separates Olorin from chat-first agents. A standard LLM agent
-hits its context window the moment you ask it about a real log file. Olorin
-runs a kernel pass over the file (milliseconds for MBs of data) and gives
-the model a compressed structural summary it can actually reason about. No
-Python, no pandas, no cloud.
+This is what separates Olorin from chat-first agents. A standard LLM agent hits
+its context window the moment you point it at a real log file. Olorin runs a
+kernel pass over the file (milliseconds for MBs), then hands the model a
+compressed structural summary it can actually reason about. No Python, no
+pandas, no cloud.
 
-```
-/rune eatime ~/gharchive.log
-```
-
-`eatime` bucketizes every timestamp in a file by hour-of-day (or weekday) in one
-SIMD pass. It auto-detects two grammars: **ISO-8601** `YYYY-MM-DDTHH:MM:SS`
-(JSON logs, container/k8s output, `journalctl -o short-iso`) and **Common Log
-Format** `[dd/MMM/yyyy:hh:mm:ss]` (the Apache/nginx access-log default), each
-with its own SIMD kernel; force one with `--format iso|clf`. Legacy
-space-separated syslog (`Jun  4 02:13:01`, no year) is still out of scope. Grab a
-real input — a few hours of public GitHub events:
-
-```bash
-curl -s https://data.gharchive.org/2015-01-01-{12,16,20}.json.gz | gunzip > ~/gharchive.log
-grep -om1 '"created_at":"[^"]*"' ~/gharchive.log     # "created_at":"2015-01-01T12:00:01Z"
-```
+**Find the moment a log broke.** `eatime --bucket series` builds a chronological
+histogram (auto-width to ~120 buckets) and flags the buckets where the event
+rate broke from a robust **median/MAD** baseline — a large spike can't inflate
+its own threshold and hide. Then the on-board model narrates the SIMD-detected
+numbers it cannot fabricate. Here it is on a **Raspberry Pi 5** reading an
+Apache access log (CLF auto-detected):
 
 ```
-> /rune eatime ~/gharchive.log          # Raspberry Pi 5 Model B, aarch64
-bytes:       72.00 MB
-timestamps:  68140
-scan:        27 ms
-
-hour-of-day:
-  11:00          681  ( 1.00%)
-  12:00        13750  (20.18%)   <- 12:00 archive
-  13:00          669  ( 0.98%)
-  ...
-  16:00        20270  (29.75%)   <- 16:00 archive
-  ...
-  20:00        22179  (32.55%)   <- 20:00 archive
-  21:00          645  ( 0.95%)
-  ...
-peak: 20:00 (22179 timestamps)
-```
-
-The three spikes are the hours pulled from the archive (the events' own
-`created_at`); the smaller background counts are timestamps embedded in the event
-payloads — repo, comment, and actor times spanning the rest of the day. A nice
-correctness signal that it's bucketing real data, not file order.
-
-**72 MB scanned in 27 ms on a Pi 5 (~20 ms warm).** End-to-end throughput tracks
-timestamp *density*: this log carries ~1 timestamp per KB so the scan dominates
-(~2.7 GB/s); on a dense every-line log (~1 per 70 B) the per-match bookkeeping
-takes over (~1.4 GB/s). The bare `timestamp_scan` **kernel**, benchmarked in
-isolation on a dense fixture, hits **6.34 GB/s on Ryzen 7700X (SSE2)** and **1.80
-GB/s on Pi 5 (NEON)** — see
-[`benchmarks/timestamp_scan_bench.c`](benchmarks/timestamp_scan_bench.c).
-
-**Spike detection.** `--bucket series` swaps the hour-of-day view for a
-chronological histogram (bucket width auto-selected to ~120 buckets) and flags
-the buckets where the event rate broke from a robust **median/MAD** baseline —
-so eatime goes from *describing* a log to *finding the moment it broke*:
-
-```
-> /rune eatime --bucket series ~/journal-24h.log    # real systemd journal, last 24h
-timestamps:  7629
-buckets:     48
-scan:        1 ms
-span:        2026-06-03T09:01:37 .. 2026-06-04T08:31:37
-peak bucket: 2026-06-03T23:01:37 (207 timestamps)
-anomalies:   4 spike(s) detected
-  2026-06-03T13:01:37 count=206 (1.3× baseline 154)
-  2026-06-03T22:31:37 count=199 (1.3× baseline 154)
-  2026-06-03T23:01:37 count=207 (1.3× baseline 154)
-  ...
-```
-
-The flags are 7–9σ events: the journal's rate is normally so steady that a 30 %
-bump is a genuine statistical outlier. A *robust* baseline (median, not mean) is
-the point — a large spike can't inflate its own threshold and hide. Flat or
-naturally-bursty data produces zero anomalies. Spikes appear in `--json` as an
-additive `anomalies[]` array; older `--json` consumers are unaffected.
-
-**Two grammars, auto-detected.** eatime reads both ISO-8601 and **Common Log
-Format** (`[dd/MMM/yyyy:hh:mm:ss]`, the Apache/nginx access-log default) — a
-separate SIMD kernel each, picked by sniffing the file. Force one with
-`--format iso|clf`. So pointing it at a raw web-server log just works.
-
-**Then the model narrates it.** Without `--json`, the SIMD-detected anomalies go
-to the on-board Gemma model, which turns the numbers into an incident summary —
-the whole pipeline in one 4 MB binary, no cloud. Here it is on a **Raspberry Pi
-5** reading an Apache access log:
-
-```
-> /rune eatime --bucket series ~/access.log     # CLF auto-detected, Pi 5 aarch64 NEON
+> /rune eatime --bucket series ~/access.log
 timestamps:  1292
-scan:        0 ms                               # SIMD scan: 716 µs
+scan:        716 µs                             # SIMD scan, NEON
 peak bucket: 2026-06-11T14:08:36 (342 timestamps)
 anomalies:   2 spike(s) detected
   2026-06-11T13:08:36 count=79  (4.5× baseline 18)
   2026-06-11T14:08:36 count=342 (19.5× baseline 18)
 
-  Significant spikes in activity were detected during this period, with one
-  time frame showing nearly twenty times the normal volume. The busiest
-  moment occurred during the afternoon of June 11th.
+  Significant spikes in activity were detected, with one window showing nearly
+  twenty times the normal volume — during the afternoon of June 11th.
 ```
 
-The narration is grounded in deterministic SIMD output — the model summarizes
-numbers it cannot fabricate, not a freeform read of the log. "Nearly twenty
-times" is the measured 19.5×; "the afternoon of June 11th" is the 14:08 bucket.
+"Nearly twenty times" is the measured 19.5×; "afternoon of June 11th" is the
+14:08 bucket. eatime auto-detects **ISO-8601** and **Apache/nginx CLF** (a SIMD
+kernel each); `--bucket hour|weekday|series` picks the view.
 
-Add `--json` for the stable schema that pipes into other runes (e.g. `eadiff`):
+**Charts, in the terminal and the browser.** Drop a timestamped log into the web
+UI — or run the rune in the REPL — and Olorin renders the rate over time as a
+block-bar chart with spikes flagged, from a single SIMD-downsampled (`col_reduce`)
+renderer shared by both surfaces:
+
+```
+ 600                             ▇
+ 420                             █
+     ─▁─▁──▁─▁───▁▁───▁▁───▁▁───▁█───▁─▁──▁─▁──▁─▁───▁▁───▁▁─
+ 240 ████████████████████████████████████████████████████████
+  60 ████████████████████████████████████████████████████████
+     ────────────────────────────────────────────────────────
+     08:00             11:10             14:25          17:45
+     median (300)
+```
+
+**Stable JSON, pipeable.** `--json` emits a single-line `RuneOutput v1` object —
+the schema that chains into other runes (`eadiff`) and feeds matplotlib/jq via
+the `olorin rune … > out.json` one-shot:
 
 ```bash
-$ /rune eatime --json ~/gharchive.log
+$ olorin rune eatime --json ~/gharchive.log
 {"rune":"eatime","source":{"bytes":75501657,"format":"iso8601"},
  "totals":{"rows":68140,"scan_us":24826},
  "categories":[{"name":"00:00","count":528}, … {"name":"20:00","count":22179}]}
 ```
 
+The bare `timestamp_scan` kernel hits **6.34 GB/s on Ryzen 7700X (SSE2)** and
+**1.80 GB/s on Pi 5 (NEON)** in isolation — see
+[`benchmarks/results.md`](benchmarks/results.md).
+
 Six v1 runes:
 
 - **`eacrunch`** — CSV summarizer (rows, columns, per-column stats + top-N)
-- **`eajson`** — JSON Lines summarizer (handles systemd / container / web-server shapes)
+- **`eajson`** — JSON Lines summarizer (systemd / container / web-server shapes)
 - **`eaparquet`** — Parquet metadata (per-column min/max/null_count from the footer)
 - **`ealog`** — log severity scanner (DEBUG/INFO/WARN/ERROR/FATAL + sample lines)
-- **`eatime`** — timestamp histogram (ISO-8601 + Apache/nginx CLF, auto-detected); hour-of-day, weekday, or chronological `series` buckets with robust spike detection
+- **`eatime`** — timestamp histogram (ISO-8601 + Apache/nginx CLF); hour-of-day, weekday, or chronological `series` buckets with robust spike detection + charts
 - **`eadiff`** — structural delta between any two `--json` rune outputs
 
-Each rune also accepts `--json` for piping into another rune. See
-**[`docs/runes.md`](docs/runes.md)** for the full catalog with per-rune
+See **[`docs/runes.md`](docs/runes.md)** for the full catalog with per-rune
 samples, limits, and the chaining contract.
 
 ## The Vault
@@ -385,7 +324,7 @@ not pulling in the things most LLM agents depend on.
 | Async runtime | `tokio` | `std::net` + work-stealing pool ([`inference/threadpool.rs`](src/inference/threadpool.rs)) |
 | HTTP server | `axum`, `actix`, `hyper`, `warp` | hand-rolled in [`interface/server.rs`](src/interface/server.rs) |
 | SSE streaming | `axum::response::sse` | raw `text/event-stream` frames |
-| Web terminal | `xterm.js` (~700 KB JS) | canvas + cell-grid emulator in [`web/chat.html`](web/chat.html) (527 lines total) |
+| Web terminal | `xterm.js` (~700 KB JS) | canvas cell-grid emulator over a hand-rolled WebSocket ([`web/chat.html`](web/chat.html) + [`interface/ws.rs`](src/interface/ws.rs)) |
 | HTTP client | `reqwest` | `curl` subprocess for cloud fallback ([`core/anthropic.rs`](src/core/anthropic.rs)) |
 | JSON | `serde` | minimal hand-rolled scanner ([`storage/json.rs`](src/storage/json.rs)) |
 | Crypto | `ring`, `rustcrypto` | ChaCha20-Poly1305 + Argon2id as Ea SIMD kernels |
@@ -404,11 +343,11 @@ surprises.
 
 | Metric | Value |
 |---|---|
-| Rust source | 23,786 lines (122 files) |
-| Ea kernel source | 14,286 lines (71 files, 49 logical kernels) |
-| Tests | 15,966 lines (98 files, 582 tests) |
+| Rust source | 25,845 lines (130 files) |
+| Ea kernel source | 14,717 lines (74 files, 51 logical kernels) |
+| Tests | 18,767 lines (124 files, 680 tests) |
 | Runtime dependencies | 2 (libc, libloading) |
-| Release binary | 2.0 MB on x86_64 / 4.3 MB on ARM (all kernels embedded) |
+| Release binary | 2.0 MB on x86_64 / 4.4 MB on ARM (all kernels embedded) |
 | Max file size | 500 lines for Rust + tests (no exceptions); 2 Ea kernels exceed it |
 
 ## License
