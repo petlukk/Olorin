@@ -8,6 +8,28 @@ order.
 
 ## [Unreleased]
 
+## [2.10.0] — 2026-06-11
+
+### Added
+
+- **`easql` file-drop auto-pick.** Dropping a `.sql` file into the web UI now
+  routes to `easql` automatically (`src/runes/select.rs`), the same deterministic
+  extension-first gesture that already handles `.csv`/`.jsonl`/`.parquet` — no
+  model decision, bulletproof on the Pi. The rune was previously reachable only
+  from the CLI/REPL.
+
+### Changed
+
+- **`easql` attribution is now exact at any scale.** The SIMD sweep is chunked
+  over newline-aligned windows instead of a single pass with an 8 192-position
+  cap, so per-table row counts stay exact on dumps with millions of statements
+  (`pg_dump --inserts` / `mysqldump --skip-extended-insert`, one INSERT per row).
+  A window denser than the per-call buffer resumes past its last marker; nibble
+  functions read the full buffer, so a statement straddling a window tail is
+  still counted whole. Verified by a 100 K-statement two-table test that forces
+  both window tiling and the in-window resume; real Chinook dumps unchanged
+  (11 tables, 15 607 rows, both dialects).
+
 ## [2.9.0] — 2026-06-11
 
 ### Added

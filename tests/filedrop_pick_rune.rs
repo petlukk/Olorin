@@ -24,6 +24,7 @@ fn extension_routing() {
     assert_eq!(pick_rune_name("events.ndjson", b""), Some("eajson"));
     assert_eq!(pick_rune_name("blob.json", b""), Some("eajson"));
     assert_eq!(pick_rune_name("data.parquet", b""), Some("eaparquet"));
+    assert_eq!(pick_rune_name("Chinook_MySql.sql", b""), Some("easql"));
 }
 
 #[test]
@@ -63,6 +64,9 @@ fn pick_rune_resolves_against_registry() {
 
     let r = pick_rune("app.log", SEVERITY_ONLY_LOG).expect("severity log -> a real rune");
     assert_eq!(r.name(), "ealog");
+
+    let r = pick_rune("dump.sql", b"CREATE TABLE t (id int);\n").expect("sql -> a real rune");
+    assert_eq!(r.name(), "easql");
 
     assert!(pick_rune("photo.png", b"").is_none());
 }
