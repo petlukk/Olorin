@@ -8,6 +8,41 @@ order.
 
 ## [Unreleased]
 
+## [2.11.0] — 2026-06-11
+
+### Added
+
+- **`eacorrelate` — cross-file lag correlation.** New rune + new portable
+  `corr_sweep.ea` kernel: drop 2–8 timestamped files (ISO-8601 or CLF,
+  auto-detected per file) and Olorin reports which event streams move
+  together, at what lag, and where the alignment peaks — *"syslog (errors)
+  follows deploys.csv by +240s (r=0.93, peak 2026-06-11T03:02:00)"*. Every
+  file contributes its event stream (ISO logs also a second ERROR/FATAL
+  sub-stream); all streams share one time grid (512 target buckets — lag
+  resolution is bucket width), get z-scored, and every cross-file pair is
+  swept over ±128 lags in SIMD. Scores are the cosine of the lag-aligned
+  overlap windows, bounded [-1, 1]; findings are direction-normalized
+  (`stream_a` always follows `stream_b`) and carry the peak instant plus the
+  honest `width_seconds` resolution. Entirely deterministic — the model never
+  sees raw data. Verified by an independent numpy re-implementation of the
+  full pipeline (`benchmarks/eacorrelate_diff.py`, 15/15 randomized scenarios)
+  and a cross-arch golden.
+- **Multi-file drop runs the correlation automatically.** Dropping ≥ 2 files
+  into the web UI now streams the eacorrelate findings after the per-file
+  kernel outputs, and the findings *lead* the narration prompt, so the model
+  opens with the conclusion ("errors follow deploys by 4 minutes") instead of
+  hunting for one across summaries. Silence when nothing correlates — no
+  findings, no block.
+- **`correlations[]` in the RuneOutput v1 contract.** Additive optional block
+  (exactly the `anomalies[]` pattern): serialized only when non-empty, so all
+  existing rune JSON stays byte-identical. Scores ride the wire rounded to 4
+  decimals for cross-arch golden stability.
+- **The 3am incident fixture** (`tests/fixtures/incident/`): deploys.csv +
+  syslog with ERROR bursts 4 minutes after each deploy + an nginx CLF access
+  log with matching retry storms. Drives the integration tests, the
+  model-gated narration e2e, and the Pi install-gate scenario — and doubles
+  as the launch demo asset.
+
 ## [2.10.0] — 2026-06-11
 
 ### Added
