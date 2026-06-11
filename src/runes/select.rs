@@ -27,6 +27,7 @@ pub fn pick_rune_name(filename: &str, bytes: &[u8]) -> Option<&'static str> {
         Some("csv") => Some("eacrunch"),
         Some("jsonl") | Some("ndjson") | Some("json") => Some("eajson"),
         Some("parquet") => Some("eaparquet"),
+        Some("sql") => Some("easql"),
         // Logs and untyped text: forensics-first — prefer timing-spike
         // detection when the file carries timestamps, else severity counts.
         Some("log") | Some("txt") | None => {

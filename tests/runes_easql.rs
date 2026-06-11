@@ -125,6 +125,25 @@ fn easql_ambiguous_insert_only_is_sql() {
 }
 
 #[test]
+fn easql_attribution_exact_past_marker_cap() {
+    // `pg_dump --inserts` shape: one INSERT per row. 100K statements across two
+    // tables is denser than one position buffer (MAX_MARKERS) and larger than
+    // one scan window (CHUNK) — exercises both window tiling and the in-window
+    // resume. Per-table attribution must stay exact, not truncate.
+    let n = 100_000u64;
+    let mut sql = String::with_capacity(3 * 1024 * 1024);
+    for i in 0..n {
+        let t = if i % 2 == 0 { "alpha" } else { "beta" };
+        sql.push_str(&format!("INSERT INTO {t} VALUES ({i});\n"));
+    }
+    let out = run("bigcap", &sql);
+    assert!(out.success, "{:?}", out.error);
+    assert_eq!(rows(&out, "alpha"), n / 2, "every alpha INSERT attributed");
+    assert_eq!(rows(&out, "beta"), n / 2, "every beta INSERT attributed");
+    assert_eq!(out.totals.rows, n, "no statements lost to a marker cap");
+}
+
+#[test]
 fn easql_empty_fails_cleanly() {
     let out = run("empty", "");
     assert!(!out.success);

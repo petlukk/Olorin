@@ -449,12 +449,12 @@ entries) are blocked regardless of format.
   needs ≥ 8 buckets before it will flag anything.
 - **easql**: a summarizer, not a SQL parser — it sweeps `CREATE`/`INSERT`/`COPY`
   and nibbles per marker. Row counts cover `pg_dump` COPY blocks and
-  `INSERT … VALUES` (both `mysqldump` and `pg_dump --inserts`); a `CONSTRAINT`
-  line inflates a table's column count slightly. Keyword positions cap at 8192
-  per file — keyword *counts* stay exact (kernel `reduce_add`), but per-table
-  row attribution truncates past the cap on dumps with more than ~8K statements
-  (single-`INSERT`-per-row dumps reach it fastest; batched dumps effectively
-  never). 2 GB max input (`sql_scan` is i32-indexed).
+  `INSERT … VALUES` (both `mysqldump` and `pg_dump --inserts` /
+  `--skip-extended-insert`); a `CONSTRAINT` line inflates a table's column count
+  slightly. The sweep is chunked over newline-aligned windows, so per-table
+  attribution is exact regardless of statement count — a million single-row
+  INSERTs attribute as accurately as a few batched ones. 2 GB max input
+  (`sql_scan` is i32-indexed).
 - **eadiff**: matches by exact field/category name across the two inputs.
   Every `FieldKind` is diffable. Stdin chaining (`-` for one of the two path
   args) is not yet wired through the rune dispatcher — both inputs must be

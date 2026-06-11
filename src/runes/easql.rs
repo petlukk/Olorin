@@ -19,11 +19,16 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 const RUNE_VERSION: i64 = 1;
-/// Cap on recorded keyword positions. A dump has O(tables × insert-batches)
-/// structural statements — thousands at most for batched dumps. Single-row
-/// `INSERT`-per-line dumps can exceed this; the keyword *counts* stay exact
-/// (kernel reduce_add), only per-table attribution truncates past the cap.
-const MAX_MARKERS: usize = 8192;
+/// Per-window cap on recorded keyword positions. The sweep is chunked (see
+/// `build_output`), so this bounds memory per `sql_scan` call — not the total
+/// statement count. A window denser than this resumes past its last marker, so
+/// per-table attribution stays exact even for million-statement `--inserts`
+/// dumps (one `INSERT` per row).
+const MAX_MARKERS: usize = 65536;
+/// SIMD sweep window. Snapped back to a newline per iteration so no keyword
+/// straddles a cut. 2 MiB holds ~50K single-row `INSERT` markers — under
+/// `MAX_MARKERS`, so the common dense case needs no in-window resume.
+const CHUNK: usize = 2 * 1024 * 1024;
 /// Most-rows tables to surface as chart categories.
 const TOP_TABLES: usize = 40;
 
@@ -126,57 +131,86 @@ fn build_output(bytes: &[u8], path: String) -> RuneOutput {
     let mut positions = vec![0i32; MAX_MARKERS];
     let mut n_pos = 0i32;
     let mut scratch = [0u8; 16];
-    unsafe {
-        ffi::sql_scan(
-            bytes.as_ptr(), bytes.len() as i32,
-            counts.as_mut_ptr(),
-            positions.as_mut_ptr(), MAX_MARKERS as i32, &mut n_pos,
-            scratch.as_mut_ptr(),
-        );
-    }
-    let dialect = detect_dialect(bytes, counts[2], counts[1]);
 
     // Ordered per-table accumulation: name -> (rows, cols). Insertion order
     // preserved via a parallel Vec so the schema reads in declaration order.
     let mut order: Vec<String> = Vec::new();
     let mut rows: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
     let mut cols: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    let mut saw_copy = false;
 
-    for &off in &positions[..n_pos as usize] {
-        let p = off as usize;
-        match keyword_at(bytes, p) {
-            Kw::Create => {
-                // CREATE <ws> TABLE <ws> <name> ( … )
-                let after = skip_kw(bytes, p, b"create");
-                if !word_is(bytes, after, b"table") { continue; }
-                let after = skip_kw(bytes, after, b"table");
-                let after = skip_optional(bytes, after, b"if not exists");
-                if let Some((name, end)) = read_ident(bytes, after) {
-                    register(&mut order, &mut rows, &mut cols, &name);
-                    cols.insert(name, count_columns(bytes, end));
-                }
+    // Chunked SIMD sweep: scan the dump in newline-aligned windows so per-table
+    // attribution stays exact even when there are more keyword markers than one
+    // position buffer holds (`pg_dump --inserts` / `mysqldump --skip-extended-
+    // insert` → one statement per row). The window end snaps to a newline so no
+    // keyword straddles the cut; the nibble functions read the full buffer, so a
+    // statement extending past the window tail is still counted whole. A window
+    // denser than MAX_MARKERS resumes just past its last marker (the backstop).
+    let len = bytes.len();
+    let mut start = 0usize;
+    while start < len {
+        let mut end = (start + CHUNK).min(len);
+        if end < len {
+            if let Some(nl) = bytes[start..end].iter().rposition(|&b| b == b'\n') {
+                end = start + nl + 1;
             }
-            Kw::Insert => {
-                // INSERT <ws> INTO <ws> <name> … VALUES (…),(…);
-                let after = skip_kw(bytes, p, b"insert");
-                if !word_is(bytes, after, b"into") { continue; }
-                let after = skip_kw(bytes, after, b"into");
-                if let Some((name, end)) = read_ident(bytes, after) {
-                    register(&mut order, &mut rows, &mut cols, &name);
-                    *rows.entry(name).or_insert(0) += count_insert_rows(bytes, end);
+            // No newline in the window → mid-data of a giant single-line
+            // statement; safe to cut on CHUNK (its keyword was found already).
+        }
+        let sub = &bytes[start..end];
+        unsafe {
+            ffi::sql_scan(
+                sub.as_ptr(), sub.len() as i32,
+                counts.as_mut_ptr(),
+                positions.as_mut_ptr(), MAX_MARKERS as i32, &mut n_pos,
+                scratch.as_mut_ptr(),
+            );
+        }
+        let n = n_pos as usize;
+        for &off in &positions[..n] {
+            let p = start + off as usize;
+            match keyword_at(bytes, p) {
+                Kw::Create => {
+                    // CREATE <ws> TABLE <ws> <name> ( … )
+                    let after = skip_kw(bytes, p, b"create");
+                    if !word_is(bytes, after, b"table") { continue; }
+                    let after = skip_kw(bytes, after, b"table");
+                    let after = skip_optional(bytes, after, b"if not exists");
+                    if let Some((name, cend)) = read_ident(bytes, after) {
+                        register(&mut order, &mut rows, &mut cols, &name);
+                        cols.insert(name, count_columns(bytes, cend));
+                    }
                 }
-            }
-            Kw::Copy => {
-                // COPY <ws> <name> … FROM stdin; <rows…> \.
-                let after = skip_kw(bytes, p, b"copy");
-                if let Some((name, end)) = read_ident(bytes, after) {
-                    register(&mut order, &mut rows, &mut cols, &name);
-                    *rows.entry(name).or_insert(0) += count_copy_rows(bytes, end);
+                Kw::Insert => {
+                    // INSERT <ws> INTO <ws> <name> … VALUES (…),(…);
+                    let after = skip_kw(bytes, p, b"insert");
+                    if !word_is(bytes, after, b"into") { continue; }
+                    let after = skip_kw(bytes, after, b"into");
+                    if let Some((name, iend)) = read_ident(bytes, after) {
+                        register(&mut order, &mut rows, &mut cols, &name);
+                        *rows.entry(name).or_insert(0) += count_insert_rows(bytes, iend);
+                    }
                 }
+                Kw::Copy => {
+                    // COPY <ws> <name> … FROM stdin; <rows…> \.
+                    saw_copy = true;
+                    let after = skip_kw(bytes, p, b"copy");
+                    if let Some((name, cend)) = read_ident(bytes, after) {
+                        register(&mut order, &mut rows, &mut cols, &name);
+                        *rows.entry(name).or_insert(0) += count_copy_rows(bytes, cend);
+                    }
+                }
+                Kw::Other => {}
             }
-            Kw::Other => {}
+        }
+        if n == MAX_MARKERS {
+            start += positions[n - 1] as usize + 1; // denser than the buffer: resume past last marker
+        } else {
+            start = end;
         }
     }
+    let _ = counts; // per-window counts unused; dialect uses saw_copy + content sniff
+    let dialect = detect_dialect(bytes, saw_copy);
 
     let scan_us = t_scan.elapsed().as_micros() as u64;
     let total_rows: u64 = rows.values().sum();
@@ -226,8 +260,8 @@ fn register(
 /// 4. Otherwise genuinely ambiguous (INSERT-only, no quoting/fingerprint) → sql.
 /// Scans a bounded prefix — the tool preamble and first `CREATE TABLE` (where
 /// MySQL's backticks first appear) are always near the top of a dump.
-fn detect_dialect(bytes: &[u8], copy_n: i32, _insert_n: i32) -> &'static str {
-    if copy_n > 0 { return "postgres"; }
+fn detect_dialect(bytes: &[u8], saw_copy: bool) -> &'static str {
+    if saw_copy { return "postgres"; }
     let head = &bytes[..bytes.len().min(256 * 1024)];
     if head.contains(&b'`') { return "mysql"; }
     const PG: [&[u8]; 5] = [
