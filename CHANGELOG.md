@@ -8,26 +8,30 @@ order.
 
 ## [Unreleased]
 
+## [2.9.0] — 2026-06-11
+
 ### Added
 
-- **`easql` rune — SQL-dump summarizer (scaffold).** Drop a `pg_dump` or
-  `mysqldump` `.sql` file → dialect, table count, per-table row + column counts,
-  in one SIMD pass. A new `sql_scan` kernel sweeps `CREATE`/`INSERT`/`COPY`
+- **`easql` rune — SQL-dump summarizer.** Drop a `pg_dump` or `mysqldump`
+  `.sql` file → dialect, table count, per-table row + column counts, in one
+  SIMD pass. A new `sql_scan` kernel sweeps `CREATE`/`INSERT`/`COPY`
   (case-insensitive, word-bounded) the same way `log_level_scan` does; the rune
   does the cheap per-marker scalar work (table name, newline-count rows in a
   `COPY … FROM stdin` block for Postgres, quote-aware value-tuple count for
-  `INSERT … VALUES`). The tuple counter skips the optional column list
-  (`INSERT INTO t (c1, c2) VALUES …`) so it is not miscounted as a row. It does
-  *not* parse SQL — it sweeps and nibbles. Dialect is detected structurally
-  (COPY → postgres; a backtick → mysql; a `pg_catalog`/`\connect`/
-  `standard_conforming` fingerprint → postgres, so `pg_dump --inserts` is
-  labeled correctly; else `sql`). Output maps tables onto the v1
-  `categories` contract, so the block-bar chart, `--json` pipe, and `eadiff`
-  work for free. Guarded by a pinned-stack large-dump canary, and verified
-  per-table against a real SQLite engine on the Chinook mysqldump + pg_dump
-  (0 mismatches, 15 607 rows, on Pi NEON). Scope: pg_dump COPY + INSERT dumps;
-  file-drop auto-pick and per-statement attribution past 8192 markers are
-  follow-ups.
+  `INSERT … VALUES`). The tuple counter is single-quote-aware (a `),(` inside a
+  string value is not a row) and skips the optional column list
+  (`INSERT INTO t (c1, c2) VALUES …`, which would otherwise read as one extra
+  row per statement). Dialect is detected structurally, not by trusting a header
+  comment: `COPY` → postgres; a backtick → mysql; a `pg_catalog`/`\connect`/
+  `standard_conforming` fingerprint → postgres (so `pg_dump --inserts` is
+  labeled correctly); else `sql`. Whole-word keyword matching means a
+  `-- Create Tables` comment no longer registers a phantom table. Output maps
+  tables onto the v1 `categories` contract, so the block-bar chart, `--json`
+  pipe, and `eadiff` work on a SQL dump for free. Verified per-table against a
+  real SQLite engine on the Chinook mysqldump + pg_dump (0 mismatches, 15 607
+  rows) on Pi 5 NEON, and guarded by a pinned-stack large-dump canary. Scope:
+  pg_dump COPY + INSERT dumps; file-drop auto-pick and per-table row
+  attribution past 8192 keyword markers are follow-ups.
 
 ## [2.8.5] — 2026-06-11
 

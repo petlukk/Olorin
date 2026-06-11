@@ -245,11 +245,19 @@ fn keyword_at(bytes: &[u8], p: usize) -> Kw {
     else { Kw::Other }
 }
 
-/// True if `bytes[p..]` starts with `kw` (ASCII case-insensitive).
+/// True if `bytes[p..]` is `kw` as a whole word (ASCII case-insensitive): the
+/// keyword bytes match *and* the next byte is a word boundary, so `table` does
+/// not match inside `tables` (a `-- Create Tables` comment must not register a
+/// phantom `s` table).
 fn word_is(bytes: &[u8], p: usize, kw: &[u8]) -> bool {
     if p + kw.len() > bytes.len() { return false; }
-    bytes[p..p + kw.len()].iter().zip(kw)
-        .all(|(b, k)| b.to_ascii_lowercase() == *k)
+    if !bytes[p..p + kw.len()].iter().zip(kw).all(|(b, k)| b.to_ascii_lowercase() == *k) {
+        return false;
+    }
+    match bytes.get(p + kw.len()) {
+        Some(c) => !(c.is_ascii_alphanumeric() || *c == b'_'),
+        None => true,
+    }
 }
 
 /// Skip `kw` (assumed present at `p`) then any following ASCII whitespace.
