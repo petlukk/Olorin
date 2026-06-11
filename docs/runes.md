@@ -22,13 +22,14 @@ Output is wrapped in `<rune_output untrusted="true">...</rune_output>` and
 runs through the inbound safety scan before reaching the LLM turn — file-derived
 bytes are always treated as data, never instructions.
 
-The six v1 runes:
+The seven v1 runes:
 
 - [`eacrunch`](#eacrunch--csv-summarizer) — CSV summarizer
 - [`eajson`](#eajson--json-lines-summarizer) — JSON Lines summarizer
 - [`eaparquet`](#eaparquet--parquet-metadata-summarizer) — Parquet metadata
 - [`ealog`](#ealog--log-severity-scanner) — log severity scanner
 - [`eatime`](#eatime--iso-8601-timestamp-histogram) — timestamp histogram + chronological spike detection
+- [`easql`](#easql--sql-dump-summarizer) — SQL-dump summarizer (`pg_dump` / `mysqldump`)
 - [`eadiff`](#eadiff--structural-delta-between-two-rune-runs) — structural delta between two rune runs
 
 The `--json` flag on any rune emits the same data as machine-readable JSON Lines
@@ -262,6 +263,63 @@ unaffected. The full chronological series is always in `categories[]`. Bucket
 counts are validated bit-for-bit against an independent pandas/regex grouping on
 real data (313K-timestamp systemd journal) via `benchmarks/eatime_diff.py`.
 
+## easql — SQL-dump summarizer
+
+```
+/rune easql ~/dumps/Chinook_MySql.sql
+```
+
+```
+dialect: mysql
+tables:  11
+rows:    15607
+scan:    1 ms
+
+rows by table:
+  PlaylistTrack                8715
+  Track                        3503
+  InvoiceLine                  2240
+  Invoice                      412
+  Album                        347
+  Artist                       275
+  Customer                     59
+  Genre                        25
+  Playlist                     18
+  Employee                     8
+  MediaType                    5
+```
+
+Drop a `pg_dump` or `mysqldump` `.sql` file and `easql` reports the dialect,
+table count, and per-table row + column counts — without executing a line of
+SQL. The `sql_scan` kernel sweeps the whole file once for word-bounded
+`CREATE` / `INSERT` / `COPY` keywords (case-insensitive) plus newlines,
+recording each keyword's byte offset; the rune then nibbles a bounded region
+per marker: read the table name (`bare`, `"quoted"`, `` `backtick` ``, or
+`schema.table`), count columns from the `CREATE TABLE (…)` block (top-level
+commas), and count rows per statement.
+
+Row counting follows the dump shape. A Postgres `COPY t … FROM stdin;` block
+counts the newlines between the header `;` and the `\.` end marker. A
+`INSERT … VALUES (…),(…)` statement counts top-level value tuples,
+single-quote-aware (so a `),(` *inside* a string value doesn't inflate the
+count) and skipping the optional column list (`INSERT INTO t (c1, c2) VALUES …`,
+which would otherwise read as one extra row). Tables split across many INSERT
+batches accumulate.
+
+Dialect is detected structurally, not by trusting a header comment: `COPY` →
+postgres (Postgres-only bulk-load syntax); a backtick anywhere → mysql (MySQL's
+identifier quote, which Postgres never emits); a `pg_catalog` / `\connect` /
+`standard_conforming` fingerprint → postgres even for `pg_dump --inserts` (which
+has no COPY blocks); otherwise an honest `sql`.
+
+Output maps tables onto the v1 `categories` contract (`name` = table, `count` =
+rows), so the block-bar chart, the `--json` pipe, and `eadiff` all work on a
+SQL dump for free — diff two nightly dumps to see which tables grew. Verified
+per-table against a real SQLite engine on the Chinook `mysqldump` + `pg_dump`
+(0 mismatches, 15 607 rows) on Pi 5 NEON, and guarded by a pinned-stack
+large-dump canary. It is a *summarizer*, not a SQL parser: it sweeps and
+nibbles, never builds a parse tree.
+
 ## eadiff — structural delta between two rune runs
 
 ```
@@ -389,6 +447,14 @@ entries) are blocked regardless of format.
   ~120 buckets), flags upward spikes only via a robust median/MAD z-score
   (threshold 4, with a ≥3×/10-event ratio fallback for flat series), and
   needs ≥ 8 buckets before it will flag anything.
+- **easql**: a summarizer, not a SQL parser — it sweeps `CREATE`/`INSERT`/`COPY`
+  and nibbles per marker. Row counts cover `pg_dump` COPY blocks and
+  `INSERT … VALUES` (both `mysqldump` and `pg_dump --inserts`); a `CONSTRAINT`
+  line inflates a table's column count slightly. Keyword positions cap at 8192
+  per file — keyword *counts* stay exact (kernel `reduce_add`), but per-table
+  row attribution truncates past the cap on dumps with more than ~8K statements
+  (single-`INSERT`-per-row dumps reach it fastest; batched dumps effectively
+  never). 2 GB max input (`sql_scan` is i32-indexed).
 - **eadiff**: matches by exact field/category name across the two inputs.
   Every `FieldKind` is diffable. Stdin chaining (`-` for one of the two path
   args) is not yet wired through the rune dispatcher — both inputs must be

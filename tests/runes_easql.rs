@@ -140,6 +140,17 @@ fn easql_non_sql_degrades_to_zero_tables() {
 }
 
 #[test]
+fn easql_create_in_comment_does_not_phantom_table() {
+    // Real mysqldump has `/* Create Tables */`-style comments. `table` must not
+    // match the prefix of `Tables` and register a phantom `s` table.
+    let out = run("comment",
+        "/* Create Tables */\nCREATE TABLE `Album` (`id` int);\nINSERT INTO `Album` VALUES (1);\n");
+    assert_eq!(out.samples.len(), 1, "only Album — no phantom from the comment");
+    assert_eq!(rows(&out, "Album"), 1);
+    assert!(rows(&out, "s") == u64::MAX, "no phantom 's' table");
+}
+
+#[test]
 fn easql_create_table_disambiguated_from_index() {
     // CREATE INDEX / VIEW must not be counted as tables.
     let out = run("idx",

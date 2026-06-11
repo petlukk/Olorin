@@ -145,13 +145,14 @@ The bare `timestamp_scan` kernel hits **6.34 GB/s on Ryzen 7700X (SSE2)** and
 **1.80 GB/s on Pi 5 (NEON)** in isolation — see
 [`benchmarks/results.md`](benchmarks/results.md).
 
-Six v1 runes:
+Seven v1 runes:
 
 - **`eacrunch`** — CSV summarizer (rows, columns, per-column stats + top-N)
 - **`eajson`** — JSON Lines summarizer (systemd / container / web-server shapes)
 - **`eaparquet`** — Parquet metadata (per-column min/max/null_count from the footer)
 - **`ealog`** — log severity scanner (DEBUG/INFO/WARN/ERROR/FATAL + sample lines)
 - **`eatime`** — timestamp histogram (ISO-8601 + Apache/nginx CLF); hour-of-day, weekday, or chronological `series` buckets with robust spike detection + charts
+- **`easql`** — SQL-dump summarizer (`pg_dump` / `mysqldump`): dialect, table count, per-table row + column counts
 - **`eadiff`** — structural delta between any two `--json` rune outputs
 
 See **[`docs/runes.md`](docs/runes.md)** for the full catalog with per-rune
