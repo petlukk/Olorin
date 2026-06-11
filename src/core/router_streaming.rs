@@ -226,7 +226,32 @@ impl DispatchContext {
                     rune_text.push_str(&chunk);
                 }
             }
-            let prompt = correlation_prompt(&runs, findings.as_deref());
+            // The PROMPT gets the prose rendering, not the technical
+            // block the user sees — see findings_for_prompt.
+            let prose = findings.and_then(|_|
+                crate::runes::eacorrelate::findings_for_prompt(&corr));
+            // Gemma 4 on NEON narrates 2-file prompts reliably but
+            // degenerates on >= 3 full answer blocks (immediate EOS or
+            // junk that slips the dump filter — Pi-verified 2026-06-11,
+            // both orders, prose or block). Same playbook as the
+            // aarch64 minimal chat prompt: shrink the prompt to what
+            // the model handles — the prose conclusion alone — and when
+            // there is no conclusion to restate, skip narration; the
+            // kernel outputs stand alone.
+            let digest = cfg!(target_arch = "aarch64") && runs.len() >= 3;
+            if digest && prose.is_none() {
+                let _ = tx.send(StreamEvent::Done { full_text: rune_text });
+                return;
+            }
+            let prompt = if digest {
+                format!(
+                    "Output of analysis tools on {} files:\n\n{}\n",
+                    runs.len(),
+                    prose.as_deref().expect("digest narration requires findings"),
+                )
+            } else {
+                correlation_prompt(&runs, prose.as_deref())
+            };
             self.run_followup_streaming(&descriptor, &rune_text, &prompt, tx);
         }
     }
@@ -326,6 +351,10 @@ impl DispatchContext {
             let _ = tx.send(StreamEvent::Done { full_text: rune_text.to_string() });
             return;
         };
+        // The narration system prompt is load-bearing: A/B on the Pi
+        // (2026-06-11) with it removed produced ~90s of free association
+        // that the discard filters ate, every run. Unlike the chat case,
+        // there is no fat to trim here.
         let system = crate::core::router_tools::NARRATION_SYSTEM_PROMPT;
         let prompt_tokens = engine.count_prompt_tokens(prompt, system);
         let cap = crate::core::router_tools::NARRATION_MAX_PROMPT_TOKENS;
@@ -367,10 +396,16 @@ impl DispatchContext {
 
         // Empty, grid-continuation, or a reformatted data dump (the multi-file
         // failure mode) → discard the narration; the kernel output stands alone.
-        if trimmed.is_empty()
-            || crate::runes::narration::is_grid_continuation(prompt, trimmed)
-            || crate::runes::narration::looks_like_data_dump(trimmed)
-        {
+        let empty = trimmed.is_empty();
+        let grid = !empty && crate::runes::narration::is_grid_continuation(prompt, trimmed);
+        let dump = !empty && !grid && crate::runes::narration::looks_like_data_dump(trimmed);
+        if empty || grid || dump {
+            if std::env::var_os("OLORIN_DEBUG_NARRATION").is_some() {
+                eprintln!(
+                    "[narration] DISCARDED (empty={empty} grid={grid} dump={dump}), {} bytes:\n{trimmed}",
+                    trimmed.len(),
+                );
+            }
             let _ = tx.send(StreamEvent::Done { full_text: rune_text.to_string() });
             return;
         }
@@ -402,13 +437,17 @@ struct FileRun {
 /// DATA ONLY, no trailing instruction: the narration system prompt already asks
 /// for a 1-2 sentence summary, and appending the instruction here makes Gemma 4
 /// echo it back instead of answering (same trap `build_narration_prompt`
-/// documents for the single-file case). When eacorrelate produced findings,
-/// they go FIRST — conclusion before evidence.
+/// documents for the single-file case). `findings` must be the PROSE
+/// rendering (`findings_for_prompt`), never the machine-shaped block —
+/// the patterned lines bait Gemma 4 on NEON into continuing them
+/// verbatim instead of summarizing (verified on the Pi 2026-06-11; x86
+/// narrates either form — the same family as the grid-continuation trap).
 fn correlation_prompt(runs: &[FileRun], findings: Option<&str>) -> String {
     let mut p = format!("Output of analysis tools on {} files:\n", runs.len());
     if let Some(f) = findings {
         p.push('\n');
         p.push_str(f);
+        p.push('\n');
     }
     for r in runs {
         p.push_str(&format!("\n{} (via {}):\n{}\n", r.display, r.rune, r.answer));
