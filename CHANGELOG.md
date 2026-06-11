@@ -8,6 +8,20 @@ order.
 
 ## [Unreleased]
 
+### Added
+
+- **ealog counts `WARNING` and `CRITICAL` again — now stack-safe.** The feature
+  (Python `logging` / syslog spellings folding into WARN/FATAL) was reverted in
+  v2.8.3 because the larger `log_level_scan` SIMD body overflowed the stack on
+  logs ≥ ~1 MB. Root cause was in the compiler: eacompute `alloca`'d loop-body
+  locals *inside* the loop, so stack grew per iteration. Fixed upstream in
+  **eacompute 1.15.1** (`hoist loop-body allocas to the function entry block`).
+  With that, the kernel is rebuilt unchanged and verified safe by the
+  pinned-stack canary (`tests/ealog_large_log_canary.rs`) — which runs ealog on
+  an 8 MiB log inside a 2 MiB stack and aborted on the old compiler, passes now.
+  Verified on x86 and Raspberry Pi 5 (NEON). **Requires building with eacompute
+  ≥ 1.15.1.**
+
 ## [2.8.4] — 2026-06-10
 
 Two rune correctness fixes from the robustness pass (differential vs
