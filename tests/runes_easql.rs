@@ -97,6 +97,33 @@ fn easql_quoted_value_with_paren_not_overcounted() {
     assert_eq!(rows(&out, "t"), 2, "two real tuples despite '),(' inside a string");
 }
 
+// pg_dump --inserts emits no COPY blocks, but its preamble is unmistakable.
+// Such a dump must be labeled postgres, not mysql (the INSERT-only fallback).
+const PG_INSERTS: &str = "\
+-- PostgreSQL database dump
+SET standard_conforming_strings = on;
+CREATE TABLE public.users (id integer, name text);
+INSERT INTO public.users (id, name) VALUES (1,'alice'),(2,'bob');
+";
+
+#[test]
+fn easql_pg_dump_inserts_labeled_postgres() {
+    let out = run("pgins", PG_INSERTS);
+    assert!(out.success, "{:?}", out.error);
+    assert_eq!(out.source.as_ref().unwrap().format, "postgres",
+        "pg_dump --inserts has no COPY but is unmistakably postgres");
+    assert_eq!(rows(&out, "users"), 2);
+}
+
+#[test]
+fn easql_ambiguous_insert_only_is_sql() {
+    // No COPY, no backticks, no PG fingerprint → honestly ambiguous, not mysql.
+    let out = run("amb", "CREATE TABLE t (id int);\nINSERT INTO t (id) VALUES (1),(2);\n");
+    assert!(out.success);
+    assert_eq!(out.source.as_ref().unwrap().format, "sql");
+    assert_eq!(rows(&out, "t"), 2);
+}
+
 #[test]
 fn easql_empty_fails_cleanly() {
     let out = run("empty", "");

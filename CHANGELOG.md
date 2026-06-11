@@ -18,7 +18,10 @@ order.
   `COPY … FROM stdin` block for Postgres, quote-aware value-tuple count for
   `INSERT … VALUES`). The tuple counter skips the optional column list
   (`INSERT INTO t (c1, c2) VALUES …`) so it is not miscounted as a row. It does
-  *not* parse SQL — it sweeps and nibbles. Output maps tables onto the v1
+  *not* parse SQL — it sweeps and nibbles. Dialect is detected structurally
+  (COPY → postgres; a backtick → mysql; a `pg_catalog`/`\connect`/
+  `standard_conforming` fingerprint → postgres, so `pg_dump --inserts` is
+  labeled correctly; else `sql`). Output maps tables onto the v1
   `categories` contract, so the block-bar chart, `--json` pipe, and `eadiff`
   work for free. Guarded by a pinned-stack large-dump canary, and verified
   per-table against a real SQLite engine on the Chinook mysqldump + pg_dump
