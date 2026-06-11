@@ -6,6 +6,7 @@
 //! 3. A minimal `eadiff` prototype operates generically over two RuneOutputs,
 //!    proving the schema actually enables composition (the entire point).
 
+use olorin::runes::correlation::Correlation;
 use olorin::runes::output::{
     Anomaly, BoolStats, Category, FieldKind, FieldStats, NumericStats, RuneOutput, Sample, Source,
     TextEntry, TextStats, TimestampStats, Totals, SCHEMA_VERSION,
@@ -100,6 +101,20 @@ fn rich_fixture() -> RuneOutput {
                 baseline: 50.0,
                 ratio:    84.0,
                 score:    37.5,
+            },
+        ],
+        correlations: vec![
+            Correlation {
+                stream_a:      "syslog (errors)".to_string(),
+                stream_b:      "deploys.csv".to_string(),
+                lag_seconds:   240,
+                // 4dp-exact so the lossless round-trip assertion holds
+                // (the wire rounds score to 4 decimals).
+                score:         0.9375,
+                peak_bucket:   "2026-05-11T03:02:00".to_string(),
+                events_a:      60,
+                events_b:      3,
+                width_seconds: 60,
             },
         ],
         error: None,

@@ -16,6 +16,7 @@
 //! because they aren't valid JSON; `f64_stats` returns NaN on empty
 //! inputs which a rune will hit.
 
+use super::correlation::{correlation_from_obj, correlation_to_obj, Correlation};
 use crate::storage::json::{self, Object, Value};
 
 pub const SCHEMA_VERSION: i64 = 1;
@@ -163,6 +164,9 @@ pub struct RuneOutput {
     /// Detected spikes (eatime series mode). Serialized only when
     /// non-empty, so every other rune's JSON is byte-identical to v1.
     pub anomalies:      Vec<Anomaly>,
+    /// Cross-stream lag findings (eacorrelate). Additive like
+    /// `anomalies[]`: serialized only when non-empty.
+    pub correlations:   Vec<Correlation>,
     pub error:          Option<String>,
 }
 
@@ -179,6 +183,7 @@ impl RuneOutput {
             categories:     Vec::new(),
             samples:        Vec::new(),
             anomalies:      Vec::new(),
+            correlations:   Vec::new(),
             error:          None,
         }
     }
@@ -199,6 +204,11 @@ impl RuneOutput {
         if !self.anomalies.is_empty() {
             o.set("anomalies", Value::Array(
                 self.anomalies.iter().map(|a| obj_value(anomaly_to_obj(a))).collect(),
+            ));
+        }
+        if !self.correlations.is_empty() {
+            o.set("correlations", Value::Array(
+                self.correlations.iter().map(|c| obj_value(correlation_to_obj(c))).collect(),
             ));
         }
         if let Some(e) = &self.error {
@@ -224,6 +234,7 @@ impl RuneOutput {
             categories:   array_of(&obj, "categories", category_from_obj)?,
             samples:      array_of(&obj, "samples",    sample_from_obj)?,
             anomalies:    array_of(&obj, "anomalies",  anomaly_from_obj)?,
+            correlations: array_of(&obj, "correlations", correlation_from_obj)?,
             error:        obj.get_str("error").map(str::to_string),
         })
     }
