@@ -1,0 +1,72 @@
+// Normalized cross-correlation lag sweep over two f32 series that share
+// one time grid. The eacorrelate rune z-scores each bucket-count series
+// first, so the per-lag overlap dot product divided by the overlap
+// length is Pearson-style correlation; the Rust side just takes the
+// argmax over lags.
+//
+// Lag convention: out[max_lag + lag] pairs a[i + lag] with b[i], so a
+// POSITIVE lag means events in `a` happen `lag` buckets AFTER events in
+// `b` ("errors lag deploys by +4 buckets").
+//
+// Contract: `out` (2*max_lag + 1 slots) is always fully written. The
+// kernel zeroes it up front, so lags with no overlap (|lag| >= n) and
+// empty inputs (n < 1) read as score 0 rather than stale memory.
+// Negative max_lag writes nothing and returns.
+//
+// SIMD strategy mirrors f32_stats/col_reduce: per lag, an f32x4
+// multiply-accumulate over the overlap 4 samples at a time, horizontal
+// reduce_add (not reduce_add_fast — associativity-ordered so x86 SSE2
+// and ARM NEON agree to ULP), then a scalar tail (< 4 remaining).
+// Single-line signature appeases the current Eä parser (multi-line
+// parameter lists fail with `expected parameter name`).
+
+export func corr_sweep(a: *f32, b: *f32, n: i32, max_lag: i32, out: *mut f32) {
+    if max_lag < 0 {
+        return
+    }
+    let n_out: i32 = 2 * max_lag + 1
+    let mut z: i32 = 0
+    while z < n_out {
+        out[z] = 0.0
+        z = z + 1
+    }
+    if n < 1 {
+        return
+    }
+
+    let mut lag: i32 = 0 - max_lag
+    while lag <= max_lag {
+        // Overlap window for pairs (a[i + lag], b[i]):
+        // lag >= 0 -> a starts at lag, b at 0, m = n - lag
+        // lag <  0 -> a starts at 0, b at -lag, m = n + lag
+        let mut off_a: i32 = 0
+        let mut off_b: i32 = 0
+        let mut m: i32 = 0
+        if lag >= 0 {
+            off_a = lag
+            m = n - lag
+        } else {
+            off_b = 0 - lag
+            m = n + lag
+        }
+
+        if m >= 1 {
+            let mut v_acc: f32x4 = splat(0.0)
+            let n_full: i32 = (m / 4) * 4
+            let mut i: i32 = 0
+            while i < n_full {
+                let va: f32x4 = load(a, off_a + i)
+                let vb: f32x4 = load(b, off_b + i)
+                v_acc = v_acc .+ (va .* vb)
+                i = i + 4
+            }
+            let mut s: f32 = reduce_add(v_acc)
+            while i < m {
+                s = s + a[off_a + i] * b[off_b + i]
+                i = i + 1
+            }
+            out[max_lag + lag] = s / to_f32(m)
+        }
+        lag = lag + 1
+    }
+}
