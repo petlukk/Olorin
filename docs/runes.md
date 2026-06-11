@@ -320,6 +320,39 @@ per-table against a real SQLite engine on the Chinook `mysqldump` + `pg_dump`
 large-dump canary. It is a *summarizer*, not a SQL parser: it sweeps and
 nibbles, never builds a parse tree.
 
+## eacorrelate — cross-file lag correlation
+
+```
+/rune eacorrelate ~/logs/syslog ~/deploys.csv
+```
+
+```
+events:      902
+streams:     3
+scan:        1.4 ms
+
+  syslog                              847
+  syslog (errors)                      52
+  deploys.csv                           3
+
+correlations: 1 finding(s)
+  syslog (errors) follows deploys.csv by +240s (r=0.93, peak 2026-06-11T03:02:00, bucket 60s)
+```
+
+Takes 2–8 timestamped files (ISO-8601 or CLF, auto-detected per file) and
+answers "what happened across these?": every file contributes its event
+stream, ISO logs contribute a second ERROR/FATAL sub-stream, all streams are
+bucketed onto **one** shared time grid (512 target buckets — finer than
+eatime's 120 because lag resolution *is* bucket width), z-scored, and every
+cross-file pair is swept over ±128 lags by the `corr_sweep` kernel. A finding
+is the cosine of the lag-aligned overlap windows — bounded [-1, 1] — and is
+direction-normalized so `stream_a` always *follows* `stream_b` by
+`lag_seconds`. The strongest three land in the additive `correlations[]`
+block (`--json`), each carrying `peak_bucket` (the instant of strongest
+co-occurrence) and `width_seconds` (the honest lag resolution). Verified
+against an independent numpy oracle on randomized planted-lag and
+independent-noise scenarios (`benchmarks/eacorrelate_diff.py`, 15/15).
+
 ## eadiff — structural delta between two rune runs
 
 ```

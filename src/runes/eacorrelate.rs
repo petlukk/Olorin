@@ -1,0 +1,371 @@
+//! eacorrelate — cross-file lag correlation. Given 2..8 files carrying
+//! timestamps, finds which event streams move together, at what lag,
+//! and where the alignment peaks ("errors spiked 4 minutes after the
+//! deploy").
+//!
+//! SIMD strategy: per file the existing position kernels extract the
+//! event streams (`timestamp_scan`/`clf_scan` via `stream::scan_for`,
+//! `log_level_scan` for the ERROR/FATAL sub-stream); all streams are
+//! bucketed onto ONE shared time grid, z-scored, and every cross-file
+//! pair is swept by the `corr_sweep` kernel over ±MAX_LAG_BUCKETS lags.
+//! Rust does the small glue (bucketing, z-score, argmax) mirroring the
+//! eatime/anomaly split: kernels for the bandwidth- and MAC-heavy work,
+//! scalar orchestration around them.
+//!
+//! Grid width targets 512 buckets (vs eatime's 120) because lag
+//! resolution IS bucket width; findings report `width_seconds` so the
+//! precision is always visible. No model involvement — narration (PR 4)
+//! only ever sees the compact findings.
+
+use super::{Rune, RuneResult, OutputSafety};
+use super::common::{resolve_path, open_capped, truncate_answer, PathError};
+use super::correlation::Correlation;
+use super::output::{Category, RuneOutput, Totals};
+use super::stream::{self, Format, MAX_POSITIONS};
+use super::timekey::{iso_bytes_to_seconds, seconds_to_iso};
+use crate::kernels::ffi;
+use std::path::PathBuf;
+use std::time::Instant;
+
+const RUNE_VERSION: i64 = 1;
+/// Finer grid than eatime's 120: lag resolution equals bucket width.
+const TARGET_BUCKETS: i64 = 512;
+const MAX_LAG_BUCKETS: i64 = 128;
+const SCORE_THRESHOLD: f64 = 0.5;
+/// Streams with fewer events than this can align by luck; skip them.
+const MIN_EVENTS: usize = 3;
+const TOP_K: usize = 3;
+const MAX_FILES: usize = 8;
+/// Cap on recorded ERROR/FATAL positions per file (4 MB of i32).
+const MAX_ERROR_POSITIONS: usize = 1_000_000;
+
+pub struct Eacorrelate;
+pub const RUNE: Eacorrelate = Eacorrelate;
+
+impl Rune for Eacorrelate {
+    fn name(&self) -> &'static str { "eacorrelate" }
+    fn description(&self) -> &'static str {
+        "Correlate event streams across 2-8 timestamped files via SIMD. \
+         Buckets every file's events (ISO-8601 or CLF auto-detected; \
+         ERROR/FATAL lines form a second stream per log) onto one time \
+         grid and sweeps all cross-file pairs over ±128 lags with the \
+         corr_sweep kernel. Reports the strongest lags as correlations[] \
+         — 'events in A follow events in B by N seconds'. Args: [--json] \
+         <path> <path> [...]."
+    }
+    fn usage(&self) -> &'static str { "eacorrelate [--json] <path> <path> [...]" }
+    fn output_safety(&self) -> OutputSafety { OutputSafety::UntrustedQuoted }
+
+    fn run(&self, args: &str) -> RuneResult {
+        let t0 = Instant::now();
+        let mut json_mode = false;
+        let mut paths: Vec<&str> = Vec::new();
+        for tok in args.split_whitespace() {
+            if tok == "--json" { json_mode = true; } else { paths.push(tok); }
+        }
+        let out = if paths.len() < 2 || paths.len() > MAX_FILES {
+            error_output(&format!("usage: {} (got {} file(s))", self.usage(), paths.len()))
+        } else {
+            execute(&paths)
+        };
+        let answer = if json_mode {
+            out.to_json()
+        } else if let Some(err) = &out.error {
+            err.clone()
+        } else {
+            format_text(&out)
+        };
+        RuneResult {
+            answer:     truncate_answer(&answer),
+            details:    None,
+            success:    out.success,
+            timing_us:  t0.elapsed().as_micros() as u64,
+            structured: json_mode,
+        }
+    }
+}
+
+fn error_output(msg: &str) -> RuneOutput {
+    let mut out = RuneOutput::new("eacorrelate", RUNE_VERSION);
+    out.success = false;
+    out.error = Some(msg.to_string());
+    out
+}
+
+/// One event stream: a file's timestamps, or its ERROR/FATAL subset.
+struct EventStream {
+    name:     String,
+    file_idx: usize,
+    epochs:   Vec<i64>,
+}
+
+fn execute(paths: &[&str]) -> RuneOutput {
+    let home = crate::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
+    let mut streams: Vec<EventStream> = Vec::new();
+    let mut scan_us_total: u64 = 0;
+
+    for (idx, path) in paths.iter().enumerate() {
+        let bytes = match resolve_path(path, &home).and_then(|p| open_capped(&p, &home)) {
+            Ok(b) => b,
+            Err(PathError::NotFound) =>
+                return error_output(&format!("file not found: {path}")),
+            Err(PathError::TooLarge(n)) =>
+                return error_output(&format!("file too large: {n} bytes ({path})")),
+            Err(PathError::OutsideAllowlist) =>
+                return error_output(&format!("path rejected: outside allowlist (~ or /tmp only): {path}")),
+            Err(PathError::Io(e)) =>
+                return error_output(&format!("io error: {e} ({path})")),
+        };
+        if bytes.len() > i32::MAX as usize {
+            return error_output(&format!("file too large for scan: {} bytes ({path})", bytes.len()));
+        }
+        let display = basename(path);
+        let format = stream::detect_format(&bytes);
+        let scan = stream::scan_for(&bytes, format, MAX_POSITIONS);
+        scan_us_total += scan.scan_us;
+        let epochs = stream::positions_to_epochs(&bytes, &scan.positions, format);
+        if epochs.len() >= MIN_EVENTS {
+            // Error sub-stream first (it borrows scan.positions), so the
+            // streams vector still lists the all-events stream first.
+            let errors = if format == Format::Iso {
+                error_substream(&bytes, &scan.positions)
+            } else {
+                Vec::new()
+            };
+            streams.push(EventStream { name: display.clone(), file_idx: idx, epochs });
+            if errors.len() >= MIN_EVENTS {
+                streams.push(EventStream {
+                    name: format!("{display} (errors)"),
+                    file_idx: idx,
+                    epochs: errors,
+                });
+            }
+        }
+    }
+
+    let mut out = RuneOutput::new("eacorrelate", RUNE_VERSION);
+    out.totals = Totals {
+        rows:    streams.iter().map(|s| s.epochs.len() as u64).sum(),
+        scan_us: scan_us_total,
+    };
+    out.categories = streams.iter().map(|s| Category {
+        name:  s.name.clone(),
+        count: s.epochs.len() as u64,
+    }).collect();
+
+    let distinct_files: std::collections::BTreeSet<usize> =
+        streams.iter().map(|s| s.file_idx).collect();
+    if distinct_files.len() < 2 {
+        // Not an error: the honest answer is "nothing to correlate".
+        return out;
+    }
+    out.correlations = correlate(&streams);
+    out
+}
+
+/// Map each ERROR/FATAL match to its line's timestamp: the greatest
+/// timestamp position <= the match position (a stack-trace line without
+/// its own timestamp attributes to the last stamped line above it).
+fn error_substream(bytes: &[u8], ts_positions: &[i32]) -> Vec<i64> {
+    if ts_positions.is_empty() {
+        return Vec::new();
+    }
+    let mut counts = [0i32; 6];
+    let mut positions = vec![0i32; MAX_ERROR_POSITIONS];
+    let mut n_positions = 0i32;
+    let mut scratch = [0u8; 16];
+    unsafe {
+        ffi::log_level_scan(
+            bytes.as_ptr(), bytes.len() as i32,
+            counts.as_mut_ptr(),
+            positions.as_mut_ptr(), MAX_ERROR_POSITIONS as i32, &mut n_positions,
+            scratch.as_mut_ptr(),
+        );
+    }
+    positions.truncate(n_positions as usize);
+
+    let mut epochs: Vec<i64> = Vec::with_capacity(positions.len());
+    for &err_pos in &positions {
+        let idx = ts_positions.partition_point(|&t| t <= err_pos);
+        if idx == 0 { continue; } // error before the first timestamp
+        let t = ts_positions[idx - 1] as usize;
+        if let Some(secs) = iso_bytes_to_seconds(&bytes[t..]) {
+            epochs.push(secs);
+        }
+    }
+    epochs
+}
+
+/// Bucket all streams onto one grid, z-score, sweep every cross-file
+/// pair with the corr_sweep kernel, keep the TOP_K strongest findings.
+fn correlate(streams: &[EventStream]) -> Vec<Correlation> {
+    let gmin = streams.iter().flat_map(|s| s.epochs.iter()).min().copied().unwrap_or(0);
+    let gmax = streams.iter().flat_map(|s| s.epochs.iter()).max().copied().unwrap_or(0);
+    let span = gmax - gmin;
+    if span <= 0 {
+        return Vec::new(); // everything in one instant — no lag structure
+    }
+    let width = stream::auto_width(span, TARGET_BUCKETS);
+    let n = (span / width) as usize + 1;
+    let max_lag = MAX_LAG_BUCKETS.min(n as i64 - 1) as i32;
+
+    // Z-scored count series per stream; None when flat (zero variance).
+    let zscored: Vec<Option<Vec<f32>>> = streams.iter()
+        .map(|s| zscore_buckets(&s.epochs, gmin, width, n))
+        .collect();
+    // Prefix sums of squares: energy of any overlap window in O(1), for
+    // the per-lag normalization below.
+    let prefix2: Vec<Option<Vec<f64>>> = zscored.iter()
+        .map(|z| z.as_ref().map(|v| prefix_squares(v)))
+        .collect();
+
+    let mut findings: Vec<Correlation> = Vec::new();
+    let mut scores = vec![0.0f32; 2 * max_lag as usize + 1];
+    for i in 0..streams.len() {
+        for j in (i + 1)..streams.len() {
+            if streams[i].file_idx == streams[j].file_idx {
+                continue; // a file trivially correlates with its own subset
+            }
+            let (Some(a), Some(b)) = (&zscored[i], &zscored[j]) else { continue };
+            unsafe {
+                ffi::corr_sweep(a.as_ptr(), b.as_ptr(), n as i32, max_lag, scores.as_mut_ptr());
+            }
+            // The kernel returns dot/overlap per lag. Re-normalize each
+            // lag by the overlap windows' norms (cosine of the windowed
+            // z-scored vectors) — Cauchy-Schwarz bounds that to [-1, 1],
+            // where dot/overlap overshoots on sparse impulse streams.
+            let (pa, pb) = (prefix2[i].as_ref().unwrap(), prefix2[j].as_ref().unwrap());
+            let (best_slot, best_score) = scores.iter().copied().enumerate()
+                .map(|(slot, raw)| (slot, cosine_at_lag(raw, slot, max_lag, n, pa, pb)))
+                .max_by(|x, y| x.1.abs().partial_cmp(&y.1.abs()).expect("scores are finite"))
+                .expect("scores is non-empty");
+            if best_score.abs() < SCORE_THRESHOLD {
+                continue;
+            }
+            let lag = best_slot as i64 - max_lag as i64;
+            // Normalize direction: stream_a is the follower (lag >= 0).
+            // corr_sweep pairs a[k+lag] with b[k], so a positive lag
+            // already means "stream i follows stream j".
+            let (fi, fj, lag) = if lag >= 0 { (i, j, lag) } else { (j, i, -lag) };
+            let (a, b) = (zscored[fi].as_ref().unwrap(), zscored[fj].as_ref().unwrap());
+            let peak = peak_bucket(a, b, lag as usize, gmin, width);
+            findings.push(Correlation {
+                stream_a:      streams[fi].name.clone(),
+                stream_b:      streams[fj].name.clone(),
+                lag_seconds:   lag * width,
+                score:         best_score,
+                peak_bucket:   peak,
+                events_a:      streams[fi].epochs.len() as u64,
+                events_b:      streams[fj].epochs.len() as u64,
+                width_seconds: width,
+            });
+        }
+    }
+    // Strongest first; name pair breaks exact ties deterministically.
+    findings.sort_by(|x, y| {
+        y.score.abs().partial_cmp(&x.score.abs()).expect("scores are finite")
+            .then_with(|| x.stream_a.cmp(&y.stream_a))
+            .then_with(|| x.stream_b.cmp(&y.stream_b))
+    });
+    findings.truncate(TOP_K);
+    findings
+}
+
+/// prefix[k] = sum of v[0..k]^2, so any window's energy is one subtract.
+fn prefix_squares(v: &[f32]) -> Vec<f64> {
+    let mut p = Vec::with_capacity(v.len() + 1);
+    let mut acc = 0.0f64;
+    p.push(0.0);
+    for &x in v {
+        acc += (x as f64) * (x as f64);
+        p.push(acc);
+    }
+    p
+}
+
+/// Turn the kernel's dot/overlap for one lag slot into the cosine of the
+/// two overlap windows: dot / sqrt(energy_a * energy_b), bounded [-1, 1].
+fn cosine_at_lag(raw: f32, slot: usize, max_lag: i32, n: usize, pa: &[f64], pb: &[f64]) -> f64 {
+    let lag = slot as i64 - max_lag as i64;
+    let (off_a, off_b, m) = if lag >= 0 {
+        (lag as usize, 0usize, n - lag as usize)
+    } else {
+        (0usize, (-lag) as usize, n - (-lag) as usize)
+    };
+    if m == 0 {
+        return 0.0;
+    }
+    let dot = raw as f64 * m as f64; // undo the kernel's /overlap
+    let ea = pa[off_a + m] - pa[off_a];
+    let eb = pb[off_b + m] - pb[off_b];
+    if ea <= 0.0 || eb <= 0.0 {
+        return 0.0; // window of exact zeros — no signal to correlate
+    }
+    dot / (ea * eb).sqrt()
+}
+
+/// Bucket epochs onto the shared grid and z-score the counts. Returns
+/// None for a flat series (zero variance) — correlation is undefined.
+fn zscore_buckets(epochs: &[i64], gmin: i64, width: i64, n: usize) -> Option<Vec<f32>> {
+    let mut counts = vec![0.0f64; n];
+    for &e in epochs {
+        let idx = ((e - gmin) / width) as usize;
+        if idx < n { counts[idx] += 1.0; }
+    }
+    let mean = counts.iter().sum::<f64>() / n as f64;
+    let var = counts.iter().map(|c| (c - mean) * (c - mean)).sum::<f64>() / n as f64;
+    if var == 0.0 {
+        return None;
+    }
+    let inv_std = 1.0 / var.sqrt();
+    Some(counts.iter().map(|c| ((c - mean) * inv_std) as f32).collect())
+}
+
+/// Grid instant where the lag-aligned overlap product peaks — the
+/// moment of strongest co-occurrence, reported in the follower's frame.
+fn peak_bucket(a: &[f32], b: &[f32], lag: usize, gmin: i64, width: i64) -> String {
+    let n = a.len();
+    let m = n - lag;
+    let mut best_i = 0usize;
+    let mut best_p = f32::NEG_INFINITY;
+    for i in 0..m {
+        let p = a[i + lag] * b[i];
+        if p > best_p {
+            best_p = p;
+            best_i = i;
+        }
+    }
+    seconds_to_iso(gmin + ((best_i + lag) as i64) * width)
+}
+
+fn basename(path: &str) -> String {
+    path.rsplit(['/', '\\']).next().unwrap_or(path).to_string()
+}
+
+fn format_text(out: &RuneOutput) -> String {
+    let mut buf = String::with_capacity(512);
+    buf.push_str(&format!("events:      {}\n", out.totals.rows));
+    buf.push_str(&format!("streams:     {}\n", out.categories.len()));
+    buf.push_str(&format!("scan:        {}\n", super::common::format_scan_time(out.totals.scan_us)));
+    buf.push('\n');
+    if out.categories.is_empty() {
+        buf.push_str("(no timestamped streams found — need >= 2 files with >= 3 events each)\n");
+        return buf;
+    }
+    for c in &out.categories {
+        buf.push_str(&format!("  {:<28} {:>10}\n", c.name, c.count));
+    }
+    buf.push('\n');
+    if out.correlations.is_empty() {
+        buf.push_str("correlations: none (no cross-file pair crossed the threshold)\n");
+        return buf;
+    }
+    buf.push_str(&format!("correlations: {} finding(s)\n", out.correlations.len()));
+    for c in &out.correlations {
+        buf.push_str(&format!(
+            "  {} follows {} by +{}s (r={:.2}, peak {}, bucket {}s)\n",
+            c.stream_a, c.stream_b, c.lag_seconds, c.score, c.peak_bucket, c.width_seconds,
+        ));
+    }
+    buf
+}

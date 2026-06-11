@@ -7,6 +7,7 @@ use std::sync::OnceLock;
 use crate::core::safety;
 
 pub mod common;
+pub mod correlation;
 pub mod output;
 pub mod eajson_aggregate;
 pub mod narration;

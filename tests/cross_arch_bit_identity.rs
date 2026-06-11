@@ -195,6 +195,20 @@ fn parity_eatime_multi_hour() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// eacorrelate is multi-input: a 2h ISO log with planted ERROR bursts
+/// 120s after each deploy in the CSV. Exercises the corr_sweep kernel,
+/// the shared-grid bucketing, AND the additive `correlations[]` block —
+/// scores ride the wire 4dp-rounded, so any cross-arch f32 drift larger
+/// than rounding absorbs surfaces here.
+#[test]
+fn parity_eacorrelate_planted_lag() {
+    let log = stage_fixture("parity_corr.log");
+    let csv = stage_fixture("parity_corr_deploys.csv");
+    run_case("eacorrelate_parity", &format!("eacorrelate --json {log} {csv}"));
+    let _ = std::fs::remove_file(&log);
+    let _ = std::fs::remove_file(&csv);
+}
+
 /// eadiff has no file source — it consumes two RuneOutput JSONs. Build
 /// the inputs in-process via the public schema so the bytes are
 /// deterministic across archs (proves `to_json()` itself is stable
