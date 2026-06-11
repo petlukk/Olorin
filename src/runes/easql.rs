@@ -313,11 +313,36 @@ fn count_columns(bytes: &[u8], p: usize) -> u64 {
 }
 
 /// Count rows in a single `INSERT … VALUES (…),(…);` statement at `p`:
-/// top-level `),(` tuple separators + 1, single-quote-aware. Scans to the
-/// statement-terminating `;` at paren-depth 0.
+/// top-level value tuples, single-quote-aware. Scans to the statement-
+/// terminating `;` at paren-depth 0.
 fn count_insert_rows(bytes: &[u8], p: usize) -> u64 {
-    let mut i = p;
-    // Find VALUES (or the first '(' if absent — best effort).
+    // Skip an optional column list — `INSERT INTO t (c1, c2, …) VALUES …`.
+    // It is the only parenthesised group between the table name and VALUES;
+    // counting it as a value tuple would over-count every statement by one
+    // (real mysqldump/pg_dump always emit it). Consume it single-quote-aware.
+    let mut i = skip_ws(bytes, p);
+    if i < bytes.len() && bytes[i] == b'(' {
+        let mut depth = 0i32;
+        let mut in_str = false;
+        while i < bytes.len() {
+            let c = bytes[i];
+            if in_str {
+                if c == b'\'' {
+                    if i + 1 < bytes.len() && bytes[i + 1] == b'\'' { i += 2; continue; }
+                    in_str = false;
+                }
+            } else {
+                match c {
+                    b'\'' => in_str = true,
+                    b'(' => depth += 1,
+                    b')' => { depth -= 1; if depth == 0 { i += 1; break; } }
+                    _ => {}
+                }
+            }
+            i += 1;
+        }
+    }
+    // Now count value tuples: top-level '(' groups up to the ';' at depth 0.
     let mut depth = 0i32;
     let mut in_str = false;
     let mut tuples = 0u64;

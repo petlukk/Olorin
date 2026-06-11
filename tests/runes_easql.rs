@@ -70,6 +70,25 @@ fn easql_mysql_insert_dump() {
     assert_eq!(out.totals.rows, 5);
 }
 
+// Real mysqldump/pg_dump emit an explicit column list before VALUES, often
+// with each tuple on its own line. The column list is a top-level paren group
+// and must NOT be counted as a value tuple (regression: was +1 per statement).
+const MY_COLLIST: &str = "\
+INSERT INTO `Genre` (`GenreId`, `Name`) VALUES
+(1,'Rock'),
+(2,'Jazz'),
+(3,'Metal');
+INSERT INTO invoice_line (id, qty) VALUES (1,2),(3,4);
+";
+
+#[test]
+fn easql_insert_column_list_not_counted_as_row() {
+    let out = run("collist", MY_COLLIST);
+    assert!(out.success, "{:?}", out.error);
+    assert_eq!(rows(&out, "Genre"), 3, "3 tuples, not 4 — column list excluded");
+    assert_eq!(rows(&out, "invoice_line"), 2, "single-line column-list INSERT");
+}
+
 #[test]
 fn easql_quoted_value_with_paren_not_overcounted() {
     // A string value containing "),(" must not inflate the tuple count.
