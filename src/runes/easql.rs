@@ -134,8 +134,7 @@ fn build_output(bytes: &[u8], path: String) -> RuneOutput {
             scratch.as_mut_ptr(),
         );
     }
-    let n_copy = counts[2];
-    let dialect = if n_copy > 0 { "postgres" } else if counts[1] > 0 { "mysql" } else { "sql" };
+    let dialect = detect_dialect(bytes, counts[2], counts[1]);
 
     // Ordered per-table accumulation: name -> (rows, cols). Insertion order
     // preserved via a parallel Vec so the schema reads in declaration order.
@@ -217,6 +216,25 @@ fn register(
         order.push(name.to_string());
         rows.insert(name.to_string(), 0);
     }
+}
+
+/// Classify the dump dialect, most-definitive signal first:
+/// 1. `COPY … FROM stdin` → postgres (PostgreSQL-only bulk-load syntax).
+/// 2. A backtick anywhere → mysql (MySQL's identifier quote; pg never emits one).
+/// 3. A PostgreSQL fingerprint that survives `pg_dump --inserts` (where the
+///    COPY blocks are replaced by INSERTs) → postgres.
+/// 4. Otherwise genuinely ambiguous (INSERT-only, no quoting/fingerprint) → sql.
+/// Scans a bounded prefix — the tool preamble and first `CREATE TABLE` (where
+/// MySQL's backticks first appear) are always near the top of a dump.
+fn detect_dialect(bytes: &[u8], copy_n: i32, _insert_n: i32) -> &'static str {
+    if copy_n > 0 { return "postgres"; }
+    let head = &bytes[..bytes.len().min(256 * 1024)];
+    if head.contains(&b'`') { return "mysql"; }
+    const PG: [&[u8]; 5] = [
+        b"pg_catalog", b"standard_conforming", b"-- PostgreSQL", b"\\connect", b"\\c ",
+    ];
+    if PG.iter().any(|p| head.windows(p.len()).any(|w| w == *p)) { return "postgres"; }
+    "sql"
 }
 
 /// Classify the keyword the kernel recorded at byte `p` (case-insensitive).
