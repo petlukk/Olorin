@@ -208,3 +208,24 @@ pub unsafe fn col_reduce(
 ) {
     (k().col_reduce)(data, len, n_cols, out_min, out_max, out_mean);
 }
+
+/// Cross-correlation lag sweep over two f32 series on a shared time grid.
+/// For each lag in `[-max_lag, +max_lag]` writes the overlap dot product
+/// of `(a[i + lag], b[i])` divided by the overlap length to
+/// `out[max_lag + lag]`. Callers z-score both series first, making each
+/// score Pearson-style; a POSITIVE lag means events in `a` happen `lag`
+/// buckets after events in `b`. Used by `eacorrelate`.
+///
+/// # Safety
+/// - `a` and `b` must each point to `n` readable `f32` elements; they may
+///   be dangling only when `n == 0` (the kernel zeroes `out` and returns
+///   without dereferencing them).
+/// - `out` must be valid for `2 * max_lag + 1` writable `f32` elements.
+///   The kernel always writes all of them (zeroed up front; lags with no
+///   overlap stay 0), except when `max_lag < 0` — then nothing is written.
+pub unsafe fn corr_sweep(
+    a: *const f32, b: *const f32, n: i32, max_lag: i32,
+    out: *mut f32,
+) {
+    (k().corr_sweep)(a, b, n, max_lag, out);
+}

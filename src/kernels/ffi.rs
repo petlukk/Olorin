@@ -48,6 +48,10 @@ type F32StatsFn         = unsafe extern "C" fn(
     *mut i32,
     *mut f32, *mut f32, *mut f32,
 );
+type CorrSweepFn        = unsafe extern "C" fn(
+    *const f32, *const f32, i32, i32,
+    *mut f32,
+);
 type F64StatsFn         = unsafe extern "C" fn(
     *const f64, i32,
     *mut i32,
@@ -128,6 +132,7 @@ pub struct KernelTable {
     pub f32_stats:                F32StatsFn,
     pub f64_stats:                F64StatsFn,
     pub col_reduce:               ColReduceFn,
+    pub corr_sweep:               CorrSweepFn,
     pub eval_expr:                EvalExprFn,
     pub zeroize:                  ZeroizeFn,
     pub batch_cosine:             BatchCosineFn,
@@ -201,6 +206,7 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
     let f32_stats_lib   = load("f32_stats")?;
     let f64_stats_lib   = load("f64_stats")?;
     let col_reduce_lib  = load("col_reduce")?;
+    let corr_sweep_lib  = load("corr_sweep")?;
     let expr_eval       = load("expr_eval")?;
     let zeroize_lib     = load("zeroize")?;
     let jl_project_lib  = load("jl_project")?;
@@ -262,6 +268,8 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
                 sym(&f64_stats_lib, b"f64_stats\0")?),
             col_reduce: std::mem::transmute(
                 sym(&col_reduce_lib, b"col_reduce\0")?),
+            corr_sweep: std::mem::transmute(
+                sym(&corr_sweep_lib, b"corr_sweep\0")?),
             eval_expr: std::mem::transmute(
                 sym(&expr_eval, b"eval_expr\0")?),
             zeroize: std::mem::transmute(
@@ -302,6 +310,7 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
                 sql_scan_lib,
                 timestamp_scan_lib, clf_scan_lib,
                 f32_stats_lib, f64_stats_lib, col_reduce_lib,
+                corr_sweep_lib,
                 poly1305_lib,
                 blake2b_lib,
                 argon2_block_lib,
@@ -427,8 +436,8 @@ pub unsafe fn chacha20_search_v2(
 // this file under the 500-LOC cap. Re-exported here so existing
 // `kernels::ffi::<name>` call sites continue to compile unchanged.
 pub use super::ffi_data::{
-    clf_scan, col_reduce, csv_scan, f32_stats, f64_stats, jsonl_struct_scan,
-    log_level_scan, sql_scan, timestamp_scan,
+    clf_scan, col_reduce, corr_sweep, csv_scan, f32_stats, f64_stats,
+    jsonl_struct_scan, log_level_scan, sql_scan, timestamp_scan,
 };
 
 /// SIMD-accelerated ANSI byte classification.
