@@ -122,6 +122,7 @@ pub struct KernelTable {
     pub csv_scan:                 CsvScanFn,
     pub jsonl_struct_scan:        JsonlStructFn,
     pub log_level_scan:           LogLevelScanFn,
+    pub sql_scan:                 LogLevelScanFn,
     pub timestamp_scan:           TimestampScanFn,
     pub clf_scan:                 TimestampScanFn,
     pub f32_stats:                F32StatsFn,
@@ -194,6 +195,7 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
     let csv_scan_lib    = load("csv_scan")?;
     let jsonl_struct_lib = load("jsonl_struct")?;
     let log_level_scan_lib = load("log_level_scan")?;
+    let sql_scan_lib    = load("sql_scan")?;
     let timestamp_scan_lib = load("timestamp_scan")?;
     let clf_scan_lib    = load("clf_scan")?;
     let f32_stats_lib   = load("f32_stats")?;
@@ -248,6 +250,8 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
                 sym(&jsonl_struct_lib, b"jsonl_struct_scan\0")?),
             log_level_scan: std::mem::transmute(
                 sym(&log_level_scan_lib, b"log_level_scan\0")?),
+            sql_scan: std::mem::transmute(
+                sym(&sql_scan_lib, b"sql_scan\0")?),
             timestamp_scan: std::mem::transmute(
                 sym(&timestamp_scan_lib, b"timestamp_scan\0")?),
             clf_scan: std::mem::transmute(
@@ -295,6 +299,7 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
                 chacha20_lib, chacha20_sv2, pretokenize_lib,
                 ansi_parser_lib, terminal_diff_lib,
                 csv_scan_lib, jsonl_struct_lib, log_level_scan_lib,
+                sql_scan_lib,
                 timestamp_scan_lib, clf_scan_lib,
                 f32_stats_lib, f64_stats_lib, col_reduce_lib,
                 poly1305_lib,
@@ -423,7 +428,7 @@ pub unsafe fn chacha20_search_v2(
 // `kernels::ffi::<name>` call sites continue to compile unchanged.
 pub use super::ffi_data::{
     clf_scan, col_reduce, csv_scan, f32_stats, f64_stats, jsonl_struct_scan,
-    log_level_scan, timestamp_scan,
+    log_level_scan, sql_scan, timestamp_scan,
 };
 
 /// SIMD-accelerated ANSI byte classification.

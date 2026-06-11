@@ -91,6 +91,24 @@ pub unsafe fn log_level_scan(
     );
 }
 
+/// Scan a `.sql` dump for the structural keywords CREATE / INSERT / COPY
+/// (case-insensitive, word-bounded) plus newline count, recording each
+/// keyword's byte offset. Used by `easql`. `out_counts[0..4]` =
+/// [CREATE, INSERT, COPY, NEWLINES]; same shape as `log_level_scan`.
+pub unsafe fn sql_scan(
+    text: *const u8, len: i32,
+    out_counts: *mut i32,
+    out_positions: *mut i32, max_positions: i32, out_n_positions: *mut i32,
+    scratch: *mut u8,
+) {
+    (k().sql_scan)(
+        text, len,
+        out_counts,
+        out_positions, max_positions, out_n_positions,
+        scratch,
+    );
+}
+
 /// Scan `text` for ISO-8601 timestamp prefixes (`YYYY-MM-DDT`) and
 /// emit each match's start byte offset. Used by `eatime` — the caller
 /// extracts HH:MM:SS from `text[offset+11..offset+19]` after each hit
