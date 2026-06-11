@@ -8,6 +8,31 @@ order.
 
 ## [Unreleased]
 
+## [2.11.1] — 2026-06-11
+
+### Fixed
+
+- **Correlation narration now works on the Pi (NEON).** v2.11.0 fed the
+  machine-shaped findings block straight into the narration prompt; Gemma 4 on
+  NEON either continued the pattern verbatim (echoed data fragments) or emitted
+  nothing — x86 narrated fine, so this only surfaced on the Pi install-gate.
+  Three changes, all Pi-verified on the real model:
+  - The narration prompt gets a **prose** rendering of the top finding
+    (`findings_for_prompt`) instead of the patterned block — nothing to
+    continue. The user-visible block is unchanged.
+  - The prose leads the prompt (conclusion first), restoring the original
+    design intent.
+  - On aarch64 with ≥ 3 files the full multi-block prompt still degenerates
+    (immediate EOS or junk that slips the dump filter), so the prompt shrinks
+    to the prose conclusion alone — same playbook as the aarch64 minimal chat
+    prompt — and narration is skipped entirely when there are no findings.
+    Also ~4× faster narration on the Pi (smaller prefill).
+  Verified: 2-file drops narrate 4/4 on NEON, 3-file drops 3/3, all voicing
+  the deploy→error lag; x86 e2e narration unchanged-or-better.
+- `OLORIN_DEBUG_NARRATION=1` prints discarded narrations and which filter
+  fired — narration discards were previously invisible, which is why the
+  NEON echo failure needed a debug build to diagnose.
+
 ## [2.11.0] — 2026-06-11
 
 ### Added

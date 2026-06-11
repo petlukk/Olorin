@@ -348,11 +348,10 @@ fn basename(path: &str) -> String {
     path.rsplit(['/', '\\']).next().unwrap_or(path).to_string()
 }
 
-/// Compact findings-only block (~100 B per finding) for the multi-file
-/// narration prompt — the conclusion the model should lead with. None
-/// when the run failed or found nothing; the narration then proceeds on
-/// the per-file summaries alone. Prefill is the Pi bottleneck, so this
-/// stays terse by construction (TOP_K findings, one line each).
+/// Compact findings-only block (~100 B per finding) streamed to the
+/// user in the multi-file drop. None when the run failed or found
+/// nothing. Prefill is the Pi bottleneck, so this stays terse by
+/// construction (TOP_K findings, one line each).
 pub fn findings_block(out: &RuneOutput) -> Option<String> {
     if !out.success || out.correlations.is_empty() {
         return None;
@@ -365,6 +364,25 @@ pub fn findings_block(out: &RuneOutput) -> Option<String> {
         ));
     }
     Some(s)
+}
+
+/// Prose rendering of the top finding for the narration PROMPT. The
+/// machine-shaped `findings_block` lines bait Gemma 4 on NEON into
+/// continuing the pattern instead of summarizing (the same "content
+/// already looks like a complete analysis" trap `build_narration_prompt`
+/// documents), so the model gets one flowing sentence with nothing to
+/// continue. Top finding only — the user-visible block carries the rest.
+pub fn findings_for_prompt(out: &RuneOutput) -> Option<String> {
+    let c = out.correlations.first()?;
+    if !out.success {
+        return None;
+    }
+    Some(format!(
+        "A correlation pass across the files found that events in {} \
+         consistently happen about {} seconds after events in {}, most \
+         strongly around {}.",
+        c.stream_a, c.lag_seconds, c.stream_b, c.peak_bucket,
+    ))
 }
 
 fn format_text(out: &RuneOutput) -> String {
