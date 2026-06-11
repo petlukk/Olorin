@@ -8,6 +8,10 @@ order.
 
 ## [Unreleased]
 
+## [2.8.5] — 2026-06-11
+
+WARNING/CRITICAL log levels return, now stack-safe (requires eacompute ≥ 1.15.1).
+
 ### Added
 
 - **ealog counts `WARNING` and `CRITICAL` again — now stack-safe.** The feature
