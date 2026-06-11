@@ -15,12 +15,16 @@ order.
   in one SIMD pass. A new `sql_scan` kernel sweeps `CREATE`/`INSERT`/`COPY`
   (case-insensitive, word-bounded) the same way `log_level_scan` does; the rune
   does the cheap per-marker scalar work (table name, newline-count rows in a
-  `COPY … FROM stdin` block for Postgres, quote-aware `),(` tuple count for
-  MySQL). It does *not* parse SQL — it sweeps and nibbles. Output maps tables
-  onto the v1 `categories` contract, so the block-bar chart, `--json` pipe, and
-  `eadiff` work for free. Guarded by a pinned-stack large-dump canary. Scope:
-  pg_dump COPY + mysqldump INSERT; file-drop auto-pick and per-statement
-  attribution past 8192 markers are follow-ups.
+  `COPY … FROM stdin` block for Postgres, quote-aware value-tuple count for
+  `INSERT … VALUES`). The tuple counter skips the optional column list
+  (`INSERT INTO t (c1, c2) VALUES …`) so it is not miscounted as a row. It does
+  *not* parse SQL — it sweeps and nibbles. Output maps tables onto the v1
+  `categories` contract, so the block-bar chart, `--json` pipe, and `eadiff`
+  work for free. Guarded by a pinned-stack large-dump canary, and verified
+  per-table against a real SQLite engine on the Chinook mysqldump + pg_dump
+  (0 mismatches, 15 607 rows, on Pi NEON). Scope: pg_dump COPY + INSERT dumps;
+  file-drop auto-pick and per-statement attribution past 8192 markers are
+  follow-ups.
 
 ## [2.8.5] — 2026-06-11
 
