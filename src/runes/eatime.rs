@@ -15,18 +15,13 @@
 use super::{Rune, RuneResult, OutputSafety};
 use super::common::{resolve_path, open_capped, truncate_answer, PathError};
 use super::output::{Anomaly, Category, RuneOutput, Source, Totals};
-use super::timekey::{clf_bytes_to_seconds, iso_bytes_to_seconds, seconds_to_iso};
+use super::stream::{self, Format, MAX_POSITIONS};
+use super::timekey::seconds_to_iso;
 use super::anomaly;
-use crate::kernels::ffi;
 use std::path::PathBuf;
 use std::time::Instant;
 
 const RUNE_VERSION: i64 = 1;
-/// Caller-side cap on positions stored from the kernel. Each emitted
-/// position is 4 bytes; ~16M timestamps fits in 64 MB which is well
-/// inside the 4 GB input limit. The kernel saturates at this cap;
-/// past that, the rune reports the cap was hit.
-const MAX_POSITIONS: usize = 16_000_000;
 
 pub struct Eatime;
 pub const RUNE: Eatime = Eatime;
@@ -78,17 +73,6 @@ impl Rune for Eatime {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Bucket { Hour, Weekday, Series }
-
-/// Timestamp grammar. `Iso` = `YYYY-MM-DDTHH:MM:SS` (timestamp_scan kernel);
-/// `Clf` = `[dd/MMM/yyyy:hh:mm:ss` Common Log Format (clf_scan kernel).
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum Format { Iso, Clf }
-
-impl Format {
-    fn tag(self) -> &'static str {
-        match self { Format::Iso => "iso8601", Format::Clf => "clf" }
-    }
-}
 
 fn parse_args(args: &str) -> Result<(String, bool, Bucket, Option<Format>), (String, bool)> {
     let mut json_mode = false;
@@ -186,10 +170,10 @@ fn build_output(bytes: &[u8], path: String, bucket: Bucket, fmt: Option<Format>)
     // Auto-detect the grammar when not forced, then scan with that kernel
     // and decode every hit to epoch-seconds. All three bucket modes work
     // off the epoch list, so CLF and ISO share one code path.
-    let format = fmt.unwrap_or_else(|| detect_format(bytes));
-    let scan = scan_for(bytes, format, MAX_POSITIONS);
+    let format = fmt.unwrap_or_else(|| stream::detect_format(bytes));
+    let scan = stream::scan_for(bytes, format, MAX_POSITIONS);
     let scan_us = scan.scan_us;
-    let epochs = positions_to_epochs(bytes, &scan.positions, format);
+    let epochs = stream::positions_to_epochs(bytes, &scan.positions, format);
 
     let mut out = RuneOutput::new("eatime", RUNE_VERSION);
     let (categories, total) = match bucket {
@@ -210,67 +194,6 @@ fn build_output(bytes: &[u8], path: String, bucket: Bucket, fmt: Option<Format>)
     out.totals = Totals { rows: total, scan_us };
     out.categories = categories;
     out
-}
-
-struct ScanResult {
-    positions: Vec<i32>,
-    scan_us:   u64,
-}
-
-/// FFI signature shared by every position-scan kernel.
-type ScanFn = unsafe fn(*const u8, i32, *mut i32, i32, *mut i32, *mut u8);
-
-/// Run the format's position kernel over `bytes`, capturing up to
-/// `max_positions` hits.
-fn scan_for(bytes: &[u8], format: Format, max_positions: usize) -> ScanResult {
-    if bytes.is_empty() {
-        return ScanResult { positions: Vec::new(), scan_us: 0 };
-    }
-    let kernel: ScanFn = match format {
-        Format::Iso => ffi::timestamp_scan,
-        Format::Clf => ffi::clf_scan,
-    };
-    let t_scan = Instant::now();
-    let mut positions = vec![0i32; max_positions];
-    let mut n_positions = 0i32;
-    let mut scratch = [0u8; 16];
-    unsafe {
-        kernel(
-            bytes.as_ptr(), bytes.len() as i32,
-            positions.as_mut_ptr(), max_positions as i32, &mut n_positions,
-            scratch.as_mut_ptr(),
-        );
-    }
-    positions.truncate(n_positions as usize);
-    ScanResult { positions, scan_us: t_scan.elapsed().as_micros() as u64 }
-}
-
-/// Sniff the timestamp grammar by running both kernels over a head sample
-/// and picking whichever matches more. Using the kernels themselves means
-/// the sniff can never disagree with the scan that follows.
-fn detect_format(bytes: &[u8]) -> Format {
-    const SNIFF_BYTES: usize = 64 * 1024;
-    const SNIFF_CAP: usize = 4096;
-    let head = &bytes[..bytes.len().min(SNIFF_BYTES)];
-    let iso = scan_for(head, Format::Iso, SNIFF_CAP).positions.len();
-    let clf = scan_for(head, Format::Clf, SNIFF_CAP).positions.len();
-    if clf > iso { Format::Clf } else { Format::Iso }
-}
-
-/// Decode each kernel position to epoch-seconds with the format's decoder;
-/// positions that don't decode (truncated / out-of-range) are dropped.
-fn positions_to_epochs(bytes: &[u8], positions: &[i32], format: Format) -> Vec<i64> {
-    let mut epochs: Vec<i64> = Vec::with_capacity(positions.len());
-    for &pos in positions {
-        let p = pos as usize;
-        if p >= bytes.len() { continue; }
-        let decoded = match format {
-            Format::Iso => iso_bytes_to_seconds(&bytes[p..]),
-            Format::Clf => clf_bytes_to_seconds(&bytes[p..]),
-        };
-        if let Some(secs) = decoded { epochs.push(secs); }
-    }
-    epochs
 }
 
 fn hour_buckets(epochs: &[i64]) -> (Vec<Category>, u64) {
@@ -307,21 +230,7 @@ fn weekday_index(epoch: i64) -> usize {
     (days.rem_euclid(7) as usize + 5) % 7
 }
 
-/// Candidate chronological bucket widths in seconds: 1s, 5s, 10s, 30s,
-/// 1m, 5m, 10m, 30m, 1h, 6h, 12h, 1d, 1w. `auto_width` snaps up to the
-/// first width that keeps the series near `TARGET_BUCKETS`.
-const NICE_WIDTHS: [i64; 13] =
-    [1, 5, 10, 30, 60, 300, 600, 1800, 3600, 21600, 43200, 86400, 604800];
 const TARGET_BUCKETS: i64 = 120;
-
-fn auto_width(span_secs: i64) -> i64 {
-    if span_secs <= 0 { return 1; }
-    let raw = span_secs / TARGET_BUCKETS;
-    for w in NICE_WIDTHS {
-        if w >= raw { return w; }
-    }
-    NICE_WIDTHS[NICE_WIDTHS.len() - 1]
-}
 
 /// Chronological histogram with spike detection. Decodes each kernel
 /// position to epoch-seconds, bins the span into auto-width buckets, and
@@ -333,7 +242,7 @@ fn series_buckets(epochs: &[i64]) -> (Vec<Category>, u64, Vec<Anomaly>) {
     }
     let min = *epochs.iter().min().unwrap();
     let max = *epochs.iter().max().unwrap();
-    let width = auto_width(max - min);
+    let width = stream::auto_width(max - min, TARGET_BUCKETS);
     let n = ((max - min) / width) as usize + 1;
     let mut counts = vec![0u64; n];
     for &e in epochs {
