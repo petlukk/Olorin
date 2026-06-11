@@ -206,7 +206,27 @@ impl DispatchContext {
                 None => { let _ = tx.send(StreamEvent::Done { full_text: rune_text }); }
             }
         } else {
-            let prompt = correlation_prompt(&runs);
+            // Deterministic cross-file lag correlation (SIMD) before the
+            // narration: findings stream to the user like any kernel
+            // output and LEAD the narration prompt, so the model opens
+            // with the conclusion instead of hunting for one across the
+            // per-file summaries.
+            let corr = crate::runes::eacorrelate::correlate_files(files);
+            let mut findings = crate::runes::eacorrelate::findings_block(&corr);
+            if let Some(block) = &findings {
+                if safety::scan(block.as_bytes()).blocked {
+                    findings = None;
+                } else {
+                    let chunk = format!(
+                        "\n\n📎 ran `eacorrelate` across {} files\n\n{block}",
+                        files.len(),
+                    );
+                    self.vault_save(b"tool", block.as_bytes());
+                    let _ = tx.send(StreamEvent::Token(chunk.clone()));
+                    rune_text.push_str(&chunk);
+                }
+            }
+            let prompt = correlation_prompt(&runs, findings.as_deref());
             self.run_followup_streaming(&descriptor, &rune_text, &prompt, tx);
         }
     }
@@ -382,9 +402,14 @@ struct FileRun {
 /// DATA ONLY, no trailing instruction: the narration system prompt already asks
 /// for a 1-2 sentence summary, and appending the instruction here makes Gemma 4
 /// echo it back instead of answering (same trap `build_narration_prompt`
-/// documents for the single-file case).
-fn correlation_prompt(runs: &[FileRun]) -> String {
+/// documents for the single-file case). When eacorrelate produced findings,
+/// they go FIRST — conclusion before evidence.
+fn correlation_prompt(runs: &[FileRun], findings: Option<&str>) -> String {
     let mut p = format!("Output of analysis tools on {} files:\n", runs.len());
+    if let Some(f) = findings {
+        p.push('\n');
+        p.push_str(f);
+    }
     for r in runs {
         p.push_str(&format!("\n{} (via {}):\n{}\n", r.display, r.rune, r.answer));
     }

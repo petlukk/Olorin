@@ -353,6 +353,11 @@ co-occurrence) and `width_seconds` (the honest lag resolution). Verified
 against an independent numpy oracle on randomized planted-lag and
 independent-noise scenarios (`benchmarks/eacorrelate_diff.py`, 15/15).
 
+Dropping ≥ 2 files into the web UI runs it automatically: the findings stream
+after the per-file kernel outputs and lead the narration, so the model opens
+with the conclusion. When nothing correlates, no block appears — silence is
+the honest finding.
+
 ## eadiff — structural delta between two rune runs
 
 ```

@@ -66,7 +66,10 @@ impl Rune for Eacorrelate {
         let out = if paths.len() < 2 || paths.len() > MAX_FILES {
             error_output(&format!("usage: {} (got {} file(s))", self.usage(), paths.len()))
         } else {
-            execute(&paths)
+            let pairs: Vec<(String, String)> = paths.iter()
+                .map(|p| (basename(p), p.to_string()))
+                .collect();
+            correlate_files(&pairs)
         };
         let answer = if json_mode {
             out.to_json()
@@ -99,12 +102,16 @@ struct EventStream {
     epochs:   Vec<i64>,
 }
 
-fn execute(paths: &[&str]) -> RuneOutput {
+/// Library entry shared by the rune (display = path basename) and the
+/// file-drop analyst (display = the upload's friendly filename, path =
+/// the staged tmp file). Stream names in the findings come from
+/// `display`, so the narration speaks the user's filenames.
+pub fn correlate_files(files: &[(String, String)]) -> RuneOutput {
     let home = crate::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
     let mut streams: Vec<EventStream> = Vec::new();
     let mut scan_us_total: u64 = 0;
 
-    for (idx, path) in paths.iter().enumerate() {
+    for (idx, (display, path)) in files.iter().enumerate() {
         let bytes = match resolve_path(path, &home).and_then(|p| open_capped(&p, &home)) {
             Ok(b) => b,
             Err(PathError::NotFound) =>
@@ -119,7 +126,6 @@ fn execute(paths: &[&str]) -> RuneOutput {
         if bytes.len() > i32::MAX as usize {
             return error_output(&format!("file too large for scan: {} bytes ({path})", bytes.len()));
         }
-        let display = basename(path);
         let format = stream::detect_format(&bytes);
         let scan = stream::scan_for(&bytes, format, MAX_POSITIONS);
         scan_us_total += scan.scan_us;
@@ -340,6 +346,25 @@ fn peak_bucket(a: &[f32], b: &[f32], lag: usize, gmin: i64, width: i64) -> Strin
 
 fn basename(path: &str) -> String {
     path.rsplit(['/', '\\']).next().unwrap_or(path).to_string()
+}
+
+/// Compact findings-only block (~100 B per finding) for the multi-file
+/// narration prompt — the conclusion the model should lead with. None
+/// when the run failed or found nothing; the narration then proceeds on
+/// the per-file summaries alone. Prefill is the Pi bottleneck, so this
+/// stays terse by construction (TOP_K findings, one line each).
+pub fn findings_block(out: &RuneOutput) -> Option<String> {
+    if !out.success || out.correlations.is_empty() {
+        return None;
+    }
+    let mut s = String::from("Cross-file correlations:\n");
+    for c in &out.correlations {
+        s.push_str(&format!(
+            "{} follows {} by +{} seconds (correlation {:.2}, peak at {})\n",
+            c.stream_a, c.stream_b, c.lag_seconds, c.score, c.peak_bucket,
+        ));
+    }
+    Some(s)
 }
 
 fn format_text(out: &RuneOutput) -> String {
