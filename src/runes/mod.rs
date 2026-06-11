@@ -10,6 +10,7 @@ pub mod common;
 pub mod output;
 pub mod eajson_aggregate;
 pub mod narration;
+pub mod stream;
 pub mod timekey;
 pub mod anomaly;
 pub mod plot;
