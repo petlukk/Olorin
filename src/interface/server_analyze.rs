@@ -60,6 +60,55 @@ pub(crate) fn handle_analyze(
     cleanup_staged(&cleanup);
 }
 
+/// `POST /api/report` — same `{"files":[{"name","b64"}]}` payload as
+/// `/api/analyze`, but the response is one self-contained HTML report
+/// from the deterministic pipeline (Content-Disposition: attachment).
+/// No model, no vault — the request never touches the DispatchContext,
+/// so it can't contend with an in-flight narration for the engine lock.
+pub fn handle_report(
+    stream: &mut std::net::TcpStream,
+    req: &str,
+    buf: &[u8],
+    n: usize,
+) {
+    let body = read_body(stream, req, buf, n);
+    let staged = match parse_and_stage(&body) {
+        Ok(v) => v,
+        Err(msg) => {
+            respond_400(stream, &msg);
+            return;
+        }
+    };
+    let cleanup: Vec<String> = staged.iter().map(|(_, p)| p.clone()).collect();
+    let result = crate::runes::report::build_report(
+        &staged,
+        concat!("v", env!("CARGO_PKG_VERSION")),
+    );
+    cleanup_staged(&cleanup);
+    match result {
+        Ok((html, _summary)) => {
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\
+                 Content-Disposition: attachment; filename=\"olorin-report.html\"\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n",
+                html.len(),
+            );
+            let _ = stream.write_all(html.as_bytes());
+        }
+        Err(msg) => respond_400(stream, &msg),
+    }
+}
+
+fn respond_400(stream: &mut std::net::TcpStream, msg: &str) {
+    let _ = write!(
+        stream,
+        "HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain; charset=utf-8\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n{msg}",
+        msg.len(),
+    );
+}
+
 /// Remove each staged file's unique /tmp drop directory after analysis, so
 /// uploads (which can be GB each) don't accumulate and fill the disk.
 fn cleanup_staged(paths: &[String]) {

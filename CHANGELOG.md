@@ -8,6 +8,24 @@ order.
 
 ## [Unreleased]
 
+## [2.12.0] — 2026-06-12
+
+### Added
+
+- **HTML reports — the shareable artifact.** `olorin report <files…> [-o
+  out.html]` runs the deterministic file-drop pipeline (rune per file +
+  `eacorrelate` across ≥ 2) and writes **one self-contained HTML file**:
+  inline CSS, inline SVG charts, zero external assets, zero JavaScript.
+  Findings banner first, then per-file sections with stats, time-series
+  charts (same `col_reduce` kernel envelope as the terminal block bars;
+  anomaly buckets tinted red, dashed median baseline), and flagged spikes.
+  No model, no wall-clock timestamp — same inputs, same report; every
+  file-derived string HTML-escaped. The 3am incident renders as ~10 KB.
+- **`POST /api/report`** — same payload as `/api/analyze`, response is the
+  report as an attachment. Never touches the model or the vault.
+- **"📄 download report"** link in the web chat after every file-drop
+  analysis — re-posts the same files to `/api/report` and saves the result.
+
 ## [2.11.1] — 2026-06-11
 
 ### Fixed
