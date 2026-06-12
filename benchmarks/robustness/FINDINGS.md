@@ -140,3 +140,62 @@ F3 lock fix). Two availability findings (S1 memory amplification, S2 unbounded
 threads) are real but require the exposed mode + are bounded by the existing cap
 and timeout; both are **DEFERRED** as request-read / accept-loop design changes,
 to be batched with the other deferred findings (vault F1/F2).
+
+---
+
+# Wave four — inference limits
+
+Target: the Gemma 4 forward pass under inputs that exceed its fixed context
+window (`max_seq_len`, 2048 in production). Oracle = a property: *no input may
+panic, OOM, or hang the inference path — an over-window prompt must be clamped
+or refused, never crash.* Demonstrated model-free at the KV-cache layer
+(`tests/inference_limits.rs`), so it runs in CI without the GGUF.
+
+| # | Severity | Symptom | Triage | Resolution |
+|---|----------|---------|--------|------------|
+| W1 | **HIGH** | **No context-length guard in `Engine::generate` → over-window prompt panics.** `generate` tokenizes and calls `forward_batch(&tokens)` with **no check** that `tokens.len() ≤ max_seq_len`. In `KvCache::store_batch` a Global layer writes at `pos = seq_len + t` with no bound; past `max_seq_len` the `kb[cache_off..cache_off + stride]` slice range is out of bounds → **panic** (Rust's bounds check prevents memory corruption, but the thread dies — REPL: process crash; server: connection thread). Only the **narration** callers budget via `count_prompt_tokens`; the **chat** path (`router_streaming` `:94`, `router.rs` `:420`) and the **tool-call follow-up** (`router_toolcall` `:75/:77`, which embeds raw tool output — a big `read_file`/`http`/shell result) are **unguarded**. Pasting a long message (~2048+ tokens, not adversarial) triggers it. Reproduced at the cache layer: `w1_global_cache_overflow_panics_past_max_seq_len`. | **bug** | DEFERRED (design, batch). Centralize the budget in `generate`: refuse (or clamp) when `n_prompt ≥ max_seq_len`, and bound the decode loop to `max_seq_len − n_prompt` so neither prefill nor decode can write past the cache — defense in depth, independent of each caller remembering to budget. The "nice" behaviour (trim old history so long conversations keep working) is a follow-on policy choice. Can't be CI-verified here (model-gated) — wants the Pi gate. |
+
+### Robustness checks that PASSED
+
+- **Bounds check prevents corruption.** The overflow is a *safe* slice-range
+  panic, not an out-of-bounds write — no UB, no silent KV corruption.
+- **Sliding-window layers can't overflow.** They index `(seq_len + t) %
+  window_size`, so they ring-wrap and absorb any token count; the overflow is
+  specific to Global layers (which hold the full sequence). Test
+  `sliding_window_layer_wraps_and_never_overflows`.
+- **Narration is already guarded.** `router_tools` / `router_streaming` skip
+  narration with a clear notice when the prompt exceeds
+  `NARRATION_MAX_PROMPT_TOKENS` — the budget pattern W1's other callers lack.
+- **Empty prompt is handled** — `generate` returns a clean `Err` when the
+  tokenized prompt is empty, rather than proceeding.
+
+## Wave-four verdict
+
+One HIGH finding: the context-window budget is enforced per-caller (only
+narration does it) instead of centrally, so the chat and tool-follow-up paths
+panic on an over-window prompt — triggerable by an ordinary long paste. The
+crash is *safe* (a bounds-checked panic, not memory corruption), and the fix is
+a small central guard in `generate`, but it carries a policy choice (refuse vs
+trim history) and can't be CI-verified without the model, so it is **DEFERRED**
+to the batch-fix pass. Scope note: this wave covered the context-overflow /
+KV-cache-exhaustion vector; adversarial **tokenizer** fuzzing (pathological byte
+sequences, huge single tokens) is a remaining watch-list item, not yet swept.
+
+---
+
+# Deferred backlog (for the prioritized batch-fix pass)
+
+After all four discovery waves, the open fixes — each changing a subsystem's
+core protocol/policy, hence batched rather than reflex-patched:
+
+- **vault F1/F2** — atomic append (journal or temp+rename with an fsync barrier
+  before the header flip) so a crash mid-append can't lose committed history.
+- **server S1** — read the request body incrementally up to the cap instead of
+  eagerly allocating the declared Content-Length.
+- **server S2** — bound connection concurrency (semaphore / worker pool).
+- **inference W1** — central context-window guard in `Engine::generate`
+  (refuse/clamp prompt + bound the decode loop).
+
+Already fixed in-wave: easql `[brackets]` (#1), eaparquet timestamps (#2),
+eajson null contract (#3), `--json` cap + eatime buckets (#4), vault concurrent
+lock (F3), server auth-parser panic (S3).
