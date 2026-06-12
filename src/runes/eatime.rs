@@ -232,6 +232,15 @@ fn weekday_index(epoch: i64) -> usize {
 
 const TARGET_BUCKETS: i64 = 120;
 
+/// Absolute ceiling on series buckets. `auto_width` caps the bucket width
+/// at the largest "nice" value (1 week), so a pathological span still
+/// grows the bucket count without bound — eatime scans *every* ISO instant
+/// in the text, and one outlier (a junk nested timestamp spanning years or
+/// millennia, as in real GH Archive data) would blow the series up to
+/// 100 k+ buckets. Past this many buckets we widen further than any nice
+/// width to keep the output sane and the labels meaningful.
+const MAX_SERIES_BUCKETS: usize = 1000;
+
 /// Chronological histogram with spike detection. Decodes each kernel
 /// position to epoch-seconds, bins the span into auto-width buckets, and
 /// hands the count series to `anomaly::detect`. Buckets are labelled with
@@ -242,8 +251,14 @@ fn series_buckets(epochs: &[i64]) -> (Vec<Category>, u64, Vec<Anomaly>) {
     }
     let min = *epochs.iter().min().unwrap();
     let max = *epochs.iter().max().unwrap();
-    let width = stream::auto_width(max - min, TARGET_BUCKETS);
-    let n = ((max - min) / width) as usize + 1;
+    let span = max - min;
+    let mut width = stream::auto_width(span, TARGET_BUCKETS);
+    // Hard-bound the bucket count against pathological spans. `+1` guarantees
+    // width > span / MAX_SERIES_BUCKETS, so n lands at or below the ceiling.
+    if (span / width) as usize + 1 > MAX_SERIES_BUCKETS {
+        width = span / MAX_SERIES_BUCKETS as i64 + 1;
+    }
+    let n = (span / width) as usize + 1;
     let mut counts = vec![0u64; n];
     for &e in epochs {
         counts[((e - min) / width) as usize] += 1;

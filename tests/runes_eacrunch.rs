@@ -83,6 +83,24 @@ fn truncate_answer_passthrough_under_limit() {
 }
 
 #[test]
+fn truncate_answer_exempts_oversized_structured_json() {
+    // Robustness wave one, finding #4: the 32 KB cap is an LLM-context
+    // bound, but structured `--json` output is never narrated — it goes to
+    // stdout or another rune's from_json. A multi-MB RuneOutput JSON (real
+    // case: eatime series over GH Archive) must pass through WHOLE, not be
+    // replaced by an "output exceeded" error object that corrupts the
+    // `olorin rune … --json > out.json` contract.
+    use olorin::runes::common::{truncate_answer, MAX_ANSWER_BYTES};
+    let mut s = String::from("{\"schema_version\":1,\"rune\":\"eatime\",\"big\":\"");
+    while s.len() < MAX_ANSWER_BYTES * 3 { s.push('x'); }
+    s.push_str("\"}");
+    let out = truncate_answer(&s);
+    assert_eq!(out, s, "structured JSON must be returned uncapped");
+    assert!(!out.contains("[...truncated"));
+    assert!(!out.contains("output exceeded"));
+}
+
+#[test]
 fn open_capped_rejects_symlink_outside_allowlist() {
     use std::os::unix::fs::symlink;
     // Create a symlink in /tmp pointing outside the allowlist.
