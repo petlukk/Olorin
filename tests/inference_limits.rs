@@ -7,16 +7,17 @@
 //! model load, so they run in CI) to pin the overflow behaviour that the
 //! generation path must protect against.
 //!
-//! Finding W1 (HIGH, DEFERRED): `Engine::generate` does not bound the prompt
-//! against `max_seq_len` — only the narration callers budget via
-//! `count_prompt_tokens`. The chat path (`router_streaming` / `router.rs`)
-//! and the tool-call follow-up (`router_toolcall`, which embeds raw tool
-//! output) feed unbounded prompts straight into `forward_batch` →
-//! `KvCache::store_batch`, where a Global layer writes at `seq_len + t` with
-//! no bound. Past `max_seq_len` that's an out-of-bounds slice → panic (REPL:
-//! process crash; server: connection thread dies). A user pasting a long
-//! message — not even adversarial — triggers it. See
-//! benchmarks/robustness/FINDINGS.md (wave four).
+//! Finding W1 (HIGH) — FIXED. `Engine::generate` used to feed an unbounded
+//! prompt straight into `forward_batch` → `KvCache::store_batch`, where a
+//! Global layer writes at `seq_len + t` with no bound: past `max_seq_len` an
+//! out-of-bounds slice panicked the thread (REPL: process crash; server:
+//! connection thread). Only the narration callers budgeted via
+//! `count_prompt_tokens`; chat and the tool-call follow-up did not. Now
+//! `generate` applies `decode_budget` centrally — it refuses a window-filling
+//! prompt with a clean `Err` and bounds the decode loop to the remaining
+//! slots, so neither prefill nor decode can write past the cache, for every
+//! caller. The cache-layer tests below still document the raw overflow the
+//! guard protects against. See benchmarks/robustness/FINDINGS.md (wave four).
 
 use olorin::inference::cache::KvCache;
 use olorin::inference::engine::AttnType;
@@ -90,4 +91,24 @@ fn sliding_window_layer_wraps_and_never_overflows() {
     let k = zeros(8);
     let v = zeros(8);
     cache.store_batch(0, &k, &v, 8); // 8 tokens into a 4-slot ring — no panic
+}
+
+#[test]
+fn w1_fix_decode_budget_guards_the_window() {
+    // The central guard `Engine::generate` now applies (model-free arithmetic):
+    // refuse when the prompt fills the window; otherwise bound decode to the
+    // remaining slots so prefill + decode never write past the KV cache.
+    use olorin::inference::generate::decode_budget;
+
+    // Room to spare → bounded by the requested max_tokens.
+    assert_eq!(decode_budget(100, 256, 2048).unwrap(), 256);
+    // Near the edge → bounded by the remaining window, not max_tokens.
+    assert_eq!(decode_budget(2000, 256, 2048).unwrap(), 48);
+    // Exactly one slot left → one token.
+    assert_eq!(decode_budget(2047, 256, 2048).unwrap(), 1);
+    // Prompt fills the window → refuse (no room to generate).
+    assert!(decode_budget(2048, 256, 2048).is_err());
+    // Prompt over the window → refuse (prefill itself would overflow → was the
+    // W1 panic; now a clean Err the callers already handle).
+    assert!(decode_budget(5000, 256, 2048).is_err());
 }

@@ -46,6 +46,27 @@ pub struct Engine {
     /// off for tasks that don't need it (e.g. narration) to cut decode tokens.
     /// Default is arch-gated (see `Engine::load`); `/think` overrides per session.
     pub thinking: bool,
+    /// Context window the KV cache was sized for. `generate` budgets the prompt
+    /// + decode against it so neither prefill nor decode can write past the
+    /// cache (robustness wave-four finding W1).
+    max_seq_len: usize,
+}
+
+/// Decode-token budget given the prompt length, the requested `max_tokens`, and
+/// the context window. Errs when the prompt alone fills (or exceeds) the window
+/// — there is then no room to generate, and prefilling would write past the KV
+/// cache (an out-of-bounds panic in `KvCache::store_batch`). Otherwise returns
+/// how many tokens decode may emit before it would overflow the window.
+///
+/// Pulled out as a pure function so the budget arithmetic is unit-testable
+/// without loading a model (the `generate` path itself is model-gated).
+pub fn decode_budget(n_prompt: usize, max_tokens: usize, max_seq_len: usize) -> Result<usize> {
+    if n_prompt >= max_seq_len {
+        return Err(Error::Inference(format!(
+            "prompt is {n_prompt} tokens, at or over the {max_seq_len}-token context window"
+        )));
+    }
+    Ok(max_tokens.min(max_seq_len - n_prompt))
 }
 
 impl Engine {
@@ -90,6 +111,7 @@ impl Engine {
             // reasoning still correct) — so default off there. x86 keeps it on.
             // `/think` flips it per session either way.
             thinking: cfg!(not(target_arch = "aarch64")),
+            max_seq_len,
         })
     }
 
@@ -131,6 +153,14 @@ impl Engine {
             return Err(Error::Inference("empty prompt after tokenization".into()));
         }
 
+        // W1 guard: refuse a prompt that fills the context window before it can
+        // overflow the KV cache. `forward_batch` (prefill) writes the prompt at
+        // cache positions 0..n_prompt, and decode writes at n_prompt.. — past
+        // `max_seq_len` that's an out-of-bounds slice panic in `store_batch`.
+        // Bounding here makes generation panic-safe for every caller, not just
+        // the ones that pre-budget with `count_prompt_tokens`.
+        let decode_budget = decode_budget(tokens.len(), self.max_tokens, self.max_seq_len)?;
+
         // 3. Reset state for new sequence
         self.state.reset();
 
@@ -161,7 +191,7 @@ impl Engine {
         // Track whether we're inside a Gemma 4 thinking block.
         let mut in_thinking = false;
 
-        for _ in 0..self.max_tokens {
+        for _ in 0..decode_budget {
             let t0 = Instant::now();
             let token_id = sample(
                 &mut logits_snapshot,

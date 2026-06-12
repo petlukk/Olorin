@@ -153,7 +153,7 @@ or refused, never crash.* Demonstrated model-free at the KV-cache layer
 
 | # | Severity | Symptom | Triage | Resolution |
 |---|----------|---------|--------|------------|
-| W1 | **HIGH** | **No context-length guard in `Engine::generate` → over-window prompt panics.** `generate` tokenizes and calls `forward_batch(&tokens)` with **no check** that `tokens.len() ≤ max_seq_len`. In `KvCache::store_batch` a Global layer writes at `pos = seq_len + t` with no bound; past `max_seq_len` the `kb[cache_off..cache_off + stride]` slice range is out of bounds → **panic** (Rust's bounds check prevents memory corruption, but the thread dies — REPL: process crash; server: connection thread). Only the **narration** callers budget via `count_prompt_tokens`; the **chat** path (`router_streaming` `:94`, `router.rs` `:420`) and the **tool-call follow-up** (`router_toolcall` `:75/:77`, which embeds raw tool output — a big `read_file`/`http`/shell result) are **unguarded**. Pasting a long message (~2048+ tokens, not adversarial) triggers it. Reproduced at the cache layer: `w1_global_cache_overflow_panics_past_max_seq_len`. | **bug** | DEFERRED (design, batch). Centralize the budget in `generate`: refuse (or clamp) when `n_prompt ≥ max_seq_len`, and bound the decode loop to `max_seq_len − n_prompt` so neither prefill nor decode can write past the cache — defense in depth, independent of each caller remembering to budget. The "nice" behaviour (trim old history so long conversations keep working) is a follow-on policy choice. Can't be CI-verified here (model-gated) — wants the Pi gate. |
+| W1 | **HIGH** | **No context-length guard in `Engine::generate` → over-window prompt panics.** `generate` tokenized and called `forward_batch(&tokens)` with **no check** that `tokens.len() ≤ max_seq_len`. In `KvCache::store_batch` a Global layer writes at `pos = seq_len + t` with no bound; past `max_seq_len` the `kb[cache_off..cache_off + stride]` slice range is out of bounds → **panic** (Rust's bounds check prevents memory corruption, but the thread dies — REPL: process crash; server: connection thread). Only the **narration** callers budgeted via `count_prompt_tokens`; the **chat** path (`router_streaming` `:94`, `router.rs` `:420`) and the **tool-call follow-up** (`router_toolcall` `:75/:77`, raw tool output) were **unguarded**. Pasting a long message (~2048+ tokens, not adversarial) triggered it. | **bug** | **FIXED.** `generate` now applies a central `decode_budget(n_prompt, max_tokens, max_seq_len)`: it refuses a window-filling prompt with a clean `Err` (callers already handle it) and bounds the decode loop to `max_seq_len − n_prompt`, so neither prefill nor decode can write past the cache — for every caller, not just the ones that pre-budget. Pure budget fn unit-tested (`w1_fix_decode_budget_guards_the_window`); raw overflow still documented by the cache-layer tests. Smart history-trimming (so long conversations keep working rather than erroring) is a follow-on. Guard wiring wants the Pi gate (model-gated). |
 
 ### Robustness checks that PASSED
 
@@ -193,9 +193,8 @@ core protocol/policy, hence batched rather than reflex-patched:
 - **server S1** — read the request body incrementally up to the cap instead of
   eagerly allocating the declared Content-Length.
 - **server S2** — bound connection concurrency (semaphore / worker pool).
-- **inference W1** — central context-window guard in `Engine::generate`
-  (refuse/clamp prompt + bound the decode loop).
 
-Already fixed in-wave: easql `[brackets]` (#1), eaparquet timestamps (#2),
-eajson null contract (#3), `--json` cap + eatime buckets (#4), vault concurrent
-lock (F3), server auth-parser panic (S3).
+Already fixed: easql `[brackets]` (#1), eaparquet timestamps (#2), eajson null
+contract (#3), `--json` cap + eatime buckets (#4) — all shipped in v2.13.0;
+vault concurrent lock (F3); server auth-parser panic (S3); **inference context
+guard (W1)**. Remaining batch backlog: vault F1/F2, server S1/S2.
