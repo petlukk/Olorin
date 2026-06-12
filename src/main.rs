@@ -15,6 +15,13 @@ fn main() {
         run_rune_cli(&args[2..]); // never returns
     }
 
+    // One-shot report subcommand: `olorin report <files…> [-o out.html]` runs
+    // the deterministic file-drop pipeline (pick_rune per file + eacorrelate
+    // across them) and writes one self-contained HTML report. No model.
+    if args.get(1).map(String::as_str) == Some("report") {
+        run_report_cli(&args[2..]); // never returns
+    }
+
     let serve    = args.contains(&"--serve".into());
     let whatsapp = args.contains(&"--whatsapp".into());
     let strict   = args.contains(&"--strict".into());
@@ -74,6 +81,58 @@ fn run_rune_cli(rest: &[String]) -> ! {
             std::process::exit(1);
         }
     }
+}
+
+/// Build a self-contained HTML report from 1–8 files and write it.
+/// Exit codes match `run_rune_cli`: 0 ok, 1 analysis failure, 2 usage.
+fn run_report_cli(rest: &[String]) -> ! {
+    let mut out_path = "olorin-report.html".to_string();
+    let mut paths: Vec<String> = Vec::new();
+    let mut it = rest.iter();
+    while let Some(tok) = it.next() {
+        if tok == "-o" || tok == "--out" {
+            match it.next() {
+                Some(p) => out_path = p.clone(),
+                None => {
+                    eprintln!("missing value after {tok}");
+                    std::process::exit(2);
+                }
+            }
+        } else {
+            paths.push(tok.clone());
+        }
+    }
+    if paths.is_empty() {
+        eprintln!(
+            "usage: olorin report <file> [file…] [-o out.html]\n  \
+             e.g. olorin report syslog.log deploys.csv access.log -o incident.html"
+        );
+        std::process::exit(2);
+    }
+    ffi::init().expect("kernel init failed");
+    let files: Vec<(String, String)> = paths
+        .iter()
+        .map(|p| (basename(p), p.clone()))
+        .collect();
+    match olorin::runes::report::build_report(&files, concat!("v", env!("CARGO_PKG_VERSION"))) {
+        Ok((html, summary)) => {
+            if let Err(e) = std::fs::write(&out_path, &html) {
+                eprintln!("cannot write {out_path}: {e}");
+                std::process::exit(1);
+            }
+            eprint!("{summary}");
+            eprintln!("\nwrote {out_path} ({:.1} KB, self-contained)", html.len() as f64 / 1024.0);
+            std::process::exit(0);
+        }
+        Err(e) => {
+            eprintln!("report failed: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn basename(path: &str) -> String {
+    path.rsplit(['/', '\\']).next().unwrap_or(path).to_string()
 }
 
 /// Return the value immediately after `flag` in args, if present.
