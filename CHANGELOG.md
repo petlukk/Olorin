@@ -8,6 +8,59 @@ order.
 
 ## [Unreleased]
 
+## [2.13.0] — 2026-06-12
+
+Robustness wave one: every rune diffed against independent ground-truth
+tools on real public files (NYC-taxi parquet, GH Archive, Chinook, NASA
+logs). Four findings, zero crashes / OOM / wrong counts — every emitted
+count matched exactly; the findings were presentation, semantics, and
+contract, the class synthetic fixtures structurally cannot surface. All
+four are resolved here.
+
+### Changed
+
+- **eajson null contract now matches eaparquet.** Keys that were JSON
+  `null` in some records were silently dropped — `count` undercounted the
+  non-null values and `null_count` was never reported (a key null in every
+  record vanished). `count` is now total presence (non-null + null),
+  `null_count` is always populated, and statistics are computed over the
+  non-null values. A key null in every record stays omitted (eajson is
+  value-typed, with no schema to declare an all-null column). **Output
+  change:** every eajson field now carries `null_count`, and `count`
+  includes nulls.
+- **eaparquet TIMESTAMP columns render as ISO instants.** They previously
+  reported min/max as the raw int64 epoch count (e.g.
+  `1230764502000000`). Modern Parquet (pyarrow) annotates timestamps only
+  via `LogicalType` — the deprecated `ConvertedType` is absent — so the
+  footer reader now parses the `LogicalType` union (time unit +
+  `isAdjustedToUTC`). Columns become `kind=timestamp` with ISO min/max,
+  unit-aware, with a trailing `Z` only when UTC-adjusted. Verified on the
+  3,066,766-row NYC-taxi file.
+
+### Fixed
+
+- **SQL Server / SQLite `[bracket]`-quoted identifiers are stripped.**
+  easql reported `[Album]` instead of `Album` on the real Chinook SQLite
+  dump, which broke eadiff's cross-dialect name matching. Counts were
+  always correct.
+- **Structured `--json` output is no longer rejected by the 32 KB cap.**
+  That cap bounds what reaches the LLM context, but `--json` output is
+  never narrated — it goes to stdout or another rune's input. Oversized
+  machine output (e.g. an eatime series over GH Archive) was being replaced
+  by an `output exceeded` error, corrupting the
+  `olorin rune … --json > out.json` contract. Structured JSON now passes
+  through whole; only the human-readable path stays capped.
+- **eatime series bucket count is hard-capped.** A pathological timestamp
+  span (one outlier instant years or millennia from the rest, as in real
+  GH Archive data) could explode the series to 100 k+ buckets. The count is
+  now bounded regardless of span.
+
+### Internal
+
+- `storage::parquet` split: the Thrift footer structs and decoders move to
+  a new `storage::parquet_meta` module so both files stay under the
+  500-line cap.
+
 ## [2.12.1] — 2026-06-12
 
 ### Fixed
