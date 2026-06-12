@@ -46,7 +46,7 @@ pub struct Bars<'a> {
 
 /// Round up to a "nice" axis ceiling (1, 2, or 5 × 10^k) so y-labels read
 /// cleanly instead of landing on 5873.
-fn nice_ceil(x: f32) -> f32 {
+pub(super) fn nice_ceil(x: f32) -> f32 {
     if x <= 0.0 {
         return 1.0;
     }
@@ -315,7 +315,7 @@ pub fn render_series(
 /// Downsample `counts` to `cols` peak-per-column heights. Uses `col_reduce`
 /// (returns the max envelope) when there is something to reduce; otherwise
 /// the series already fits and is returned as-is.
-fn columnize(counts: &[f32], cols: usize) -> Vec<f32> {
+pub(super) fn columnize(counts: &[f32], cols: usize) -> Vec<f32> {
     if counts.len() <= cols {
         return counts.to_vec();
     }
@@ -336,14 +336,14 @@ fn columnize(counts: &[f32], cols: usize) -> Vec<f32> {
 }
 
 /// One bool per source category: true if that bucket was flagged as a spike.
-fn spike_flags(out: &RuneOutput) -> Vec<bool> {
+pub(super) fn spike_flags(out: &RuneOutput) -> Vec<bool> {
     out.categories
         .iter()
         .map(|c| out.anomalies.iter().any(|a| a.bucket == c.name))
         .collect()
 }
 
-fn robust_median(counts: &[f32]) -> f32 {
+pub(super) fn robust_median(counts: &[f32]) -> f32 {
     if counts.is_empty() {
         return 0.0;
     }
@@ -359,7 +359,7 @@ fn robust_median(counts: &[f32]) -> f32 {
 
 /// Four evenly-spaced x-axis ticks from the source category names,
 /// shortened to keep the axis readable.
-fn x_ticks(out: &RuneOutput, cols: usize, n_src: usize) -> Vec<XTick> {
+pub(super) fn x_ticks(out: &RuneOutput, cols: usize, n_src: usize) -> Vec<XTick> {
     // A span crossing midnight needs the date in labels, else HH:MM-only
     // ticks read backwards (18:30 → 04:30). Detect it from first vs last
     // ISO date prefix.

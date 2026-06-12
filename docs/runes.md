@@ -22,7 +22,7 @@ Output is wrapped in `<rune_output untrusted="true">...</rune_output>` and
 runs through the inbound safety scan before reaching the LLM turn — file-derived
 bytes are always treated as data, never instructions.
 
-The seven v1 runes:
+The eight runes:
 
 - [`eacrunch`](#eacrunch--csv-summarizer) — CSV summarizer
 - [`eajson`](#eajson--json-lines-summarizer) — JSON Lines summarizer
@@ -30,11 +30,13 @@ The seven v1 runes:
 - [`ealog`](#ealog--log-severity-scanner) — log severity scanner
 - [`eatime`](#eatime--iso-8601-timestamp-histogram) — timestamp histogram + chronological spike detection
 - [`easql`](#easql--sql-dump-summarizer) — SQL-dump summarizer (`pg_dump` / `mysqldump`)
+- [`eacorrelate`](#eacorrelate--cross-file-lag-correlation) — cross-file lag correlation
 - [`eadiff`](#eadiff--structural-delta-between-two-rune-runs) — structural delta between two rune runs
 
 The `--json` flag on any rune emits the same data as machine-readable JSON Lines
 for piping into another rune. See [`--json` mode](#--json-mode) below for the
-chaining contract.
+chaining contract. `olorin report <files…>` renders the same pipeline as one
+self-contained HTML file — see [HTML reports](#html-reports).
 
 ---
 
@@ -500,3 +502,22 @@ entries) are blocked regardless of format.
 - **Narration**: the model gets a token budget of ~1248 prompt + 768 decode.
   Outputs over that skip narration with a clear notice — the kernel summary
   is shown either way.
+
+## HTML reports
+
+```
+olorin report syslog.log deploys.csv access.log -o incident.html
+```
+
+Runs the deterministic file-drop pipeline — `pick_rune` per file, `eacorrelate`
+across them when two or more carry timestamps — and writes **one self-contained
+HTML file**: inline CSS, inline SVG charts, zero external assets, zero
+JavaScript. It opens anywhere, prints cleanly, and survives being emailed,
+which makes it the artifact to attach to an incident ticket.
+
+Structure mirrors the investigation: cross-file correlation findings first
+(conclusion before evidence), then one section per file with its stats,
+time-series chart (same `col_reduce`-kernel column envelope as the terminal
+block bars — every surface agrees about the data; anomaly buckets tinted red),
+and flagged spikes. The model is never involved: same inputs, same report.
+Every file-derived string is HTML-escaped.
