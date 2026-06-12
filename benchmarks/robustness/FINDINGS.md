@@ -96,3 +96,47 @@ it didn't wait for the batch. **F1/F2 remain DEFERRED**: they need atomic-commit
 (journal or temp+rename with an fsync barrier before the header flip), which
 changes the on-disk write protocol — a deliberate design decision, batched with
 later waves exactly as wave one deferred its contract-changing findings.
+
+---
+
+# Wave three — server abuse
+
+Target: the Web UI / WhatsApp gateway (`interface/server*.rs`, `std::net`,
+thread-per-connection, no tokio). Threat model matters here: the server binds
+`127.0.0.1` by default (local-only); it is network-reachable only when
+`OLORIN_BIND` is non-loopback (the wifi/Pi mode), and that path is **fail-closed**
+— it refuses to start without `OLORIN_AUTH_TOKEN`, and `AuthGate::authorized`
+gates every request before dispatch. Oracle = a property: *no attacker-reachable
+request may panic a thread, exhaust memory, or authorize without the token.*
+
+| # | Severity | Symptom | Triage | Resolution |
+|---|----------|---------|--------|------------|
+| S3 | **MED** (pre-auth panic) | **Auth parser panics on a non-UTF-8-boundary header slice.** `bearer_token`/`cookie_token` sliced fixed byte ranges (`line[..14]`, `line[..7]`, `val[..7]`) on attacker-controlled header lines; a multibyte char straddling byte 7 or 14 panics the slice. `authorized` runs on every request *before* auth, so this is reachable **unauthenticated** on an exposed server — a crafted header kills the connection thread (process survives; the thread is isolated). | **bug** | **FIXED.** Switched to boundary-safe prefix checks (`str::get(..n).is_some_and(\|p\| p.eq_ignore_ascii_case(..))`) — a non-boundary slice now simply doesn't match instead of panicking. Regression: `tests/server_abuse.rs` (`s3_*`). |
+| S1 | MED | **Content-Length eager allocation → memory amplification.** `read_body` does `vec![0u8; content_len]` — it allocates the full *declared* Content-Length (≤ `OLORIN_MAX_UPLOAD`, default **128 MB**) before reading any body. A request that declares 128 MB and sends nothing allocates 128 MB for free; combined with S2 (unbounded threads), a flood of such requests is N×128 MB → OOM (a Pi has 8 GB). The 10 s read timeout bounds *duration* but not the concurrent allocation. Behind auth (body read is post-`authorized`). | **bug** | DEFERRED (design). Read the body incrementally up to the cap (grow the buffer as bytes arrive) instead of trusting Content-Length for the allocation size; optionally a global in-flight-body memory budget. |
+| S2 | MED | **Unbounded thread-per-connection.** The accept loop spawns a 16 MB-stack thread per connection with no cap / pool. Thread-spawn + header read happen *pre-auth*, so an unauthenticated connection flood (when exposed) exhausts threads/address space. | **bug** | DEFERRED (design). Bound concurrency with a connection semaphore or a small worker pool; reject or queue beyond the cap. |
+
+### Robustness checks that PASSED
+
+- **Auth gate logic is solid.** Constant-time token compare (`ct_eq`), fail-closed
+  on a non-loopback bind without a token, unparseable bind host treated as
+  non-loopback, all three credential channels checked (Bearer / cookie / query),
+  bootstrap cookie reflects the *configured* token (no reflection), `HttpOnly` +
+  `SameSite=Strict`. Covered by `tests/server_auth_gate.rs`; S3 was a parsing
+  panic, not an auth-logic bypass.
+- **Body cap + read timeout exist.** `OLORIN_MAX_UPLOAD` rejects an over-cap
+  declared length outright, and a 10 s socket read timeout bounds slowloris on
+  both the header read and the body read (the thread can't hang forever).
+- **Malformed request heads don't bypass or crash dispatch.** Non-UTF-8 request
+  bytes return early; missing method/path use safe defaults; `parse_content_length`
+  is `unwrap_or(0)` (overflow/garbage → 0).
+
+## Wave-three verdict
+
+The network-facing design is **fail-closed and the auth logic is sound** — the
+real exposure only exists in the opt-in `OLORIN_BIND` mode. One genuine
+pre-auth defect (S3, a parser panic on malformed input) is **FIXED in-wave**
+(small, self-contained, reachable unauthenticated — same posture as wave two's
+F3 lock fix). Two availability findings (S1 memory amplification, S2 unbounded
+threads) are real but require the exposed mode + are bounded by the existing cap
+and timeout; both are **DEFERRED** as request-read / accept-loop design changes,
+to be batched with the other deferred findings (vault F1/F2).
