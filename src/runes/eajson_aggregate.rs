@@ -30,10 +30,21 @@ pub struct Aggregator {
     text_tops:    HashMap<String, HashMap<String, u32>>,
     text_counts:  HashMap<String, u32>,
     bool_counts:  HashMap<String, (u32, u32)>,
+    /// Per-key count of explicit JSON `null` values. Tracked separately
+    /// from the typed value maps so a key's reported `count` is its total
+    /// presence (non-null + null) with `null_count` broken out — the same
+    /// contract eaparquet emits. A key that is `null` in *every* record is
+    /// not registered as a field (eajson is value-typed, with no schema to
+    /// declare an all-null column); only keys with ≥1 typed value appear.
+    null_counts:  HashMap<String, u64>,
 }
 
 impl Aggregator {
     pub fn new() -> Self { Self::default() }
+
+    fn record_null(&mut self, full_key: &str) {
+        *self.null_counts.entry(full_key.to_string()).or_insert(0) += 1;
+    }
 }
 
 pub fn process_line(
@@ -120,6 +131,11 @@ pub fn process_line(
             advance_cursors(colons, co_cur, val_end);
             if kind != ScalarKind::Skip {
                 ingest_scalar(&full_key, val_bytes, kind, agg);
+            } else if val_bytes == b"null" {
+                // Explicit null — record it so the key's count reflects total
+                // presence and null_count is reported. (Empty/garbage scalars
+                // also classify as Skip but are not nulls, so they're ignored.)
+                agg.record_null(&full_key);
             }
         }
     }
@@ -212,8 +228,17 @@ pub fn build_field_stats(agg: &Aggregator) -> Vec<FieldStats> {
 
 fn make_field(k: &str, kind: KeyType, agg: &Aggregator) -> FieldStats {
     use crate::kernels::ffi;
+    // Explicit-null tally for this key. `count` reports total presence
+    // (non-null + null); `null_count` is always populated (Some, possibly 0)
+    // so the field is self-consistent and matches eaparquet's contract.
+    // Stats (min/max/mean/sum, top values, true/false) stay computed over the
+    // non-null values only. `blank.count` defaults to `nulls` so a Mixed key
+    // (whose typed values are intentionally untracked) never reports
+    // null_count > count.
+    let nulls = agg.null_counts.get(k).copied().unwrap_or(0);
     let blank = FieldStats {
-        name: k.to_string(), kind: FieldKind::Mixed, count: 0, null_count: None,
+        name: k.to_string(), kind: FieldKind::Mixed, count: nulls,
+        null_count: Some(nulls),
         numeric: None, text: None, bool: None, timestamp: None,
     };
     match kind {
@@ -228,7 +253,7 @@ fn make_field(k: &str, kind: KeyType, agg: &Aggregator) -> FieldStats {
             };
             let mean = if count > 0 { sum / count as f64 } else { 0.0 };
             FieldStats {
-                kind: FieldKind::Number, count: count as u64,
+                kind: FieldKind::Number, count: count as u64 + nulls,
                 numeric: Some(NumericStats {
                     min: min_v, max: max_v,
                     mean, sum,
@@ -246,7 +271,7 @@ fn make_field(k: &str, kind: KeyType, agg: &Aggregator) -> FieldStats {
             }
             let total = agg.text_counts.get(k).copied().unwrap_or(0);
             FieldStats {
-                kind: FieldKind::Timestamp, count: total as u64,
+                kind: FieldKind::Timestamp, count: total as u64 + nulls,
                 timestamp: Some(TimestampStats {
                     min: min_s.cloned().unwrap_or_else(|| "?".to_string()),
                     max: max_s.cloned().unwrap_or_else(|| "?".to_string()),
@@ -265,7 +290,7 @@ fn make_field(k: &str, kind: KeyType, agg: &Aggregator) -> FieldStats {
                 .collect();
             let total = agg.text_counts.get(k).copied().unwrap_or(0);
             FieldStats {
-                kind: FieldKind::Text, count: total as u64,
+                kind: FieldKind::Text, count: total as u64 + nulls,
                 text: Some(TextStats { unique: pairs.len() as u64, top }),
                 ..blank
             }
@@ -273,7 +298,7 @@ fn make_field(k: &str, kind: KeyType, agg: &Aggregator) -> FieldStats {
         KeyType::Bool => {
             let (t, f) = agg.bool_counts.get(k).copied().unwrap_or((0, 0));
             FieldStats {
-                kind: FieldKind::Bool, count: (t + f) as u64,
+                kind: FieldKind::Bool, count: (t + f) as u64 + nulls,
                 bool: Some(BoolStats {
                     true_count: t as u64, false_count: f as u64,
                 }),

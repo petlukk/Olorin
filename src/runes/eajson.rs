@@ -222,7 +222,11 @@ fn format_text(out: &RuneOutput) -> String {
     for f in &out.fields {
         if f.kind == FieldKind::Text {
             let t = f.text.as_ref().expect("text kind has text stats");
-            if f.count > 0 && t.unique == f.count {
+            // Compare unique against the non-null count: `count` now includes
+            // nulls, but the "every value distinct" noise test is about the
+            // actual (non-null) text values.
+            let non_null = f.count - f.null_count.unwrap_or(0);
+            if non_null > 0 && t.unique == non_null {
                 suppressed_count += 1;
                 continue;
             }
