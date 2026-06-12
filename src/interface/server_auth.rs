@@ -105,10 +105,13 @@ fn matches(presented: Option<String>, want: &[u8]) -> bool {
 
 fn bearer_token(request: &str) -> Option<String> {
     for line in request.lines() {
-        if line.len() >= 14 && line[..14].eq_ignore_ascii_case("authorization:") {
+        // `str::get(..n)` returns None when n isn't a UTF-8 char boundary, so a
+        // header line with a multibyte char straddling byte 14 can't panic the
+        // slice (it just won't match) — `line[..14]` would. Reachable pre-auth.
+        if line.get(..14).is_some_and(|p| p.eq_ignore_ascii_case("authorization:")) {
             let val = line[14..].trim();
             // Case-insensitive "Bearer " prefix.
-            if val.len() >= 7 && val[..7].eq_ignore_ascii_case("bearer ") {
+            if val.get(..7).is_some_and(|p| p.eq_ignore_ascii_case("bearer ")) {
                 let t = val[7..].trim();
                 if !t.is_empty() {
                     return Some(t.to_string());
@@ -121,7 +124,7 @@ fn bearer_token(request: &str) -> Option<String> {
 
 fn cookie_token(request: &str) -> Option<String> {
     for line in request.lines() {
-        if line.len() >= 7 && line[..7].eq_ignore_ascii_case("cookie:") {
+        if line.get(..7).is_some_and(|p| p.eq_ignore_ascii_case("cookie:")) {
             for crumb in line[7..].split(';') {
                 if let Some(v) = crumb.trim().strip_prefix("olorin_auth=") {
                     if !v.is_empty() {
