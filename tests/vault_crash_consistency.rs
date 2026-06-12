@@ -11,12 +11,12 @@
 //!    the in-flight block — never silently lose or corrupt a previously
 //!    committed block, and never panic."
 //!
-//! Several tests below are **characterization tests for KNOWN-UNFIXED
-//! findings** (named `finding_fN_*`): they assert the *current* (defective)
-//! behaviour so the defect is executable and CI tells us the moment it
-//! changes. When the underlying fix lands (atomic append, advisory locking),
-//! invert the marked assertion. The `passes_*` tests assert correct
-//! behaviour that already holds.
+//! F3 (concurrent-open nonce reuse) is FIXED — an exclusive advisory file
+//! lock now rejects a second opener; `f3_fixed_*` asserts that. F1 (crash
+//! mid-append) is still a **characterization test for a KNOWN-UNFIXED
+//! finding** (`finding_f1_*`): it asserts the *current* defective behaviour so
+//! CI tells us the moment it changes — invert it when atomic append lands. The
+//! `passes_*` tests assert correct behaviour that already holds.
 //!
 //! See benchmarks/robustness/FINDINGS.md (wave two) for the write-up.
 
@@ -97,44 +97,35 @@ fn finding_f1_crash_mid_append_loses_all_committed_blocks() {
 // ── Finding F3: no file locking → concurrent append = silent loss + nonce reuse ─
 
 #[test]
-fn finding_f3_concurrent_append_silently_drops_data_and_reuses_nonce() {
+fn f3_fixed_concurrent_open_is_rejected_by_the_lock() {
     ffi::init().unwrap();
     let dir = unique_dir("f3");
     make_vault_with_blocks(&dir, 2);
 
-    // Two handles on the same vault.bin — models two Olorin processes (e.g.
-    // REPL + server) opened against the same vault dir. There is no flock.
+    // First handle takes the exclusive advisory lock and holds it.
     let mut a = Vault::open_with(&dir, PASS, Params::TEST_FAST).unwrap();
-    let mut b = Vault::open_with(&dir, PASS, Params::TEST_FAST).unwrap();
     assert_eq!(a.block_count(), 2);
-    assert_eq!(b.block_count(), 2);
 
-    // Each appends one block. Both compute nonce_counter = 2 and block_offset =
-    // (post-2-blocks offset): B's write lands on top of A's.
-    a.append(b"user", b"AAAA-secret-from-process-A").unwrap();
-    b.append(b"user", b"BBBB-secret-from-process-B").unwrap();
-    drop(a);
-    drop(b);
-
-    let mut v = Vault::open_with(&dir, PASS, Params::TEST_FAST).unwrap();
-
-    // FINDING F3 (HIGH): two appends happened, but the reopened vault reports
-    // only THREE blocks — one append vanished with no error — and block 2 is
-    // the last writer's. Both blocks were sealed at nonce_counter=2 with the
-    // same key (nonce reuse: a confidentiality break for the lost block).
-    assert_eq!(
-        v.block_count(),
-        3,
-        "FINDING F3 reproduced: two concurrent appends, only one block survived \
-         (the other was silently overwritten). Invert when advisory locking lands."
-    );
-    let surviving = v.decrypt_block(2).unwrap();
-    assert_eq!(surviving, b"user: BBBB-secret-from-process-B\n");
-    // A's append is gone — silent data loss, no error ever surfaced.
+    // F3 FIX: a second open of the same vault dir (a second process, e.g. REPL
+    // alongside the server) is now rejected instead of silently racing into
+    // nonce reuse + data loss.
+    let second = Vault::open_with(&dir, PASS, Params::TEST_FAST);
     assert!(
-        !v.decrypt_block(2).unwrap().windows(4).any(|w| w == b"AAAA"),
-        "process A's committed message was silently lost"
+        second.is_err(),
+        "F3 fix: a concurrent open must be rejected while the vault is held"
     );
+
+    // A keeps working under its lock.
+    a.append(b"user", b"AAAA-from-the-only-writer").unwrap();
+    assert_eq!(a.block_count(), 3);
+
+    // The lock releases on Drop, so a fresh open afterwards succeeds and sees
+    // the committed append — no stale lock left behind.
+    drop(a);
+    let mut c = Vault::open_with(&dir, PASS, Params::TEST_FAST)
+        .expect("lock released on drop — vault reopens cleanly");
+    assert_eq!(c.block_count(), 3);
+    assert_eq!(c.decrypt_block(2).unwrap(), b"user: AAAA-from-the-only-writer\n");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

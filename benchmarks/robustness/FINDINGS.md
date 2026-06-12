@@ -67,7 +67,7 @@ is no temp-file+rename, no journal/WAL, no recovery path, and no file lock.
 |---|----------|---------|--------|------------|
 | F1 | **HIGH** | **Crash mid-append destroys ALL prior blocks.** The new block overwrites the committed index before the header commits; on reopen the header still points at that region, the header/index MAC fails, and the vault refuses to open. A single interrupted append loses the entire history, not just the in-flight message. Reproduced: `finding_f1_crash_mid_append_loses_all_committed_blocks`. | **bug** | DEFERRED (design). Needs atomic commit — write block+index to a temp region / journal, fsync, then flip the header by rename or a double-buffered header. Changes the on-disk write protocol → Peter's call. |
 | F2 | MEDIUM | **No fsync ordering.** Block, index, and header can reach disk in any order (only the final header is fsync'd; the index `flush()` is a durability no-op). Write reordering can durably commit a header that points at not-yet-durable block/index bytes — same failure class as F1 without an explicit crash. | **bug** | DEFERRED. Folded into the F1 atomic-commit redesign (barrier the block+index fsync *before* the header fsync). |
-| F3 | **HIGH** | **No file locking → concurrent append = silent data loss + nonce reuse.** Two handles on the same vault dir (e.g. REPL + server) each open at block_count=N, then each append at the same block_offset and the same `nonce_counter=N`. The second write clobbers the first (one committed message silently lost, no error) and the same key+nonce seals two different plaintexts (ChaCha20 two-time-pad → confidentiality break). Reproduced: `finding_f3_concurrent_append_silently_drops_data_and_reuses_nonce`. | **bug** | DEFERRED (design). Needs advisory locking (`flock`/`O_EXCL` lockfile) on the vault dir, or a single-writer guarantee. Relates to the security-audit "rollback→nonce-reuse" note. Peter's call. |
+| F3 | **HIGH** | **No file locking → concurrent append = silent data loss + nonce reuse.** Two handles on the same vault dir (e.g. REPL + server) each open at block_count=N, then each append at the same block_offset and the same `nonce_counter=N`. The second write clobbers the first (one committed message silently lost, no error) and the same key+nonce seals two different plaintexts (ChaCha20 two-time-pad → confidentiality break). | **bug** | **FIXED.** `Vault::open*` now takes an **exclusive advisory file lock** (`flock` on unix / `LockFileEx` on Windows, via `platform::lock::try_lock_file_exclusive`) held for the Vault's lifetime; a concurrent open is rejected with "vault is already open by another Olorin process". Auto-released on Drop/process death (no stale lock). Test `f3_fixed_concurrent_open_is_rejected_by_the_lock`. |
 
 ### Robustness checks that PASSED
 
@@ -88,11 +88,14 @@ is no temp-file+rename, no journal/WAL, no recovery path, and no file lock.
 Two HIGH findings (F1 total-loss-on-crash, F3 silent-loss + nonce-reuse on
 concurrent open) plus one MEDIUM (F2 fsync ordering), all reproduced by tests.
 The store fails *closed* against corruption and tampering (good — no silent
-wrong data, no panics), but has **no atomic-commit and no concurrency control**,
-so an interrupted or concurrent write can lose committed history or reuse a
-nonce. Both HIGH fixes change the on-disk write protocol (atomic append;
-advisory locking) and are deferred for a deliberate design decision, exactly as
-wave one deferred its contract-changing findings.
+wrong data, no panics).
+
+**F3 is FIXED** in-wave — it was self-contained (an exclusive advisory file
+lock, no on-disk format change) and a confidentiality issue (nonce reuse), so
+it didn't wait for the batch. **F1/F2 remain DEFERRED**: they need atomic-commit
+(journal or temp+rename with an fsync barrier before the header flip), which
+changes the on-disk write protocol — a deliberate design decision, batched with
+later waves exactly as wave one deferred its contract-changing findings.
 
 ---
 
