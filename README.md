@@ -34,6 +34,7 @@ schema and `--json` chaining contract are stable across releases.
 ./olorin                                          # interactive REPL
 ./olorin rune eajson ~/access.log.jsonl           # one-shot: rune output to stdout
 ./olorin rune eatime --bucket series --json x.log > out.json   # clean JSON for jq/matplotlib
+./olorin report app.log deploys.csv -o report.html             # self-contained HTML report
 ./olorin --serve                                  # HTTP + web UI on :8080
 ./olorin --strict                                 # LLM disabled (~25ms startup)
 ```
@@ -145,7 +146,7 @@ The bare `timestamp_scan` kernel hits **6.34 GB/s on Ryzen 7700X (SSE2)** and
 **1.80 GB/s on Pi 5 (NEON)** in isolation — see
 [`benchmarks/results.md`](benchmarks/results.md).
 
-Seven v1 runes:
+Eight runes:
 
 - **`eacrunch`** — CSV summarizer (rows, columns, per-column stats + top-N)
 - **`eajson`** — JSON Lines summarizer (systemd / container / web-server shapes)
@@ -153,10 +154,17 @@ Seven v1 runes:
 - **`ealog`** — log severity scanner (DEBUG/INFO/WARN/ERROR/FATAL + sample lines)
 - **`eatime`** — timestamp histogram (ISO-8601 + Apache/nginx CLF); hour-of-day, weekday, or chronological `series` buckets with robust spike detection + charts
 - **`easql`** — SQL-dump summarizer (`pg_dump` / `mysqldump`): dialect, table count, per-table row + column counts
+- **`eacorrelate`** — cross-file lag correlation: drop 2–8 timestamped files and find which event streams move together, at what lag ("errors follow deploys by 4 min")
 - **`eadiff`** — structural delta between any two `--json` rune outputs
 
 See **[`docs/runes.md`](docs/runes.md)** for the full catalog with per-rune
 samples, limits, and the chaining contract.
+
+**Shareable reports.** `olorin report <files…> -o out.html` runs the same
+deterministic pipeline (a rune per file, `eacorrelate` across them) and writes
+**one self-contained HTML file** — inline charts, zero external assets, zero
+JavaScript — that opens anywhere and prints cleanly. In the web UI, a
+"📄 download report" link appears under every file-drop analysis.
 
 ## The Vault
 
