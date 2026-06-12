@@ -109,15 +109,14 @@ fn encrypt_decrypt_roundtrip_still_works_after_zeroize() {
     assert_eq!(&buf[..], plaintext, "decrypt does not roundtrip");
 }
 
-/// Finding #8: block_count must not wrap.  In v2 the per-block nonce is
-/// `nonce_seed_8 || u32_le(block_count)`, with the high bit of the
-/// counter slot reserved for the header-MAC domain — so the guard now
-/// fires at 0x80000000 (not u32::MAX).  Either way: tampering the header
-/// to claim a near-exhausted counter must not let the next append
-/// silently reuse a nonce.
+/// Finding #8 (v4): a tampered block_count must never let the next append
+/// silently reuse a nonce. In v4 the header is MAC'd in two slots, so setting
+/// block_count to a near-exhausted value in BOTH slots invalidates both MACs
+/// and the vault is rejected at open — it can never reach a tampered-max state
+/// from which it would append. (The `>= 0x8000_0000` wrap guard in flush_block
+/// remains as a backstop for the legitimately-exhausted case.)
 #[test]
-fn vault_refuses_to_append_when_counter_is_at_max() {
-    use std::io::{Seek, SeekFrom, Write};
+fn tampered_block_count_cannot_force_nonce_reuse() {
     olorin::kernels::ffi::init().unwrap();
     let dir = unique_dir("counter_wrap");
 
@@ -126,35 +125,19 @@ fn vault_refuses_to_append_when_counter_is_at_max() {
         vault.append(b"user", b"hello once").expect("first append");
     }
 
-    // Tamper the header: block_count is bytes 6..10 (u32 LE) per
-    // VaultHeader::to_bytes. Set it to u32::MAX.
-    let vault_path = dir.join("vault.bin");
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&vault_path)
-        .expect("reopen file");
-    file.seek(SeekFrom::Start(6)).expect("seek block_count");
-    file.write_all(&u32::MAX.to_le_bytes())
-        .expect("tamper count");
-    drop(file);
+    // block_count is bytes 6..10 in each 64-byte slot. Set it to u32::MAX in
+    // both slots, invalidating both header MACs.
+    let path = dir.join("vault.bin");
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes[6..10].copy_from_slice(&u32::MAX.to_le_bytes());
+    bytes[64 + 6..64 + 10].copy_from_slice(&u32::MAX.to_le_bytes());
+    std::fs::write(&path, &bytes).unwrap();
 
-    // Re-open: the vault now thinks it has 2^32 - 1 blocks.
-    // Index parsing will fail because we didn't actually write those
-    // blocks — that's fine; the test only cares about post-open
-    // append refusing.
     let reopened = Vault::open_with(&dir, b"test-passphrase", olorin::storage::argon2id::Params::TEST_FAST);
-    if let Ok(mut vault) = reopened {
-        let result = vault.append(b"user", b"hello twice");
-        assert!(
-            result.is_err(),
-            "append at u32::MAX must refuse (would reuse nonce); got: {:?}",
-            result
-        );
-    }
-    // Either reopen-failure (index parse) or append-failure is
-    // acceptable — both mean the wrap can't silently produce a
-    // nonce-reused ciphertext.
+    assert!(
+        reopened.is_err(),
+        "a block_count tampered to u32::MAX in both slots must be rejected at open"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -183,15 +166,16 @@ fn v2_block_tag_byte_flip_detected_at_decrypt() {
     let dir = unique_dir("block_tag");
     make_three_block_vault(&dir);
 
-    // Read entry 0 to find (offset, length) of block 0.
+    // v4: record 0 is at RECORDS_START (2×64-byte header slots). Its index
+    // entry occupies the first 288 bytes; `length` (ct+16) is entry bytes 8..12.
+    // The ciphertext follows the entry; the 16-byte tag is the last of it.
     let path = dir.join("vault.bin");
     let bytes = std::fs::read(&path).unwrap();
-    let index_offset = u64::from_le_bytes(bytes[10..18].try_into().unwrap()) as usize;
-    let off0 = u64::from_le_bytes(bytes[index_offset..index_offset + 8].try_into().unwrap());
-    let len0 = u32::from_le_bytes(bytes[index_offset + 8..index_offset + 12].try_into().unwrap())
-        as u64;
-    // Flip the *first* tag byte (= 16 bytes before block end).
-    let tag_byte_off = off0 + len0 - 16;
+    let entry0 = 128usize; // RECORDS_START
+    let len0 = u32::from_le_bytes(bytes[entry0 + 8..entry0 + 12].try_into().unwrap()) as u64;
+    let ct0_off = (entry0 + 288) as u64;
+    // Flip the *first* tag byte (= 16 bytes before the record's ciphertext end).
+    let tag_byte_off = ct0_off + len0 - 16;
 
     let mut f = std::fs::OpenOptions::new()
         .read(true)
@@ -212,10 +196,11 @@ fn v2_block_tag_byte_flip_detected_at_decrypt() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// `index_offset` (bytes 10..18) is part of the header MAC input.  A flip
-/// changes the prefix the tag was computed over, so open MUST fail.
+/// `index_offset` / data-end (bytes 10..18) is in the header MAC input. v4 has
+/// two slots, so flipping it in BOTH invalidates both MACs → open MUST fail.
+/// (Flipping just one is recovered from the other — see vault_header_tamper.)
 #[test]
-fn header_index_offset_flip_detected_at_open() {
+fn header_data_end_flip_in_both_slots_rejected_at_open() {
     olorin::kernels::ffi::init().unwrap();
     let dir = unique_dir("idx_off");
     make_three_block_vault(&dir);
@@ -223,10 +208,11 @@ fn header_index_offset_flip_detected_at_open() {
     let path = dir.join("vault.bin");
     let mut bytes = std::fs::read(&path).unwrap();
     bytes[10] ^= 0x01;
+    bytes[64 + 10] ^= 0x01;
     std::fs::write(&path, &bytes).unwrap();
 
     let result = Vault::open_with(&dir, b"test-passphrase", olorin::storage::argon2id::Params::TEST_FAST);
-    assert!(result.is_err(), "index_offset tamper must be rejected");
+    assert!(result.is_err(), "data-end tamper in both slots must be rejected");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
