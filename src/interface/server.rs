@@ -5,7 +5,7 @@ use std::io::{Read, Write};
 use std::fmt::Write as FmtWrite;
 use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use crate::core::router::DispatchContext;
 use crate::interface::server_auth::AuthGate;
 use crate::interface::term_stream;
@@ -31,6 +31,26 @@ pub fn get_chat_html() -> String {
 }
 
 // ── Web server ────────────────────────────────────────────────────────────────
+
+/// Cap on simultaneously-handled connections (wave-three S2): the accept loop
+/// spawns a 16 MB-stack thread per connection, so without a bound a flood
+/// exhausts threads. Override with `OLORIN_MAX_CONN` (default 64).
+fn max_connections() -> usize {
+    std::env::var("OLORIN_MAX_CONN")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(64)
+}
+
+/// Decrements the in-flight counter on drop, so a connection slot is released
+/// even if `handle_connection` panics.
+struct ConnGuard(Arc<AtomicUsize>);
+impl Drop for ConnGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
 
 pub fn run(port: u16, model_arg: Option<&str>, strict: bool, audit_path: Option<&str>) {
     let api_key = std::env::var("ANTHROPIC_API_KEY").ok();
@@ -81,6 +101,9 @@ pub fn run(port: u16, model_arg: Option<&str>, strict: bool, audit_path: Option<
         println!("[Olorin] Web UI at http://{addr}  (token required — first visit: http://{addr}/?token=$OLORIN_AUTH_TOKEN)");
     }
 
+    let max_conn = max_connections();
+    let active = Arc::new(AtomicUsize::new(0));
+
     for stream in listener.incoming() {
         let mut stream = match stream {
             Ok(s) => s,
@@ -88,16 +111,32 @@ pub fn run(port: u16, model_arg: Option<&str>, strict: bool, audit_path: Option<
         };
         let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
         let _ = stream.set_nodelay(true);
+
+        // S2: refuse beyond the concurrency cap instead of spawning an
+        // unbounded number of 16 MB-stack threads. `fetch_add` then re-check is
+        // race-safe enough for a soft cap (a small transient overshoot at most).
+        if active.fetch_add(1, Ordering::AcqRel) >= max_conn {
+            active.fetch_sub(1, Ordering::AcqRel);
+            let _ = stream.write_all(
+                b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            );
+            continue;
+        }
+        let guard = ConnGuard(active.clone());
+
         let ctx = ctx.clone();
         let teleported = teleported.clone();
         let auth = auth.clone();
 
-        // 16 MB matches the main thread's PE stack reserve. The
-        // dispatch path nested below this can hit the forward pass,
-        // which busts std::thread's 2 MB default on Windows.
+        // 16 MB matches the main thread's PE stack reserve. The dispatch path
+        // can hit the forward pass, which busts std::thread's 2 MB Windows
+        // default. `guard` moves into the closure → released on both spawn
+        // success (thread end) and failure (closure dropped), so the slot
+        // always frees.
         let _ = std::thread::Builder::new()
             .stack_size(16 * 1024 * 1024)
             .spawn(move || {
+                let _guard = guard;
                 handle_connection(&mut stream, ctx, &teleported, &auth);
             });
     }

@@ -16,19 +16,32 @@ fn max_body_size() -> usize {
         .unwrap_or(128 * 1024 * 1024)
 }
 
-pub(crate) fn read_body(stream: &mut std::net::TcpStream, req: &str, buf: &[u8], n: usize) -> Vec<u8> {
+pub fn read_body(stream: &mut std::net::TcpStream, req: &str, buf: &[u8], n: usize) -> Vec<u8> {
     let content_len = parse_content_length(req);
     if content_len > max_body_size() { return Vec::new(); }
-    let header_end  = req.find("\r\n\r\n").unwrap_or(n) + 4;
-    let already     = n.saturating_sub(header_end);
-    let mut body_buf = vec![0u8; content_len];
-    if already > 0 && already <= content_len {
-        body_buf[..already].copy_from_slice(&buf[header_end..n]);
+
+    // Robustness wave-three S1: grow the buffer as bytes actually arrive,
+    // rather than `vec![0u8; content_len]` up front. A lying Content-Length
+    // (declares 128 MB, sends nothing) used to allocate the full declared size
+    // before reading — N such connections → OOM. Now a connection only costs
+    // the bytes it really sends, and the 10 s socket read timeout bounds how
+    // long it can stall.
+    let header_end = req.find("\r\n\r\n").map(|p| p + 4).unwrap_or(n);
+    let prefilled = if header_end <= n { &buf[header_end..n] } else { &[][..] };
+    let take = prefilled.len().min(content_len);
+
+    let mut body = Vec::with_capacity(take.max(1).min(64 * 1024));
+    body.extend_from_slice(&prefilled[..take]);
+
+    let mut chunk = [0u8; 64 * 1024];
+    while body.len() < content_len {
+        let want = (content_len - body.len()).min(chunk.len());
+        match stream.read(&mut chunk[..want]) {
+            Ok(0) | Err(_) => break, // EOF / timeout / error — return what arrived
+            Ok(r) => body.extend_from_slice(&chunk[..r]),
+        }
     }
-    if already < content_len {
-        let _ = stream.read_exact(&mut body_buf[already..]);
-    }
-    body_buf
+    body
 }
 
 // ── System info ───────────────────────────────────────────────────────────────

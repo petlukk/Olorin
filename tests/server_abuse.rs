@@ -9,11 +9,15 @@
 //!
 //! S3 (auth-parser panic on a non-UTF-8-boundary header slice) is FIXED — see
 //! `s3_*` below. S1 (Content-Length eager allocation → memory amplification)
-//! and S2 (unbounded thread-per-connection → flood DoS) are documented in
-//! benchmarks/robustness/FINDINGS.md and deferred (they change the request
-//! read / accept-loop design).
+//! is FIXED — `read_body` now grows with the bytes that actually arrive (see
+//! `s1_*`). S2 (unbounded thread-per-connection) is FIXED by the accept-loop
+//! concurrency cap (`OLORIN_MAX_CONN`); the loop itself isn't unit-reachable,
+//! so it's verified by inspection + the Pi gate.
 
 use olorin::interface::server_auth::AuthGate;
+use olorin::interface::server_http::read_body;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
 
 const TOKEN: &str = "wave3-secret-token";
 
@@ -85,4 +89,64 @@ fn s3_open_gate_also_survives_malformed_heads() {
         let c = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| gate.bootstrap_cookie(req)));
         assert!(c.is_ok(), "bootstrap_cookie panicked on {req:?}");
     }
+}
+
+/// Drive `read_body` over a real loopback socket: write `request`, close the
+/// write half, and return what the server side reads. Mirrors the header read
+/// in `handle_connection` (read until CRLFCRLF) before calling `read_body`.
+fn body_over_socket(request: &[u8]) -> Vec<u8> {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let mut client = TcpStream::connect(addr).unwrap();
+    client.write_all(request).unwrap();
+    client.shutdown(std::net::Shutdown::Write).unwrap(); // signal end-of-body
+
+    let (mut srv, _) = listener.accept().unwrap();
+    srv.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+
+    let mut buf = [0u8; 8192];
+    let mut n = 0;
+    loop {
+        match srv.read(&mut buf[n..]) {
+            Ok(0) | Err(_) => break,
+            Ok(r) => n += r,
+        }
+        if buf[..n].windows(4).any(|w| w == b"\r\n\r\n") || n == buf.len() {
+            break;
+        }
+    }
+    let req = std::str::from_utf8(&buf[..n]).unwrap();
+    read_body(&mut srv, req, &buf, n)
+}
+
+#[test]
+fn s1_lying_content_length_does_not_force_a_large_read() {
+    // FINDING S1 (FIXED): a request declaring a 128 MB body but sending only a
+    // few bytes must NOT allocate 128 MB — `read_body` grows with the bytes
+    // that actually arrive and stops at EOF. Returns just the 5 sent bytes.
+    let req = b"POST /api/x HTTP/1.1\r\nContent-Length: 134217728\r\n\r\nHELLO";
+    let body = body_over_socket(req);
+    assert_eq!(body, b"HELLO", "only the bytes that actually arrived");
+    assert!(body.len() < 1024, "no eager allocation to the declared length");
+}
+
+#[test]
+fn s1_full_body_still_read_completely() {
+    // The fix must not under-read a legitimate body: declared length matches
+    // what's sent, so the whole body comes back intact.
+    let req = b"POST /api/x HTTP/1.1\r\nContent-Length: 11\r\n\r\nhello world";
+    let body = body_over_socket(req);
+    assert_eq!(body, b"hello world");
+}
+
+#[test]
+fn s1_over_cap_content_length_is_rejected() {
+    // The existing OLORIN_MAX_UPLOAD cap still rejects an over-cap declared
+    // length outright (returns empty), before reading anything.
+    let huge = format!(
+        "POST /api/x HTTP/1.1\r\nContent-Length: 999999999999\r\n\r\n"
+    );
+    let body = body_over_socket(huge.as_bytes());
+    assert!(body.is_empty(), "over-cap Content-Length must be refused");
 }
