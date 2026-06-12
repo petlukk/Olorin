@@ -59,6 +59,8 @@ body{background:var(--crust);color:var(--text);font-family:'Inter',system-ui,san
 .chat-input{flex:1;background:transparent;border:none;color:var(--text);font:14px 'Inter',system-ui,sans-serif;outline:none}
 .chat-send{background:var(--lavender);color:var(--crust);border:none;border-radius:8px;width:32px;height:32px;cursor:pointer;font-size:16px}
 .cursor-blink{display:inline-block;width:2px;height:16px;background:var(--teal);vertical-align:text-bottom;animation:blink 1s step-end infinite}
+.report-link{display:inline-block;margin:6px 0 2px;font-size:13px;color:var(--teal);cursor:pointer;text-decoration:none}
+.report-link:hover{text-decoration:underline}
 .cursor-thinking{display:inline-block;color:var(--overlay0);font-size:12px;font-style:italic;margin-left:6px;animation:pulse 1.5s ease-in-out infinite}
 @keyframes blink{50%{opacity:0}}
 @keyframes pulse{0%,100%{opacity:0.4}50%{opacity:1}}
@@ -245,8 +247,34 @@ async function analyzeFiles(id,body,files){
         body:JSON.stringify({files:payload})});
     }
     await renderSSE(res,bubble,cursor,body);
+    addReportLink(body,list);
   }catch(e){bubble.textContent+=' [error: '+e.message+']';}
   cursor.remove();
+}
+
+// After an analysis completes, offer the same files as a downloadable
+// self-contained HTML report (/api/report, deterministic, no model).
+// Re-posts the kept File handles — staged copies are deleted server-side
+// after each request, so there is no server state to reference.
+function addReportLink(body,list){
+  const a=el('a','report-link','📄 download report');
+  a.href='#';
+  a.onclick=async e=>{
+    e.preventDefault();a.textContent='⏳ building report…';
+    try{
+      const payload=await Promise.all(list.map(async f=>({name:f.name,b64:await fileToB64(f)})));
+      const res=await fetch('/api/report',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({files:payload})});
+      if(!res.ok)throw new Error(await res.text());
+      const blob=await res.blob();
+      const url=URL.createObjectURL(blob);
+      const dl=document.createElement('a');
+      dl.href=url;dl.download='olorin-report.html';dl.click();
+      URL.revokeObjectURL(url);
+      a.textContent='📄 download report';
+    }catch(err){a.textContent='📄 report failed: '+err.message;}
+  };
+  body.appendChild(a);
 }
 
 function createReplTile(id){
