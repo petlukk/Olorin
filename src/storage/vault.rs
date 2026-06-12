@@ -100,6 +100,13 @@ impl Vault {
         let file = OpenOptions::new()
             .read(true).write(true).create(true).truncate(true)
             .open(path)?;
+        // Single-writer guard: an exclusive advisory lock held for the Vault's
+        // lifetime. Without it, two processes opening the same vault would
+        // append at the same offset and reuse the same per-block nonce (a
+        // two-time-pad). Released automatically on Drop / process death.
+        if !crate::platform::lock::try_lock_file_exclusive(&file) {
+            return Err(Error::Vault("vault is already open by another Olorin process"));
+        }
         let mut key = SecureBuffer::new(32);
         key.write(&key_bytes);
         let mut vault = Self { file, header, index: Vec::new(), key, searcher: FusedSearcher::new() };
@@ -111,6 +118,11 @@ impl Vault {
 
     fn open_existing(path: &Path, key_bytes: [u8; 32]) -> Result<Self> {
         let mut file = OpenOptions::new().read(true).write(true).open(path)?;
+        // Single-writer guard (see create_new): reject a concurrent open so two
+        // processes can't append at the same offset and reuse a block nonce.
+        if !crate::platform::lock::try_lock_file_exclusive(&file) {
+            return Err(Error::Vault("vault is already open by another Olorin process"));
+        }
         let file_size = file.metadata()?.len();
 
         let mut hdr_buf = [0u8; HEADER_SIZE_V2];
