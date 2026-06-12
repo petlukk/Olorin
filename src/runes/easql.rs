@@ -334,6 +334,17 @@ fn read_ident(bytes: &[u8], p: usize) -> Option<(String, usize)> {
                 if i < bytes.len() && bytes[i] == b'.' { i += 1; leaf_start = i; continue; }
                 return Some((name, i));
             }
+            // SQL Server / SQLite bracket-quoted identifier `[Table]`.
+            // Asymmetric delimiters, so it can't fold into the arm above;
+            // without this the brackets leak into the reported name.
+            b'[' => {
+                i += 1; leaf_start = i;
+                while i < bytes.len() && bytes[i] != b']' { i += 1; }
+                let name = String::from_utf8_lossy(&bytes[leaf_start..i]).into_owned();
+                i += 1; // closing ']'
+                if i < bytes.len() && bytes[i] == b'.' { i += 1; leaf_start = i; continue; }
+                return Some((name, i));
+            }
             b'.' => { i += 1; leaf_start = i; }
             c if c.is_ascii_whitespace() || c == b'(' || c == b';' => break,
             _ => { i += 1; }
