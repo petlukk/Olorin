@@ -16,9 +16,11 @@ pub struct Correlation {
     pub stream_a:      String,
     pub stream_b:      String,
     pub lag_seconds:   i64,
-    /// Cosine of the lag-aligned overlap windows of the two z-scored
-    /// series — bounded [-1, 1] by Cauchy-Schwarz. Rounded to 4 decimals
-    /// at serialization so the cross-arch goldens stay byte-stable
+    /// Pearson r of the lag-aligned overlap windows, in [0, 1] for
+    /// reported findings (positive-only: negative rate-correlation
+    /// across event files is the disjoint-era artifact; both windows
+    /// must also hold >= 3 events). Rounded to 4 decimals at
+    /// serialization so the cross-arch goldens stay byte-stable
     /// against last-ULP drift.
     pub score:         f64,
     pub peak_bucket:   String,

@@ -120,6 +120,52 @@ fn uncorrelated_streams_yield_no_findings() {
 }
 
 #[test]
+fn disjoint_eras_yield_no_findings() {
+    olorin::kernels::ffi::init().unwrap();
+    // The wild v2.12.0 bug (found 2026-06-12 with two NASA-log slices):
+    // file A covers days 1–2, file B covers days 6–13 — no shared time
+    // at all. A lag that shifts A's activity onto B's era compares A's
+    // ZERO-EVENT overlap window against B's traffic; global-window
+    // cosine scored that constant-vs-curve pairing r=1.00 at +5 days.
+    // Per-window Pearson + the active-window gate must report nothing.
+    let mut a = String::new();
+    for m in 0..(2 * 24 * 60) {
+        let burst = if (m / 60) % 24 < 12 { 3 } else { 1 }; // diurnal-ish
+        for k in 0..burst {
+            writeln!(a, "{} INFO svc-a event {k}", stamp_day(1 + m / (24 * 60), (m % (24 * 60)) * 60)).unwrap();
+        }
+    }
+    let mut b = String::new();
+    for m in 0..(7 * 24 * 60) {
+        let burst = if (m / 60) % 24 < 12 { 4 } else { 1 };
+        for k in 0..burst {
+            writeln!(b, "{} INFO svc-b event {k}", stamp_day(6 + m / (24 * 60), (m % (24 * 60)) * 60)).unwrap();
+        }
+    }
+    let pa = write_tmp("olorin_corr_era_a.log", a.as_bytes());
+    let pb = write_tmp("olorin_corr_era_b.log", b.as_bytes());
+
+    let result = run_rune("eacorrelate", &format!("--json {pa} {pb}")).unwrap();
+    assert!(result.success, "rune failed: {}", result.answer);
+    let out = parse_answer(&result.answer);
+    assert!(
+        out.correlations.is_empty(),
+        "disjoint eras must not correlate: {}", result.answer
+    );
+
+    let _ = std::fs::remove_file(&pa);
+    let _ = std::fs::remove_file(&pb);
+}
+
+/// ISO stamp on a given June day at `secs` into the day.
+fn stamp_day(day: i64, secs: i64) -> String {
+    format!(
+        "2026-06-{:02}T{:02}:{:02}:{:02}",
+        day, secs / 3600, (secs % 3600) / 60, secs % 60
+    )
+}
+
+#[test]
 fn flat_stream_is_skipped_not_correlated() {
     olorin::kernels::ffi::init().unwrap();
     // File A is a metronome (every minute, zero variance on the grid) —

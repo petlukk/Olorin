@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Differential oracle for eacorrelate: an independent numpy
 re-implementation of the full pipeline (ISO scan -> ERROR substream ->
-shared grid -> z-score -> lag sweep -> windowed-cosine scores -> top-3),
-compared against the real `olorin rune eacorrelate --json` binary on
-randomized scenarios with planted lags and independent-noise controls.
+shared grid -> lag sweep -> per-window Pearson, positive-only, active-
+window gated -> top-3), compared against the real `olorin rune
+eacorrelate --json` binary on randomized scenarios with planted lags,
+independent-noise controls, and disjoint-era traps.
 
 Usage: python3 benchmarks/eacorrelate_diff.py [path-to-olorin-binary]
 Exits non-zero on any mismatch (lag, finding set, threshold decision,
@@ -87,33 +88,37 @@ def reference_findings(files):
     n = span // width + 1
     max_lag = min(MAX_LAG_BUCKETS, n - 1)
 
-    zs = []
+    css = []
     for name, idx, epochs in streams:
         counts = np.zeros(n, dtype=np.float64)
         for e in epochs:
             counts[(e - gmin) // width] += 1.0
-        var = counts.var()
-        zs.append(None if var == 0.0 else (counts - counts.mean()) / np.sqrt(var))
+        css.append(None if counts.var() == 0.0 else counts)
 
     findings = []
     for i in range(len(streams)):
         for j in range(i + 1, len(streams)):
-            if streams[i][1] == streams[j][1] or zs[i] is None or zs[j] is None:
+            if streams[i][1] == streams[j][1] or css[i] is None or css[j] is None:
                 continue
-            a, b = zs[i], zs[j]
+            a, b = css[i], css[j]
             best_lag, best_score = 0, 0.0
             for lag in range(-max_lag, max_lag + 1):
                 if lag >= 0:
                     wa, wb = a[lag:], b[: n - lag]
                 else:
                     wa, wb = a[: n + lag], b[-lag:]
-                ea, eb = float(wa @ wa), float(wb @ wb)
-                if ea <= 0.0 or eb <= 0.0:
+                # Per-window Pearson (invariant to the binary's z-scoring),
+                # gated on both windows being ACTIVE — same spec as the rune.
+                if wa.sum() < MIN_EVENTS or wb.sum() < MIN_EVENTS:
                     continue
-                r = float(wa @ wb) / np.sqrt(ea * eb)
-                if abs(r) > abs(best_score):
+                if wa.std() <= 0.0 or wb.std() <= 0.0:
+                    continue
+                r = float(np.corrcoef(wa, wb)[0, 1])
+                if r > best_score:
                     best_lag, best_score = lag, r
-            if abs(best_score) < SCORE_THRESHOLD:
+            # Positive-only, same spec as the rune (negative rate
+            # correlation across files = the disjoint-era artifact).
+            if best_score < SCORE_THRESHOLD:
                 continue
             fi, fj, lag = (i, j, best_lag) if best_lag >= 0 else (j, i, -best_lag)
             findings.append({
@@ -125,7 +130,7 @@ def reference_findings(files):
                 "events_b": len(streams[fj][2]),
                 "width_seconds": width,
             })
-    findings.sort(key=lambda f: (-abs(f["score"]), f["stream_a"], f["stream_b"]))
+    findings.sort(key=lambda f: (-f["score"], f["stream_a"], f["stream_b"]))
     return findings[:TOP_K]
 
 
@@ -166,6 +171,22 @@ def gen_independent(rng, tmp, case):
     return files
 
 
+def gen_disjoint(rng, tmp, case):
+    """Two diurnal-ish logs in NON-overlapping windows of the day — the
+    wild NASA-slices trap: must produce no finding (positive-only +
+    active-window gate)."""
+    files = []
+    for tag, (lo, hi) in (("a", (0, 8 * 3600)), ("b", (14 * 3600, 23 * 3600))):
+        lines = []
+        for s in range(lo, hi, 60):
+            burst = 3 if ((s // 3600) % 2 == 0) else 1
+            lines += [f"{stamp(s)} INFO svc-{tag} event {k}" for k in range(burst)]
+        f = tmp / f"diff_{case}_{tag}.log"
+        f.write_text("\n".join(lines) + "\n")
+        files.append(f)
+    return files
+
+
 def main():
     binary = sys.argv[1] if len(sys.argv) > 1 else "target/debug/olorin"
     tmp = Path("/tmp/olorin_eacorrelate_diff")
@@ -173,7 +194,11 @@ def main():
     rng = random.Random(20260611)
 
     failures = 0
-    cases = [("planted", gen_planted)] * 10 + [("independent", gen_independent)] * 5
+    cases = (
+        [("planted", gen_planted)] * 10
+        + [("independent", gen_independent)] * 5
+        + [("disjoint", gen_disjoint)] * 3
+    )
     for case_no, (kind, gen) in enumerate(cases):
         files = gen(rng, tmp, case_no)
         got = run_olorin(binary, files).get("correlations", [])
