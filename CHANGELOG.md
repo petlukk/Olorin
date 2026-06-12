@@ -8,6 +8,30 @@ order.
 
 ## [Unreleased]
 
+## [2.12.1] — 2026-06-12
+
+### Fixed
+
+- **eacorrelate no longer reports spurious correlations between files from
+  disjoint time periods.** Found in the wild on day one: two NASA-log slices
+  covering different weeks scored r=1.00 at a +5-day lag. Two defects, one
+  root cause (window statistics vs global statistics):
+  - The score was the cosine of *globally* z-scored overlap windows — a
+    window with **zero events** z-scores to a constant vector, and a constant
+    against anything can reach ±1. Scores are now the **per-window Pearson r**
+    (window means/variances via prefix sums, O(1) per lag, kernel unchanged);
+    a constant window has zero variance and scores 0. Both overlap windows
+    must also contain ≥ 3 actual events — a correlation claim requires both
+    streams *active* in the compared window.
+  - Findings are now **positive-only**: files recorded in different periods
+    anti-correlate by presence alone (one is active where the other is
+    silent — the same NASA pair scored r=−0.54 at +3 days), and negative
+    rate-correlation across event files is that artifact, not behavior.
+  All existing goldens unchanged (for healthy windows Pearson ≡ the old
+  cosine within wire rounding — the definitions diverge only where the old
+  one was wrong). Differential oracle updated to the same spec + 3
+  disjoint-era trap scenarios (18/18); new disjoint-era E2E regression.
+
 ## [2.12.0] — 2026-06-12
 
 ### Added

@@ -215,14 +215,9 @@ fn correlate(streams: &[EventStream]) -> Vec<Correlation> {
     let n = (span / width) as usize + 1;
     let max_lag = MAX_LAG_BUCKETS.min(n as i64 - 1) as i32;
 
-    // Z-scored count series per stream; None when flat (zero variance).
-    let zscored: Vec<Option<Vec<f32>>> = streams.iter()
-        .map(|s| zscore_buckets(&s.epochs, gmin, width, n))
-        .collect();
-    // Prefix sums of squares: energy of any overlap window in O(1), for
-    // the per-lag normalization below.
-    let prefix2: Vec<Option<Vec<f64>>> = zscored.iter()
-        .map(|z| z.as_ref().map(|v| prefix_squares(v)))
+    // Bucketed series per stream; None when flat (zero variance).
+    let series: Vec<Option<StreamSeries>> = streams.iter()
+        .map(|s| bucket_series(&s.epochs, gmin, width, n))
         .collect();
 
     let mut findings: Vec<Correlation> = Vec::new();
@@ -232,20 +227,32 @@ fn correlate(streams: &[EventStream]) -> Vec<Correlation> {
             if streams[i].file_idx == streams[j].file_idx {
                 continue; // a file trivially correlates with its own subset
             }
-            let (Some(a), Some(b)) = (&zscored[i], &zscored[j]) else { continue };
+            let (Some(sa), Some(sb)) = (&series[i], &series[j]) else { continue };
             unsafe {
-                ffi::corr_sweep(a.as_ptr(), b.as_ptr(), n as i32, max_lag, scores.as_mut_ptr());
+                ffi::corr_sweep(sa.z.as_ptr(), sb.z.as_ptr(), n as i32, max_lag, scores.as_mut_ptr());
             }
-            // The kernel returns dot/overlap per lag. Re-normalize each
-            // lag by the overlap windows' norms (cosine of the windowed
-            // z-scored vectors) — Cauchy-Schwarz bounds that to [-1, 1],
-            // where dot/overlap overshoots on sparse impulse streams.
-            let (pa, pb) = (prefix2[i].as_ref().unwrap(), prefix2[j].as_ref().unwrap());
+            // The kernel returns dot/overlap per lag; turn each into the
+            // PER-WINDOW Pearson r via prefix sums. Global-window cosine
+            // (v2.11–2.12.0) was degenerate on disjoint-era inputs: a
+            // zero-event overlap window z-scores to a constant and the
+            // cosine of a constant against anything can reach ±1 — two
+            // non-overlapping NASA-log slices scored r=1.00 at +5 days
+            // (found in the wild, 2026-06-12). Pearson subtracts the
+            // window means, so a constant window has zero variance and
+            // scores 0; windows with fewer than MIN_EVENTS real events
+            // are rejected outright — a correlation claim requires both
+            // streams ACTIVE in the compared window.
+            // POSITIVE correlations only. Negative rate-correlation
+            // across two event files is almost always the other face of
+            // the disjoint-era artifact — files recorded in different
+            // periods anti-correlate by presence alone (where one is
+            // active the other is silent; the same NASA pair scored
+            // r=-0.54 at +3 days). The 3am story is co-occurrence.
             let (best_slot, best_score) = scores.iter().copied().enumerate()
-                .map(|(slot, raw)| (slot, cosine_at_lag(raw, slot, max_lag, n, pa, pb)))
-                .max_by(|x, y| x.1.abs().partial_cmp(&y.1.abs()).expect("scores are finite"))
+                .map(|(slot, raw)| (slot, pearson_at_lag(raw, slot, max_lag, n, sa, sb)))
+                .max_by(|x, y| x.1.partial_cmp(&y.1).expect("scores are finite"))
                 .expect("scores is non-empty");
-            if best_score.abs() < SCORE_THRESHOLD {
+            if best_score < SCORE_THRESHOLD {
                 continue;
             }
             let lag = best_slot as i64 - max_lag as i64;
@@ -253,7 +260,10 @@ fn correlate(streams: &[EventStream]) -> Vec<Correlation> {
             // corr_sweep pairs a[k+lag] with b[k], so a positive lag
             // already means "stream i follows stream j".
             let (fi, fj, lag) = if lag >= 0 { (i, j, lag) } else { (j, i, -lag) };
-            let (a, b) = (zscored[fi].as_ref().unwrap(), zscored[fj].as_ref().unwrap());
+            let (a, b) = (
+                &series[fi].as_ref().unwrap().z,
+                &series[fj].as_ref().unwrap().z,
+            );
             let peak = peak_bucket(a, b, lag as usize, gmin, width);
             findings.push(Correlation {
                 stream_a:      streams[fi].name.clone(),
@@ -269,7 +279,7 @@ fn correlate(streams: &[EventStream]) -> Vec<Correlation> {
     }
     // Strongest first; name pair breaks exact ties deterministically.
     findings.sort_by(|x, y| {
-        y.score.abs().partial_cmp(&x.score.abs()).expect("scores are finite")
+        y.score.partial_cmp(&x.score).expect("scores are finite")
             .then_with(|| x.stream_a.cmp(&y.stream_a))
             .then_with(|| x.stream_b.cmp(&y.stream_b))
     });
@@ -277,21 +287,24 @@ fn correlate(streams: &[EventStream]) -> Vec<Correlation> {
     findings
 }
 
-/// prefix[k] = sum of v[0..k]^2, so any window's energy is one subtract.
-fn prefix_squares(v: &[f32]) -> Vec<f64> {
-    let mut p = Vec::with_capacity(v.len() + 1);
-    let mut acc = 0.0f64;
-    p.push(0.0);
-    for &x in v {
-        acc += (x as f64) * (x as f64);
-        p.push(acc);
-    }
-    p
+/// One stream on the shared grid: the z-scored series the kernel sweeps,
+/// plus prefix sums that make any overlap window's mean, variance, and
+/// raw event count an O(1) subtract.
+struct StreamSeries {
+    z:      Vec<f32>,
+    sum:    Vec<f64>, // prefix of z
+    sumsq:  Vec<f64>, // prefix of z²
+    events: Vec<u64>, // prefix of raw counts
 }
 
-/// Turn the kernel's dot/overlap for one lag slot into the cosine of the
-/// two overlap windows: dot / sqrt(energy_a * energy_b), bounded [-1, 1].
-fn cosine_at_lag(raw: f32, slot: usize, max_lag: i32, n: usize, pa: &[f64], pb: &[f64]) -> f64 {
+/// Turn the kernel's dot/overlap for one lag slot into the per-window
+/// Pearson r — bounded [-1, 1], zero for a constant window (Pearson is
+/// undefined there, and "silence correlates with nothing" is the honest
+/// reading), zero when either window holds fewer than MIN_EVENTS events.
+fn pearson_at_lag(
+    raw: f32, slot: usize, max_lag: i32, n: usize,
+    sa: &StreamSeries, sb: &StreamSeries,
+) -> f64 {
     let lag = slot as i64 - max_lag as i64;
     let (off_a, off_b, m) = if lag >= 0 {
         (lag as usize, 0usize, n - lag as usize)
@@ -301,18 +314,28 @@ fn cosine_at_lag(raw: f32, slot: usize, max_lag: i32, n: usize, pa: &[f64], pb: 
     if m == 0 {
         return 0.0;
     }
-    let dot = raw as f64 * m as f64; // undo the kernel's /overlap
-    let ea = pa[off_a + m] - pa[off_a];
-    let eb = pb[off_b + m] - pb[off_b];
-    if ea <= 0.0 || eb <= 0.0 {
-        return 0.0; // window of exact zeros — no signal to correlate
+    let ev_a = sa.events[off_a + m] - sa.events[off_a];
+    let ev_b = sb.events[off_b + m] - sb.events[off_b];
+    if (ev_a as usize) < MIN_EVENTS || (ev_b as usize) < MIN_EVENTS {
+        return 0.0;
     }
-    dot / (ea * eb).sqrt()
+    let mf = m as f64;
+    let dot = raw as f64 * mf; // undo the kernel's /overlap
+    let sum_a = sa.sum[off_a + m] - sa.sum[off_a];
+    let sum_b = sb.sum[off_b + m] - sb.sum[off_b];
+    let var_a = (sa.sumsq[off_a + m] - sa.sumsq[off_a]) - sum_a * sum_a / mf;
+    let var_b = (sb.sumsq[off_b + m] - sb.sumsq[off_b]) - sum_b * sum_b / mf;
+    if var_a <= 1e-9 || var_b <= 1e-9 {
+        return 0.0; // (near-)constant window — Pearson undefined
+    }
+    let cov = dot - sum_a * sum_b / mf;
+    (cov / (var_a * var_b).sqrt()).clamp(-1.0, 1.0)
 }
 
-/// Bucket epochs onto the shared grid and z-score the counts. Returns
-/// None for a flat series (zero variance) — correlation is undefined.
-fn zscore_buckets(epochs: &[i64], gmin: i64, width: i64, n: usize) -> Option<Vec<f32>> {
+/// Bucket epochs onto the shared grid, z-score the counts, and build the
+/// window prefix sums. Returns None for a globally flat series (zero
+/// variance) — correlation is undefined.
+fn bucket_series(epochs: &[i64], gmin: i64, width: i64, n: usize) -> Option<StreamSeries> {
     let mut counts = vec![0.0f64; n];
     for &e in epochs {
         let idx = ((e - gmin) / width) as usize;
@@ -324,7 +347,24 @@ fn zscore_buckets(epochs: &[i64], gmin: i64, width: i64, n: usize) -> Option<Vec
         return None;
     }
     let inv_std = 1.0 / var.sqrt();
-    Some(counts.iter().map(|c| ((c - mean) * inv_std) as f32).collect())
+    let z: Vec<f32> = counts.iter().map(|c| ((c - mean) * inv_std) as f32).collect();
+
+    let mut sum = Vec::with_capacity(n + 1);
+    let mut sumsq = Vec::with_capacity(n + 1);
+    let mut events = Vec::with_capacity(n + 1);
+    let (mut s, mut s2, mut ev) = (0.0f64, 0.0f64, 0u64);
+    sum.push(0.0);
+    sumsq.push(0.0);
+    events.push(0);
+    for (zi, ci) in z.iter().zip(&counts) {
+        s += *zi as f64;
+        s2 += (*zi as f64) * (*zi as f64);
+        ev += *ci as u64;
+        sum.push(s);
+        sumsq.push(s2);
+        events.push(ev);
+    }
+    Some(StreamSeries { z, sum, sumsq, events })
 }
 
 /// Grid instant where the lag-aligned overlap product peaks — the

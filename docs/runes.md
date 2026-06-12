@@ -347,13 +347,20 @@ stream, ISO logs contribute a second ERROR/FATAL sub-stream, all streams are
 bucketed onto **one** shared time grid (512 target buckets — finer than
 eatime's 120 because lag resolution *is* bucket width), z-scored, and every
 cross-file pair is swept over ±128 lags by the `corr_sweep` kernel. A finding
-is the cosine of the lag-aligned overlap windows — bounded [-1, 1] — and is
-direction-normalized so `stream_a` always *follows* `stream_b` by
-`lag_seconds`. The strongest three land in the additive `correlations[]`
-block (`--json`), each carrying `peak_bucket` (the instant of strongest
-co-occurrence) and `width_seconds` (the honest lag resolution). Verified
-against an independent numpy oracle on randomized planted-lag and
-independent-noise scenarios (`benchmarks/eacorrelate_diff.py`, 15/15).
+is the **per-window Pearson r** of the lag-aligned overlap windows —
+positive-only (negative rate-correlation across event files is the
+disjoint-recording-period artifact, not behavior), and only when both
+windows hold ≥ 3 actual events: a correlation claim requires both streams
+*active* in the compared window, so files from different eras correctly
+report nothing. Findings are direction-normalized so `stream_a` always
+*follows* `stream_b` by `lag_seconds`. The strongest three land in the
+additive `correlations[]` block (`--json`), each carrying `peak_bucket`
+(the instant of strongest co-occurrence) and `width_seconds` (the honest
+lag resolution). Verified against an independent numpy oracle on
+randomized planted-lag, independent-noise, and disjoint-era scenarios
+(`benchmarks/eacorrelate_diff.py`, 18/18). One caveat by design: two
+overlapping logs of the same system will correlate at ±24 h lags — real
+diurnal periodicity is a phase alignment, not causation.
 
 Dropping ≥ 2 files into the web UI runs it automatically: the findings stream
 after the per-file kernel outputs and lead the narration, so the model opens
