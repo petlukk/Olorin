@@ -4,6 +4,9 @@
 //! `--json` is set, or rendered to legacy human-readable text.
 //!
 //! Schema encoding (no new schema fields needed):
+//! - TIMESTAMP (LogicalType) → kind=Timestamp, ISO min/max from the epoch
+//!   min/max (unit-aware; `Z` when isAdjustedToUTC). Takes precedence over
+//!   the physical INT64 so the summary reads as instants, not raw integers.
 //! - Boolean              → kind=Bool, count + null_count (no true/false breakdown)
 //! - Int32/64/Float/Double → kind=Number, NumericStats { min, max, mean=0, sum=0 }
 //! - Int96                → kind=Number, numeric=None  (signal: undecoded numeric)
@@ -12,10 +15,12 @@
 use super::{Rune, RuneResult, OutputSafety};
 use super::common::{resolve_path, open_capped, truncate_answer, PathError};
 use super::output::{
-    BoolStats, FieldKind, FieldStats, NumericStats, RuneOutput, Source, Totals,
+    BoolStats, FieldKind, FieldStats, NumericStats, RuneOutput, Source,
+    TimestampStats, Totals,
 };
+use super::timekey;
 use crate::storage::parquet::{
-    read_summary, ColumnSummary, ParquetSummary, PhysicalType,
+    read_summary, ColumnSummary, LogicalKind, ParquetSummary, PhysicalType,
 };
 use std::path::PathBuf;
 use std::time::Instant;
@@ -135,6 +140,23 @@ fn column_to_field(c: &ColumnSummary) -> FieldStats {
         name: c.name.clone(), kind: FieldKind::Mixed, count, null_count,
         numeric: None, text: None, bool: None, timestamp: None,
     };
+    // A TIMESTAMP logical type (INT64 epoch count) renders as an ISO instant
+    // range, not a raw integer. `unique` is unknown from the footer (it holds
+    // only min/max), so it's left 0. Decoded ahead of the physical-type match
+    // because the underlying physical type is a plain INT64.
+    if let Some(LogicalKind::Timestamp { unit, utc }) = c.logical {
+        let to_iso = |ns: crate::storage::parquet::NumStat|
+            timekey::unix_seconds_to_iso(unit.to_epoch_seconds(ns.as_f64() as i64), utc);
+        let (min, max) = match (c.min, c.max) {
+            (Some(mn), Some(mx)) => (to_iso(mn), to_iso(mx)),
+            _ => ("?".to_string(), "?".to_string()),
+        };
+        return FieldStats {
+            kind: FieldKind::Timestamp,
+            timestamp: Some(TimestampStats { min, max, unique: 0 }),
+            ..blank
+        };
+    }
     match c.physical_type {
         PhysicalType::Boolean => FieldStats {
             kind: FieldKind::Bool,
@@ -205,6 +227,12 @@ fn format_field(f: &FieldStats) -> String {
             ),
         },
         FieldKind::Mixed => format!("{} (mixed): values={}{nulls}\n", f.name, f.count),
-        FieldKind::Timestamp => format!("{} (timestamp): values={}{nulls}\n", f.name, f.count),
+        FieldKind::Timestamp => match &f.timestamp {
+            Some(ts) => format!(
+                "{} (timestamp): values={}{nulls}, range: {} .. {}\n",
+                f.name, f.count, ts.min, ts.max
+            ),
+            None => format!("{} (timestamp): values={}{nulls}\n", f.name, f.count),
+        },
     }
 }

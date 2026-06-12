@@ -119,3 +119,82 @@ fn eaparquet_decodes_unsigned_columns() {
     assert_eq!(sig.min.unwrap().as_f64(), -5.0);
     assert_eq!(sig.max.unwrap().as_f64(), 50.0);
 }
+
+#[test]
+fn eaparquet_decodes_timestamp_logical_type() {
+    // Robustness wave one, finding #2: TIMESTAMP columns were reported as
+    // raw INT64 epoch counts (e.g. 1230764502000000) instead of an ISO
+    // instant. Modern pyarrow marks them ONLY via LogicalType (no deprecated
+    // ConvertedType), so the footer reader must parse the union. Fixture
+    // ts.parquet (committed) carries a microsecond naive column and a
+    // millisecond UTC column; the µs min epoch is exactly the value from the
+    // NYC-taxi finding. Regenerate: see the gen snippet in the PR / fixture.
+    use olorin::storage::parquet::{read_summary, LogicalKind, TimeUnit};
+    let bytes = std::fs::read(
+        std::env::current_dir().unwrap().join("tests/fixtures/runes/ts.parquet")
+    ).expect("ts fixture exists");
+    let s = read_summary(&bytes).expect("parse ts parquet");
+    let col = |name: &str| s.columns.iter().find(|c| c.name == name)
+        .unwrap_or_else(|| panic!("column {name} missing"));
+
+    assert_eq!(
+        col("ts_us").logical,
+        Some(LogicalKind::Timestamp { unit: TimeUnit::Micros, utc: false }),
+    );
+    assert_eq!(
+        col("ts_ms_utc").logical,
+        Some(LogicalKind::Timestamp { unit: TimeUnit::Millis, utc: true }),
+    );
+    assert_eq!(col("id").logical, None, "plain INT64 carries no logical type");
+}
+
+#[test]
+fn eaparquet_renders_timestamp_columns_as_iso() {
+    ensure_kernels();
+    let src = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/runes/ts.parquet");
+    let dst = std::env::temp_dir().join(format!(
+        "olorin_eaparquet_ts_{}.parquet", std::process::id()
+    ));
+    std::fs::copy(&src, &dst).expect("copy fixture to /tmp");
+
+    // --json so we can assert the structured FieldStats precisely.
+    let result = run_rune("eaparquet", &format!("--json {}", dst.to_string_lossy()))
+        .expect("eaparquet runnable");
+    assert!(result.success, "rune failed: {}", result.answer);
+    let out = olorin::runes::output::RuneOutput::from_json(result.answer.as_bytes())
+        .expect("valid structured output");
+    let field = |name: &str| out.fields.iter().find(|f| f.name == name)
+        .unwrap_or_else(|| panic!("field {name} missing"));
+
+    use olorin::runes::output::FieldKind;
+    let us = field("ts_us");
+    assert_eq!(us.kind, FieldKind::Timestamp, "INT64 µs timestamp must read as timestamp");
+    let uts = us.timestamp.as_ref().expect("timestamp stats");
+    // Naive (isAdjustedToUTC=false) → no Z. Min is the exact finding value.
+    assert_eq!(uts.min, "2008-12-31T23:01:42");
+    assert_eq!(uts.max, "2023-01-01T00:00:00");
+
+    let ms = field("ts_ms_utc");
+    assert_eq!(ms.kind, FieldKind::Timestamp);
+    let mts = ms.timestamp.as_ref().expect("timestamp stats");
+    // UTC-adjusted → trailing Z; millisecond unit decoded.
+    assert_eq!(mts.min, "2020-01-01T00:00:00Z");
+    assert_eq!(mts.max, "2022-12-31T23:59:59Z");
+
+    // The plain INT64 column is unaffected — still a number.
+    assert_eq!(field("id").kind, FieldKind::Number);
+
+    let _ = std::fs::remove_file(&dst);
+}
+
+#[test]
+fn unix_seconds_to_iso_matches_known_instants() {
+    use olorin::runes::timekey::unix_seconds_to_iso;
+    // 1230764502 s since 1970 = 2008-12-31T23:01:42 (the finding's µs min / 1e6).
+    assert_eq!(unix_seconds_to_iso(1230764502, false), "2008-12-31T23:01:42");
+    assert_eq!(unix_seconds_to_iso(1230764502, true), "2008-12-31T23:01:42Z");
+    assert_eq!(unix_seconds_to_iso(0, true), "1970-01-01T00:00:00Z");
+    // Pre-epoch instants stay correct via euclidean division.
+    assert_eq!(unix_seconds_to_iso(-1, false), "1969-12-31T23:59:59");
+}

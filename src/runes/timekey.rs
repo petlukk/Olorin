@@ -54,6 +54,22 @@ pub fn seconds_to_iso(secs: i64) -> String {
     format!("{y:04}-{m:02}-{d:02}T{h:02}:{mi:02}:{s:02}")
 }
 
+/// Render Unix epoch seconds (since 1970-01-01) as ISO-8601. Parquet/Arrow
+/// timestamps are Unix-epoch, unlike this module's internal 2000-epoch
+/// [`seconds_to_iso`]. A trailing `Z` is appended when the source declared
+/// the instant UTC-adjusted (Parquet `isAdjustedToUTC`); a naive local
+/// instant gets none.
+pub fn unix_seconds_to_iso(secs: i64, utc: bool) -> String {
+    let days = secs.div_euclid(86400);
+    let tod  = secs.rem_euclid(86400);
+    let (y, m, d) = civil_from_days(days);
+    let h  = tod / 3600;
+    let mi = (tod % 3600) / 60;
+    let s  = tod % 60;
+    let zone = if utc { "Z" } else { "" };
+    format!("{y:04}-{m:02}-{d:02}T{h:02}:{mi:02}:{s:02}{zone}")
+}
+
 /// Parse a Common Log Format instant `[dd/MMM/yyyy:hh:mm:ss` from the
 /// front of `b` to seconds since 2000-01-01. The trailing ` ±HHMM` zone
 /// is ignored — within a single log it is constant and cancels out of

@@ -2,7 +2,8 @@
 //! aggregates per-column stats across row groups via `f64_stats`.
 //! Footer-only — never decodes column data.
 
-use crate::storage::thrift_compact::{CompactType, ThriftReader};
+use crate::storage::parquet_meta::{self, FileMetaData};
+use crate::storage::thrift_compact::ThriftReader;
 
 const PARQUET_MAGIC: &[u8] = b"PAR1";
 
@@ -20,7 +21,7 @@ pub enum PhysicalType {
 }
 
 impl PhysicalType {
-    fn from_i32(v: i32) -> Option<Self> {
+    pub(super) fn from_i32(v: i32) -> Option<Self> {
         Some(match v {
             0 => Self::Boolean,
             1 => Self::Int32,
@@ -60,11 +61,38 @@ impl NumStat {
     }
 }
 
+/// Resolution of a TIMESTAMP logical type (parquet.thrift `TimeUnit`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TimeUnit { Millis, Micros, Nanos }
+
+impl TimeUnit {
+    /// Convert a raw epoch count in this unit to whole epoch-seconds.
+    pub fn to_epoch_seconds(self, raw: i64) -> i64 {
+        match self {
+            Self::Millis => raw.div_euclid(1_000),
+            Self::Micros => raw.div_euclid(1_000_000),
+            Self::Nanos  => raw.div_euclid(1_000_000_000),
+        }
+    }
+}
+
+/// A column's logical (annotated) type, when it carries one we render
+/// specially. Modern Parquet (pyarrow) marks timestamps via `LogicalType`
+/// (SchemaElement field 10) only — `ConvertedType` is often absent — so
+/// the footer reader must parse the union to recognize them at all.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LogicalKind {
+    /// A physical INT64 holding an epoch count; `utc` is `isAdjustedToUTC`.
+    Timestamp { unit: TimeUnit, utc: bool },
+}
+
 /// Aggregated per-column summary across all row groups.
 #[derive(Debug, Clone)]
 pub struct ColumnSummary {
     pub name: String,
     pub physical_type: PhysicalType,
+    /// Logical type annotation (e.g. TIMESTAMP), when present.
+    pub logical: Option<LogicalKind>,
     /// Total values across all row groups (includes nulls; equals the row
     /// count for a top-level column).
     pub total_values: i64,
@@ -111,180 +139,8 @@ pub fn read_summary(bytes: &[u8]) -> Result<ParquetSummary, String> {
     let footer = &bytes[footer_start..bytes.len() - 8];
 
     let mut r = ThriftReader::new(footer);
-    let meta = read_file_metadata(&mut r)?;
+    let meta = parquet_meta::read_file_metadata(&mut r)?;
     aggregate_summary(meta)
-}
-
-// ── Parquet metadata structs (intermediate) ───────────────────────────────────
-
-#[derive(Debug, Default)]
-struct FileMetaData {
-    num_rows: i64,
-    schema: Vec<SchemaElement>,
-    row_groups: Vec<RowGroup>,
-}
-
-#[derive(Debug, Default, Clone)]
-struct SchemaElement {
-    name: String,
-    physical_type: Option<PhysicalType>,
-    num_children: i32,
-    /// Parquet ConvertedType (field 6). UINT_8/16/32/64 = 11..=14 — the
-    /// signal that an INT32/INT64 physical column holds unsigned values.
-    converted_type: Option<i32>,
-}
-
-#[derive(Debug, Default)]
-struct RowGroup {
-    columns: Vec<ColumnChunk>,
-    num_rows: i64,
-}
-
-#[derive(Debug, Default)]
-struct ColumnChunk {
-    meta: ColumnMetaData,
-}
-
-#[derive(Debug, Default)]
-struct ColumnMetaData {
-    physical_type: Option<PhysicalType>,
-    path_in_schema: Vec<String>,
-    num_values: i64,
-    statistics: Option<Statistics>,
-}
-
-#[derive(Debug, Default)]
-struct Statistics {
-    null_count: Option<i64>,
-    min_value: Option<Vec<u8>>,
-    max_value: Option<Vec<u8>>,
-}
-
-// ── Parquet struct decoders ───────────────────────────────────────────────────
-
-fn read_file_metadata(r: &mut ThriftReader) -> Result<FileMetaData, String> {
-    let mut meta = FileMetaData::default();
-    let mut last: i16 = 0;
-    while let Some((fid, ty)) = r.read_field_header(last)? {
-        last = fid;
-        match (fid, ty) {
-            (1, CompactType::I32) => { let _ = r.read_zigzag_i32()?; } // version
-            (2, CompactType::List) => {
-                let (et, n) = r.read_list_header()?;
-                if et != CompactType::Struct { return Err("schema list element type not Struct".into()); }
-                for _ in 0..n {
-                    meta.schema.push(read_schema_element(r)?);
-                }
-            }
-            (3, CompactType::I64) => { meta.num_rows = r.read_zigzag_i64()?; }
-            (4, CompactType::List) => {
-                let (et, n) = r.read_list_header()?;
-                if et != CompactType::Struct { return Err("row_groups list element type not Struct".into()); }
-                for _ in 0..n {
-                    meta.row_groups.push(read_row_group(r)?);
-                }
-            }
-            _ => r.skip_value(ty)?,
-        }
-    }
-    Ok(meta)
-}
-
-fn read_schema_element(r: &mut ThriftReader) -> Result<SchemaElement, String> {
-    let mut e = SchemaElement::default();
-    let mut last: i16 = 0;
-    while let Some((fid, ty)) = r.read_field_header(last)? {
-        last = fid;
-        match (fid, ty) {
-            (1, CompactType::I32) => {
-                e.physical_type = PhysicalType::from_i32(r.read_zigzag_i32()?);
-            }
-            (4, CompactType::Binary) => {
-                e.name = String::from_utf8_lossy(r.read_binary()?).into_owned();
-            }
-            (5, CompactType::I32) => {
-                e.num_children = r.read_zigzag_i32()?;
-            }
-            (6, CompactType::I32) => {
-                e.converted_type = Some(r.read_zigzag_i32()?);
-            }
-            _ => r.skip_value(ty)?,
-        }
-    }
-    Ok(e)
-}
-
-fn read_row_group(r: &mut ThriftReader) -> Result<RowGroup, String> {
-    let mut rg = RowGroup::default();
-    let mut last: i16 = 0;
-    while let Some((fid, ty)) = r.read_field_header(last)? {
-        last = fid;
-        match (fid, ty) {
-            (1, CompactType::List) => {
-                let (et, n) = r.read_list_header()?;
-                if et != CompactType::Struct { return Err("columns list element type not Struct".into()); }
-                for _ in 0..n {
-                    rg.columns.push(read_column_chunk(r)?);
-                }
-            }
-            (3, CompactType::I64) => { rg.num_rows = r.read_zigzag_i64()?; }
-            _ => r.skip_value(ty)?,
-        }
-    }
-    Ok(rg)
-}
-
-fn read_column_chunk(r: &mut ThriftReader) -> Result<ColumnChunk, String> {
-    let mut cc = ColumnChunk::default();
-    let mut last: i16 = 0;
-    while let Some((fid, ty)) = r.read_field_header(last)? {
-        last = fid;
-        match (fid, ty) {
-            (3, CompactType::Struct) => { cc.meta = read_column_metadata(r)?; }
-            _ => r.skip_value(ty)?,
-        }
-    }
-    Ok(cc)
-}
-
-fn read_column_metadata(r: &mut ThriftReader) -> Result<ColumnMetaData, String> {
-    let mut m = ColumnMetaData::default();
-    let mut last: i16 = 0;
-    while let Some((fid, ty)) = r.read_field_header(last)? {
-        last = fid;
-        match (fid, ty) {
-            (1, CompactType::I32) => {
-                m.physical_type = PhysicalType::from_i32(r.read_zigzag_i32()?);
-            }
-            (3, CompactType::List) => {
-                let (et, n) = r.read_list_header()?;
-                if et != CompactType::Binary { return Err("path_in_schema element type not Binary".into()); }
-                for _ in 0..n {
-                    m.path_in_schema.push(String::from_utf8_lossy(r.read_binary()?).into_owned());
-                }
-            }
-            (5, CompactType::I64) => { m.num_values = r.read_zigzag_i64()?; }
-            (12, CompactType::Struct) => { m.statistics = Some(read_statistics(r)?); }
-            _ => r.skip_value(ty)?,
-        }
-    }
-    Ok(m)
-}
-
-fn read_statistics(r: &mut ThriftReader) -> Result<Statistics, String> {
-    let mut s = Statistics::default();
-    let mut last: i16 = 0;
-    while let Some((fid, ty)) = r.read_field_header(last)? {
-        last = fid;
-        match (fid, ty) {
-            // Field 1 is `max` (deprecated), 2 is `min` (deprecated). Skip.
-            (3, CompactType::I64) => { s.null_count = Some(r.read_zigzag_i64()?); }
-            (5, CompactType::Binary) => { s.max_value = Some(r.read_binary()?.to_vec()); }
-            (6, CompactType::Binary) => { s.min_value = Some(r.read_binary()?.to_vec()); }
-            _ => r.skip_value(ty)?,
-        }
-    }
-    Ok(s)
 }
 
 // ── Aggregation: row groups → per-column summary ──────────────────────────────
@@ -331,6 +187,7 @@ fn decode_stat_value(pt: PhysicalType, bytes: &[u8], unsigned: bool) -> Option<N
 /// equivalent to scalar but stays on the kernel-first dispatch path.
 struct ColumnScratch {
     physical_type: PhysicalType,
+    logical:     Option<LogicalKind>,
     unsigned:    bool,
     total_values: i64,
     mins:        Vec<f64>,
@@ -358,6 +215,12 @@ fn aggregate_summary(meta: FileMetaData) -> Result<ParquetSummary, String> {
         .filter_map(|e| e.physical_type.map(|_|
             (e.name.as_str(), matches!(e.converted_type, Some(11..=14)))))
         .collect();
+    // LogicalType annotations (TIMESTAMP) keyed by column name.
+    let name_to_logical: std::collections::HashMap<&str, LogicalKind> = meta.schema.iter()
+        .skip(1)
+        .filter(|e| e.num_children == 0)
+        .filter_map(|e| e.logical.map(|l| (e.name.as_str(), l)))
+        .collect();
 
     // Phase 1: walk row groups, collect per-column f64 vectors of mins,
     // maxes, null_counts. No reduction yet — that's the SIMD step.
@@ -374,10 +237,12 @@ fn aggregate_summary(meta: FileMetaData) -> Result<ParquetSummary, String> {
                 None => continue,
             };
             let unsigned = name_to_unsigned.get(name.as_str()).copied().unwrap_or(false);
+            let logical = name_to_logical.get(name.as_str()).copied();
             let entry = scratches.entry(name.clone()).or_insert_with(|| {
                 order.push(name.clone());
                 ColumnScratch {
                     physical_type: pt,
+                    logical,
                     unsigned,
                     total_values: 0,
                     mins:        Vec::with_capacity(meta.row_groups.len()),
@@ -423,6 +288,7 @@ fn aggregate_summary(meta: FileMetaData) -> Result<ParquetSummary, String> {
             Some(ColumnSummary {
                 name,
                 physical_type: pt,
+                logical: s.logical,
                 total_values: s.total_values,
                 null_count: nulls,
                 min,
