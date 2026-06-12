@@ -28,8 +28,12 @@ Six runes against real public files and independent oracles. **4 findings, 0 cra
 
 ## Fix status
 
-- **#1 easql brackets** — FIXED this wave (`read_ident` `[…]` arm + regression test).
-- **#2 / #3 / #4** — confirmed, root-caused, deferred for a batched fix: each changes output goldens or contract semantics (`count` meaning, `--json` size policy, timestamp rendering) and wants a deliberate design decision rather than a reflexive patch.
+All four wave-one findings are now FIXED.
+
+- **#1 easql brackets** — `read_ident` `[…]` arm + regression test. PR #75, merged.
+- **#2 eaparquet timestamps** — footer reader parses the modern `LogicalType` union (pyarrow omits the deprecated `ConvertedType`); TIMESTAMP columns render ISO min/max, unit-aware, `Z` only when `isAdjustedToUTC`. Verified end-to-end on the 3M-row taxi file (`tpep_pickup_datetime` → `2008-12-31T23:01:42`). `parquet.rs` split into `parquet_meta.rs` to stay under the 500-LOC cap.
+- **#3 eajson null contract** — `count` now = total presence (non-null + null), `null_count` always populated, stats over non-null — aligned with eaparquet. All-null keys stay omitted (eajson is value-typed). eajson goldens re-blessed.
+- **#4 `--json` 32 KB cap + bucket explosion** — (a) structured `--json` output is exempt from the LLM-context cap (it never reaches the model); (b) eatime series bucket count is hard-capped so a pathological span can't explode the output.
 
 ## Notes / watch-list (not yet bugs)
 

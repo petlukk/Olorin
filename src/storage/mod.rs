@@ -7,6 +7,7 @@ pub mod secure;
 pub mod json;
 pub mod jsonl_parse;
 pub mod parquet;
+mod parquet_meta;
 mod thrift_compact;
 pub mod key;
 pub mod blake2b;

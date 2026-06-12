@@ -95,6 +95,31 @@ fn injected_spike_flags_with_noise_zscore_path() {
 }
 
 #[test]
+fn pathological_span_is_bucket_capped() {
+    olorin::kernels::ffi::init().unwrap();
+    // Robustness wave one, finding #4(b): eatime scans EVERY ISO instant in
+    // the text, so one outlier timestamp millennia from the rest (real GH
+    // Archive data has these) would — with auto_width's bucket width capped
+    // at one week — explode the series to 100 k+ buckets. The hard ceiling
+    // must bound it regardless of span. The two stamps below span ~3000
+    // years (~157 k week-buckets uncapped).
+    let log = b"2000-01-01T00:00:00 INFO start\n5000-01-01T00:00:00 INFO end\n";
+    let path = write_tmp("olorin_eatime_huge_span.log", log);
+    let result = run_rune("eatime", &format!("--json --bucket series {path}")).unwrap();
+    assert!(result.success, "rune failed: {}", result.answer);
+
+    // parse_answer proves the (large) structured output is delivered WHOLE
+    // and valid — i.e. finding #4(a)'s cap exemption holds end-to-end too.
+    let out = parse_answer(&result.answer);
+    assert_eq!(out.totals.rows, 2, "both timestamps counted");
+    assert!(
+        out.categories.len() <= 1000,
+        "series bucket count must be hard-capped, got {}",
+        out.categories.len()
+    );
+}
+
+#[test]
 fn series_text_mode_surfaces_the_spike() {
     olorin::kernels::ffi::init().unwrap();
     let log = synthetic_log(120, |m| if m == 75 { 2500 } else { 50 });

@@ -151,6 +151,65 @@ fn json_mode_error_path_emits_structured_failure() {
 }
 
 #[test]
+fn null_values_counted_as_presence_with_null_count() {
+    // Robustness wave one, finding #3: a key that is JSON `null` in some
+    // records was silently dropped — `count` undercounted the non-null
+    // values and `null_count` was omitted entirely (and a column null in
+    // EVERY record vanished). Now `count` = total presence (non-null +
+    // null), `null_count` is always populated, and stats cover the non-null
+    // values — matching eaparquet's contract. A key that is null in every
+    // record stays omitted: eajson is value-typed, with no schema to
+    // declare an all-null column.
+    olorin::kernels::ffi::init().unwrap();
+    const NULLS: &[u8] = b"\
+{\"a\":1,\"b\":\"x\",\"c\":10,\"d\":null,\"e\":true}
+{\"a\":null,\"b\":null,\"c\":null,\"d\":null,\"e\":false}
+{\"a\":3,\"b\":\"y\",\"c\":30,\"d\":null,\"e\":true}
+";
+    let path = write_tmp("olorin_eajson_nulls.jsonl", NULLS);
+    let out = parse_answer(&run_rune("eajson", &format!("--json {path}")).unwrap().answer);
+    assert_eq!(out.totals.rows, 3);
+
+    // a: number, 2 non-null + 1 null. count = presence, stats over non-null.
+    let a = find_field(&out, "a");
+    assert_eq!(a.kind, FieldKind::Number);
+    assert_eq!(a.count, 3, "presence = 2 non-null + 1 null");
+    assert_eq!(a.null_count, Some(1));
+    let n = a.numeric.as_ref().expect("number stats");
+    assert!((n.min - 1.0).abs() < 1e-9, "min over non-null only");
+    assert!((n.max - 3.0).abs() < 1e-9, "max over non-null only");
+
+    // b: text, 2 non-null + 1 null.
+    let b = find_field(&out, "b");
+    assert_eq!(b.kind, FieldKind::Text);
+    assert_eq!(b.count, 3);
+    assert_eq!(b.null_count, Some(1));
+
+    // c: number, 2 non-null + 1 null.
+    let c = find_field(&out, "c");
+    assert_eq!(c.count, 3);
+    assert_eq!(c.null_count, Some(1));
+
+    // e: bool present in every record, never null → null_count Some(0),
+    // proving null_count is always populated (not just when > 0).
+    let e = find_field(&out, "e");
+    assert_eq!(e.kind, FieldKind::Bool);
+    assert_eq!(e.count, 3);
+    assert_eq!(e.null_count, Some(0));
+
+    // d: null in all 3 records → all-null → omitted entirely.
+    assert!(out.fields.iter().all(|f| f.name != "d"),
+        "all-null key must be omitted, fields: {:?}",
+        out.fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>());
+
+    // No field may report more nulls than its total presence.
+    for f in &out.fields {
+        assert!(f.null_count.unwrap_or(0) <= f.count,
+            "null_count > count for '{}'", f.name);
+    }
+}
+
+#[test]
 fn json_mode_flag_position_does_not_matter() {
     olorin::kernels::ffi::init().unwrap();
     let path = write_tmp("olorin_eajson_order.jsonl", FIXTURE);
