@@ -2,8 +2,15 @@
 //!
 //! Key derivation: Argon2id (RFC 9106) over passphrase + per-vault salt
 //! (see [`crate::storage::key`] and [`crate::storage::argon2id`]).
-//! Format: binary header + encrypted blocks + index at tail (see
-//! [`vault_format`] for the byte-layout details).
+//!
+//! Format v4 — `[header slot A][header slot B][record0][record1]…`, where each
+//! record is `index_entry ‖ ciphertext ‖ tag`. Append writes the record at the
+//! data-end (fresh space, never over a committed record), fsyncs, then commits
+//! the header to the *other* slot and fsyncs. A crash before the commit leaves
+//! the in-flight record beyond `block_count`, so reopen ignores it — committed
+//! history is never clobbered or made unopenable (robustness wave-two F1/F2).
+//! On open, the MAC-valid header slot with the highest generation wins, so a
+//! torn header commit falls back to the previous generation.
 //! Plaintext never lingers — blocks are encrypted immediately on append.
 
 use std::fs::{File, OpenOptions};
@@ -21,7 +28,7 @@ use crate::storage::search::FusedSearcher;
 use crate::storage::secure::SecureBuffer;
 use crate::storage::vault_format::{
     build_block_aad, derive_block_nonce, derive_header_nonce, now_epoch,
-    IndexEntry, INDEX_ENTRY_SIZE, VAULT_VERSION_V3,
+    IndexEntry, INDEX_ENTRY_SIZE, N_HEADER_SLOTS, RECORDS_START, VAULT_VERSION,
 };
 
 pub use crate::storage::vault_format::{VaultHeaderV2, HEADER_SIZE_V2};
@@ -45,6 +52,46 @@ fn key_array(buf: &SecureBuffer) -> [u8; 32] {
     let mut out = [0u8; 32];
     out.copy_from_slice(buf.as_slice());
     out
+}
+
+/// File offset of the header slot for a given generation (`header_rewrites`).
+/// The two slots alternate by parity, so committing generation G to one slot
+/// always leaves G−1 intact in the other — a torn header write can never
+/// destroy the only valid commit point (v4 atomic-commit, F1/F2).
+fn header_slot_offset(header_rewrites: u32) -> u64 {
+    (header_rewrites as u64 % N_HEADER_SLOTS) * HEADER_SIZE_V2 as u64
+}
+
+/// Poly1305 tag over `header[0..46]` (magic, version, block_count, data_end,
+/// key_id, nonce_seed, header_rewrites — everything load-bearing; the tag
+/// itself and reserved bytes are excluded), OTK from the generation-derived
+/// header nonce. The per-block index fields (timestamp/counter/histogram) are
+/// authenticated by each block's own AEAD AAD, so the header MAC need not cover
+/// the records.
+fn compute_header_mac(key_bytes: &[u8; 32], header: &VaultHeaderV2) -> [u8; 16] {
+    let header_bytes = header.to_bytes();
+    let header_nonce = derive_header_nonce(&header.nonce_seed_8, header.header_rewrites);
+    let mut otk = [0u8; 32];
+    crypto::keystream(key_bytes, &header_nonce, 0, &mut otk);
+    let mut tag = [0u8; 16];
+    unsafe {
+        ffi::poly1305_mac(otk.as_ptr(), header_bytes.as_ptr(), 46, tag.as_mut_ptr());
+        ffi::zeroize(otk.as_mut_ptr(), 32);
+    }
+    tag
+}
+
+/// Constant-time verify of a header slot's tag against `header[0..46]`.
+fn verify_header_mac(key_bytes: &[u8; 32], header: &VaultHeaderV2) -> bool {
+    let header_bytes = header.to_bytes();
+    let header_nonce = derive_header_nonce(&header.nonce_seed_8, header.header_rewrites);
+    let mut otk = [0u8; 32];
+    crypto::keystream(key_bytes, &header_nonce, 0, &mut otk);
+    let ok = unsafe {
+        ffi::poly1305_verify(otk.as_ptr(), header_bytes.as_ptr(), 46, header.header_tag.as_ptr())
+    };
+    unsafe { ffi::zeroize(otk.as_mut_ptr(), 32); }
+    ok != 0
 }
 
 impl Vault {
@@ -110,9 +157,18 @@ impl Vault {
         let mut key = SecureBuffer::new(32);
         key.write(&key_bytes);
         let mut vault = Self { file, header, index: Vec::new(), key, searcher: FusedSearcher::new() };
-        // First write: a valid v2 header with header_rewrites = 1 and a tag
-        // covering the empty index.  Subsequent appends bump rewrites.
-        vault.recompute_and_write_header_tag()?;
+        // Initialize BOTH header slots with a valid generation-1 header (empty
+        // vault), so `open` always finds a valid slot no matter which one the
+        // first append's commit lands on. Subsequent commits bump the generation
+        // and alternate slots.
+        vault.header.header_rewrites = 1;
+        vault.header.header_tag = compute_header_mac(&key_bytes, &vault.header);
+        let bytes = vault.header.to_bytes();
+        for slot in 0..N_HEADER_SLOTS {
+            vault.file.seek(SeekFrom::Start(slot * HEADER_SIZE_V2 as u64))?;
+            vault.file.write_all(&bytes)?;
+        }
+        vault.file.sync_data()?;
         Ok(vault)
     }
 
@@ -124,56 +180,58 @@ impl Vault {
             return Err(Error::Vault("vault is already open by another Olorin process"));
         }
         let file_size = file.metadata()?.len();
+        if file_size < RECORDS_START {
+            return Err(Error::Vault("vault file too small for a v4 header"));
+        }
 
-        let mut hdr_buf = [0u8; HEADER_SIZE_V2];
-        file.read_exact(&mut hdr_buf)?;
-        let header = VaultHeaderV2::from_bytes(&hdr_buf)?;
+        // Recover the commit point: read both header slots, keep the MAC-valid
+        // one with the highest generation. A torn/corrupt slot is skipped, so a
+        // crash during a header commit falls back to the previous generation.
+        let mut header: Option<VaultHeaderV2> = None;
+        for slot in 0..N_HEADER_SLOTS {
+            let mut buf = [0u8; HEADER_SIZE_V2];
+            file.seek(SeekFrom::Start(slot * HEADER_SIZE_V2 as u64))?;
+            if file.read_exact(&mut buf).is_err() { continue; }
+            let Ok(h) = VaultHeaderV2::from_bytes(&buf) else { continue; };
+            if !verify_header_mac(&key_bytes, &h) { continue; }
+            if header.as_ref().map_or(true, |b| h.header_rewrites > b.header_rewrites) {
+                header = Some(h);
+            }
+        }
+        let header = header.ok_or(Error::Vault("vault header or index has been tampered"))?;
 
-        // Sanity-check block_count against actual file size. A tampered
-        // or corrupted header claiming u32::MAX blocks would otherwise
-        // make Vec::with_capacity attempt a multi-terabyte allocation
-        // and abort the process — a DoS vector via vault.bin tampering.
-        let entries_region = file_size.saturating_sub(header.index_offset);
-        let max_entries = (entries_region / INDEX_ENTRY_SIZE as u64) as usize;
-        if header.block_count as usize > max_entries {
+        // `index_offset` is the data-end. Clamp to the real file size, then
+        // bound block_count against the smallest possible record (entry + empty
+        // ct + tag) so a corrupt count can't drive a huge allocation (DoS guard).
+        let data_end = header.index_offset.min(file_size);
+        let min_record = INDEX_ENTRY_SIZE as u64 + 16;
+        let max_blocks = data_end.saturating_sub(RECORDS_START) / min_record;
+        if header.block_count as u64 > max_blocks {
             return Err(Error::Vault("vault header block_count exceeds file size"));
         }
 
+        // Scan committed records to rebuild the in-memory index. Each record is
+        // `entry(288) ‖ ct ‖ tag`; the ct offset is recomputed from the cursor
+        // (not trusted from the stored entry). A short/oversized record fails
+        // closed. Per-block content integrity is checked later by AEAD.
         let mut index = Vec::with_capacity(header.block_count as usize);
-        file.seek(SeekFrom::Start(header.index_offset))?;
+        let mut cursor = RECORDS_START;
         for _ in 0..header.block_count {
+            if cursor + INDEX_ENTRY_SIZE as u64 > data_end {
+                return Err(Error::Vault("vault record truncated"));
+            }
             let mut entry_buf = [0u8; INDEX_ENTRY_SIZE];
+            file.seek(SeekFrom::Start(cursor))?;
             file.read_exact(&mut entry_buf)?;
-            index.push(IndexEntry::from_bytes(&entry_buf));
-        }
-
-        // Verify header_tag — Poly1305 MAC over header[0..46] || serialized
-        // index, with OTK derived from a domain-separated header nonce.
-        // Catches tampering of block_count, index_offset, key_id, nonce_seed_8,
-        // header_rewrites, or any index entry byte.  The reserved bytes
-        // (62..64) and the tag itself (46..62) are not in the MAC input.
-        let header_bytes = header.to_bytes();
-        let mut mac_input =
-            Vec::with_capacity(46 + index.len() * INDEX_ENTRY_SIZE);
-        mac_input.extend_from_slice(&header_bytes[0..46]);
-        for e in &index {
-            mac_input.extend_from_slice(&e.to_bytes());
-        }
-        let header_nonce =
-            derive_header_nonce(&header.nonce_seed_8, header.header_rewrites);
-        let mut otk = [0u8; 32];
-        crypto::keystream(&key_bytes, &header_nonce, 0, &mut otk);
-        let ok = unsafe {
-            ffi::poly1305_verify(
-                otk.as_ptr(),
-                mac_input.as_ptr(),
-                mac_input.len() as i32,
-                header.header_tag.as_ptr(),
-            )
-        };
-        unsafe { ffi::zeroize(otk.as_mut_ptr(), 32); }
-        if ok == 0 {
-            return Err(Error::Vault("vault header or index has been tampered"));
+            let mut entry = IndexEntry::from_bytes(&entry_buf);
+            let ct_offset = cursor + INDEX_ENTRY_SIZE as u64;
+            let length = entry.length as u64;
+            if length < 16 || ct_offset + length > data_end {
+                return Err(Error::Vault("vault record length invalid"));
+            }
+            entry.offset = ct_offset;
+            index.push(entry);
+            cursor = ct_offset + length;
         }
 
         let mut key = SecureBuffer::new(32);
@@ -209,7 +267,7 @@ impl Vault {
         let nonce = derive_block_nonce(&self.header.nonce_seed_8, nonce_counter);
         let aad = build_block_aad(
             &self.header.key_id,
-            VAULT_VERSION_V3,
+            VAULT_VERSION,
             nonce_counter,
             timestamp,
             &histogram,
@@ -220,25 +278,47 @@ impl Vault {
         let mut tag = [0u8; 16];
         aead::seal(&key_bytes, &nonce, &aad, &mut ct, &mut tag);
 
-        let block_offset = self.header.index_offset;
-        self.file.seek(SeekFrom::Start(block_offset))?;
-        self.file.write_all(&ct)?;
-        self.file.write_all(&tag)?;
-
+        // v4 append-only record: write `entry ‖ ct ‖ tag` at the data-end — in
+        // fresh space, never over a committed record — then fsync, THEN commit
+        // the header. A crash before the commit leaves this record beyond
+        // block_count, so reopen ignores it; committed history is never
+        // clobbered and is never made unopenable (F1/F2).
+        let entry_offset = self.header.index_offset;
+        let ct_offset = entry_offset + INDEX_ENTRY_SIZE as u64;
         let entry = IndexEntry {
-            offset: block_offset,
+            offset: ct_offset,
             length: (ct.len() + 16) as u32,
             timestamp,
             _reserved: 0,
             nonce_counter,
             histogram,
         };
+        self.file.seek(SeekFrom::Start(entry_offset))?;
+        self.file.write_all(&entry.to_bytes())?;
+        self.file.write_all(&ct)?;
+        self.file.write_all(&tag)?;
+        self.file.sync_data()?; // barrier: record durable before the header commit
+
         self.index.push(entry);
         self.header.block_count += 1;
-        self.header.index_offset = block_offset + ct.len() as u64 + 16;
+        self.header.index_offset = ct_offset + ct.len() as u64 + 16;
 
-        self.write_index()?;
-        self.recompute_and_write_header_tag()
+        self.commit_header()
+    }
+
+    /// Commit the in-memory header: bump the generation, MAC `header[0..46]`,
+    /// write it to the generation's slot, and fsync. The alternating slot means
+    /// the previous generation survives a torn write (v4 atomic-commit).
+    fn commit_header(&mut self) -> Result<()> {
+        self.header.header_rewrites = self.header.header_rewrites.wrapping_add(1);
+        let key_bytes = key_array(&self.key);
+        self.header.header_tag = compute_header_mac(&key_bytes, &self.header);
+        let bytes = self.header.to_bytes();
+        let off = header_slot_offset(self.header.header_rewrites);
+        self.file.seek(SeekFrom::Start(off))?;
+        self.file.write_all(&bytes)?;
+        self.file.sync_data()?;
+        Ok(())
     }
 
     /// Decrypt a specific block by index.
@@ -269,7 +349,7 @@ impl Vault {
         let key_bytes = key_array(&self.key);
         let aad = build_block_aad(
             &self.header.key_id,
-            VAULT_VERSION_V3,
+            VAULT_VERSION,
             nonce_counter,
             timestamp,
             &histogram,
@@ -356,7 +436,7 @@ impl Vault {
             let entry = &self.index[block_idx];
             let aad = build_block_aad(
                 &self.header.key_id,
-                VAULT_VERSION_V3,
+                VAULT_VERSION,
                 entry.nonce_counter,
                 entry.timestamp,
                 &entry.histogram,
@@ -387,55 +467,6 @@ impl Vault {
         Ok(blocks)
     }
 
-    fn write_index(&mut self) -> Result<()> {
-        self.file.seek(SeekFrom::Start(self.header.index_offset))?;
-        for entry in &self.index {
-            self.file.write_all(&entry.to_bytes())?;
-        }
-        self.file.flush()?;
-        Ok(())
-    }
-
-    /// Bump `header_rewrites`, Poly1305-MAC the new header[0..46] || index
-    /// using a domain-separated nonce, write the header back to the file,
-    /// and fsync.  Called at the end of every operation that mutates the
-    /// header (create, append, future migration writes).
-    fn recompute_and_write_header_tag(&mut self) -> Result<()> {
-        self.header.header_rewrites = self.header.header_rewrites.wrapping_add(1);
-
-        let header_bytes = self.header.to_bytes();
-        let prefix = &header_bytes[0..46];
-        let mut mac_input =
-            Vec::with_capacity(46 + self.index.len() * INDEX_ENTRY_SIZE);
-        mac_input.extend_from_slice(prefix);
-        for e in &self.index {
-            mac_input.extend_from_slice(&e.to_bytes());
-        }
-
-        let key_bytes = key_array(&self.key);
-        let header_nonce =
-            derive_header_nonce(&self.header.nonce_seed_8, self.header.header_rewrites);
-
-        // Same OTK derivation as aead::seal, but no encryption — just MAC.
-        let mut otk = [0u8; 32];
-        crypto::keystream(&key_bytes, &header_nonce, 0, &mut otk);
-        let mut tag = [0u8; 16];
-        unsafe {
-            ffi::poly1305_mac(
-                otk.as_ptr(),
-                mac_input.as_ptr(),
-                mac_input.len() as i32,
-                tag.as_mut_ptr(),
-            );
-            ffi::zeroize(otk.as_mut_ptr(), 32);
-        }
-        self.header.header_tag = tag;
-
-        self.file.seek(SeekFrom::Start(0))?;
-        self.file.write_all(&self.header.to_bytes())?;
-        self.file.sync_data()?;
-        Ok(())
-    }
 }
 
 /// A search result with score and matched context lines.

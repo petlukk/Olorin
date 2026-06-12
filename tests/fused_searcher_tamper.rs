@@ -19,16 +19,22 @@ fn unique_dir(label: &str) -> std::path::PathBuf {
 
 const V2_HEADER_SIZE: usize = 64;
 
-/// Read the v2 IndexEntry at slot `idx` directly off disk to find a block's
-/// `(offset, length)` so we can tamper a specific ct byte deterministically.
+/// Walk the v4 record log to find block `idx`'s ciphertext `(offset, length)`
+/// so we can tamper a specific ct byte deterministically. Records start after
+/// the two 64-byte header slots; each is `entry(288) ‖ ct ‖ tag`, with the
+/// `ct+tag` length stored at entry bytes 8..12.
 fn read_block_offset(path: &std::path::Path, idx: usize) -> (u64, u32) {
     const INDEX_ENTRY_SIZE: usize = 288;
+    const RECORDS_START: usize = V2_HEADER_SIZE * 2;
     let bytes = std::fs::read(path).unwrap();
-    let index_offset = u64::from_le_bytes(bytes[10..18].try_into().unwrap()) as usize;
-    let entry_start = index_offset + idx * INDEX_ENTRY_SIZE;
-    let off = u64::from_le_bytes(bytes[entry_start..entry_start + 8].try_into().unwrap());
-    let len = u32::from_le_bytes(bytes[entry_start + 8..entry_start + 12].try_into().unwrap());
-    (off, len)
+    let mut cursor = RECORDS_START;
+    for _ in 0..idx {
+        let len = u32::from_le_bytes(bytes[cursor + 8..cursor + 12].try_into().unwrap()) as usize;
+        cursor += INDEX_ENTRY_SIZE + len;
+    }
+    let len = u32::from_le_bytes(bytes[cursor + 8..cursor + 12].try_into().unwrap());
+    let ct_off = (cursor + INDEX_ENTRY_SIZE) as u64;
+    (ct_off, len)
 }
 
 #[test]

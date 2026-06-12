@@ -1,13 +1,21 @@
-//! Header-tag tamper coverage for v2 vaults.
+//! Header tamper coverage for the v4 vault (double-buffered header).
 //!
-//! After Task 10, any byte flipped inside the MAC region
-//! (header[0..46] || serialized index) must cause `Vault::open` to fail.
-//! The MAC excludes the tag itself (46..62) and the 2 reserved bytes
-//! (62..64); reserved-byte tampering is out of scope.
+//! v4 keeps two 64-byte header slots (offsets 0 and 64); open takes the
+//! MAC-valid slot with the highest generation. So the security property is:
+//! a forged/tampered slot is never *accepted* — at worst it's ignored and the
+//! other slot wins (resilience), and if BOTH slots are tampered in a
+//! MAC-covered field, open fails closed. The MAC covers `header[0..46]`
+//! (magic, version, block_count, data_end, key_id, nonce_seed, header_rewrites)
+//! plus the tag at 46..62; per-block index fields are authenticated by each
+//! block's own AEAD AAD, so a record-body flip is caught at decrypt, not open
+//! (see `vault_crash_consistency.rs`).
 
 use olorin::kernels::ffi;
+use olorin::storage::argon2id::Params;
 use olorin::storage::vault::Vault;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+const SLOT: usize = 64; // second header slot offset
 
 fn unique_dir(label: &str) -> std::path::PathBuf {
     static SEQ: AtomicU64 = AtomicU64::new(0);
@@ -21,106 +29,73 @@ fn unique_dir(label: &str) -> std::path::PathBuf {
 }
 
 fn make_vault_with_blocks(dir: &std::path::Path, n: usize) {
-    let mut v = Vault::open_with(dir, b"test-passphrase", olorin::storage::argon2id::Params::TEST_FAST).unwrap();
+    let mut v = Vault::open_with(dir, b"test-passphrase", Params::TEST_FAST).unwrap();
     for i in 0..n {
         v.append(b"user", format!("message {i}").as_bytes()).unwrap();
     }
 }
 
-#[test]
-fn block_count_flip_detected() {
-    ffi::init().unwrap();
-    let dir = unique_dir("block_count");
+fn open(dir: &std::path::Path) -> olorin::error::Result<Vault> {
+    Vault::open_with(dir, b"test-passphrase", Params::TEST_FAST)
+}
+
+/// Flip byte `off` in BOTH header slots, then attempt open.
+fn flip_both_and_open(label: &str, off: usize) -> bool {
+    let dir = unique_dir(label);
     make_vault_with_blocks(&dir, 3);
-
     let path = dir.join("vault.bin");
     let mut bytes = std::fs::read(&path).unwrap();
-    bytes[6] ^= 0x01;
+    bytes[off] ^= 0x01;
+    bytes[SLOT + off] ^= 0x01;
     std::fs::write(&path, &bytes).unwrap();
-
-    let result = Vault::open_with(&dir, b"test-passphrase", olorin::storage::argon2id::Params::TEST_FAST);
-    assert!(result.is_err(), "block_count tamper must be rejected");
+    let ok = open(&dir).is_ok();
     let _ = std::fs::remove_dir_all(&dir);
+    ok
 }
 
 #[test]
-fn key_id_flip_detected() {
+fn both_slots_block_count_tamper_rejected() {
     ffi::init().unwrap();
-    let dir = unique_dir("key_id");
-    make_vault_with_blocks(&dir, 2);
-
-    let path = dir.join("vault.bin");
-    let mut bytes = std::fs::read(&path).unwrap();
-    bytes[20] ^= 0x80; // mid of key_id
-    std::fs::write(&path, &bytes).unwrap();
-
-    let result = Vault::open_with(&dir, b"test-passphrase", olorin::storage::argon2id::Params::TEST_FAST);
-    assert!(result.is_err(), "key_id tamper must be rejected");
-    let _ = std::fs::remove_dir_all(&dir);
+    assert!(!flip_both_and_open("block_count", 6), "tampering block_count in both slots must reject");
 }
 
 #[test]
-fn nonce_seed_flip_detected() {
+fn both_slots_key_id_tamper_rejected() {
     ffi::init().unwrap();
-    let dir = unique_dir("nonce_seed");
-    make_vault_with_blocks(&dir, 2);
-
-    let path = dir.join("vault.bin");
-    let mut bytes = std::fs::read(&path).unwrap();
-    bytes[34] ^= 0x01; // first byte of nonce_seed_8
-    std::fs::write(&path, &bytes).unwrap();
-
-    let result = Vault::open_with(&dir, b"test-passphrase", olorin::storage::argon2id::Params::TEST_FAST);
-    assert!(result.is_err(), "nonce_seed_8 tamper must be rejected");
-    let _ = std::fs::remove_dir_all(&dir);
+    assert!(!flip_both_and_open("key_id", 20), "key_id tamper in both slots must reject");
 }
 
 #[test]
-fn header_rewrites_flip_detected() {
+fn both_slots_nonce_seed_tamper_rejected() {
     ffi::init().unwrap();
-    let dir = unique_dir("rewrites");
-    make_vault_with_blocks(&dir, 1);
-
-    let path = dir.join("vault.bin");
-    let mut bytes = std::fs::read(&path).unwrap();
-    bytes[42] ^= 0x01; // low byte of header_rewrites
-    std::fs::write(&path, &bytes).unwrap();
-
-    let result = Vault::open_with(&dir, b"test-passphrase", olorin::storage::argon2id::Params::TEST_FAST);
-    assert!(result.is_err(), "header_rewrites tamper must be rejected");
-    let _ = std::fs::remove_dir_all(&dir);
+    assert!(!flip_both_and_open("nonce_seed", 34), "nonce_seed tamper in both slots must reject");
 }
 
 #[test]
-fn header_tag_flip_detected() {
+fn both_slots_tag_tamper_rejected() {
     ffi::init().unwrap();
-    let dir = unique_dir("tag");
-    make_vault_with_blocks(&dir, 2);
-
-    let path = dir.join("vault.bin");
-    let mut bytes = std::fs::read(&path).unwrap();
-    bytes[46] ^= 0x01; // first byte of header_tag
-    std::fs::write(&path, &bytes).unwrap();
-
-    let result = Vault::open_with(&dir, b"test-passphrase", olorin::storage::argon2id::Params::TEST_FAST);
-    assert!(result.is_err(), "header_tag tamper must be rejected");
-    let _ = std::fs::remove_dir_all(&dir);
+    assert!(!flip_both_and_open("tag", 46), "header_tag tamper in both slots must reject");
 }
 
 #[test]
-fn index_entry_flip_detected_at_open() {
+fn single_slot_tamper_is_recovered() {
     ffi::init().unwrap();
-    let dir = unique_dir("index");
+    // Corrupt only the *lower-generation* (inactive) slot's block_count. Open
+    // must fall back to the still-valid active slot and recover all 3 blocks —
+    // tampering one header copy can't deny service.
+    let dir = unique_dir("single");
     make_vault_with_blocks(&dir, 3);
-
     let path = dir.join("vault.bin");
     let mut bytes = std::fs::read(&path).unwrap();
-    let index_offset = u64::from_le_bytes(bytes[10..18].try_into().unwrap()) as usize;
-    bytes[index_offset + 12] ^= 0x01; // timestamp byte of first entry
+    let gen0 = u32::from_le_bytes(bytes[42..46].try_into().unwrap());
+    let gen1 = u32::from_le_bytes(bytes[SLOT + 42..SLOT + 46].try_into().unwrap());
+    let inactive = if gen0 < gen1 { 0 } else { SLOT }; // the older slot
+    bytes[inactive + 6] ^= 0x01; // corrupt its block_count
     std::fs::write(&path, &bytes).unwrap();
 
-    let result = Vault::open_with(&dir, b"test-passphrase", olorin::storage::argon2id::Params::TEST_FAST);
-    assert!(result.is_err(), "index entry tamper must be rejected at open");
+    let mut v = open(&dir).expect("one tampered slot must be recovered from the other");
+    assert_eq!(v.block_count(), 3);
+    assert_eq!(v.decrypt_block(0).unwrap(), b"user: message 0\n");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -129,10 +104,8 @@ fn legitimate_open_still_works() {
     ffi::init().unwrap();
     let dir = unique_dir("legit");
     make_vault_with_blocks(&dir, 3);
-
-    let mut v = Vault::open_with(&dir, b"test-passphrase", olorin::storage::argon2id::Params::TEST_FAST).expect("untampered vault must open");
+    let mut v = open(&dir).expect("untampered vault must open");
     assert_eq!(v.block_count(), 3);
-    let pt = v.decrypt_block(0).unwrap();
-    assert_eq!(&pt, b"user: message 0\n");
+    assert_eq!(v.decrypt_block(0).unwrap(), b"user: message 0\n");
     let _ = std::fs::remove_dir_all(&dir);
 }

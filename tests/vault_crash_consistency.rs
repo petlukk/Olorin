@@ -11,18 +11,17 @@
 //!    the in-flight block — never silently lose or corrupt a previously
 //!    committed block, and never panic."
 //!
-//! F3 (concurrent-open nonce reuse) is FIXED — an exclusive advisory file
-//! lock now rejects a second opener; `f3_fixed_*` asserts that. F1 (crash
-//! mid-append) is still a **characterization test for a KNOWN-UNFIXED
-//! finding** (`finding_f1_*`): it asserts the *current* defective behaviour so
-//! CI tells us the moment it changes — invert it when atomic append lands. The
-//! `passes_*` tests assert correct behaviour that already holds.
+//! All findings are now FIXED (vault format v4): F1/F2 by the append-only
+//! record log + double-buffered header (`f1_fixed_*`, `f1_torn_*`), and F3 by
+//! the exclusive advisory file lock (`f3_fixed_*`). The `passes_*` tests cover
+//! the already-holding invariants (no panic on truncation, AEAD catches a
+//! block-body bit-flip).
 //!
 //! See benchmarks/robustness/FINDINGS.md (wave two) for the write-up.
 
 use olorin::kernels::ffi;
 use olorin::storage::argon2id::Params;
-use olorin::storage::vault::Vault;
+use olorin::storage::vault::{Vault, HEADER_SIZE_V2};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -50,46 +49,64 @@ fn header_index_offset(bytes: &[u8]) -> usize {
     u64::from_le_bytes(bytes[10..18].try_into().unwrap()) as usize
 }
 
-// ── Finding F1: crash mid-append destroys ALL prior blocks ────────────────────
+// ── F1/F2: crash mid-append is recoverable (v4 atomic append) ─────────────────
 
 #[test]
-fn finding_f1_crash_mid_append_loses_all_committed_blocks() {
+fn f1_fixed_crash_mid_append_recovers_all_committed_blocks() {
     ffi::init().unwrap();
     let dir = unique_dir("f1");
     make_vault_with_blocks(&dir, 3);
     let path = dir.join("vault.bin");
 
-    // Sanity: the committed vault opens with all 3 blocks.
-    {
-        let mut v = Vault::open_with(&dir, PASS, Params::TEST_FAST).unwrap();
-        assert_eq!(v.block_count(), 3);
-        assert_eq!(v.decrypt_block(0).unwrap(), b"user: committed message 0\n");
-    }
-
-    // Simulate a crash during the 4th append: `flush_block` writes the new
-    // block's ciphertext at `block_offset = old index_offset` — i.e. directly
-    // on top of the committed index — and only fsyncs the header at the very
-    // end. Reproduce the on-disk state AFTER the block hit disk but BEFORE the
-    // header was rewritten: header still says {block_count:3, index_offset:io},
-    // but `io` now holds block ciphertext, not the index.
+    // v4 append writes the new record at the data-end (== EOF after a clean
+    // append) and only commits the header AFTER an fsync. Simulate a crash
+    // *during* the 4th append: a partial in-flight record has hit the disk past
+    // the committed data-end, but the header was never committed. Append
+    // garbage at EOF, leaving both header slots untouched.
     let mut bytes = std::fs::read(&path).unwrap();
-    let io = header_index_offset(&bytes);
-    let in_flight_ct = vec![0xABu8; 48]; // stand-in for the 4th block's ct+tag
-    let end = (io + in_flight_ct.len()).min(bytes.len());
-    bytes[io..end].copy_from_slice(&in_flight_ct[..end - io]);
+    bytes.extend_from_slice(&[0xABu8; 200]); // partial in-flight record
     std::fs::write(&path, &bytes).unwrap();
 
-    // FINDING F1 (HIGH): the vault is now unopenable. The header MAC covers the
-    // index region, which the in-flight block overwrote, so open fails — and
-    // there is no recovery path. A single interrupted append loses the ENTIRE
-    // conversation history, not just the in-flight message.
-    let result = Vault::open_with(&dir, PASS, Params::TEST_FAST);
-    assert!(
-        result.is_err(),
-        "FINDING F1 reproduced: crash mid-append leaves the vault unopenable \
-         (all 3 committed blocks lost). Invert this assertion when atomic \
-         append / recovery lands."
-    );
+    // F1 FIXED: the vault still opens and recovers all 3 committed blocks — the
+    // header still says block_count 3 with the data-end before the garbage, so
+    // the in-flight record is ignored — and every block decrypts.
+    let mut v = Vault::open_with(&dir, PASS, Params::TEST_FAST)
+        .expect("crash mid-append must remain recoverable");
+    assert_eq!(v.block_count(), 3, "all committed blocks recovered");
+    for i in 0..3 {
+        assert_eq!(
+            v.decrypt_block(i).unwrap(),
+            format!("user: committed message {i}\n").into_bytes()
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn f1_torn_header_commit_falls_back_to_previous_generation() {
+    ffi::init().unwrap();
+    let dir = unique_dir("f1torn");
+    make_vault_with_blocks(&dir, 3);
+    let path = dir.join("vault.bin");
+
+    // The two 64-byte header slots alternate by generation. Simulate a torn
+    // final header commit by corrupting the tag of the higher-generation slot;
+    // open must fall back to the other (valid, previous-generation) slot rather
+    // than fail. `header_rewrites` is bytes [42..46]; the tag starts at byte 46.
+    let mut bytes = std::fs::read(&path).unwrap();
+    let gen0 = u32::from_le_bytes(bytes[42..46].try_into().unwrap());
+    let gen1 = u32::from_le_bytes(bytes[64 + 42..64 + 46].try_into().unwrap());
+    let active = if gen0 >= gen1 { 0 } else { 64 };
+    bytes[active + 46] ^= 0x01; // corrupt the active slot's tag → torn write
+    std::fs::write(&path, &bytes).unwrap();
+
+    // Falls back to the previous generation: opens with the state before the
+    // last append (2 blocks), all decryptable — never a total loss.
+    let mut v = Vault::open_with(&dir, PASS, Params::TEST_FAST)
+        .expect("a torn header commit must recover from the other slot");
+    assert_eq!(v.block_count(), 2, "recovered the previous committed generation");
+    assert_eq!(v.decrypt_block(1).unwrap(), b"user: committed message 1\n");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -172,26 +189,26 @@ fn passes_bitflip_in_block_body_is_rejected_on_decrypt() {
     make_vault_with_blocks(&dir, 3);
     let path = dir.join("vault.bin");
 
-    // Flip a byte inside block 1's ciphertext (read its offset from index
-    // entry 1). The header+index are untouched, so the vault still opens —
-    // but decrypting the damaged block must fail the AEAD tag, never return
+    // v4 record 0 sits at RECORDS_START (2 × 64-byte header slots); its
+    // ciphertext starts after the 288-byte index entry. Flip a byte there. The
+    // headers + index entry are untouched, so the vault still opens — but
+    // decrypting the damaged block must fail the AEAD tag, never return
     // corrupted plaintext.
+    let records_start = HEADER_SIZE_V2 * 2;
+    let ct0_off = records_start + 288; // skip record 0's index entry
     let mut bytes = std::fs::read(&path).unwrap();
-    let io = header_index_offset(&bytes);
-    let entry1 = io + 288; // second index entry
-    let blk1_off = u64::from_le_bytes(bytes[entry1..entry1 + 8].try_into().unwrap()) as usize;
-    bytes[blk1_off] ^= 0x01;
+    bytes[ct0_off] ^= 0x01;
     std::fs::write(&path, &bytes).unwrap();
 
     let mut v = Vault::open_with(&dir, PASS, Params::TEST_FAST)
-        .expect("header+index intact, vault still opens");
+        .expect("headers + index intact, vault still opens");
     assert_eq!(v.block_count(), 3);
     assert!(
-        v.decrypt_block(1).is_err(),
+        v.decrypt_block(0).is_err(),
         "a bit-flip in the block body must fail AEAD verification, not decrypt"
     );
     // Undamaged blocks remain readable.
-    assert_eq!(v.decrypt_block(0).unwrap(), b"user: committed message 0\n");
+    assert_eq!(v.decrypt_block(1).unwrap(), b"user: committed message 1\n");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

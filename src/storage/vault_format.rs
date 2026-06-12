@@ -19,7 +19,15 @@ use crate::error::{Error, Result};
 
 pub(super) const VAULT_MAGIC: [u8; 4] = *b"OLRN";
 pub(super) const INDEX_ENTRY_SIZE: usize = 288;
-pub(super) const VAULT_VERSION_V3: u16 = 3;
+/// File-format version. v4 = append-only record log + double-buffered header
+/// (robustness wave-two F1/F2 atomic-append fix). v3 and earlier are no longer
+/// readable — all v3 data was throwaway dev data, so no migration is provided.
+pub(super) const VAULT_VERSION: u16 = 4;
+
+/// One header copy is `HEADER_SIZE_V2` (64) bytes; v4 keeps two at offsets
+/// 0 and 64. Records begin after both slots.
+pub(super) const N_HEADER_SLOTS: u64 = 2;
+pub(super) const RECORDS_START: u64 = HEADER_SIZE_V2 as u64 * N_HEADER_SLOTS;
 
 // ── VaultHeaderV2 ─────────────────────────────────────────────────────────────
 
@@ -43,9 +51,11 @@ impl VaultHeaderV2 {
     pub(crate) fn new(key_id: [u8; 16], nonce_seed_8: [u8; 8]) -> Self {
         Self {
             magic: VAULT_MAGIC,
-            version: VAULT_VERSION_V3,
+            version: VAULT_VERSION,
             block_count: 0,
-            index_offset: HEADER_SIZE_V2 as u64,
+            // v4: this field is the data-end offset (where the next record is
+            // written / end of committed records), not a separate index region.
+            index_offset: RECORDS_START,
             key_id,
             nonce_seed_8,
             header_rewrites: 0,
@@ -74,7 +84,7 @@ impl VaultHeaderV2 {
             return Err(Error::Vault("bad magic"));
         }
         let version = u16::from_le_bytes(buf[4..6].try_into().unwrap());
-        if version != VAULT_VERSION_V3 {
+        if version != VAULT_VERSION {
             return Err(Error::Vault("unsupported vault version"));
         }
         let block_count = u32::from_le_bytes(buf[6..10].try_into().unwrap());

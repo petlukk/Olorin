@@ -65,8 +65,8 @@ is no temp-file+rename, no journal/WAL, no recovery path, and no file lock.
 
 | # | Severity | Symptom | Triage | Resolution |
 |---|----------|---------|--------|------------|
-| F1 | **HIGH** | **Crash mid-append destroys ALL prior blocks.** The new block overwrites the committed index before the header commits; on reopen the header still points at that region, the header/index MAC fails, and the vault refuses to open. A single interrupted append loses the entire history, not just the in-flight message. Reproduced: `finding_f1_crash_mid_append_loses_all_committed_blocks`. | **bug** | DEFERRED (design). Needs atomic commit — write block+index to a temp region / journal, fsync, then flip the header by rename or a double-buffered header. Changes the on-disk write protocol → Peter's call. |
-| F2 | MEDIUM | **No fsync ordering.** Block, index, and header can reach disk in any order (only the final header is fsync'd; the index `flush()` is a durability no-op). Write reordering can durably commit a header that points at not-yet-durable block/index bytes — same failure class as F1 without an explicit crash. | **bug** | DEFERRED. Folded into the F1 atomic-commit redesign (barrier the block+index fsync *before* the header fsync). |
+| F1 | **HIGH** | **Crash mid-append destroyed ALL prior blocks.** The new block overwrote the committed index before the header committed; on reopen the header still pointed there, the MAC failed, and the vault refused to open — a single interrupted append lost the entire history. | **bug** | **FIXED (format v4).** Append-only record log: each append writes `index_entry ‖ ct ‖ tag` at the data-end (fresh space, never over a committed record), fsyncs, then commits the header. A crash before the commit leaves the in-flight record beyond `block_count`, so reopen recovers all committed blocks and ignores it. Tests `f1_fixed_*`, `f1_torn_*`. |
+| F2 | MEDIUM | **No fsync ordering.** Block, index, and header could reach disk in any order (only the final header was fsync'd; the index `flush()` was a durability no-op). Write reordering could commit a header pointing at not-yet-durable bytes. | **bug** | **FIXED (format v4).** Two fsync barriers per append — the record is durable (`sync_data`) *before* the header commit (`sync_data`) — and the header is double-buffered across two slots so a torn commit falls back to the previous generation. |
 | F3 | **HIGH** | **No file locking → concurrent append = silent data loss + nonce reuse.** Two handles on the same vault dir (e.g. REPL + server) each open at block_count=N, then each append at the same block_offset and the same `nonce_counter=N`. The second write clobbers the first (one committed message silently lost, no error) and the same key+nonce seals two different plaintexts (ChaCha20 two-time-pad → confidentiality break). | **bug** | **FIXED.** `Vault::open*` now takes an **exclusive advisory file lock** (`flock` on unix / `LockFileEx` on Windows, via `platform::lock::try_lock_file_exclusive`) held for the Vault's lifetime; a concurrent open is rejected with "vault is already open by another Olorin process". Auto-released on Drop/process death (no stale lock). Test `f3_fixed_concurrent_open_is_rejected_by_the_lock`. |
 
 ### Robustness checks that PASSED
@@ -79,9 +79,10 @@ is no temp-file+rename, no journal/WAL, no recovery path, and no file lock.
   a bit-flip inside a committed block's ciphertext fails the per-block AEAD tag
   on decrypt — never returns corrupted plaintext — while undamaged blocks stay
   readable.
-- **Header/index tamper** is already covered by `tests/vault_header_tamper.rs`
-  (every MAC-region byte flip rejected at open). That integrity is exactly what
-  makes F1 *total* loss rather than partial: a torn append reads as tamper.
+- **Header tamper** is covered by `tests/vault_header_tamper.rs`. In v4 the
+  header is double-buffered: corrupting a MAC-covered field in one slot is
+  *recovered* from the other (resilience); corrupting both fails closed. A
+  tampered slot is never accepted as valid.
 
 ## Wave-two verdict
 
@@ -90,12 +91,13 @@ concurrent open) plus one MEDIUM (F2 fsync ordering), all reproduced by tests.
 The store fails *closed* against corruption and tampering (good — no silent
 wrong data, no panics).
 
-**F3 is FIXED** in-wave — it was self-contained (an exclusive advisory file
-lock, no on-disk format change) and a confidentiality issue (nonce reuse), so
-it didn't wait for the batch. **F1/F2 remain DEFERRED**: they need atomic-commit
-(journal or temp+rename with an fsync barrier before the header flip), which
-changes the on-disk write protocol — a deliberate design decision, batched with
-later waves exactly as wave one deferred its contract-changing findings.
+**All three are now FIXED.** F3 was fixed in-wave (an exclusive advisory file
+lock — self-contained and a confidentiality issue). F1/F2 were fixed in the
+batch pass by **vault format v4** — an append-only record log plus a
+double-buffered, two-fsync header commit — so a crash mid-append recovers all
+committed blocks (at worst losing only the in-flight one) and a torn header
+falls back to the previous generation. v3 vaults are not migrated (all dev
+data); they're rejected as an unsupported version.
 
 ---
 
@@ -182,15 +184,19 @@ sequences, huge single tokens) is a remaining watch-list item, not yet swept.
 
 ---
 
-# Deferred backlog (for the prioritized batch-fix pass)
+# Campaign complete — every finding fixed
 
-After all four discovery waves, **one fix remains** — it changes the vault's
-on-disk write protocol, so it's the last and most carefully gated:
+All four discovery waves are done and **every finding is resolved**:
 
-- **vault F1/F2** — atomic append (journal or temp+rename with an fsync barrier
-  before the header flip) so a crash mid-append can't lose committed history.
+- **Wave one (runes)** — #1 easql `[brackets]`, #2 eaparquet timestamps, #3
+  eajson null contract, #4 `--json` cap + eatime buckets. Shipped in **v2.13.0**.
+- **Wave two (vault)** — F3 concurrent-open lock (in-wave); F1/F2 atomic append
+  via **format v4** (batch pass).
+- **Wave three (server)** — S3 auth-parser panic (in-wave); S1 incremental body
+  read + S2 connection cap (batch pass).
+- **Wave four (inference)** — W1 central context-window guard in `generate`.
 
-Already fixed: easql `[brackets]` (#1), eaparquet timestamps (#2), eajson null
-contract (#3), `--json` cap + eatime buckets (#4) — all shipped in v2.13.0;
-vault concurrent lock (F3); server auth-parser panic (S3); inference context
-guard (W1); **server body-read S1 + connection-cap S2**. Remaining: vault F1/F2.
+Open watch-list (not bugs): adversarial **tokenizer** fuzzing (pathological
+byte sequences / huge single tokens), not yet swept; a future `sqlite` dialect
+label for easql. Next campaign step would be a wave five on a new subsystem, or
+deeper fuzzing of the runes/inference input paths.
