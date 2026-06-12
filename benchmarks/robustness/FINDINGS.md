@@ -112,8 +112,8 @@ request may panic a thread, exhaust memory, or authorize without the token.*
 | # | Severity | Symptom | Triage | Resolution |
 |---|----------|---------|--------|------------|
 | S3 | **MED** (pre-auth panic) | **Auth parser panics on a non-UTF-8-boundary header slice.** `bearer_token`/`cookie_token` sliced fixed byte ranges (`line[..14]`, `line[..7]`, `val[..7]`) on attacker-controlled header lines; a multibyte char straddling byte 7 or 14 panics the slice. `authorized` runs on every request *before* auth, so this is reachable **unauthenticated** on an exposed server — a crafted header kills the connection thread (process survives; the thread is isolated). | **bug** | **FIXED.** Switched to boundary-safe prefix checks (`str::get(..n).is_some_and(\|p\| p.eq_ignore_ascii_case(..))`) — a non-boundary slice now simply doesn't match instead of panicking. Regression: `tests/server_abuse.rs` (`s3_*`). |
-| S1 | MED | **Content-Length eager allocation → memory amplification.** `read_body` does `vec![0u8; content_len]` — it allocates the full *declared* Content-Length (≤ `OLORIN_MAX_UPLOAD`, default **128 MB**) before reading any body. A request that declares 128 MB and sends nothing allocates 128 MB for free; combined with S2 (unbounded threads), a flood of such requests is N×128 MB → OOM (a Pi has 8 GB). The 10 s read timeout bounds *duration* but not the concurrent allocation. Behind auth (body read is post-`authorized`). | **bug** | DEFERRED (design). Read the body incrementally up to the cap (grow the buffer as bytes arrive) instead of trusting Content-Length for the allocation size; optionally a global in-flight-body memory budget. |
-| S2 | MED | **Unbounded thread-per-connection.** The accept loop spawns a 16 MB-stack thread per connection with no cap / pool. Thread-spawn + header read happen *pre-auth*, so an unauthenticated connection flood (when exposed) exhausts threads/address space. | **bug** | DEFERRED (design). Bound concurrency with a connection semaphore or a small worker pool; reject or queue beyond the cap. |
+| S1 | MED | **Content-Length eager allocation → memory amplification.** `read_body` did `vec![0u8; content_len]` — allocating the full *declared* Content-Length (≤ `OLORIN_MAX_UPLOAD`, default **128 MB**) before reading any body. A request declaring 128 MB and sending nothing allocated 128 MB for free; with S2 (unbounded threads), N such requests → OOM. | **bug** | **FIXED.** `read_body` now grows with the bytes that actually arrive (64 KB chunks, bounded by Content-Length) and stops at EOF/timeout — a lying length costs only what it sends. The `OLORIN_MAX_UPLOAD` cap still rejects an over-cap declared length up front. Tests `s1_*` (real socket). |
+| S2 | MED | **Unbounded thread-per-connection.** The accept loop spawned a 16 MB-stack thread per connection with no cap / pool; thread-spawn + header read happen *pre-auth*, so an unauthenticated flood (when exposed) exhausts threads/address space. | **bug** | **FIXED.** The accept loop now caps in-flight connections (`OLORIN_MAX_CONN`, default 64) via an atomic counter + a `ConnGuard` that releases the slot on drop (even on panic); beyond the cap it returns `503` and closes without spawning. Loop not unit-reachable → verified by inspection + Pi gate. |
 
 ### Robustness checks that PASSED
 
@@ -136,10 +136,9 @@ The network-facing design is **fail-closed and the auth logic is sound** — the
 real exposure only exists in the opt-in `OLORIN_BIND` mode. One genuine
 pre-auth defect (S3, a parser panic on malformed input) is **FIXED in-wave**
 (small, self-contained, reachable unauthenticated — same posture as wave two's
-F3 lock fix). Two availability findings (S1 memory amplification, S2 unbounded
-threads) are real but require the exposed mode + are bounded by the existing cap
-and timeout; both are **DEFERRED** as request-read / accept-loop design changes,
-to be batched with the other deferred findings (vault F1/F2).
+F3 lock fix). The two availability findings (S1 memory amplification, S2
+unbounded threads) are now also **FIXED** — incremental body read + an
+accept-loop concurrency cap — in the batch-fix pass.
 
 ---
 
@@ -185,16 +184,13 @@ sequences, huge single tokens) is a remaining watch-list item, not yet swept.
 
 # Deferred backlog (for the prioritized batch-fix pass)
 
-After all four discovery waves, the open fixes — each changing a subsystem's
-core protocol/policy, hence batched rather than reflex-patched:
+After all four discovery waves, **one fix remains** — it changes the vault's
+on-disk write protocol, so it's the last and most carefully gated:
 
 - **vault F1/F2** — atomic append (journal or temp+rename with an fsync barrier
   before the header flip) so a crash mid-append can't lose committed history.
-- **server S1** — read the request body incrementally up to the cap instead of
-  eagerly allocating the declared Content-Length.
-- **server S2** — bound connection concurrency (semaphore / worker pool).
 
 Already fixed: easql `[brackets]` (#1), eaparquet timestamps (#2), eajson null
 contract (#3), `--json` cap + eatime buckets (#4) — all shipped in v2.13.0;
-vault concurrent lock (F3); server auth-parser panic (S3); **inference context
-guard (W1)**. Remaining batch backlog: vault F1/F2, server S1/S2.
+vault concurrent lock (F3); server auth-parser panic (S3); inference context
+guard (W1); **server body-read S1 + connection-cap S2**. Remaining: vault F1/F2.
