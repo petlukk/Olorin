@@ -19,3 +19,6 @@
 !/docs/images/**
 /.claude/
 *.pdf
+
+# Robustness-campaign real datasets (fetched on demand, see benchmarks/robustness/SOURCES.md)
+benchmarks/robustness/data/

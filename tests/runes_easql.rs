@@ -97,6 +97,22 @@ fn easql_quoted_value_with_paren_not_overcounted() {
     assert_eq!(rows(&out, "t"), 2, "two real tuples despite '),(' inside a string");
 }
 
+#[test]
+fn easql_bracket_quoted_identifier_stripped() {
+    // SQL Server / SQLite delimit identifiers with [brackets]. They are
+    // quoting, not part of the name — the reported table is `Album`, not
+    // `[Album]`. Found on the real Chinook_Sqlite.sql (robustness wave,
+    // 2026-06-12): the brackets leaked into output and broke eadiff's
+    // cross-dialect name matching.
+    let out = run(
+        "brackets",
+        "INSERT INTO [Album] ([AlbumId], [Title]) VALUES (1,'a'),(2,'b'),(3,'c');\n",
+    );
+    assert!(out.success);
+    assert_eq!(rows(&out, "Album"), 3, "name reported without brackets");
+    assert_eq!(rows(&out, "[Album]"), u64::MAX, "bracketed form must not appear");
+}
+
 // pg_dump --inserts emits no COPY blocks, but its preamble is unmistakable.
 // Such a dump must be labeled postgres, not mysql (the INSERT-only fallback).
 const PG_INSERTS: &str = "\
