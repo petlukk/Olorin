@@ -3,7 +3,7 @@
 //! Features:
 //! - Escape-aware quote walking — `\"` inside strings is correctly skipped.
 //! - Nested-object flattening — `{"http": {"status":200}}` becomes
-//!   `http.status` keys (one level deep).
+//!   `http.status` keys, up to `--depth N` levels deep (default 4).
 //! - Byte-array decoding — `[27,91,...]` (systemd-style binary MESSAGE
 //!   encoding) is decoded as UTF-8 with `�` replacement.
 //! - ISO-8601 timestamp detection — text keys whose values look like
@@ -25,7 +25,7 @@ use super::{Rune, RuneResult, OutputSafety};
 use super::common::{resolve_path, open_capped, truncate_answer, PathError};
 use super::output::{FieldKind, FieldStats, RuneOutput, Source, Totals};
 use super::eajson_aggregate::{
-    build_field_stats, process_line, Aggregator,
+    self, build_field_stats, process_line, Aggregator,
 };
 use crate::storage::jsonl_parse::build_escaped_quote_set;
 use std::path::PathBuf;
@@ -42,17 +42,17 @@ impl Rune for Eajson {
         "Summarize a JSON Lines file (one object per line) via SIMD: row \
          count, per-key type (number/text/bool/timestamp), per-numeric-key \
          stats (min/max/mean/sum), top-3 most frequent values for text keys. \
-         Handles nested objects (flattened to parent.child), byte-array \
-         strings (systemd MESSAGE format), and ISO-8601 timestamps. \
-         Args: [--json] <path.jsonl>."
+         Handles nested objects (flattened to dotted keys `a.b.c` up to \
+         `--depth N` levels, default 4), byte-array strings (systemd MESSAGE \
+         format), and ISO-8601 timestamps. Args: [--json] [--depth N] <path.jsonl>."
     }
-    fn usage(&self) -> &'static str { "eajson [--json] <path.jsonl>" }
+    fn usage(&self) -> &'static str { "eajson [--json] [--depth N] <path.jsonl>" }
     fn output_safety(&self) -> OutputSafety { OutputSafety::UntrustedQuoted }
 
     fn run(&self, args: &str) -> RuneResult {
         let t0 = Instant::now();
-        let (path, json_mode) = parse_args(args);
-        let output = execute(&path);
+        let (path, json_mode, depth) = parse_args(args);
+        let output = execute(&path, depth);
         let answer = if json_mode {
             output.to_json()
         } else if let Some(err) = &output.error {
@@ -70,22 +70,29 @@ impl Rune for Eajson {
     }
 }
 
-fn parse_args(args: &str) -> (String, bool) {
-    let trimmed = args.trim();
-    if let Some(rest) = trimmed.strip_prefix("--json ") {
-        (rest.trim().to_string(), true)
-    } else if let Some(rest) = trimmed.strip_suffix(" --json") {
-        (rest.trim().to_string(), true)
-    } else if trimmed == "--json" {
-        (String::new(), true)
-    } else {
-        (trimmed.to_string(), false)
+/// Returns (path, json_mode, flatten_depth). `--depth N` overrides the
+/// default nested-object flatten depth; `--json` may appear anywhere.
+/// Whitespace-tokenized — the lone non-flag token is the path.
+fn parse_args(args: &str) -> (String, bool, usize) {
+    let mut path = String::new();
+    let mut json = false;
+    let mut depth = eajson_aggregate::DEFAULT_FLATTEN_DEPTH;
+    let mut it = args.split_whitespace();
+    while let Some(tok) = it.next() {
+        match tok {
+            "--json"  => json = true,
+            "--depth" => if let Some(n) = it.next().and_then(|s| s.parse::<usize>().ok()) {
+                depth = n;
+            },
+            _ => if path.is_empty() { path = tok.to_string(); },
+        }
     }
+    (path, json, depth)
 }
 
-fn execute(path: &str) -> RuneOutput {
+fn execute(path: &str, depth: usize) -> RuneOutput {
     if path.is_empty() {
-        return error_output("usage: eajson [--json] <path.jsonl>");
+        return error_output("usage: eajson [--json] [--depth N] <path.jsonl>");
     }
     let home = crate::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
     let resolved = match resolve_path(path, &home) {
@@ -111,7 +118,7 @@ fn execute(path: &str) -> RuneOutput {
             return error_output(&format!("io error: {e}")),
     };
     let resolved_str = resolved.to_string_lossy().into_owned();
-    match build_output(&bytes, resolved_str) {
+    match build_output(&bytes, resolved_str, depth) {
         Ok(out) => out,
         Err(e)  => error_output(&format!("parse failed: {e}")),
     }
@@ -124,7 +131,7 @@ fn error_output(msg: &str) -> RuneOutput {
     out
 }
 
-fn build_output(bytes: &[u8], path: String) -> Result<RuneOutput, String> {
+fn build_output(bytes: &[u8], path: String, depth: usize) -> Result<RuneOutput, String> {
     use crate::kernels::ffi;
 
     if bytes.is_empty() {
@@ -191,7 +198,7 @@ fn build_output(bytes: &[u8], path: String) -> Result<RuneOutput, String> {
         if line_quotes.is_empty() { continue; }
 
         row_count += 1;
-        process_line(bytes, line_quotes, colons, line_end, &mut co_cur, "", &mut agg, 0);
+        process_line(bytes, line_quotes, colons, line_end, &mut co_cur, "", &mut agg, 0, depth);
         q_cur = q_end;
     }
 

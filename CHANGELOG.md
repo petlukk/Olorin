@@ -10,6 +10,16 @@ order.
 
 ### Added
 
+- **`eajson --depth N` multi-level nesting.** Nested objects now flatten to
+  dotted keys (`http.req.headers.ua`) up to N levels deep — default raised
+  from 1 to **4**, `--depth 0` = top-level keys only. The flattener was
+  already recursive; this lifts the one-level cap and makes it configurable.
+  On the 558 MB GH Archive file, eajson now surfaces deep keys like
+  `payload.review.user.site_admin` with exact counts (differential vs Python
+  `json`: 0 mismatches; keys deeper than the cap and arrays-of-objects remain
+  out of scope, reported as omitted). **Behavior change:** files with 2+
+  levels of nesting now report more keys by default.
+
 - **`eaparquet` decodes INT96 timestamps and DECIMAL columns.** INT96 (the
   deprecated 12-byte Spark/Hive/Impala timestamp: nanos-of-day + Julian day)
   now labels as a timestamp and decodes footer min/max to ISO instants;
