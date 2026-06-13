@@ -63,15 +63,17 @@ impl NumStat {
 
 /// Resolution of a TIMESTAMP logical type (parquet.thrift `TimeUnit`).
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum TimeUnit { Millis, Micros, Nanos }
+pub enum TimeUnit { Millis, Micros, Nanos, Seconds }
 
 impl TimeUnit {
     /// Convert a raw epoch count in this unit to whole epoch-seconds.
     pub fn to_epoch_seconds(self, raw: i64) -> i64 {
         match self {
-            Self::Millis => raw.div_euclid(1_000),
-            Self::Micros => raw.div_euclid(1_000_000),
-            Self::Nanos  => raw.div_euclid(1_000_000_000),
+            Self::Millis  => raw.div_euclid(1_000),
+            Self::Micros  => raw.div_euclid(1_000_000),
+            Self::Nanos   => raw.div_euclid(1_000_000_000),
+            // INT96 is decoded directly to whole epoch-seconds.
+            Self::Seconds => raw,
         }
     }
 }
@@ -176,8 +178,33 @@ fn decode_stat_value(pt: PhysicalType, bytes: &[u8], unsigned: bool) -> Option<N
             let mut b = [0u8; 8]; b.copy_from_slice(bytes);
             Some(NumStat::F64(f64::from_le_bytes(b)))
         }
+        PhysicalType::Int96 => int96_to_epoch_seconds(bytes).map(NumStat::I64),
         _ => None,
     }
+}
+
+/// Decode a 12-byte INT96 timestamp to whole epoch-seconds.
+///
+/// The deprecated Impala/Hive/Spark encoding: first 8 bytes = i64
+/// nanoseconds within the day (LE), last 4 = i32 Julian day number (LE).
+/// `epoch_seconds = (jd − 2440588)·86400 + nanos/1e9` (2440588 = the Julian
+/// day of the Unix epoch, 1970-01-01). Decoded to whole seconds: the footer
+/// min/max render to second-resolution ISO, and seconds (~1.7e9) stay exact
+/// through the f64 reduction pipeline where raw nanos (~1.7e18) would not.
+///
+/// Returns `None` unless `bytes.len() == 12`. NOTE: pyarrow and many engines
+/// omit statistics for INT96 columns (its sort order is undefined), so a
+/// real file often has no min/max to decode here — but when stats ARE
+/// present, this turns them into instants instead of skipping them.
+pub fn int96_to_epoch_seconds(bytes: &[u8]) -> Option<i64> {
+    if bytes.len() != 12 {
+        return None;
+    }
+    let mut nb = [0u8; 8];
+    nb.copy_from_slice(&bytes[0..8]);
+    let nanos = i64::from_le_bytes(nb);
+    let jd = i32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as i64;
+    Some((jd - 2_440_588) * 86_400 + nanos.div_euclid(1_000_000_000))
 }
 
 /// Per-column scratch: collect every row-group's stat into a Vec, then
@@ -237,7 +264,14 @@ fn aggregate_summary(meta: FileMetaData) -> Result<ParquetSummary, String> {
                 None => continue,
             };
             let unsigned = name_to_unsigned.get(name.as_str()).copied().unwrap_or(false);
-            let logical = name_to_logical.get(name.as_str()).copied();
+            // INT96 is always a timestamp (it carries no LogicalType
+            // annotation), so mark it implicitly; otherwise use the schema's
+            // annotation. This routes INT96 through the ISO-instant renderer.
+            let logical = if pt == PhysicalType::Int96 {
+                Some(LogicalKind::Timestamp { unit: TimeUnit::Seconds, utc: false })
+            } else {
+                name_to_logical.get(name.as_str()).copied()
+            };
             let entry = scratches.entry(name.clone()).or_insert_with(|| {
                 order.push(name.clone());
                 ColumnScratch {

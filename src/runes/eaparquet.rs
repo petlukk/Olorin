@@ -175,10 +175,10 @@ fn column_to_field(c: &ColumnSummary) -> FieldStats {
             };
             FieldStats { kind: FieldKind::Number, numeric, ..blank }
         }
-        // INT96 is a deprecated timestamp encoding the reader doesn't
-        // decode; the kind stays Number to match the legacy label, with
-        // numeric=None as the "min/max not decoded" signal that
-        // format_text picks up.
+        // INT96 columns are tagged with an implicit TIMESTAMP logical type
+        // upstream (in aggregate_summary), so they take the timestamp branch
+        // above and never reach here. This arm only keeps the match
+        // exhaustive; numeric=None would mean "stats absent" if it ever did.
         PhysicalType::Int96 => FieldStats {
             kind: FieldKind::Number, numeric: None, ..blank
         },
