@@ -6,7 +6,8 @@
 //! `--json` is set) or rendered to the legacy human-readable text.
 
 use super::{Rune, RuneResult, OutputSafety};
-use super::common::{resolve_path, open_capped, truncate_answer, PathError};
+use super::common::{resolve_path, open_capped, truncate_answer, unquote, PathError};
+use super::grouping::{self, AggSpec};
 use super::output::{
     FieldKind, FieldStats, NumericStats, RuneOutput, Source, TextEntry, TextStats, Totals,
 };
@@ -26,16 +27,20 @@ impl Rune for Eacrunch {
     fn description(&self) -> &'static str {
         "Summarize a CSV file via SIMD: row count, per-column type \
          (numeric/text), and per-numeric-column stats (min/max/mean/sum). \
-         Top-3 most frequent values for text columns. Args: [--json] <path.csv>."
+         Top-3 most frequent values for text columns. GROUP BY a column with \
+         `--by <col>` and aggregate others with `--agg <op:col,...>` (ops: \
+         count/sum/mean/min/max). Args: [--json] [--by <col> [--agg <op:col,...>]] <path.csv>."
     }
-    fn usage(&self) -> &'static str { "eacrunch [--json] <path.csv>" }
+    fn usage(&self) -> &'static str {
+        "eacrunch [--json] [--by <col> [--agg <op:col,...>]] <path.csv>"
+    }
     fn output_safety(&self) -> OutputSafety { OutputSafety::UntrustedQuoted }
 
     fn run(&self, args: &str) -> RuneResult {
         let t0 = Instant::now();
-        let (path, json_mode) = parse_args(args);
-        let output = execute(&path);
-        let answer = if json_mode {
+        let a = parse_args(args);
+        let output = execute(&a);
+        let answer = if a.json {
             output.to_json()
         } else if let Some(err) = &output.error {
             err.clone()
@@ -47,30 +52,56 @@ impl Rune for Eacrunch {
             details:    None,
             success:    output.success,
             timing_us:  t0.elapsed().as_micros() as u64,
-            structured: json_mode,
+            structured: a.json,
         }
     }
 }
 
-fn parse_args(args: &str) -> (String, bool) {
-    let trimmed = args.trim();
-    if let Some(rest) = trimmed.strip_prefix("--json ") {
-        (rest.trim().to_string(), true)
-    } else if let Some(rest) = trimmed.strip_suffix(" --json") {
-        (rest.trim().to_string(), true)
-    } else if trimmed == "--json" {
-        (String::new(), true)
-    } else {
-        (trimmed.to_string(), false)
-    }
+/// Parsed eacrunch invocation. `by`/`agg` select GROUP BY mode; absent,
+/// eacrunch does its classic whole-file column summary.
+struct Args {
+    path: String,
+    json: bool,
+    by:   Option<String>,
+    agg:  Option<String>,
 }
 
-fn execute(path: &str) -> RuneOutput {
-    if path.is_empty() {
-        return error_output("usage: eacrunch [--json] <path.csv>");
+/// Whitespace-tokenized flag parse. `--by`/`--agg` each consume the next
+/// token as their value; the lone non-flag token is the path. (Paths with
+/// embedded spaces aren't supported in flag mode — staged rune paths under
+/// ~/ or /tmp never contain them.)
+fn parse_args(args: &str) -> Args {
+    let mut a = Args { path: String::new(), json: false, by: None, agg: None };
+    let mut it = args.split_whitespace();
+    while let Some(tok) = it.next() {
+        match tok {
+            "--json" => a.json = true,
+            "--by"   => a.by  = it.next().map(str::to_string),
+            "--agg"  => a.agg = it.next().map(str::to_string),
+            _ => if a.path.is_empty() { a.path = tok.to_string(); },
+        }
     }
+    a
+}
+
+fn execute(a: &Args) -> RuneOutput {
+    if a.path.is_empty() {
+        return error_output(
+            "usage: eacrunch [--json] [--by <col> [--agg <op:col,...>]] <path.csv>",
+        );
+    }
+    if a.agg.is_some() && a.by.is_none() {
+        return error_output("--agg requires --by (it aggregates rows grouped by a column)");
+    }
+    let specs = match &a.agg {
+        Some(s) => match grouping::parse_agg_specs(s) {
+            Ok(v)  => v,
+            Err(e) => return error_output(&e),
+        },
+        None => Vec::new(),
+    };
     let home = crate::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
-    let resolved = match resolve_path(path, &home) {
+    let resolved = match resolve_path(&a.path, &home) {
         Ok(p) => p,
         Err(PathError::OutsideAllowlist) =>
             return error_output("path rejected: outside allowlist (~ or /tmp only)"),
@@ -93,7 +124,7 @@ fn execute(path: &str) -> RuneOutput {
             return error_output(&format!("io error: {e}")),
     };
     let resolved_str = resolved.to_string_lossy().into_owned();
-    match build_output(&bytes, resolved_str) {
+    match build_output(&bytes, resolved_str, a.by.as_deref(), &specs) {
         Ok(out) => out,
         Err(e)  => error_output(&format!("parse failed: {e}")),
     }
@@ -106,7 +137,12 @@ fn error_output(msg: &str) -> RuneOutput {
     out
 }
 
-fn build_output(bytes: &[u8], path: String) -> Result<RuneOutput, String> {
+fn build_output(
+    bytes: &[u8],
+    path:  String,
+    by:    Option<&str>,
+    specs: &[AggSpec],
+) -> Result<RuneOutput, String> {
     use crate::kernels::ffi;
 
     if bytes.is_empty() {
@@ -189,6 +225,26 @@ fn build_output(bytes: &[u8], path: String) -> Result<RuneOutput, String> {
 
     if n_rows < 2 {
         return Err("no data rows".into());
+    }
+
+    // GROUP BY mode: aggregate over the same field grid instead of the
+    // whole-file column summary. Reuses the scanned rows_fields/headers;
+    // the only new work is the per-group key-hash + reduction in grouping.
+    if let Some(by) = by {
+        let by_idx = headers.iter().position(|h| h == by)
+            .ok_or_else(|| format!("--by column not found: {by}"))?;
+        let groups = grouping::build_groups(bytes, &rows_fields, &headers, by_idx, specs)?;
+        let scan_us = t_scan.elapsed().as_micros() as u64;
+        let mut out = RuneOutput::new("eacrunch", RUNE_VERSION);
+        out.source = Some(Source {
+            path,
+            bytes:  bytes.len() as u64,
+            format: "csv".to_string(),
+        });
+        out.totals = Totals { rows: (n_rows - 1) as u64, scan_us };
+        out.groups = groups;
+        out.group_by = Some(by.to_string());
+        return Ok(out);
     }
 
     // Sniff first up-to-32 data rows to classify columns as numeric vs
@@ -304,19 +360,15 @@ fn build_output(bytes: &[u8], path: String) -> Result<RuneOutput, String> {
     Ok(out)
 }
 
-/// Strip RFC-4180 surrounding double-quotes and unescape `""` -> `"`.
-/// Borrows when the field isn't quoted, so the numeric hot path stays
-/// allocation-free.
-fn unquote(t: &str) -> std::borrow::Cow<'_, str> {
-    let b = t.as_bytes();
-    if b.len() >= 2 && b[0] == b'"' && b[b.len() - 1] == b'"' {
-        std::borrow::Cow::Owned(t[1..t.len() - 1].replace("\"\"", "\""))
-    } else {
-        std::borrow::Cow::Borrowed(t)
-    }
-}
+/// Cap on group rows rendered in the human-readable answer (the `--json`
+/// path emits all groups). Mirrors easql's TOP_TABLES — keeps the LLM /
+/// REPL summary bounded when a column has many distinct values.
+const TOP_GROUPS: usize = 40;
 
 fn format_text(out: &RuneOutput) -> String {
+    if !out.groups.is_empty() {
+        return format_groups(out);
+    }
     let mut buf = String::new();
     buf.push_str(&format!("rows: {}\ncolumns: {}\n",
         out.totals.rows, out.fields.len()));
@@ -346,6 +398,33 @@ fn format_text(out: &RuneOutput) -> String {
                     f.name, f.kind.as_str(), f.count));
             }
         }
+    }
+    buf
+}
+
+/// Human-readable GROUP BY table. One line per group: the key, the row
+/// count, then each requested aggregation as `op(col)=value`. Capped at
+/// TOP_GROUPS rows (groups are already sorted biggest-first).
+fn format_groups(out: &RuneOutput) -> String {
+    let by = out.group_by.as_deref().unwrap_or("?");
+    let mut buf = format!(
+        "group by {by}: {} group(s) over {} rows\n",
+        out.groups.len(), out.totals.rows,
+    );
+    for g in out.groups.iter().take(TOP_GROUPS) {
+        buf.push_str(&format!("  {} — count={}", g.key, g.count));
+        for a in &g.aggs {
+            if a.col.is_empty() {
+                buf.push_str(&format!("  {}={:.2}", a.op, a.value));
+            } else {
+                buf.push_str(&format!("  {}({})={:.2}", a.op, a.col, a.value));
+            }
+        }
+        buf.push('\n');
+    }
+    if out.groups.len() > TOP_GROUPS {
+        buf.push_str(&format!("  … {} more group(s) (use --json for all)\n",
+            out.groups.len() - TOP_GROUPS));
     }
     buf
 }

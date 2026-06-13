@@ -17,6 +17,7 @@
 //! inputs which a rune will hit.
 
 use super::correlation::{correlation_from_obj, correlation_to_obj, Correlation};
+use super::grouping::{group_from_obj, group_to_obj, Group};
 use crate::storage::json::{self, Object, Value};
 
 pub const SCHEMA_VERSION: i64 = 1;
@@ -167,6 +168,12 @@ pub struct RuneOutput {
     /// Cross-stream lag findings (eacorrelate). Additive like
     /// `anomalies[]`: serialized only when non-empty.
     pub correlations:   Vec<Correlation>,
+    /// GROUP BY results (eacrunch `--by`/`--agg`). Additive like
+    /// `anomalies[]`: serialized only when non-empty.
+    pub groups:         Vec<Group>,
+    /// The column `groups[]` is keyed on (eacrunch `--by`). Serialized only
+    /// when grouping ran, so non-grouped output stays byte-identical to v1.
+    pub group_by:       Option<String>,
     pub error:          Option<String>,
 }
 
@@ -184,6 +191,8 @@ impl RuneOutput {
             samples:        Vec::new(),
             anomalies:      Vec::new(),
             correlations:   Vec::new(),
+            groups:         Vec::new(),
+            group_by:       None,
             error:          None,
         }
     }
@@ -211,6 +220,14 @@ impl RuneOutput {
                 self.correlations.iter().map(|c| obj_value(correlation_to_obj(c))).collect(),
             ));
         }
+        if !self.groups.is_empty() {
+            o.set("groups", Value::Array(
+                self.groups.iter().map(|g| obj_value(group_to_obj(g))).collect(),
+            ));
+        }
+        if let Some(gb) = &self.group_by {
+            o.set("group_by", Value::Str(gb.clone()));
+        }
         if let Some(e) = &self.error {
             o.set("error", Value::Str(e.clone()));
         }
@@ -235,6 +252,8 @@ impl RuneOutput {
             samples:      array_of(&obj, "samples",    sample_from_obj)?,
             anomalies:    array_of(&obj, "anomalies",  anomaly_from_obj)?,
             correlations: array_of(&obj, "correlations", correlation_from_obj)?,
+            groups:       array_of(&obj, "groups",     group_from_obj)?,
+            group_by:     obj.get_str("group_by").map(str::to_string),
             error:        obj.get_str("error").map(str::to_string),
         })
     }

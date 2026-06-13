@@ -7,6 +7,7 @@
 //!    proving the schema actually enables composition (the entire point).
 
 use olorin::runes::correlation::Correlation;
+use olorin::runes::grouping::{AggResult, Group};
 use olorin::runes::output::{
     Anomaly, BoolStats, Category, FieldKind, FieldStats, NumericStats, RuneOutput, Sample, Source,
     TextEntry, TextStats, TimestampStats, Totals, SCHEMA_VERSION,
@@ -117,6 +118,25 @@ fn rich_fixture() -> RuneOutput {
                 width_seconds: 60,
             },
         ],
+        groups: vec![
+            Group {
+                key:   "SKF".to_string(),
+                count: 600,
+                aggs:  vec![
+                    AggResult { op: "mean".to_string(), col: "price".to_string(), value: 47.5 },
+                    AggResult { op: "count".to_string(), col: String::new(), value: 600.0 },
+                ],
+            },
+            Group {
+                key:   "FAG".to_string(),
+                count: 300,
+                aggs:  vec![
+                    AggResult { op: "mean".to_string(), col: "price".to_string(), value: 31.0 },
+                    AggResult { op: "count".to_string(), col: String::new(), value: 300.0 },
+                ],
+            },
+        ],
+        group_by: Some("supplier".to_string()),
         error: None,
     }
 }
