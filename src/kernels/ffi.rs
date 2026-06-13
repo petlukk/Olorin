@@ -35,10 +35,11 @@ type CsvGroupbyScanFn   = unsafe extern "C" fn(
     *mut i32,
     *mut u8,
 );
+// (text, len, out_newlines/quotes/colons/backslashes, out_n_* ×4, scratch)
 type JsonlStructFn      = unsafe extern "C" fn(
     *const u8, i32,
-    *mut i32, *mut i32, *mut i32, *mut i32, *mut i32,
-    *mut i32, *mut i32, *mut i32, *mut i32, *mut i32,
+    *mut i32, *mut i32, *mut i32, *mut i32,
+    *mut i32, *mut i32, *mut i32, *mut i32,
     *mut u8,
 );
 type LogLevelScanFn     = unsafe extern "C" fn(

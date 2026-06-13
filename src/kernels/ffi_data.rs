@@ -56,9 +56,10 @@ pub unsafe fn csv_groupby_scan(
 }
 
 /// Single-pass JSONL structural scan: writes positions of newlines, quotes,
-/// colons, commas, and backslashes across `text` to five caller-allocated
-/// arrays. Backslash positions allow callers to filter out escaped quotes
-/// (`\"` inside a JSON string is *not* a structural quote).
+/// colons, and backslashes across `text` to four caller-allocated arrays.
+/// Backslash positions allow callers to filter out escaped quotes (`\"`
+/// inside a JSON string is *not* a structural quote). Commas are not
+/// scanned — eajson (the sole caller) never used them.
 ///
 /// # Safety
 /// - `text` must point to `len` readable bytes.
@@ -70,15 +71,15 @@ pub unsafe fn csv_groupby_scan(
 pub unsafe fn jsonl_struct_scan(
     text: *const u8, len: i32,
     out_newlines: *mut i32, out_quotes: *mut i32,
-    out_colons: *mut i32,   out_commas: *mut i32, out_backslashes: *mut i32,
+    out_colons: *mut i32,   out_backslashes: *mut i32,
     out_n_newline: *mut i32, out_n_quote: *mut i32,
-    out_n_colon: *mut i32,   out_n_comma: *mut i32, out_n_backslash: *mut i32,
+    out_n_colon: *mut i32,   out_n_backslash: *mut i32,
     scratch: *mut u8,
 ) {
     (k().jsonl_struct_scan)(
         text, len,
-        out_newlines, out_quotes, out_colons, out_commas, out_backslashes,
-        out_n_newline, out_n_quote, out_n_colon, out_n_comma, out_n_backslash,
+        out_newlines, out_quotes, out_colons, out_backslashes,
+        out_n_newline, out_n_quote, out_n_colon, out_n_backslash,
         scratch,
     );
 }
