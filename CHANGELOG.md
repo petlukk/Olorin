@@ -8,6 +8,8 @@ order.
 
 ## [Unreleased]
 
+## [3.1.0] — 2026-06-13
+
 ### Added
 
 - **`eacrunch` GROUP BY (`--by <col> [--agg <op:col,...>]`).** Aggregate CSV
