@@ -8,6 +8,8 @@ order.
 
 ## [Unreleased]
 
+## [3.2.0] — 2026-06-13
+
 ### Added
 
 - **`eajson --depth N` multi-level nesting.** Nested objects now flatten to
