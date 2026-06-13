@@ -228,7 +228,7 @@ fn main() {
                 || name == "narration.rs" || name == "report.rs"
                 || name == "stream.rs" || name == "timekey.rs"
                 || name == "anomaly.rs" || name == "plot.rs"
-                || name == "select.rs" { continue; }
+                || name == "select.rs" || name == "grouping.rs" { continue; }
             let stem = name.strip_suffix(".rs").unwrap();
             let contents = fs::read_to_string(entry.path()).unwrap_or_default();
             if !contents.contains("pub const RUNE") {

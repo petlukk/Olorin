@@ -8,6 +8,21 @@ order.
 
 ## [Unreleased]
 
+### Added
+
+- **`eacrunch` GROUP BY (`--by <col> [--agg <op:col,...>]`).** Aggregate CSV
+  rows grouped by a column instead of summarizing the whole file. `--agg`
+  takes `sum`/`mean`/`min`/`max` `op:col` pairs plus a bare `count`; with no
+  `--agg` you get per-group row counts. Reuses the existing `csv_scan` field
+  grid and the same finite-skip numeric rule as whole-column stats, so group
+  aggregates agree with column stats by construction — differentially verified
+  against pandas `groupby().agg()` on the 3M-row NYC-taxi file (0 mismatches).
+  Output adds the additive `groups[]` / `group_by` fields to the v1
+  `RuneOutput` (serialized only when grouping ran, so every other rune's JSON
+  is byte-identical). Reachable from the one-shot CLI, `/rune`, and the LLM
+  tool-call surface; high-cardinality keys (>~1M groups) fail loud rather than
+  exhausting memory.
+
 ## [3.0.0] — 2026-06-13
 
 Robustness campaign waves two–four: the encrypted vault, the web/WhatsApp

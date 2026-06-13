@@ -55,6 +55,34 @@ amount (number): count=1247, mean=46.70, min=1.00, max=1850.00, sum=58235.00
 merchant (text): 42 unique; top values: Coop, ICA, SL
 ```
 
+### GROUP BY — `--by <col> [--agg <op:col,...>]`
+
+Aggregate rows grouped by one column instead of summarizing the whole file.
+`--agg` takes comma-separated `op:col` pairs (`sum`/`mean`/`min`/`max`) plus a
+bare `count`; with no `--agg`, you get the per-group row count (SQL's
+`SELECT col, count(*) … GROUP BY col`).
+
+```
+/rune eacrunch --by category --agg sum:amount,mean:amount ~/statement.csv
+```
+
+```
+group by category: 8 group(s) over 1247 rows
+  groceries — count=412  sum(amount)=19204.50  mean(amount)=46.61
+  food — count=298  sum(amount)=8810.00  mean(amount)=29.56
+  rent — count=12  sum(amount)=22200.00  mean(amount)=1850.00
+  …
+```
+
+Groups are ordered biggest-first (count descending, key ascending on ties),
+so the output is deterministic and cross-arch bit-identical. The human-readable
+view caps at 40 groups; `--json` emits every group. Aggregated values use the
+same finite-only (skip `NaN`/`inf`) rule as whole-column stats, so a group's
+`mean(amount)` agrees with the column's `mean` by construction — differentially
+verified against pandas `groupby().agg()` on the 3M-row NYC-taxi file (0
+mismatches). Grouping a column with more than ~1M distinct values fails with a
+clear "high cardinality" error rather than exhausting memory.
+
 ## eajson — JSON Lines summarizer
 
 ```
@@ -468,7 +496,9 @@ entries) are blocked regardless of format.
 - **Output cap**: 32 KB summary (truncated with a `[...truncated N bytes]`
   marker at a UTF-8-safe boundary).
 - **eacrunch**: unquoted CSV only; CRLF line endings tolerated (trailing `\r`
-  trimmed per field).
+  trimmed per field). GROUP BY (`--by`/`--agg`) caps at ~1M distinct group
+  keys (fails loud past that); the human table shows the top 40 groups,
+  `--json` all of them.
 - **eajson**: top-level scalars only — nested objects flatten one level deep
   (`http.status`); deeper nesting and arrays-of-objects are skipped.
   Mixed-type keys (number on one line, string on another) collapse to

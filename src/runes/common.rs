@@ -126,3 +126,16 @@ pub fn truncate_answer(s: &str) -> String {
     let dropped = s.len() - cut;
     format!("{} [...truncated {dropped} bytes]", &s[..cut])
 }
+
+/// Strip RFC-4180 surrounding double-quotes and unescape `""` -> `"`.
+/// Borrows when the field isn't quoted, so the numeric hot path stays
+/// allocation-free. Shared by eacrunch (whole-column stats) and grouping
+/// (group keys + agg values) so both clean fields identically.
+pub fn unquote(t: &str) -> std::borrow::Cow<'_, str> {
+    let b = t.as_bytes();
+    if b.len() >= 2 && b[0] == b'"' && b[b.len() - 1] == b'"' {
+        std::borrow::Cow::Owned(t[1..t.len() - 1].replace("\"\"", "\""))
+    } else {
+        std::borrow::Cow::Borrowed(t)
+    }
+}
