@@ -83,6 +83,23 @@ verified against pandas `groupby().agg()` on the 3M-row NYC-taxi file (0
 mismatches). Grouping a column with more than ~1M distinct values fails with a
 clear "high cardinality" error rather than exhausting memory.
 
+### WHERE — `--where <col><op><value>`
+
+Filter rows *before* aggregating (or before whole-column stats, standalone).
+One predicate; operators `=` `!=` (string) and `>` `>=` `<` `<=` (numeric — a
+non-numeric cell never satisfies an ordered comparison).
+
+```
+olorin rune eacrunch --where 'total_amount>20' --by payment_type --agg sum:trip_distance access.csv
+```
+
+`--where` composes with `--by`/`--agg` (`SELECT … GROUP BY … WHERE …`) and
+also works alone for filtered column summaries; `totals.rows` then reports the
+matched-row count. Differentially verified against pandas (`df[df.col > v]`) on
+the 3M-row NYC-taxi file. **Shell note:** quote predicates containing `>`/`<`
+on the command line (`--where 'temp>29'`) or the shell reads them as
+redirections; the REPL, web UI, and tool-call paths need no quoting.
+
 ## eajson — JSON Lines summarizer
 
 ```
