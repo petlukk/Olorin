@@ -24,9 +24,12 @@ pub(super) struct SchemaElement {
     /// Parquet ConvertedType (field 6). UINT_8/16/32/64 = 11..=14 — the
     /// signal that an INT32/INT64 physical column holds unsigned values.
     pub(super) converted_type: Option<i32>,
+    /// SchemaElement.scale (field 7) — the legacy DECIMAL scale, used with
+    /// `converted_type == 5` when no modern LogicalType DECIMAL is present.
+    pub(super) scale: Option<i32>,
     /// Parquet LogicalType (field 10), the modern annotation. Parsed for
-    /// TIMESTAMP; pyarrow writes it without a ConvertedType, so this is the
-    /// only place a timestamp is recognizable.
+    /// TIMESTAMP and DECIMAL; pyarrow writes it without a ConvertedType, so
+    /// this is often the only place the type is recognizable.
     pub(super) logical: Option<LogicalKind>,
 }
 
@@ -104,6 +107,9 @@ fn read_schema_element(r: &mut ThriftReader) -> Result<SchemaElement, String> {
             (6, CompactType::I32) => {
                 e.converted_type = Some(r.read_zigzag_i32()?);
             }
+            (7, CompactType::I32) => {
+                e.scale = Some(r.read_zigzag_i32()?);
+            }
             (10, CompactType::Struct) => {
                 e.logical = read_logical_type(r)?;
             }
@@ -113,19 +119,36 @@ fn read_schema_element(r: &mut ThriftReader) -> Result<SchemaElement, String> {
     Ok(e)
 }
 
-/// Parse the `LogicalType` union (parquet.thrift). Only TIMESTAMP (union
-/// field 8) is decoded; every other arm is skipped and yields `None`.
+/// Parse the `LogicalType` union (parquet.thrift). DECIMAL (union field 5)
+/// and TIMESTAMP (union field 8) are decoded; every other arm is skipped
+/// and yields `None`.
 fn read_logical_type(r: &mut ThriftReader) -> Result<Option<LogicalKind>, String> {
     let mut logical = None;
     let mut last: i16 = 0;
     while let Some((fid, ty)) = r.read_field_header(last)? {
         last = fid;
         match (fid, ty) {
+            (5, CompactType::Struct) => { logical = Some(read_decimal_type(r)?); }
             (8, CompactType::Struct) => { logical = Some(read_timestamp_type(r)?); }
             _ => r.skip_value(ty)?,
         }
     }
     Ok(logical)
+}
+
+/// Parse `DecimalType { 1: i32 scale, 2: i32 precision }`. Precision is
+/// read past but unused (the scaled f64 value doesn't need it).
+fn read_decimal_type(r: &mut ThriftReader) -> Result<LogicalKind, String> {
+    let mut scale = 0i32;
+    let mut last: i16 = 0;
+    while let Some((fid, ty)) = r.read_field_header(last)? {
+        last = fid;
+        match (fid, ty) {
+            (1, CompactType::I32) => scale = r.read_zigzag_i32()?,
+            _ => r.skip_value(ty)?,
+        }
+    }
+    Ok(LogicalKind::Decimal { scale })
 }
 
 /// Parse `TimestampType { 1: bool isAdjustedToUTC, 2: TimeUnit unit }`.

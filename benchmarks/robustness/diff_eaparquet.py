@@ -65,6 +65,50 @@ def approx(a, b):
         return str(a) == str(b)
 
 
+def diff_synthetic_types(binary, findings):
+    """Write a DECIMAL + INT96 parquet with pyarrow and check eaparquet
+    against it — the taxi file has neither type. DECIMAL footer stats are
+    present (compared numerically); INT96 stats are omitted by pyarrow
+    (undefined sort order), so we only assert the column is labeled a
+    timestamp."""
+    import datetime, decimal
+    import pyarrow as pa
+
+    path = STAGE / "synthetic_types.parquet"
+    STAGE.mkdir(exist_ok=True)
+    t = pa.table({
+        "price": pa.array([decimal.Decimal("19.99"), decimal.Decimal("1234.50"),
+                           decimal.Decimal("-7.25"), decimal.Decimal("0.01")],
+                          pa.decimal128(10, 2)),
+        "event_time": pa.array([datetime.datetime(2023, 1, 15, 8, 30),
+                                datetime.datetime(2023, 6, 1, 12, 0),
+                                datetime.datetime(2022, 12, 31, 23, 59, 59),
+                                datetime.datetime(2023, 3, 1, 0, 0)], pa.timestamp("ns")),
+    })
+    pq.write_table(t, path, use_deprecated_int96_timestamps=True)
+
+    got = olorin_eaparquet(binary, path)
+    f = {x["name"]: x for x in got.get("fields", [])}
+
+    md = pq.read_metadata(path)
+    st = md.row_group(0).column(md.schema.names.index("price")).statistics
+    num = (f.get("price") or {}).get("numeric")
+    if not num:
+        findings.append("synthetic price: no numeric stats from olorin")
+    else:
+        if not approx(num.get("min"), st.min):
+            findings.append(f"price.min olorin={num.get('min')} pyarrow={st.min}")
+        if not approx(num.get("max"), st.max):
+            findings.append(f"price.max olorin={num.get('max')} pyarrow={st.max}")
+    print(f"  DECIMAL price: olorin min={num and num.get('min')} max={num and num.get('max')} "
+          f"pyarrow min={st.min} max={st.max}")
+
+    ev = f.get("event_time", {})
+    print(f"  INT96 event_time: olorin kind={ev.get('kind')} (pyarrow omits INT96 stats)")
+    if ev.get("kind") != "timestamp":
+        findings.append(f"event_time kind olorin={ev.get('kind')} expected=timestamp")
+
+
 def main():
     binary, data = sys.argv[1], Path(sys.argv[2])
     path = data / "yellow_tripdata_2023-01.parquet"
@@ -98,13 +142,15 @@ def main():
         mark = "ok" if name in o_fields else "MISSING"
         print(f"  {name:<24} nulls olorin={str(nc):>8} pyarrow={t['nulls']:>8}  {mark}")
 
+    diff_synthetic_types(binary, findings)
+
     print()
     if findings:
         print(f"FINDINGS ({len(findings)}):")
         for x in findings:
             print(f"  {x}")
         sys.exit(1)
-    print("eaparquet vs pyarrow: 0 mismatches")
+    print("eaparquet vs pyarrow: 0 mismatches (taxi + DECIMAL/INT96)")
 
 
 if __name__ == "__main__":

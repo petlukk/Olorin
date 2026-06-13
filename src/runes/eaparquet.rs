@@ -157,6 +157,19 @@ fn column_to_field(c: &ColumnSummary) -> FieldStats {
             ..blank
         };
     }
+    // A DECIMAL renders as a Number: c.min/c.max already hold the scaled
+    // f64 value (unscaled ÷ 10^scale), decoded ahead of the physical-type
+    // match because the physical type may be FixedLenByteArray (which would
+    // otherwise route to Text).
+    if let Some(LogicalKind::Decimal { .. }) = c.logical {
+        let numeric = match (c.min, c.max) {
+            (Some(min), Some(max)) => Some(NumericStats {
+                min: min.as_f64(), max: max.as_f64(), mean: 0.0, sum: 0.0,
+            }),
+            _ => None,
+        };
+        return FieldStats { kind: FieldKind::Number, numeric, ..blank };
+    }
     match c.physical_type {
         PhysicalType::Boolean => FieldStats {
             kind: FieldKind::Bool,
