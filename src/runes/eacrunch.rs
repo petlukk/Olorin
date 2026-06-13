@@ -156,6 +156,26 @@ fn build_output(
         ));
     }
 
+    // GROUP BY mode takes the fused path: the `csv_groupby_scan` kernel
+    // projects only the key + aggregation columns in one pass, so neither
+    // the two `len`-sized delimiter arrays below nor the full field grid
+    // are ever allocated (scratch is O(rows·cols_needed), not O(bytes)).
+    if let Some(by) = by {
+        let t_scan = Instant::now();
+        let outcome = grouping::build_groups(bytes, by, specs)?;
+        let scan_us = t_scan.elapsed().as_micros() as u64;
+        let mut out = RuneOutput::new("eacrunch", RUNE_VERSION);
+        out.source = Some(Source {
+            path,
+            bytes:  bytes.len() as u64,
+            format: "csv".to_string(),
+        });
+        out.totals = Totals { rows: outcome.data_rows, scan_us };
+        out.groups = outcome.groups;
+        out.group_by = Some(by.to_string());
+        return Ok(out);
+    }
+
     let t_scan = Instant::now();
     let len = bytes.len() as i32;
     let mut commas   = vec![0i32; bytes.len()];
@@ -225,26 +245,6 @@ fn build_output(
 
     if n_rows < 2 {
         return Err("no data rows".into());
-    }
-
-    // GROUP BY mode: aggregate over the same field grid instead of the
-    // whole-file column summary. Reuses the scanned rows_fields/headers;
-    // the only new work is the per-group key-hash + reduction in grouping.
-    if let Some(by) = by {
-        let by_idx = headers.iter().position(|h| h == by)
-            .ok_or_else(|| format!("--by column not found: {by}"))?;
-        let groups = grouping::build_groups(bytes, &rows_fields, &headers, by_idx, specs)?;
-        let scan_us = t_scan.elapsed().as_micros() as u64;
-        let mut out = RuneOutput::new("eacrunch", RUNE_VERSION);
-        out.source = Some(Source {
-            path,
-            bytes:  bytes.len() as u64,
-            format: "csv".to_string(),
-        });
-        out.totals = Totals { rows: (n_rows - 1) as u64, scan_us };
-        out.groups = groups;
-        out.group_by = Some(by.to_string());
-        return Ok(out);
     }
 
     // Sniff first up-to-32 data rows to classify columns as numeric vs

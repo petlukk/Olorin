@@ -1,0 +1,154 @@
+// Fused CSV column-projection scanner for GROUP BY.
+//
+// One pass over the bytes that fuses scan + row-split + column projection:
+// for every row it emits the byte range [offset, length) of ONLY the
+// caller-requested columns (`needed`), instead of materializing every
+// delimiter position (the old csv_scan path allocated two `len`-sized i32
+// arrays = 8 bytes of scratch per input byte) plus a full per-row field
+// grid. Here the output is O(rows * n_needed), not O(bytes).
+//
+// `needed` is a sorted-ascending list of column indices to project (the
+// GROUP BY key column plus the aggregation value columns). For each row
+// `r` and each needed slot `k`, the kernel writes:
+//   out_off[r*n_needed + k] = byte start of that column's field
+//   out_len[r*n_needed + k] = field byte length
+// A column absent from a (ragged) row keeps the caller's pre-filled -1.
+// Field bytes are RAW (surrounding quotes/spaces included); the caller
+// trims + unquotes exactly as the whole-column path does, so a group's
+// value parse is byte-identical to eacrunch's column stats.
+//
+// Row 0 (the header) is emitted like any other; the caller skips it.
+// `out_n_rows` counts emitted rows (a trailing line without a final
+// newline counts as a row; a trailing newline does not add an empty one),
+// matching the legacy grid's row reconstruction.
+//
+// RFC-4180 quoting: a `"` toggles in-quote parity; commas/newlines inside
+// a quoted field are field content, not delimiters — identical to csv_scan.
+//
+// Caller responsibilities:
+//   - out_off / out_len each sized >= max_rows * n_needed, PRE-FILLED with
+//     -1 (this kernel only writes present fields).
+//   - max_rows >= (count of '\n' bytes in text) + 1 (an upper bound, since
+//     quoted newlines never increase the row count).
+//   - scratch valid for 16 bytes (overwritten per 16-byte chunk).
+
+export func csv_groupby_scan(text: *u8, len: i32, needed: *i32, n_needed: i32, out_off: *mut i32, out_len: *mut i32, out_n_rows: *mut i32, scratch: *mut u8) {
+    let v_comma: u8x16 = splat(44)
+    let v_newl:  u8x16 = splat(10)
+    let v_quote: u8x16 = splat(34)
+    let v_zero:  u8x16 = splat(0)
+    let v_one:   u8x16 = splat(1)
+    let v_two:   u8x16 = splat(2)
+    let v_four:  u8x16 = splat(4)
+
+    let mut in_quote:      i32 = 0
+    let mut row:           i32 = 0
+    let mut col:           i32 = 0
+    let mut field_start:   i32 = 0
+    let mut row_start_pos: i32 = 0
+
+    let n_full: i32 = (len / 16) * 16
+    let mut i: i32 = 0
+    while i < n_full {
+        let c: u8x16 = load(text, i)
+        let m_c:  u8x16 = select(c .== v_comma, v_one,  v_zero)
+        let m_n:  u8x16 = select(c .== v_newl,  v_two,  v_zero)
+        let m_q:  u8x16 = select(c .== v_quote, v_four, v_zero)
+        let m_cn: u8x16 = m_c .| m_n
+        let m:    u8x16 = m_cn .| m_q
+        store(scratch, 0, m)
+
+        let mut k: i32 = 0
+        while k < 16 {
+            let b: i32 = to_i32(scratch[k])
+            let p: i32 = i + k
+            if (b & 4) != 0 {
+                in_quote = 1 - in_quote
+            }
+            if in_quote == 0 {
+                if (b & 1) != 0 {
+                    // unquoted comma: end of column `col`
+                    let mut q: i32 = 0
+                    while q < n_needed {
+                        if needed[q] == col {
+                            out_off[row * n_needed + q] = field_start
+                            out_len[row * n_needed + q] = p - field_start
+                        }
+                        q = q + 1
+                    }
+                    col = col + 1
+                    field_start = p + 1
+                }
+                if (b & 2) != 0 {
+                    // unquoted newline: end of last column, end of row
+                    let mut q2: i32 = 0
+                    while q2 < n_needed {
+                        if needed[q2] == col {
+                            out_off[row * n_needed + q2] = field_start
+                            out_len[row * n_needed + q2] = p - field_start
+                        }
+                        q2 = q2 + 1
+                    }
+                    row = row + 1
+                    col = 0
+                    field_start = p + 1
+                    row_start_pos = p + 1
+                }
+            }
+            k = k + 1
+        }
+        i = i + 16
+    }
+
+    // Scalar tail (< 16 bytes) — same quote-parity carry.
+    while i < len {
+        let bt: i32 = to_i32(text[i])
+        if bt == 34 {
+            in_quote = 1 - in_quote
+        }
+        if in_quote == 0 {
+            if bt == 44 {
+                let mut qt: i32 = 0
+                while qt < n_needed {
+                    if needed[qt] == col {
+                        out_off[row * n_needed + qt] = field_start
+                        out_len[row * n_needed + qt] = i - field_start
+                    }
+                    qt = qt + 1
+                }
+                col = col + 1
+                field_start = i + 1
+            }
+            if bt == 10 {
+                let mut qn: i32 = 0
+                while qn < n_needed {
+                    if needed[qn] == col {
+                        out_off[row * n_needed + qn] = field_start
+                        out_len[row * n_needed + qn] = i - field_start
+                    }
+                    qn = qn + 1
+                }
+                row = row + 1
+                col = 0
+                field_start = i + 1
+                row_start_pos = i + 1
+            }
+        }
+        i = i + 1
+    }
+
+    // Final line without a trailing newline: emit its last field + count it.
+    if row_start_pos < len {
+        let mut qf: i32 = 0
+        while qf < n_needed {
+            if needed[qf] == col {
+                out_off[row * n_needed + qf] = field_start
+                out_len[row * n_needed + qf] = len - field_start
+            }
+            qf = qf + 1
+        }
+        row = row + 1
+    }
+
+    out_n_rows[0] = row
+}

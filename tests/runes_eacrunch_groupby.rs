@@ -48,6 +48,66 @@ fn agg(g: &olorin::runes::grouping::Group, op: &str, col: &str) -> f64 {
         .value
 }
 
+/// Direct kernel test: csv_groupby_scan projects only `needed` columns,
+/// quote-aware, with a final line lacking a trailing newline.
+#[test]
+fn fused_kernel_projects_columns() {
+    olorin::kernels::ffi::init().unwrap();
+    // cols: a(0) b(1) c(2). Row 2's b has a quoted embedded comma. Last
+    // row has no trailing newline. Project columns 0 and 2.
+    let csv: &[u8] = b"a,b,c\nx1,y1,z1\nx2,\"q,w\",z2";
+    let needed = [0i32, 2i32];
+    let n = needed.len();
+    let max_rows = csv.iter().filter(|&&b| b == b'\n').count() + 1;
+    let mut off = vec![-1i32; max_rows * n];
+    let mut len = vec![-1i32; max_rows * n];
+    let mut n_rows = 0i32;
+    let mut scratch = [0u8; 16];
+    unsafe {
+        olorin::kernels::ffi::csv_groupby_scan(
+            csv.as_ptr(), csv.len() as i32,
+            needed.as_ptr(), n as i32,
+            off.as_mut_ptr(), len.as_mut_ptr(),
+            &mut n_rows, scratch.as_mut_ptr(),
+        );
+    }
+    assert_eq!(n_rows, 3, "header + 2 data rows (last has no trailing \\n)");
+    let f = |row: usize, slot: usize| -> &str {
+        let o = off[row * n + slot] as usize;
+        let l = len[row * n + slot] as usize;
+        std::str::from_utf8(&csv[o..o + l]).unwrap()
+    };
+    assert_eq!((f(0, 0), f(0, 1)), ("a", "c"));   // header
+    assert_eq!((f(1, 0), f(1, 1)), ("x1", "z1"));
+    // col 2 of row 2 is "z2"; the quoted comma in col 1 must NOT shift it.
+    assert_eq!((f(2, 0), f(2, 1)), ("x2", "z2"));
+}
+
+/// Ragged row: a data row with fewer columns than the projected index
+/// leaves that slot at the caller's -1 sentinel (not a spurious field).
+#[test]
+fn fused_kernel_ragged_row_marks_absent() {
+    olorin::kernels::ffi::init().unwrap();
+    let csv: &[u8] = b"a,b,c\n1,2,3\n9\n"; // row 2 has only column 0
+    let needed = [0i32, 2i32];
+    let n = needed.len();
+    let max_rows = csv.iter().filter(|&&b| b == b'\n').count() + 1;
+    let mut off = vec![-1i32; max_rows * n];
+    let mut len = vec![-1i32; max_rows * n];
+    let mut n_rows = 0i32;
+    let mut scratch = [0u8; 16];
+    unsafe {
+        olorin::kernels::ffi::csv_groupby_scan(
+            csv.as_ptr(), csv.len() as i32, needed.as_ptr(), n as i32,
+            off.as_mut_ptr(), len.as_mut_ptr(), &mut n_rows, scratch.as_mut_ptr(),
+        );
+    }
+    assert_eq!(n_rows, 3);
+    // row 2, slot for column 2 is absent → off stays -1.
+    assert_eq!(off[2 * n + 1], -1, "missing column 2 must stay -1");
+    assert_eq!(off[2 * n + 0], 12, "column 0 of row 2 present");
+}
+
 #[test]
 fn group_by_with_mean_and_sum() {
     let f = stage("basic", FIXTURE);

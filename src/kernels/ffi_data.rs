@@ -28,6 +28,33 @@ pub unsafe fn csv_scan(
     (k().csv_scan)(text, len, out_commas, out_newlines, out_n_comma, out_n_newline, scratch);
 }
 
+/// Fused CSV column-projection scan for GROUP BY. One pass emits the byte
+/// range `[off, len)` of only the `needed` columns per row, into
+/// `out_off`/`out_len` (row-major `[row*n_needed + slot]`). Absent fields
+/// in ragged rows keep their pre-filled value. Writes the row count
+/// (header included) to `out_n_rows`.
+///
+/// # Safety
+/// - `text` must point to `len` readable bytes.
+/// - `needed` must point to `n_needed` readable `i32` column indices,
+///   sorted ascending.
+/// - `out_off` and `out_len` must each be valid for `max_rows * n_needed`
+///   writable `i32` elements, where `max_rows >=` (count of `\n` in `text`)
+///   `+ 1`. The caller must pre-fill them (e.g. with `-1`) so absent fields
+///   are detectable — the kernel only writes present fields.
+/// - `out_n_rows` must be valid for one writable `i32`.
+/// - `scratch` must be valid for 16 writable bytes; contents after the call
+///   are unspecified.
+pub unsafe fn csv_groupby_scan(
+    text: *const u8, len: i32,
+    needed: *const i32, n_needed: i32,
+    out_off: *mut i32, out_len: *mut i32,
+    out_n_rows: *mut i32,
+    scratch: *mut u8,
+) {
+    (k().csv_groupby_scan)(text, len, needed, n_needed, out_off, out_len, out_n_rows, scratch);
+}
+
 /// Single-pass JSONL structural scan: writes positions of newlines, quotes,
 /// colons, commas, and backslashes across `text` to five caller-allocated
 /// arrays. Backslash positions allow callers to filter out escaped quotes
