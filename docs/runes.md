@@ -520,10 +520,12 @@ entries) are blocked regardless of format.
   trimmed per field). GROUP BY (`--by`/`--agg`) caps at ~1M distinct group
   keys (fails loud past that); the human table shows the top 40 groups,
   `--json` all of them.
-- **eajson**: top-level scalars only — nested objects flatten one level deep
-  (`http.status`); deeper nesting and arrays-of-objects are skipped.
-  Mixed-type keys (number on one line, string on another) collapse to
-  `(mixed)` with no stats. Text top-N capped at 10K cardinality.
+- **eajson**: nested objects flatten to dotted keys (`http.req.headers.ua`)
+  up to `--depth N` levels (default 4; `--depth 0` = top-level keys only).
+  Arrays-of-objects are still skipped (only systemd byte-array `MESSAGE`
+  fields are decoded). Mixed-type keys (number on one line, string on
+  another) collapse to `(mixed)` with no stats. Text top-N capped at 10K
+  cardinality.
 - **eaparquet**: metadata-only — column data is never decoded. Statistics must
   be present in the file footer. INT96 timestamps decode to ISO instants and
   DECIMAL columns to their scaled value; BYTE_ARRAY (string) min/max are not

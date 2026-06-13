@@ -16,7 +16,11 @@ use crate::storage::jsonl_parse::{
 use std::collections::HashMap;
 
 pub const TEXT_CARDINALITY_CAP: usize = 10_000;
-pub const NESTED_FLATTEN_MAX_DEPTH: usize = 1;
+/// Default `--depth`: how many levels of nested objects to flatten into
+/// dotted keys (`a.b.c.d`). 4 covers the common real shapes (container
+/// logs, GH Archive `pull_request.base.repo.*`) without unbounded key
+/// growth; `--depth N` overrides (0 = top-level keys only).
+pub const DEFAULT_FLATTEN_DEPTH: usize = 4;
 const TOP_N: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -56,6 +60,7 @@ pub fn process_line(
     key_prefix: &str,
     agg: &mut Aggregator,
     depth: usize,
+    max_depth: usize,
 ) {
     let mut pair_i = 0usize;
     while pair_i + 1 < line_quotes.len() {
@@ -94,13 +99,13 @@ pub fn process_line(
                 Some(e) => e,
                 None => break,
             };
-            if depth < NESTED_FLATTEN_MAX_DEPTH {
+            if depth < max_depth {
                 let inner_quotes: Vec<i32> = line_quotes.iter().copied()
                     .filter(|&q| (q as usize) > val_start && (q as usize) < obj_end)
                     .collect();
                 let mut inner_co = *co_cur;
                 process_line(bytes, &inner_quotes, colons, obj_end,
-                    &mut inner_co, &full_key, agg, depth + 1);
+                    &mut inner_co, &full_key, agg, depth + 1, max_depth);
             }
             while pair_i < line_quotes.len() && (line_quotes[pair_i] as usize) < obj_end {
                 pair_i += 1;
