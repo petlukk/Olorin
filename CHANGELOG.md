@@ -8,6 +8,17 @@ order.
 
 ## [Unreleased]
 
+### Added
+
+- **`eacrunch --where <col><op><value>` row filter.** Filter rows before
+  aggregating (with `--by`/`--agg`) or before whole-column stats (standalone)
+  — `SELECT … GROUP BY … WHERE …`. One predicate; operators `=` `!=` (string)
+  and `>` `>=` `<` `<=` (numeric, non-numeric cells never satisfy an ordered
+  comparison). On the group path it needs no kernel change — the predicate
+  column is just another projected column in `csv_groupby_scan`, evaluated in
+  Rust. `totals.rows` reports the matched-row count. Differentially verified
+  against pandas (`df[df.col > v]`) on the 3M-row NYC-taxi file (0 mismatches).
+
 ## [3.1.0] — 2026-06-13
 
 ### Added

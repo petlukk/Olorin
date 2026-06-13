@@ -181,10 +181,16 @@ pub fn build_groups(
     bytes: &[u8],
     by:    &str,
     specs: &[AggSpec],
+    pred:  Option<&super::filter::Predicate>,
 ) -> Result<GroupOutcome, String> {
     let headers = parse_header(bytes);
     let by_col = headers.iter().position(|h| h == by)
         .ok_or_else(|| format!("--by column not found: {by}"))?;
+    let pred_col = match pred {
+        Some(p) => Some(headers.iter().position(|h| h == &p.col)
+            .ok_or_else(|| format!("--where column not found: {}", p.col))?),
+        None => None,
+    };
 
     // Resolve each numeric spec's column to an index up front (Count → None).
     let col_idx: Vec<Option<usize>> = specs.iter()
@@ -196,11 +202,13 @@ pub fn build_groups(
         })
         .collect::<Result<_, _>>()?;
 
-    // `needed` = sorted-unique column indices the kernel must project:
-    // the key column plus every value column. Each spec/key then maps to a
-    // slot (position within `needed`) of the kernel's per-row output.
+    // `needed` = sorted-unique column indices the kernel must project: the
+    // key column, every value column, and (if filtering) the predicate
+    // column. Each then maps to a slot (position within `needed`) of the
+    // kernel's per-row output.
     let mut needed: Vec<usize> = std::iter::once(by_col)
         .chain(col_idx.iter().filter_map(|c| *c))
+        .chain(pred_col)
         .collect();
     needed.sort_unstable();
     needed.dedup();
@@ -208,6 +216,7 @@ pub fn build_groups(
     let slot = |col: usize| needed.iter().position(|&c| c == col).unwrap();
     let key_slot = slot(by_col);
     let val_slot: Vec<Option<usize>> = col_idx.iter().map(|c| c.map(slot)).collect();
+    let pred_slot = pred_col.map(slot);
 
     // Upper bound on rows: every '\n' plus a possible final unterminated
     // line. Counted in Rust (O(1) memory) — never an Ea pass.
@@ -241,7 +250,21 @@ pub fn build_groups(
     };
 
     // Data rows are 1.. (row 0 is the header the kernel also emitted).
+    // `matched` counts rows passing the `--where` filter (all rows when no
+    // filter) — reported as totals.rows, consistent with the non-group path.
+    let mut matched = 0usize;
     for row in 1..n_rows {
+        if let (Some(p), Some(ps)) = (pred, pred_slot) {
+            let ok = match field(row, ps) {
+                Some(b) => {
+                    let cell = std::str::from_utf8(b).unwrap_or("").trim();
+                    p.matches(common::unquote(cell).as_ref())
+                }
+                None => false, // ragged row missing the predicate column
+            };
+            if !ok { continue; }
+        }
+        matched += 1;
         let Some(key_bytes) = field(row, key_slot) else { continue }; // no key
         let key_raw = std::str::from_utf8(key_bytes).unwrap_or("").trim();
         let key = common::unquote(key_raw).into_owned();
@@ -290,7 +313,7 @@ pub fn build_groups(
 
     // Deterministic order: biggest groups first, key ascending on ties.
     groups.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.key.cmp(&b.key)));
-    Ok(GroupOutcome { groups, data_rows: (n_rows - 1) as u64 })
+    Ok(GroupOutcome { groups, data_rows: matched as u64 })
 }
 
 // ── JSON codec (additive `groups[]` on RuneOutput) ────────────────────────────

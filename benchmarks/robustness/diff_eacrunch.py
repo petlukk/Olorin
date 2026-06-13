@@ -35,6 +35,44 @@ def olorin_eacrunch(binary, path, extra=()):
     return json.loads(out.stdout.strip().splitlines()[-1])
 
 
+def diff_where(binary, path, findings):
+    """`--where total_amount>20 --by payment_type` vs pandas: filter then
+    group. Confirms the predicate filters the same rows pandas keeps."""
+    by = "payment_type"
+    got = olorin_eacrunch(
+        binary, path,
+        extra=["--where", "total_amount>20", "--by", by, "--agg", "count,sum:trip_distance"],
+    )
+    groups = {g["key"]: g for g in got.get("groups", [])}
+
+    df = pd.read_csv(path, dtype={by: str}, low_memory=False)
+    keep = pd.to_numeric(df["total_amount"], errors="coerce") > 20
+    dff = df[keep]
+    keys = dff[by].fillna("")
+    size = keys.value_counts()
+    td = pd.to_numeric(dff["trip_distance"], errors="coerce").groupby(keys).sum()
+    o_rows = got["totals"]["rows"]
+    print(f"  WHERE total_amount>20 + GROUP BY {by}: "
+          f"olorin matched={o_rows} pandas matched={int(keep.sum())} "
+          f"groups olorin={len(groups)} pandas={len(size)}")
+    if o_rows != int(keep.sum()):
+        findings.append(f"where matched: olorin={o_rows} pandas={int(keep.sum())}")
+
+    def agg_val(g, op, col=""):
+        return next((a["value"] for a in g["aggs"] if a["op"] == op and a.get("col", "") == col), None)
+
+    for key, truth_n in size.items():
+        g = groups.get(key)
+        if g is None:
+            findings.append(f"where group {key!r}: missing from olorin")
+            continue
+        if g["count"] != int(truth_n):
+            findings.append(f"where group {key} count olorin={g['count']} pandas={truth_n}")
+        if not approx(agg_val(g, "sum", "trip_distance"), td[key]):
+            findings.append(f"where group {key} sum(trip_distance) "
+                            f"olorin={agg_val(g, 'sum', 'trip_distance')} pandas={td[key]}")
+
+
 def diff_groupby(binary, path, findings):
     """GROUP BY payment_type vs pandas groupby — count + mean(total_amount)
     + sum(trip_distance). pandas reads the key column as str so both sides
@@ -123,6 +161,7 @@ def main():
               f"mean={num.get('mean'):>10.3f}  {mark}")
 
     diff_groupby(binary, path, findings)
+    diff_where(binary, path, findings)
 
     print()
     if findings:

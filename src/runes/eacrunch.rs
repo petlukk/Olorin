@@ -8,6 +8,7 @@
 use super::{Rune, RuneResult, OutputSafety};
 use super::common::{resolve_path, open_capped, truncate_answer, unquote, PathError};
 use super::grouping::{self, AggSpec};
+use super::filter::Predicate;
 use super::output::{
     FieldKind, FieldStats, NumericStats, RuneOutput, Source, TextEntry, TextStats, Totals,
 };
@@ -29,10 +30,12 @@ impl Rune for Eacrunch {
          (numeric/text), and per-numeric-column stats (min/max/mean/sum). \
          Top-3 most frequent values for text columns. GROUP BY a column with \
          `--by <col>` and aggregate others with `--agg <op:col,...>` (ops: \
-         count/sum/mean/min/max). Args: [--json] [--by <col> [--agg <op:col,...>]] <path.csv>."
+         count/sum/mean/min/max). Filter rows first with `--where <col><op><value>` \
+         (ops: = != > >= < <=). Args: [--json] [--where <col><op><value>] \
+         [--by <col> [--agg <op:col,...>]] <path.csv>."
     }
     fn usage(&self) -> &'static str {
-        "eacrunch [--json] [--by <col> [--agg <op:col,...>]] <path.csv>"
+        "eacrunch [--json] [--where <col><op><value>] [--by <col> [--agg <op:col,...>]] <path.csv>"
     }
     fn output_safety(&self) -> OutputSafety { OutputSafety::UntrustedQuoted }
 
@@ -60,24 +63,26 @@ impl Rune for Eacrunch {
 /// Parsed eacrunch invocation. `by`/`agg` select GROUP BY mode; absent,
 /// eacrunch does its classic whole-file column summary.
 struct Args {
-    path: String,
-    json: bool,
-    by:   Option<String>,
-    agg:  Option<String>,
+    path:  String,
+    json:  bool,
+    by:    Option<String>,
+    agg:   Option<String>,
+    where_: Option<String>,
 }
 
-/// Whitespace-tokenized flag parse. `--by`/`--agg` each consume the next
-/// token as their value; the lone non-flag token is the path. (Paths with
-/// embedded spaces aren't supported in flag mode — staged rune paths under
-/// ~/ or /tmp never contain them.)
+/// Whitespace-tokenized flag parse. `--by`/`--agg`/`--where` each consume
+/// the next token as their value; the lone non-flag token is the path.
+/// (Paths with embedded spaces aren't supported in flag mode — staged rune
+/// paths under ~/ or /tmp never contain them.)
 fn parse_args(args: &str) -> Args {
-    let mut a = Args { path: String::new(), json: false, by: None, agg: None };
+    let mut a = Args { path: String::new(), json: false, by: None, agg: None, where_: None };
     let mut it = args.split_whitespace();
     while let Some(tok) = it.next() {
         match tok {
-            "--json" => a.json = true,
-            "--by"   => a.by  = it.next().map(str::to_string),
-            "--agg"  => a.agg = it.next().map(str::to_string),
+            "--json"  => a.json   = true,
+            "--by"    => a.by     = it.next().map(str::to_string),
+            "--agg"   => a.agg    = it.next().map(str::to_string),
+            "--where" => a.where_ = it.next().map(str::to_string),
             _ => if a.path.is_empty() { a.path = tok.to_string(); },
         }
     }
@@ -99,6 +104,13 @@ fn execute(a: &Args) -> RuneOutput {
             Err(e) => return error_output(&e),
         },
         None => Vec::new(),
+    };
+    let pred = match &a.where_ {
+        Some(s) => match Predicate::parse(s) {
+            Ok(p)  => Some(p),
+            Err(e) => return error_output(&e),
+        },
+        None => None,
     };
     let home = crate::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
     let resolved = match resolve_path(&a.path, &home) {
@@ -124,7 +136,7 @@ fn execute(a: &Args) -> RuneOutput {
             return error_output(&format!("io error: {e}")),
     };
     let resolved_str = resolved.to_string_lossy().into_owned();
-    match build_output(&bytes, resolved_str, a.by.as_deref(), &specs) {
+    match build_output(&bytes, resolved_str, a.by.as_deref(), &specs, pred.as_ref()) {
         Ok(out) => out,
         Err(e)  => error_output(&format!("parse failed: {e}")),
     }
@@ -142,6 +154,7 @@ fn build_output(
     path:  String,
     by:    Option<&str>,
     specs: &[AggSpec],
+    pred:  Option<&Predicate>,
 ) -> Result<RuneOutput, String> {
     use crate::kernels::ffi;
 
@@ -162,7 +175,7 @@ fn build_output(
     // are ever allocated (scratch is O(rows·cols_needed), not O(bytes)).
     if let Some(by) = by {
         let t_scan = Instant::now();
-        let outcome = grouping::build_groups(bytes, by, specs)?;
+        let outcome = grouping::build_groups(bytes, by, specs, pred)?;
         let scan_us = t_scan.elapsed().as_micros() as u64;
         let mut out = RuneOutput::new("eacrunch", RUNE_VERSION);
         out.source = Some(Source {
@@ -247,6 +260,15 @@ fn build_output(
         return Err("no data rows".into());
     }
 
+    // Resolve the optional `--where` predicate column. Column type
+    // classification (sniff, below) is over all rows — a column's
+    // numeric/text kind doesn't depend on which rows the filter keeps.
+    let pred_col = match pred {
+        Some(p) => Some(headers.iter().position(|h| h == &p.col)
+            .ok_or_else(|| format!("--where column not found: {}", p.col))?),
+        None => None,
+    };
+
     // Sniff first up-to-32 data rows to classify columns as numeric vs
     // text (numeric if >= 75% of sniffed cells parse as f64).
     let sniff_rows = SNIFF_ROWS.min(n_rows - 1);
@@ -267,8 +289,20 @@ fn build_output(
     let mut numeric_vals: Vec<Vec<f64>> = vec![Vec::new(); n_cols];
     let mut text_tops: Vec<std::collections::HashMap<String, u32>> =
         vec![std::collections::HashMap::new(); n_cols];
-    let n_data = n_rows - 1;
+    let mut n_data = 0usize;
     for r in 1..n_rows {
+        // Apply the `--where` predicate (if any) before this row counts.
+        if let (Some(p), Some(pc)) = (pred, pred_col) {
+            let matched = match rows_fields[r].get(pc) {
+                Some(&(s, e)) => {
+                    let raw = std::str::from_utf8(&bytes[s..e]).unwrap_or("").trim();
+                    p.matches(unquote(raw).as_ref())
+                }
+                None => false, // ragged row missing the predicate column
+            };
+            if !matched { continue; }
+        }
+        n_data += 1;
         for c in 0..n_cols {
             if c >= rows_fields[r].len() { continue; }
             let (s, e) = rows_fields[r][c];
