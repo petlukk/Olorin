@@ -448,11 +448,13 @@ fn format_groups(out: &RuneOutput) -> String {
     for g in out.groups.iter().take(TOP_GROUPS) {
         buf.push_str(&format!("  {} — count={}", g.key, g.count));
         for a in &g.aggs {
-            if a.col.is_empty() {
-                buf.push_str(&format!("  {}={:.2}", a.op, a.value));
-            } else {
-                buf.push_str(&format!("  {}({})={:.2}", a.op, a.col, a.value));
+            // `count` is intrinsic to the group and already printed above; a
+            // requested `--agg count` would otherwise re-print it as a noisy
+            // `count=N.00`. Every other agg carries a column.
+            if a.op == "count" {
+                continue;
             }
+            buf.push_str(&format!("  {}({})={:.2}", a.op, a.col, a.value));
         }
         buf.push('\n');
     }

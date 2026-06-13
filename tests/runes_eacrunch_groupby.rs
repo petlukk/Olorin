@@ -175,6 +175,26 @@ fn unknown_by_column_is_an_error() {
 }
 
 #[test]
+fn explicit_count_agg_not_double_rendered() {
+    // `--agg count` must not re-print the group count as a noisy `count=N.00`;
+    // the integer group count is always shown once. (sum still renders .00.)
+    olorin::kernels::ffi::init().unwrap();
+    let f = stage("dblcount", FIXTURE);
+    let path = f.0.to_str().unwrap();
+    let r = olorin::runes::run_rune("eacrunch",
+        &format!("--by status --agg count,sum:bytes {path}")).unwrap();
+    assert!(r.success, "{}", r.answer);
+    assert!(r.answer.contains("count=2"), "integer group count shown: {}", r.answer);
+    assert!(!r.answer.contains("count=2.00") && !r.answer.contains("count=1.00"),
+        "redundant decimal count must not appear: {}", r.answer);
+    for line in r.answer.lines()
+        .filter(|l| l.trim_start().starts_with(|c: char| c.is_ascii_digit()))
+    {
+        assert_eq!(line.matches("count=").count(), 1, "one count per group line: {line}");
+    }
+}
+
+#[test]
 fn text_mode_renders_group_table() {
     // Non-json answer is human-readable and surfaces the group keys + aggs.
     olorin::kernels::ffi::init().unwrap();

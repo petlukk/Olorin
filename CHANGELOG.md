@@ -8,6 +8,14 @@ order.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`eacrunch` GROUP BY text output no longer double-prints `count`.** A
+  requested `--agg count` re-rendered the group's row count as a noisy
+  `count=N.00` next to the intrinsic integer `count=N`; the text table now
+  prints the count once. `--json` output is unchanged (the `count` agg stays
+  in `aggs[]` for machine consumers).
+
 ## [3.2.0] — 2026-06-13
 
 ### Added
