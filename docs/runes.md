@@ -152,9 +152,13 @@ real SIMD work that scales with file size.
 **Limit**: column-data SIMD decoding (PLAIN/RLE/dictionary encoding +
 snappy/gzip/zstd decompression) is out of scope for v1. Statistics must be
 present in the file metadata (most modern writers include them by default).
-Primitive types only: BOOLEAN/INT32/INT64/FLOAT/DOUBLE get min/max; BYTE_ARRAY
-(strings) and INT96 (legacy timestamp) are reported by type but their stats are
-left absent.
+BOOLEAN/INT32/INT64/FLOAT/DOUBLE get min/max; **INT96** (legacy Spark/Hive/
+Impala timestamps) decode to ISO instants, and **DECIMAL** columns decode to
+their scaled value (`unscaled / 10^scale`, including FIXED_LEN_BYTE_ARRAY
+big-endian two's-complement). BYTE_ARRAY (strings) are reported by type with
+stats absent. Note: many writers omit statistics for INT96 (its sort order is
+undefined), so a real INT96 column is often labeled a timestamp with no
+min/max to show.
 
 ## ealog — log severity scanner
 
@@ -521,9 +525,10 @@ entries) are blocked regardless of format.
   Mixed-type keys (number on one line, string on another) collapse to
   `(mixed)` with no stats. Text top-N capped at 10K cardinality.
 - **eaparquet**: metadata-only — column data is never decoded. Statistics must
-  be present in the file footer. BYTE_ARRAY (string) and INT96 (legacy
-  timestamp) min/max are not decoded. Flat schemas only; nested groups
-  (LIST/MAP/STRUCT children) are skipped from the column list.
+  be present in the file footer. INT96 timestamps decode to ISO instants and
+  DECIMAL columns to their scaled value; BYTE_ARRAY (string) min/max are not
+  decoded. Flat schemas only; nested groups (LIST/MAP/STRUCT children) are
+  skipped from the column list.
 - **ealog**: severity keywords (`DEBUG/INFO/WARN/ERROR/FATAL`) matched
   **case-insensitively** since v2.0.8 — `info`, `INFO`, and `Error` all count —
   bounded by `space/tab/newline/CR/[/]/"/:`. Compound identifiers like

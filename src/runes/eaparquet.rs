@@ -157,6 +157,19 @@ fn column_to_field(c: &ColumnSummary) -> FieldStats {
             ..blank
         };
     }
+    // A DECIMAL renders as a Number: c.min/c.max already hold the scaled
+    // f64 value (unscaled ÷ 10^scale), decoded ahead of the physical-type
+    // match because the physical type may be FixedLenByteArray (which would
+    // otherwise route to Text).
+    if let Some(LogicalKind::Decimal { .. }) = c.logical {
+        let numeric = match (c.min, c.max) {
+            (Some(min), Some(max)) => Some(NumericStats {
+                min: min.as_f64(), max: max.as_f64(), mean: 0.0, sum: 0.0,
+            }),
+            _ => None,
+        };
+        return FieldStats { kind: FieldKind::Number, numeric, ..blank };
+    }
     match c.physical_type {
         PhysicalType::Boolean => FieldStats {
             kind: FieldKind::Bool,
@@ -175,10 +188,10 @@ fn column_to_field(c: &ColumnSummary) -> FieldStats {
             };
             FieldStats { kind: FieldKind::Number, numeric, ..blank }
         }
-        // INT96 is a deprecated timestamp encoding the reader doesn't
-        // decode; the kind stays Number to match the legacy label, with
-        // numeric=None as the "min/max not decoded" signal that
-        // format_text picks up.
+        // INT96 columns are tagged with an implicit TIMESTAMP logical type
+        // upstream (in aggregate_summary), so they take the timestamp branch
+        // above and never reach here. This arm only keeps the match
+        // exhaustive; numeric=None would mean "stats absent" if it ever did.
         PhysicalType::Int96 => FieldStats {
             kind: FieldKind::Number, numeric: None, ..blank
         },

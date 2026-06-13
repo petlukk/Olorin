@@ -10,6 +10,16 @@ order.
 
 ### Added
 
+- **`eaparquet` decodes INT96 timestamps and DECIMAL columns.** INT96 (the
+  deprecated 12-byte Spark/Hive/Impala timestamp: nanos-of-day + Julian day)
+  now labels as a timestamp and decodes footer min/max to ISO instants;
+  DECIMAL columns decode their unscaled footer stats (INT32/INT64 LE, or
+  FIXED_LEN_BYTE_ARRAY big-endian two's-complement) to the scaled value
+  `unscaled / 10^scale`, reading scale from the modern `LogicalType.DECIMAL`
+  or the legacy `ConvertedType` + `SchemaElement.scale`. Verified vs pyarrow
+  (DECIMAL min/max exact; INT96 decode proven against hand-crafted bytes,
+  since pyarrow omits INT96 statistics).
+
 - **`eacrunch --where <col><op><value>` row filter.** Filter rows before
   aggregating (with `--by`/`--agg`) or before whole-column stats (standalone)
   — `SELECT … GROUP BY … WHERE …`. One predicate; operators `=` `!=` (string)

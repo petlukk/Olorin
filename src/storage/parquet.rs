@@ -63,15 +63,17 @@ impl NumStat {
 
 /// Resolution of a TIMESTAMP logical type (parquet.thrift `TimeUnit`).
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum TimeUnit { Millis, Micros, Nanos }
+pub enum TimeUnit { Millis, Micros, Nanos, Seconds }
 
 impl TimeUnit {
     /// Convert a raw epoch count in this unit to whole epoch-seconds.
     pub fn to_epoch_seconds(self, raw: i64) -> i64 {
         match self {
-            Self::Millis => raw.div_euclid(1_000),
-            Self::Micros => raw.div_euclid(1_000_000),
-            Self::Nanos  => raw.div_euclid(1_000_000_000),
+            Self::Millis  => raw.div_euclid(1_000),
+            Self::Micros  => raw.div_euclid(1_000_000),
+            Self::Nanos   => raw.div_euclid(1_000_000_000),
+            // INT96 is decoded directly to whole epoch-seconds.
+            Self::Seconds => raw,
         }
     }
 }
@@ -84,6 +86,42 @@ impl TimeUnit {
 pub enum LogicalKind {
     /// A physical INT64 holding an epoch count; `utc` is `isAdjustedToUTC`.
     Timestamp { unit: TimeUnit, utc: bool },
+    /// A DECIMAL: the physical value (INT32/INT64 little-endian, or
+    /// FIXED_LEN_BYTE_ARRAY/BYTE_ARRAY big-endian two's-complement) is an
+    /// unscaled integer; the real value is `unscaled / 10^scale`.
+    Decimal { scale: i32 },
+}
+
+/// Decode a big-endian two's-complement integer of up to 16 bytes (the
+/// FIXED_LEN_BYTE_ARRAY / BYTE_ARRAY encoding of a DECIMAL's unscaled
+/// value). Sign-extends from the top bit. Returns `None` for empty or
+/// >16-byte values (decimal256 is out of scope).
+fn be_twos_complement_i128(bytes: &[u8]) -> Option<i128> {
+    if bytes.is_empty() || bytes.len() > 16 {
+        return None;
+    }
+    let mut v: i128 = if bytes[0] & 0x80 != 0 { -1 } else { 0 };
+    for &b in bytes {
+        v = (v << 8) | (b as i128);
+    }
+    Some(v)
+}
+
+/// Decode a DECIMAL stat value to its real (scaled) f64. The unscaled
+/// integer comes from the physical encoding; we divide by `10^scale`.
+fn decode_decimal(pt: PhysicalType, bytes: &[u8], scale: i32) -> Option<f64> {
+    let unscaled: i128 = match pt {
+        PhysicalType::Int32 if bytes.len() == 4 =>
+            i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as i128,
+        PhysicalType::Int64 if bytes.len() == 8 => {
+            let mut b = [0u8; 8]; b.copy_from_slice(bytes);
+            i64::from_le_bytes(b) as i128
+        }
+        PhysicalType::FixedLenByteArray | PhysicalType::ByteArray =>
+            be_twos_complement_i128(bytes)?,
+        _ => return None,
+    };
+    Some(unscaled as f64 / 10f64.powi(scale))
 }
 
 /// Aggregated per-column summary across all row groups.
@@ -176,8 +214,33 @@ fn decode_stat_value(pt: PhysicalType, bytes: &[u8], unsigned: bool) -> Option<N
             let mut b = [0u8; 8]; b.copy_from_slice(bytes);
             Some(NumStat::F64(f64::from_le_bytes(b)))
         }
+        PhysicalType::Int96 => int96_to_epoch_seconds(bytes).map(NumStat::I64),
         _ => None,
     }
+}
+
+/// Decode a 12-byte INT96 timestamp to whole epoch-seconds.
+///
+/// The deprecated Impala/Hive/Spark encoding: first 8 bytes = i64
+/// nanoseconds within the day (LE), last 4 = i32 Julian day number (LE).
+/// `epoch_seconds = (jd − 2440588)·86400 + nanos/1e9` (2440588 = the Julian
+/// day of the Unix epoch, 1970-01-01). Decoded to whole seconds: the footer
+/// min/max render to second-resolution ISO, and seconds (~1.7e9) stay exact
+/// through the f64 reduction pipeline where raw nanos (~1.7e18) would not.
+///
+/// Returns `None` unless `bytes.len() == 12`. NOTE: pyarrow and many engines
+/// omit statistics for INT96 columns (its sort order is undefined), so a
+/// real file often has no min/max to decode here — but when stats ARE
+/// present, this turns them into instants instead of skipping them.
+pub fn int96_to_epoch_seconds(bytes: &[u8]) -> Option<i64> {
+    if bytes.len() != 12 {
+        return None;
+    }
+    let mut nb = [0u8; 8];
+    nb.copy_from_slice(&bytes[0..8]);
+    let nanos = i64::from_le_bytes(nb);
+    let jd = i32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as i64;
+    Some((jd - 2_440_588) * 86_400 + nanos.div_euclid(1_000_000_000))
 }
 
 /// Per-column scratch: collect every row-group's stat into a Vec, then
@@ -215,11 +278,19 @@ fn aggregate_summary(meta: FileMetaData) -> Result<ParquetSummary, String> {
         .filter_map(|e| e.physical_type.map(|_|
             (e.name.as_str(), matches!(e.converted_type, Some(11..=14)))))
         .collect();
-    // LogicalType annotations (TIMESTAMP) keyed by column name.
+    // LogicalType annotations (TIMESTAMP / DECIMAL) keyed by column name.
+    // Falls back to the legacy ConvertedType DECIMAL (5) + SchemaElement
+    // scale when no modern LogicalType is present.
     let name_to_logical: std::collections::HashMap<&str, LogicalKind> = meta.schema.iter()
         .skip(1)
         .filter(|e| e.num_children == 0)
-        .filter_map(|e| e.logical.map(|l| (e.name.as_str(), l)))
+        .filter_map(|e| {
+            let l = e.logical.or_else(|| {
+                (e.converted_type == Some(5))
+                    .then(|| LogicalKind::Decimal { scale: e.scale.unwrap_or(0) })
+            })?;
+            Some((e.name.as_str(), l))
+        })
         .collect();
 
     // Phase 1: walk row groups, collect per-column f64 vectors of mins,
@@ -237,7 +308,14 @@ fn aggregate_summary(meta: FileMetaData) -> Result<ParquetSummary, String> {
                 None => continue,
             };
             let unsigned = name_to_unsigned.get(name.as_str()).copied().unwrap_or(false);
-            let logical = name_to_logical.get(name.as_str()).copied();
+            // INT96 is always a timestamp (it carries no LogicalType
+            // annotation), so mark it implicitly; otherwise use the schema's
+            // annotation. This routes INT96 through the ISO-instant renderer.
+            let logical = if pt == PhysicalType::Int96 {
+                Some(LogicalKind::Timestamp { unit: TimeUnit::Seconds, utc: false })
+            } else {
+                name_to_logical.get(name.as_str()).copied()
+            };
             let entry = scratches.entry(name.clone()).or_insert_with(|| {
                 order.push(name.clone());
                 ColumnScratch {
@@ -251,19 +329,28 @@ fn aggregate_summary(meta: FileMetaData) -> Result<ParquetSummary, String> {
                 }
             });
             entry.total_values += m.num_values;
+            // Decimal stats decode through the unscaled-integer path; all
+            // others through the physical-type decoder. Read the column's
+            // logical/unsigned into locals first to avoid borrowing `entry`
+            // while pushing into its vectors.
+            let col_logical = entry.logical;
+            let col_unsigned = entry.unsigned;
+            let decode = |bytes: &[u8]| -> Option<f64> {
+                if let Some(LogicalKind::Decimal { scale }) = col_logical {
+                    decode_decimal(pt, bytes, scale)
+                } else {
+                    decode_stat_value(pt, bytes, col_unsigned).map(|v| v.as_f64())
+                }
+            };
             if let Some(stats) = &m.statistics {
                 if let Some(nc) = stats.null_count {
                     entry.null_counts.push(nc as f64);
                 }
                 if let Some(min_b) = &stats.min_value {
-                    if let Some(v) = decode_stat_value(pt, min_b, entry.unsigned) {
-                        entry.mins.push(v.as_f64());
-                    }
+                    if let Some(v) = decode(min_b) { entry.mins.push(v); }
                 }
                 if let Some(max_b) = &stats.max_value {
-                    if let Some(v) = decode_stat_value(pt, max_b, entry.unsigned) {
-                        entry.maxes.push(v.as_f64());
-                    }
+                    if let Some(v) = decode(max_b) { entry.maxes.push(v); }
                 }
             }
         }
@@ -281,8 +368,8 @@ fn aggregate_summary(meta: FileMetaData) -> Result<ParquetSummary, String> {
             let s = scratches.remove(&name)?;
             let pt = s.physical_type;
 
-            let min = simd_reduce_min(&s.mins, pt);
-            let max = simd_reduce_max(&s.maxes, pt);
+            let min = simd_reduce_min(&s.mins, pt, s.logical);
+            let max = simd_reduce_max(&s.maxes, pt, s.logical);
             let nulls = simd_reduce_sum(&s.null_counts);
 
             Some(ColumnSummary {
@@ -306,16 +393,16 @@ fn aggregate_summary(meta: FileMetaData) -> Result<ParquetSummary, String> {
 
 /// Reduce a Vec<f64> of per-row-group min values to a single min via
 /// the SIMD `f64_stats` kernel. Returns `None` if the vec is empty.
-fn simd_reduce_min(vals: &[f64], pt: PhysicalType) -> Option<NumStat> {
+fn simd_reduce_min(vals: &[f64], pt: PhysicalType, logical: Option<LogicalKind>) -> Option<NumStat> {
     if vals.is_empty() { return None; }
     let v = simd_min_max(vals)?.0;
-    Some(typed_stat(pt, v))
+    Some(typed_stat(pt, v, logical))
 }
 
-fn simd_reduce_max(vals: &[f64], pt: PhysicalType) -> Option<NumStat> {
+fn simd_reduce_max(vals: &[f64], pt: PhysicalType, logical: Option<LogicalKind>) -> Option<NumStat> {
     if vals.is_empty() { return None; }
     let v = simd_min_max(vals)?.1;
-    Some(typed_stat(pt, v))
+    Some(typed_stat(pt, v, logical))
 }
 
 fn simd_reduce_sum(vals: &[f64]) -> Option<i64> {
@@ -347,7 +434,12 @@ fn simd_min_max(vals: &[f64]) -> Option<(f64, f64)> {
 
 /// Convert a reduced f64 value back into the column's NumStat representation
 /// so format_column can print it with the right shape (int vs float vs bool).
-fn typed_stat(pt: PhysicalType, v: f64) -> NumStat {
+fn typed_stat(pt: PhysicalType, v: f64, logical: Option<LogicalKind>) -> NumStat {
+    // A DECIMAL's value is the scaled f64 (e.g. 19.99); never coerce it to an
+    // integer, even when the physical type is INT32/INT64.
+    if let Some(LogicalKind::Decimal { .. }) = logical {
+        return NumStat::F64(v);
+    }
     match pt {
         PhysicalType::Boolean => NumStat::Bool(v != 0.0),
         PhysicalType::Int32 | PhysicalType::Int64 | PhysicalType::Int96 => {
