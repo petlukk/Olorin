@@ -1,15 +1,18 @@
 //! GROUP BY block of the RuneOutput v1 contract — types, agg parsing, and
-//! the grouping pass over eacrunch's CSV field grid.
+//! the grouping pass driven by the fused `csv_groupby_scan` kernel.
 //!
 //! Lives outside `output.rs`/`eacrunch.rs` to keep both under the 500-LOC
 //! cap; the `groups[]` field is on `RuneOutput` and serializes additively
 //! (only when non-empty), exactly like `anomalies[]` / `correlations[]`.
 //!
-//! Phase 1 is correctness-first: grouping reuses the same `csv_scan` field
-//! grid eacrunch already builds and parses agg values with the identical
-//! finite-skipna rule (`f64::parse` + `is_finite`), so a group's
-//! `mean:latency` agrees with eacrunch's whole-column `latency` mean by
-//! construction. The fused single-pass kernel is Phase 2.
+//! The fused kernel projects only the key + aggregation columns in one
+//! pass — no `len`-sized delimiter arrays, no full field grid (scratch is
+//! O(rows·cols_needed), not O(bytes); ~5.8× less peak RSS on a 3M-row CSV).
+//! Agg values are parsed here in Rust with the identical finite-skipna rule
+//! (`f64::parse` + `is_finite`) as eacrunch's whole-column stats — the
+//! honest fusion boundary, since Ea has no `strtod` intrinsic — so a group's
+//! `mean:latency` agrees with the whole-column `latency` mean by
+//! construction, and is differentially verified against pandas.
 
 use super::common;
 use crate::storage::json::{Object, Value};
@@ -132,16 +135,57 @@ impl Acc {
     }
 }
 
-/// Run the grouping pass. `rows_fields[0]` is the header row (skipped);
-/// data rows are `1..`. Returns groups ordered count-desc then key-asc so
-/// the output is deterministic and cross-arch bit-identical.
+/// Outcome of a grouping pass: the groups plus the total data-row count
+/// (header excluded) so eacrunch can report `totals.rows`.
+pub struct GroupOutcome {
+    pub groups:    Vec<Group>,
+    pub data_rows: u64,
+}
+
+/// Quote-aware split of the CSV header (first line). Mirrors the kernel's
+/// column splitting (toggle on `"`, split on unquoted `,`, stop at the
+/// first unquoted `\n`) so header names resolve to the same column indices
+/// the kernel projects. O(header length) — never touches the whole file.
+fn parse_header(bytes: &[u8]) -> Vec<String> {
+    let clean = |b: &[u8]| -> String {
+        let s = std::str::from_utf8(b).unwrap_or("").trim();
+        common::unquote(s).into_owned()
+    };
+    let mut headers = Vec::new();
+    let mut in_quote = false;
+    let mut field_start = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => in_quote = !in_quote,
+            b',' if !in_quote => {
+                headers.push(clean(&bytes[field_start..i]));
+                field_start = i + 1;
+            }
+            b'\n' if !in_quote => break,
+            _ => {}
+        }
+        i += 1;
+    }
+    headers.push(clean(&bytes[field_start..i])); // last field (trim drops any \r)
+    headers
+}
+
+/// Run the GROUP BY pass via the fused `csv_groupby_scan` kernel. The kernel
+/// projects only the key + aggregation columns in one pass (no `len`-sized
+/// delimiter arrays, no full field grid); this fn parses values + reduces
+/// per group in Rust (the honest fusion boundary — no `strtod` intrinsic).
+/// Groups are ordered count-desc then key-asc so output is deterministic
+/// and cross-arch bit-identical.
 pub fn build_groups(
-    bytes:       &[u8],
-    rows_fields: &[Vec<(usize, usize)>],
-    headers:     &[String],
-    by_col:      usize,
-    specs:       &[AggSpec],
-) -> Result<Vec<Group>, String> {
+    bytes: &[u8],
+    by:    &str,
+    specs: &[AggSpec],
+) -> Result<GroupOutcome, String> {
+    let headers = parse_header(bytes);
+    let by_col = headers.iter().position(|h| h == by)
+        .ok_or_else(|| format!("--by column not found: {by}"))?;
+
     // Resolve each numeric spec's column to an index up front (Count → None).
     let col_idx: Vec<Option<usize>> = specs.iter()
         .map(|s| match s.op {
@@ -152,33 +196,68 @@ pub fn build_groups(
         })
         .collect::<Result<_, _>>()?;
 
+    // `needed` = sorted-unique column indices the kernel must project:
+    // the key column plus every value column. Each spec/key then maps to a
+    // slot (position within `needed`) of the kernel's per-row output.
+    let mut needed: Vec<usize> = std::iter::once(by_col)
+        .chain(col_idx.iter().filter_map(|c| *c))
+        .collect();
+    needed.sort_unstable();
+    needed.dedup();
+    let n_needed = needed.len();
+    let slot = |col: usize| needed.iter().position(|&c| c == col).unwrap();
+    let key_slot = slot(by_col);
+    let val_slot: Vec<Option<usize>> = col_idx.iter().map(|c| c.map(slot)).collect();
+
+    // Upper bound on rows: every '\n' plus a possible final unterminated
+    // line. Counted in Rust (O(1) memory) — never an Ea pass.
+    let max_rows = bytes.iter().filter(|&&b| b == b'\n').count() + 1;
+    let needed_i32: Vec<i32> = needed.iter().map(|&c| c as i32).collect();
+    let mut out_off = vec![-1i32; max_rows * n_needed];
+    let mut out_len = vec![-1i32; max_rows * n_needed];
+    let mut n_rows  = 0i32;
+    let mut scratch = [0u8; 16];
+    unsafe {
+        crate::kernels::ffi::csv_groupby_scan(
+            bytes.as_ptr(), bytes.len() as i32,
+            needed_i32.as_ptr(), n_needed as i32,
+            out_off.as_mut_ptr(), out_len.as_mut_ptr(),
+            &mut n_rows,
+            scratch.as_mut_ptr(),
+        );
+    }
+    let n_rows = n_rows as usize;
+    if n_rows < 2 {
+        return Err("no data rows".into());
+    }
+
     use std::collections::HashMap;
     let mut map: HashMap<String, Acc> = HashMap::new();
+    let field = |row: usize, s: usize| -> Option<&[u8]> {
+        let off = out_off[row * n_needed + s];
+        let len = out_len[row * n_needed + s];
+        if off < 0 { return None; } // column absent from this (ragged) row
+        Some(&bytes[off as usize..(off + len) as usize])
+    };
 
-    for fields in rows_fields.iter().skip(1) {
-        if by_col >= fields.len() {
-            continue; // ragged row missing the key column
-        }
-        let (ks, ke) = fields[by_col];
-        let key_raw = std::str::from_utf8(&bytes[ks..ke]).unwrap_or("").trim();
+    // Data rows are 1.. (row 0 is the header the kernel also emitted).
+    for row in 1..n_rows {
+        let Some(key_bytes) = field(row, key_slot) else { continue }; // no key
+        let key_raw = std::str::from_utf8(key_bytes).unwrap_or("").trim();
         let key = common::unquote(key_raw).into_owned();
 
         if !map.contains_key(&key) && map.len() >= MAX_GROUPS {
             return Err(format!(
-                "too many groups (> {MAX_GROUPS}); `--by {}` has very high cardinality",
-                headers.get(by_col).map(String::as_str).unwrap_or("?"),
+                "too many groups (> {MAX_GROUPS}); `--by {by}` has very high cardinality",
             ));
         }
         let acc = map.entry(key).or_insert_with(|| Acc::new(specs.len()));
         acc.count += 1;
 
-        for (i, ci) in col_idx.iter().enumerate() {
-            let Some(ci) = ci else { continue };
-            if *ci >= fields.len() {
-                continue;
-            }
-            let (vs, ve) = fields[*ci];
-            let raw = std::str::from_utf8(&bytes[vs..ve]).unwrap_or("").trim();
+        for (i, vs) in val_slot.iter().enumerate() {
+            let Some(vs) = vs else { continue };
+            let Some(val_bytes) = field(row, *vs) else { continue };
+            let raw = std::str::from_utf8(val_bytes).unwrap_or("").trim();
             let txt = common::unquote(raw);
             // Same finite-skipna rule as eacrunch's whole-column stats: drop
             // NaN/inf so sum/mean/min/max stay mutually consistent.
@@ -211,7 +290,7 @@ pub fn build_groups(
 
     // Deterministic order: biggest groups first, key ascending on ties.
     groups.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.key.cmp(&b.key)));
-    Ok(groups)
+    Ok(GroupOutcome { groups, data_rows: (n_rows - 1) as u64 })
 }
 
 // ── JSON codec (additive `groups[]` on RuneOutput) ────────────────────────────
