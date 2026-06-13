@@ -149,17 +149,15 @@ fn build_output(bytes: &[u8], path: String, depth: usize) -> Result<RuneOutput, 
     let mut newlines    = vec![0i32; bytes.len()];
     let mut quotes      = vec![0i32; bytes.len()];
     let mut colons      = vec![0i32; bytes.len()];
-    let mut commas      = vec![0i32; bytes.len()];
     let mut backslashes = vec![0i32; bytes.len()];
-    let mut n_nl = 0i32; let mut n_q = 0i32; let mut n_co = 0i32;
-    let mut n_cm = 0i32; let mut n_bs = 0i32;
+    let mut n_nl = 0i32; let mut n_q = 0i32; let mut n_co = 0i32; let mut n_bs = 0i32;
     let mut scratch = [0u8; 16];
     unsafe {
         ffi::jsonl_struct_scan(
             bytes.as_ptr(), len,
             newlines.as_mut_ptr(), quotes.as_mut_ptr(),
-            colons.as_mut_ptr(),   commas.as_mut_ptr(), backslashes.as_mut_ptr(),
-            &mut n_nl, &mut n_q, &mut n_co, &mut n_cm, &mut n_bs,
+            colons.as_mut_ptr(),   backslashes.as_mut_ptr(),
+            &mut n_nl, &mut n_q, &mut n_co, &mut n_bs,
             scratch.as_mut_ptr(),
         );
     }

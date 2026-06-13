@@ -1,7 +1,12 @@
 // One-pass JSONL structural scanner. For each byte in `text`, records the
-// position of every newline, quote, colon, comma, and backslash into five
+// position of every newline, quote, colon, and backslash into four
 // caller-allocated output arrays. Mirrors csv_scan.ea — same SIMD pattern,
-// five match characters instead of two.
+// four match characters.
+//
+// Commas are NOT scanned: eajson (the sole caller) walks key/value pairs
+// from quote + colon positions and never consulted comma positions, so
+// emitting them was pure wasted SIMD work plus a full `len`-sized array of
+// dead output. Dropping them cuts the scratch from five arrays to four.
 //
 // Caller sizes each out_* array at `len` (worst case: every byte is a
 // structural character of that type).
@@ -12,44 +17,40 @@
 // emits raw positions; escape resolution is a scalar Rust pass.
 //
 // SIMD strategy (same as csv_scan): 16-byte chunks compared against
-// splat('\n'), splat('"'), splat(':'), splat(','), splat('\\'). Each lane
-// gets a 5-bit-encoded match byte (bit 0 = newline, 1 = quote, 2 = colon,
-// 3 = comma, 4 = backslash). Mask is stored to caller-provided scratch
-// (16 bytes); scalar walk emits positions per type. Cross-arch — no
-// movemask, no lane-extract primitive needed.
+// splat('\n'), splat('"'), splat(':'), splat('\\'). Each lane gets a
+// 4-bit-encoded match byte (bit 0 = newline, 1 = quote, 2 = colon,
+// 3 = backslash). Mask is stored to caller-provided scratch (16 bytes);
+// scalar walk emits positions per type. Cross-arch — no movemask, no
+// lane-extract primitive needed.
 //
 // Signature kept on one line: multi-line parameter lists hit the same
 // Eä parser limitation as f32_stats.
 
-export func jsonl_struct_scan(text: *u8, len: i32, out_newlines: *mut i32, out_quotes: *mut i32, out_colons: *mut i32, out_commas: *mut i32, out_backslashes: *mut i32, out_n_newline: *mut i32, out_n_quote: *mut i32, out_n_colon: *mut i32, out_n_comma: *mut i32, out_n_backslash: *mut i32, scratch: *mut u8) {
+export func jsonl_struct_scan(text: *u8, len: i32, out_newlines: *mut i32, out_quotes: *mut i32, out_colons: *mut i32, out_backslashes: *mut i32, out_n_newline: *mut i32, out_n_quote: *mut i32, out_n_colon: *mut i32, out_n_backslash: *mut i32, scratch: *mut u8) {
     let v_newl:  u8x16 = splat(10)
     let v_quote: u8x16 = splat(34)
     let v_colon: u8x16 = splat(58)
-    let v_comma: u8x16 = splat(44)
     let v_bksl:  u8x16 = splat(92)
     let v_zero:  u8x16 = splat(0)
     let v_1:     u8x16 = splat(1)
     let v_2:     u8x16 = splat(2)
     let v_4:     u8x16 = splat(4)
     let v_8:     u8x16 = splat(8)
-    let v_16:    u8x16 = splat(16)
 
     let mut nn: i32 = 0
     let mut nq: i32 = 0
     let mut nc: i32 = 0
-    let mut nm: i32 = 0
     let mut nb: i32 = 0
 
     let n_full: i32 = (len / 16) * 16
     let mut i: i32 = 0
     while i < n_full {
         let c: u8x16 = load(text, i)
-        let m_n: u8x16 = select(c .== v_newl,  v_1,  v_zero)
-        let m_q: u8x16 = select(c .== v_quote, v_2,  v_zero)
-        let m_c: u8x16 = select(c .== v_colon, v_4,  v_zero)
-        let m_m: u8x16 = select(c .== v_comma, v_8,  v_zero)
-        let m_b: u8x16 = select(c .== v_bksl,  v_16, v_zero)
-        let m:   u8x16 = m_n .| m_q .| m_c .| m_m .| m_b
+        let m_n: u8x16 = select(c .== v_newl,  v_1, v_zero)
+        let m_q: u8x16 = select(c .== v_quote, v_2, v_zero)
+        let m_c: u8x16 = select(c .== v_colon, v_4, v_zero)
+        let m_b: u8x16 = select(c .== v_bksl,  v_8, v_zero)
+        let m:   u8x16 = m_n .| m_q .| m_c .| m_b
         store(scratch, 0, m)
 
         let mut k: i32 = 0
@@ -68,10 +69,6 @@ export func jsonl_struct_scan(text: *u8, len: i32, out_newlines: *mut i32, out_q
                 nc = nc + 1
             }
             if (b & 8) != 0 {
-                out_commas[nm] = i + k
-                nm = nm + 1
-            }
-            if (b & 16) != 0 {
                 out_backslashes[nb] = i + k
                 nb = nb + 1
             }
@@ -95,10 +92,6 @@ export func jsonl_struct_scan(text: *u8, len: i32, out_newlines: *mut i32, out_q
             out_colons[nc] = i
             nc = nc + 1
         }
-        if b == 44 {
-            out_commas[nm] = i
-            nm = nm + 1
-        }
         if b == 92 {
             out_backslashes[nb] = i
             nb = nb + 1
@@ -109,6 +102,5 @@ export func jsonl_struct_scan(text: *u8, len: i32, out_newlines: *mut i32, out_q
     out_n_newline[0]   = nn
     out_n_quote[0]     = nq
     out_n_colon[0]     = nc
-    out_n_comma[0]     = nm
     out_n_backslash[0] = nb
 }
