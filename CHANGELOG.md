@@ -8,6 +8,45 @@ order.
 
 ## [Unreleased]
 
+## [3.0.0] — 2026-06-13
+
+Robustness campaign waves two–four: the encrypted vault, the web/WhatsApp
+server, and the inference path stress-tested under failure and adversarial
+input. Major version because the vault on-disk format changes incompatibly.
+
+### ⚠ BREAKING
+
+- **Vault on-disk format → v4 (`storage::vault`).** Append-only record log plus
+  a double-buffered, two-fsync header commit, so a crash mid-append recovers
+  every committed block (at worst losing only the in-flight one) instead of
+  leaving the vault unopenable. **There is no v3→v4 migration: existing vaults
+  are rejected as an unsupported version.** Back up `~/.olorin/vault/` if you
+  care about its contents, or expect a fresh vault on first run. (Findings
+  F1/F2.)
+
+### Security
+
+- **Vault concurrent-open lock (F3).** `Vault::open*` now takes an exclusive
+  advisory file lock for its lifetime — two processes opening the same vault
+  could previously append at the same offset and reuse a per-block ChaCha20
+  nonce (a two-time-pad). A concurrent open is now rejected; the lock
+  auto-releases on process exit.
+- **Server auth-parser hardening (S3).** The bearer/cookie token parsers no
+  longer slice fixed byte offsets on attacker-controlled header lines (a
+  multibyte char at the boundary could panic the connection thread, pre-auth on
+  an exposed bind). Boundary-safe prefix checks now.
+
+### Fixed
+
+- **Inference context-window guard (W1).** `Engine::generate` now refuses a
+  prompt that fills the context window and bounds the decode loop, so an
+  over-window prompt returns a clean error instead of panicking the KV cache
+  (was a process crash on a long paste).
+- **Server request-body memory + connection bounds (S1/S2).** The request body
+  is read incrementally up to the cap instead of eagerly allocating the declared
+  Content-Length (no more multi-MB allocation from a lying header), and the
+  accept loop caps concurrent connections (`OLORIN_MAX_CONN`, default 64).
+
 ## [2.13.0] — 2026-06-12
 
 Robustness wave one: every rune diffed against independent ground-truth
