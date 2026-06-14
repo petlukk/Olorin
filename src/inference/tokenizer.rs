@@ -244,6 +244,13 @@ impl Tokenizer {
         self.token_to_id.get(token.as_bytes()).copied()
     }
 
+    /// Number of tokens in the vocabulary. A valid token id is in
+    /// `0..vocab_size()`; `encode` must never emit an id outside this range, or
+    /// the embedding lookup in the forward pass would index out of bounds.
+    pub fn vocab_size(&self) -> usize {
+        self.vocab.len()
+    }
+
     pub fn encode(&self, text: &str) -> Vec<u32> {
         if text.is_empty() {
             return Vec::new();
