@@ -3,7 +3,7 @@
 //! HTML attachment from the deterministic pipeline; bad payloads fail
 //! closed with a 400. No DispatchContext, no model.
 
-use olorin::interface::server_analyze::handle_report;
+use olorin::interface::server_analyze::{handle_report, handle_report_raw};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 
@@ -75,6 +75,55 @@ fn valid_payload_returns_html_attachment() {
     assert!(resp.contains("<!DOCTYPE html>"), "HTML body");
     assert!(resp.contains("via eatime"), "per-file section present");
     assert!(!resp.contains("<script"), "no JS in the artifact");
+}
+
+/// Run one raw (no-base64) request through handle_report_raw and return the
+/// raw response. The body is the file bytes verbatim; the name rides in a header.
+fn roundtrip_raw(name: &str, file: &[u8]) -> String {
+    olorin::kernels::ffi::init().unwrap();
+    let (mut client, mut server) = socket_pair();
+    let request_head = format!(
+        "POST /api/report_raw HTTP/1.1\r\nHost: x\r\nX-Filename: {name}\r\n\
+         Content-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n",
+        file.len(),
+    );
+    let mut request = request_head.into_bytes();
+    request.extend_from_slice(file);
+    client.write_all(&request).unwrap();
+    client.flush().unwrap();
+
+    let mut buf = vec![0u8; 64 * 1024];
+    let n = server.read(&mut buf).unwrap();
+    let req = String::from_utf8_lossy(&buf[..n]).into_owned();
+    handle_report_raw(&mut server, &req, &buf[..n], n);
+    drop(server);
+
+    let mut response = String::new();
+    client.read_to_string(&mut response).unwrap();
+    response
+}
+
+#[test]
+fn raw_single_file_returns_html_attachment() {
+    let log = {
+        let mut s = String::new();
+        for m in 0..120 {
+            s.push_str(&format!("2026-06-12T08:{:02}:00 INFO ok\n", m % 60));
+        }
+        s
+    };
+    let resp = roundtrip_raw("app.log", log.as_bytes());
+    assert!(resp.starts_with("HTTP/1.1 200 OK"), "status: {}", &resp[..60.min(resp.len())]);
+    assert!(resp.contains("Content-Disposition: attachment"), "attachment header");
+    assert!(resp.contains("<!DOCTYPE html>"), "HTML body");
+    assert!(resp.contains("via eatime"), "per-file section present");
+    assert!(!resp.contains("<script"), "no JS in the artifact");
+}
+
+#[test]
+fn raw_empty_upload_fails_closed_with_400() {
+    let resp = roundtrip_raw("app.log", b"");
+    assert!(resp.starts_with("HTTP/1.1 400"), "status: {}", &resp[..60.min(resp.len())]);
 }
 
 #[test]
