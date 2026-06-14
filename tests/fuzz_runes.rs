@@ -209,8 +209,8 @@ enum Outcome {
 /// watchdog deadline. `child` stays in this thread so the deadline path can
 /// actually `kill()` a wedged parser instead of orphaning it. stderr is
 /// discarded — only the structured stdout JSON matters to the contract.
-fn run_once(rune: &str, path: &str) -> Outcome {
-    let script = format!("/rune {rune} --json {path}\n/quit\n");
+fn run_invocation(rune: &str, paths: &[&str]) -> Outcome {
+    let script = format!("/rune {rune} --json {}\n/quit\n", paths.join(" "));
     let mut child = Command::new(OLORIN)
         .arg("--strict")
         .stdin(Stdio::piped())
@@ -294,36 +294,56 @@ fn base_seed() -> u64 {
         .unwrap_or(0x9E37_79B9_7F4A_7C15)
 }
 
-/// Drive `iters` mutated inputs through one rune. On the first finding, dump
-/// the input and panic with a fully reproducible description.
+/// Describe an outcome as a finding, or `None` if all invariants held.
+fn failure_of(outcome: Outcome) -> Option<String> {
+    match outcome {
+        Outcome::Ok => None,
+        Outcome::Hang => Some(format!("HANG (exceeded {:?})", PER_RUN_TIMEOUT)),
+        Outcome::Crash(m) => Some(format!("CRASH: {m}")),
+        Outcome::BadOutput(m) => Some(format!("BAD OUTPUT: {m}")),
+    }
+}
+
+/// Dump every offending input and panic with a fully reproducible report.
+/// `inputs` is `(tag, bytes)` pairs — one for single-input runes, several for
+/// multi-input ones (eadiff/eacorrelate), each dumped to its own repro file.
+fn report_finding(
+    rune: &str, seed: u64, iter: u32, strategies: &[Strategy],
+    failure: &str, inputs: &[(&str, &[u8])],
+) -> ! {
+    let mut dumps = Vec::with_capacity(inputs.len());
+    for (tag, bytes) in inputs {
+        let repro = format!("/tmp/olorin_fuzz_repro_{rune}_seed{seed:x}_iter{iter}_{tag}.bin");
+        let _ = std::fs::write(&repro, bytes);
+        dumps.push(format!("{tag}: {} bytes -> {repro}", bytes.len()));
+    }
+    panic!(
+        "\n=== FUZZ FINDING ===\nrune:       {rune}\nfailure:    {failure}\n\
+         seed:       {seed:#x}\niter:       {iter}\nstrategies: {strategies:?}\n\
+         inputs:\n  {}\nreplay:     OLORIN_FUZZ_SEED={seed} cargo test --release \
+         --test fuzz_runes fuzz_{rune}\n",
+        dumps.join("\n  ")
+    );
+}
+
+/// Per-iteration sub-seed — an independent, reproducible stream so a single
+/// (seed, iter) pair pins the exact bytes.
+fn iter_rng(seed: u64, iter: u32) -> Rng {
+    Rng::new(seed ^ ((iter as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)))
+}
+
+/// Drive `iters` mutated inputs through one single-input rune.
 fn fuzz_rune(rune: &str, corpus: &[&[u8]]) {
     let seed = base_seed();
-    let iter_count = iters();
-    for iter in 0..iter_count {
-        // Derive an independent, reproducible sub-stream per iteration so a
-        // single (seed, iter) pair pins the exact bytes.
-        let mut rng = Rng::new(seed ^ ((iter as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)));
+    for iter in 0..iters() {
+        let mut rng = iter_rng(seed, iter);
         let (input, strategies) = mutate(corpus, &mut rng);
         let path = write_tmp(&format!("{rune}_{iter}"), &input);
-        let outcome = run_once(rune, &path);
+        let outcome = run_invocation(rune, &[&path]);
         let _ = std::fs::remove_file(&path);
-
-        let failure = match outcome {
-            Outcome::Ok => continue,
-            Outcome::Hang => format!("HANG (exceeded {:?})", PER_RUN_TIMEOUT),
-            Outcome::Crash(m) => format!("CRASH: {m}"),
-            Outcome::BadOutput(m) => format!("BAD OUTPUT: {m}"),
-        };
-        let repro = format!("/tmp/olorin_fuzz_repro_{rune}_seed{seed:x}_iter{iter}.bin");
-        let _ = std::fs::write(&repro, &input);
-        panic!(
-            "\n=== FUZZ FINDING ===\nrune:       {rune}\nfailure:    {failure}\n\
-             seed:       {seed:#x}\niter:       {iter}\nstrategies: {strategies:?}\n\
-             input:      {} bytes, dumped to {repro}\nreplay:     \
-             OLORIN_FUZZ_SEED={seed} OLORIN_FUZZ_ITERS={} cargo test --release \
-             --test fuzz_runes fuzz_{rune}\n",
-            input.len(), iter + 1
-        );
+        if let Some(failure) = failure_of(outcome) {
+            report_finding(rune, seed, iter, &strategies, &failure, &[("a", &input)]);
+        }
     }
 }
 
@@ -338,6 +358,10 @@ const SQL: &[u8] = b"CREATE TABLE t (id INT, name TEXT);\nINSERT INTO t VALUES (
 // Mutating the footer-length field is the point — it drives the bounds math in
 // the footer/thrift decoder, a classic out-of-range-read crash site.
 const PARQUET: &[u8] = b"PAR1\x15\x00\x15\x10\x15\x10\x2c\x15\x04\x00\x00\x00\x08\x00\x00\x00PAR1";
+// A valid serialized RuneOutput line — the input grammar eadiff consumes. Its
+// hand-rolled `RuneOutput::from_json` parser (no serde) is the fuzz target;
+// mutations that still parse reach the structural-diff math behind it.
+const RUNEOUT: &[u8] = b"{\"schema_version\":1,\"rune\":\"eatime\",\"rune_version\":1,\"success\":true,\"source\":{\"path\":\"a\",\"bytes\":10,\"format\":\"plaintext\"},\"totals\":{\"rows\":3,\"scan_us\":0},\"fields\":[],\"categories\":[{\"name\":\"06:00\",\"count\":2},{\"name\":\"07:00\",\"count\":1}],\"samples\":[]}";
 
 /// The other seeds are visible to the splice strategy so it can graft one
 /// grammar's tail onto another — cross-format confusion is a real bug class.
@@ -371,6 +395,52 @@ fn fuzz_easql() { fuzz_rune("easql", &corpus_for(SQL)); }
 
 #[test]
 fn fuzz_eaparquet() { fuzz_rune("eaparquet", &corpus_for(PARQUET)); }
+
+/// eadiff takes two RuneOutput JSON files. Side A is mutated (hammers the
+/// hand-rolled JSON parser); side B is a fixed valid output so any mutation
+/// that still parses reaches the diff math.
+#[test]
+fn fuzz_eadiff() {
+    let seed = base_seed();
+    let corpus = corpus_for(RUNEOUT);
+    for iter in 0..iters() {
+        let mut rng = iter_rng(seed, iter);
+        let (a, strategies) = mutate(&corpus, &mut rng);
+        let pa = write_tmp(&format!("eadiff_a_{iter}"), &a);
+        let pb = write_tmp(&format!("eadiff_b_{iter}"), RUNEOUT);
+        let outcome = run_invocation("eadiff", &[&pa, &pb]);
+        let _ = std::fs::remove_file(&pa);
+        let _ = std::fs::remove_file(&pb);
+        if let Some(failure) = failure_of(outcome) {
+            report_finding("eadiff", seed, iter, &strategies, &failure,
+                &[("a", &a), ("b", RUNEOUT)]);
+        }
+    }
+}
+
+/// eacorrelate takes 2–8 timestamped files through the corr_sweep SIMD kernel.
+/// Both inputs are independently mutated → probes the cross-file bucket
+/// alignment + correlation math, not just one parser.
+#[test]
+fn fuzz_eacorrelate() {
+    let seed = base_seed();
+    let corpus = corpus_for(TIMELOG);
+    for iter in 0..iters() {
+        let mut rng = iter_rng(seed, iter);
+        let (f1, mut strategies) = mutate(&corpus, &mut rng);
+        let (f2, s2) = mutate(&corpus, &mut rng);
+        strategies.extend(s2);
+        let p1 = write_tmp(&format!("eacorr_1_{iter}"), &f1);
+        let p2 = write_tmp(&format!("eacorr_2_{iter}"), &f2);
+        let outcome = run_invocation("eacorrelate", &[&p1, &p2]);
+        let _ = std::fs::remove_file(&p1);
+        let _ = std::fs::remove_file(&p2);
+        if let Some(failure) = failure_of(outcome) {
+            report_finding("eacorrelate", seed, iter, &strategies, &failure,
+                &[("f1", &f1), ("f2", &f2)]);
+        }
+    }
+}
 
 /// Negative control — proves the harness can actually *fail*. A green fuzzer
 /// that cannot detect a violation is worthless. Pointing it at a non-existent
