@@ -32,7 +32,13 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-const OLORIN: &str = env!("CARGO_BIN_EXE_olorin");
+/// The olorin binary to drive. Defaults to the one cargo built for this test,
+/// but `OLORIN_BIN` overrides it — this is what lets a cross-compiled test
+/// binary run against an already-installed binary on another arch (e.g. the
+/// Pi's NEON build at ~/.local/bin/olorin), closing the x86-only fuzz gap.
+fn olorin_bin() -> String {
+    std::env::var("OLORIN_BIN").unwrap_or_else(|_| env!("CARGO_BIN_EXE_olorin").to_string())
+}
 
 /// Wall-clock budget per single rune invocation. A real summary of these
 /// tiny seeds finishes in well under a second even on a loaded CI box; an
@@ -211,7 +217,7 @@ enum Outcome {
 /// discarded — only the structured stdout JSON matters to the contract.
 fn run_invocation(rune: &str, paths: &[&str]) -> Outcome {
     let script = format!("/rune {rune} --json {}\n/quit\n", paths.join(" "));
-    let mut child = Command::new(OLORIN)
+    let mut child = Command::new(olorin_bin())
         .arg("--strict")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
