@@ -146,11 +146,21 @@ The bare `timestamp_scan` kernel hits **6.34 GB/s on Ryzen 7700X (SSE2)** and
 **1.80 GB/s on Pi 5 (NEON)** in isolation — see
 [`benchmarks/results.md`](benchmarks/results.md).
 
+**Proven correct, and fuzzed.** Every rune is differentially validated against
+the standard tool for its format — pandas, pyarrow, a real SQLite engine, numpy
+— on real public files at scale (a 3M-row NYC-taxi dataset, a 558 MB GitHub
+Archive dump, 196 MB of NASA access logs), with zero count mismatches. The rune
+parsers, the encrypted vault's crash-recovery, and the tokenizer are
+continuously fuzzed — mutation fuzzing plus randomized on-disk crash-state
+injection — on **both x86 and Raspberry Pi NEON**, with every standing harness
+paired with a negative control that proves it can actually fail. Bit-identical
+output across architectures is a CI gate.
+
 Eight runes:
 
-- **`eacrunch`** — CSV summarizer (rows, columns, per-column stats + top-N)
-- **`eajson`** — JSON Lines summarizer (systemd / container / web-server shapes)
-- **`eaparquet`** — Parquet metadata (per-column min/max/null_count from the footer)
+- **`eacrunch`** — CSV summarizer (rows, columns, per-column stats + top-N); SQL-style `GROUP BY` (`--by`/`--agg`) and `WHERE` (`--where`) row filtering
+- **`eajson`** — JSON Lines summarizer (systemd / container / web-server shapes); nested objects flatten to dotted keys up to `--depth N` (default 4)
+- **`eaparquet`** — Parquet metadata (per-column min/max/null_count from the footer; INT96 timestamps decode to ISO, DECIMAL to scaled value)
 - **`ealog`** — log severity scanner (DEBUG/INFO/WARN/ERROR/FATAL + sample lines)
 - **`eatime`** — timestamp histogram (ISO-8601 + Apache/nginx CLF); hour-of-day, weekday, or chronological `series` buckets with robust spike detection + charts
 - **`easql`** — SQL-dump summarizer (`pg_dump` / `mysqldump`): dialect, table count, per-table row + column counts
