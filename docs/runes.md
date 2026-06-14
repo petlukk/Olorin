@@ -22,6 +22,17 @@ Output is wrapped in `<rune_output untrusted="true">...</rune_output>` and
 runs through the inbound safety scan before reaching the LLM turn — file-derived
 bytes are always treated as data, never instructions.
 
+**Correctness & robustness.** Each rune's counts are differentially validated
+against the standard tool for its format (pandas, pyarrow, a real SQLite engine,
+numpy) on real public files at scale — the per-rune notes below cite the
+specific oracle and dataset. Beyond correctness, every rune parser is
+continuously fuzzed against panics, hangs, and silent-wrong output (mutation
+fuzzing over real-file seeds; see `tests/fuzz_runes.rs`), as are the tokenizer
+(`tests/fuzz_tokenizer.rs`) and the encrypted vault's crash recovery
+(`tests/vault_crash_fuzz.rs`, randomized on-disk crash-state injection) — run on
+both x86 and Raspberry Pi NEON, each harness paired with a negative control that
+proves it can fail.
+
 The eight runes:
 
 - [`eacrunch`](#eacrunch--csv-summarizer) — CSV summarizer
