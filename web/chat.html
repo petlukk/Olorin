@@ -262,9 +262,15 @@ function addReportLink(body,list){
   a.onclick=async e=>{
     e.preventDefault();a.textContent='⏳ building report…';
     try{
-      const payload=await Promise.all(list.map(async f=>({name:f.name,b64:await fileToB64(f)})));
-      const res=await fetch('/api/report',{method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({files:payload})});
+      let res;
+      if(list.length===1){
+        // single file: stream raw bytes so big logs don't overflow the JSON body cap
+        res=await fetch('/api/report_raw',{method:'POST',headers:{'X-Filename':list[0].name},body:list[0]});
+      }else{
+        const payload=await Promise.all(list.map(async f=>({name:f.name,b64:await fileToB64(f)})));
+        res=await fetch('/api/report',{method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({files:payload})});
+      }
       if(!res.ok)throw new Error(await res.text());
       const blob=await res.blob();
       const url=URL.createObjectURL(blob);

@@ -100,6 +100,58 @@ pub fn handle_report(
     }
 }
 
+/// `POST /api/report_raw` — single file streamed straight to /tmp (no base64, no
+/// in-memory JSON), then turned into the same self-contained HTML report as
+/// `/api/report`. The base64 JSON path caps the request body at 128 MB, so a
+/// ~100 MB log (≈135 MB once base64-encoded) overflows it and fails to parse;
+/// streaming the raw bytes (filename from `X-Filename`) lifts that limit to the
+/// 4 GB disk cap, matching `/api/analyze_raw`.
+pub fn handle_report_raw(
+    stream: &mut std::net::TcpStream,
+    req: &str,
+    buf: &[u8],
+    n: usize,
+) {
+    let name = header_value(req, "x-filename").unwrap_or_else(|| "dropped-file".to_string());
+    let content_len = crate::interface::server::parse_content_length(req) as u64;
+    if content_len == 0 {
+        respond_400(stream, "Empty upload.");
+        return;
+    }
+    if content_len > MAX_STREAM_UPLOAD {
+        respond_400(stream, "File too large (max 4 GB).");
+        return;
+    }
+
+    let path = temp_path_for(&name);
+    let header_end = req.find("\r\n\r\n").map(|i| i + 4).unwrap_or(n).min(n);
+    if let Err(e) = drain_to_file(stream, &buf[header_end..n], content_len, &path) {
+        respond_400(stream, &format!("Upload failed: {e}"));
+        let _ = std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap_or(std::path::Path::new("/tmp")));
+        return;
+    }
+
+    let staged = vec![(name, path.clone())];
+    let result = crate::runes::report::build_report(
+        &staged,
+        concat!("v", env!("CARGO_PKG_VERSION")),
+    );
+    cleanup_staged(&[path]);
+    match result {
+        Ok((html, _summary)) => {
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\
+                 Content-Disposition: attachment; filename=\"olorin-report.html\"\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n",
+                html.len(),
+            );
+            let _ = stream.write_all(html.as_bytes());
+        }
+        Err(msg) => respond_400(stream, &msg),
+    }
+}
+
 fn respond_400(stream: &mut std::net::TcpStream, msg: &str) {
     let _ = write!(
         stream,
