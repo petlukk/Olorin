@@ -8,6 +8,8 @@ order.
 
 ## [Unreleased]
 
+## [3.2.1] — 2026-06-14
+
 ### Fixed
 
 - **`eacrunch` GROUP BY text output no longer double-prints `count`.** A
@@ -15,6 +17,16 @@ order.
   `count=N.00` next to the intrinsic integer `count=N`; the text table now
   prints the count once. `--json` output is unchanged (the `count` agg stays
   in `aggs[]` for machine consumers).
+
+### Performance
+
+- **`eajson` drops the dead comma scan from `jsonl_struct`.** The kernel
+  emitted every comma position into a full-length `i32` array that eajson
+  never read (the key/value walk uses only quote + colon + newline +
+  backslash positions). Removing comma detection + emission cuts the scan
+  from 5 position arrays to 4. On the 558 MB GH Archive file (`--json`),
+  peak RSS drops ~41 MB (1307 → 1265 MB) with byte-identical output
+  (differential vs Python `json`: 0 mismatches).
 
 ## [3.2.0] — 2026-06-13
 
