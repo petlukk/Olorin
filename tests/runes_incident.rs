@@ -94,6 +94,57 @@ fn incident_anchors_on_trigger_and_orders_cascade() {
     let _ = std::fs::remove_file(&csv);
 }
 
+/// Steady traffic with deterministic variation (so MAD > 0 — the robust-z
+/// path, as real traffic behaves), collapsing to near-zero for `drop_dur`
+/// seconds starting `drop_lag` after each deploy.
+fn traffic_with_drop(deploy_secs: &[i64], drop_lag: i64, drop_dur: i64) -> Vec<u8> {
+    let mut buf = String::new();
+    for m in 0..=(8 * 60) {
+        let t = m * 60;
+        let in_drop = deploy_secs.iter().any(|&d| t >= d + drop_lag && t < d + drop_lag + drop_dur);
+        let n = if in_drop { 1 } else { 16 + (m % 7) };
+        for k in 0..n {
+            writeln!(buf, "{} GET /api ok #{k}", stamp(t)).unwrap();
+        }
+    }
+    buf.into_bytes()
+}
+
+#[test]
+fn incident_detects_traffic_drop_as_decrease_step() {
+    olorin::kernels::ffi::init().unwrap();
+    // deploy -> errors rise +240s -> traffic DROPS +720s. The drop anti-
+    // correlates with the error spike, so it must surface as a signed
+    // downward-anomaly observation, NOT a correlation.
+    let deploys = [2 * 3600, 4 * 3600, 6 * 3600];
+    let app = write_tmp("olorin_inc_s2_app.log", &log_with_error_bursts(&deploys, 240));
+    let csv = write_tmp("olorin_inc_s2_deploys.csv", &deploys_csv(&deploys));
+    let traf = write_tmp("olorin_inc_s2_traffic.log", &traffic_with_drop(&deploys, 720, 180));
+
+    let result = run_rune("eacorrelate", &format!("--json {csv} {app} {traf}")).unwrap();
+    assert!(result.success, "rune failed: {}", result.answer);
+    let out = parse(&result.answer);
+    let inc = out.incident.as_ref().unwrap_or_else(|| panic!("no incident: {}", result.answer));
+
+    let drop = inc.steps.iter()
+        .find(|s| s.stream == "olorin_inc_s2_traffic.log")
+        .unwrap_or_else(|| panic!("no traffic step: {:?}", inc.steps));
+    assert_eq!(drop.direction, "decrease", "traffic must be a DROP: {drop:?}");
+    assert_eq!(drop.kind, "anomaly", "a drop is an observation, not a correlation: {drop:?}");
+    // Drop is ~12 min after the anchor (720s ± a bucket of slack).
+    assert!((660..=840).contains(&drop.lag_seconds), "drop lag off: {drop:?}");
+    assert!(drop.score > 0.5 && drop.score <= 1.0, "implausible drop score: {drop:?}");
+
+    // The error cascade is still there, and confidence is the weakest link.
+    assert!(inc.steps.iter().any(|s| s.direction == "increase" && s.kind == "correlated"),
+        "lost the error cascade: {:?}", inc.steps);
+    let min_score = inc.steps.iter().map(|s| s.score).fold(f64::INFINITY, f64::min);
+    assert!((inc.confidence - (min_score * 10_000.0).round() / 10_000.0).abs() < 1e-9,
+        "confidence != weakest link: {} vs {}", inc.confidence, min_score);
+
+    for p in [&app, &csv, &traf] { let _ = std::fs::remove_file(p); }
+}
+
 #[test]
 fn incident_text_reads_as_a_story() {
     olorin::kernels::ffi::init().unwrap();
