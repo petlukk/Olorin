@@ -249,8 +249,8 @@ The three spikes are the hours pulled from the archive (the events' own
 `created_at`); the background counts are timestamps embedded in the event
 payloads — repo, comment, and actor times across the rest of the day.
 
-One SIMD pass to find every `YYYY-MM-DDTHH:MM:SS` occurrence in the buffer —
-log lines, CSV cells, JSONL values, any position. Per-hour counts bucketed
+One SIMD pass to find every timestamp occurrence of the detected grammar in the
+buffer — log lines, CSV cells, JSONL values, any position. Per-hour counts bucketed
 scalar after the SIMD scan. All 24 hour-of-day slots are always emitted (even
 when count is 0) so downstream `eadiff` chaining is deterministic.
 

@@ -117,6 +117,29 @@ Postgres/Python-logging/OpenStack), **classic syslog** (`Jun 14 15:16:01` —
 Linux `/var/log`), and **Apache/nginx CLF** (a SIMD
 kernel each); `--bucket hour|weekday|series` picks the view.
 
+**Find *why* your service died.** Point `eacorrelate` at several timestamped
+logs — a deploy log, an app log, an access log — and it doesn't just correlate
+them, it assembles the answer into one ordered **incident timeline**:
+
+```
+> olorin rune eacorrelate deploy.log app.log access.log
+incident timeline (confidence 0.91):
+  Deployment at 14:02
+  -> app errors rise 4 minutes later (r=0.93)
+  -> request traffic drops 12 minutes later (anomaly 0.91)
+```
+
+It finds the cascade's root — a discrete trigger like a deploy, or the first
+break — anchors on it, and orders the fallout by lag: a co-spiking stream that
+*rises* (carrying its Pearson `r`) or a stream that *falls* (a downward
+anomaly). `confidence` is the weakest link. The wording stays strictly temporal
+— "errors rise 4 minutes later", never "the deploy *caused* it" — a correlation
+over too few buckets is rejected (the guard that killed a real NASA
+`+654 h, r=1.00` artifact), and when nothing correlates, no timeline appears.
+Nobody forwards a correlation matrix; everybody forwards "why did my service
+die?". Built entirely on the differentially-proven correlation engine — no model
+involved.
+
 **Charts, in the terminal and the browser.** Drop a timestamped log into the web
 UI — or run the rune in the REPL — and Olorin renders the rate over time as a
 block-bar chart with spikes flagged, from a single SIMD-downsampled (`col_reduce`)
@@ -166,7 +189,7 @@ Eight runes:
 - **`ealog`** — log severity scanner (DEBUG/INFO/WARN/ERROR/FATAL + sample lines)
 - **`eatime`** — timestamp histogram (ISO-8601 + classic syslog + Apache/nginx CLF); hour-of-day, weekday, or chronological `series` buckets with robust spike detection + charts
 - **`easql`** — SQL-dump summarizer (`pg_dump` / `mysqldump`): dialect, table count, per-table row + column counts
-- **`eacorrelate`** — cross-file lag correlation: drop 2–8 timestamped files and find which event streams move together, at what lag ("errors follow deploys by 4 min")
+- **`eacorrelate`** — cross-file lag correlation → **incident timeline**: drop 2–8 timestamped files and get the ordered story ("deploy at 14:02 → errors rise +4 min → traffic drops +12 min, confidence 0.91")
 - **`eadiff`** — structural delta between any two `--json` rune outputs
 
 See **[`docs/runes.md`](docs/runes.md)** for the full catalog with per-rune
