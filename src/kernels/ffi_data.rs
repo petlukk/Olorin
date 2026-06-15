@@ -186,6 +186,25 @@ pub unsafe fn clf_scan(
     );
 }
 
+/// Scan a CLF access log for HTTP 5xx responses and emit the status-digit
+/// byte offset of each (`5` in the `" 5DD "` field after the quoted request).
+/// Used by `eacorrelate` to build the error sub-stream for CLF logs, the way
+/// [`log_level_scan`] does for ISO/syslog ERROR/FATAL lines.
+///
+/// # Safety
+/// Same as [`clf_scan`].
+pub unsafe fn clf_status_scan(
+    text: *const u8, len: i32,
+    out_positions: *mut i32, max_positions: i32, out_n_positions: *mut i32,
+    scratch: *mut u8,
+) {
+    (k().clf_status_scan)(
+        text, len,
+        out_positions, max_positions, out_n_positions,
+        scratch,
+    );
+}
+
 /// Classic BSD syslog `MMM DD HH:MM:SS` position scan. Identical contract to
 /// [`timestamp_scan`]. The decoder assigns a fixed reference year (syslog is
 /// yearless).

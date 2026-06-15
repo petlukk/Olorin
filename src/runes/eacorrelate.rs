@@ -23,7 +23,8 @@ use super::correlation::Correlation;
 use super::incident;
 use super::output::{Category, RuneOutput, Totals};
 use super::stream::{self, Format, MAX_POSITIONS};
-use super::timekey::{iso_bytes_to_seconds, seconds_to_iso};
+use super::substream;
+use super::timekey::seconds_to_iso;
 use crate::kernels::ffi;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -32,6 +33,17 @@ const RUNE_VERSION: i64 = 1;
 /// Finer grid than eatime's 120: lag resolution equals bucket width.
 const TARGET_BUCKETS: i64 = 512;
 const MAX_LAG_BUCKETS: i64 = 128;
+/// Absolute ceiling on a reported lag, in seconds. The `span/4` cap below is a
+/// STATISTICAL bound (keep enough overlap for a credible Pearson r); this is a
+/// PHYSICAL one. An incident cascade — deploy → errors → traffic drop — plays
+/// out in seconds-to-minutes, never hours. On a multi-day log `span/4` alone
+/// permits absurd lags (a real srv1174152 syslog/auth pair reported a
+/// confidence-0.60 "errors → auth rises 16h later", lag 59400s, r=0.62, built
+/// from unrelated fwupd noise + SSH bot bursts — found 2026-06-15). Cross-file
+/// alignment beyond an hour on long logs is dominated by diurnal periodicity,
+/// not causation. Trade-off: cascades slower than 1h on multi-day spans are not
+/// claimed — feed a narrower window to resolve those.
+const MAX_LAG_SECONDS: i64 = 3600;
 /// A correlation window must span at least this many buckets — Pearson over a
 /// handful of points is meaningless (hits ±1 trivially). Floor for short grids.
 const MIN_OVERLAP_BUCKETS: usize = 8;
@@ -40,8 +52,6 @@ const SCORE_THRESHOLD: f64 = 0.5;
 const MIN_EVENTS: usize = 3;
 const TOP_K: usize = 3;
 const MAX_FILES: usize = 8;
-/// Cap on recorded ERROR/FATAL positions per file (4 MB of i32).
-const MAX_ERROR_POSITIONS: usize = 1_000_000;
 
 pub struct Eacorrelate;
 pub const RUNE: Eacorrelate = Eacorrelate;
@@ -50,12 +60,12 @@ impl Rune for Eacorrelate {
     fn name(&self) -> &'static str { "eacorrelate" }
     fn description(&self) -> &'static str {
         "Correlate event streams across 2-8 timestamped files via SIMD. \
-         Buckets every file's events (ISO-8601 or CLF auto-detected; \
-         ERROR/FATAL lines form a second stream per log) onto one time \
-         grid and sweeps all cross-file pairs over ±128 lags with the \
-         corr_sweep kernel. Reports the strongest lags as correlations[] \
-         — 'events in A follow events in B by N seconds'. Args: [--json] \
-         <path> <path> [...]."
+         Buckets every file's events (ISO-8601, CLF, or syslog auto-detected; \
+         ERROR/FATAL lines in ISO logs and HTTP 5xx in CLF access logs form a \
+         second 'errors' stream per log) onto one time grid and sweeps all \
+         cross-file pairs over ±128 lags with the corr_sweep kernel. Reports \
+         the strongest lags as correlations[] — 'events in A follow events in \
+         B by N seconds'. Args: [--json] <path> <path> [...]."
     }
     fn usage(&self) -> &'static str { "eacorrelate [--json] <path> <path> [...]" }
     fn output_safety(&self) -> OutputSafety { OutputSafety::UntrustedQuoted }
@@ -136,11 +146,12 @@ pub fn correlate_files(files: &[(String, String)]) -> RuneOutput {
         let epochs = stream::positions_to_epochs(&bytes, &scan.positions, format);
         if epochs.len() >= MIN_EVENTS {
             // Error sub-stream first (it borrows scan.positions), so the
-            // streams vector still lists the all-events stream first.
-            let errors = if format == Format::Iso {
-                error_substream(&bytes, &scan.positions)
-            } else {
-                Vec::new()
+            // streams vector still lists the all-events stream first. ISO/syslog
+            // logs split on ERROR/FATAL keywords; CLF access logs on HTTP 5xx.
+            let errors = match format {
+                Format::Iso => substream::iso_errors(&bytes, &scan.positions),
+                Format::Clf => substream::clf_errors(&bytes, &scan.positions),
+                Format::Syslog => Vec::new(),
             };
             streams.push(EventStream { name: display.clone(), file_idx: idx, epochs });
             if errors.len() >= MIN_EVENTS {
@@ -175,39 +186,6 @@ pub fn correlate_files(files: &[(String, String)]) -> RuneOutput {
     out
 }
 
-/// Map each ERROR/FATAL match to its line's timestamp: the greatest
-/// timestamp position <= the match position (a stack-trace line without
-/// its own timestamp attributes to the last stamped line above it).
-fn error_substream(bytes: &[u8], ts_positions: &[i32]) -> Vec<i64> {
-    if ts_positions.is_empty() {
-        return Vec::new();
-    }
-    let mut counts = [0i32; 6];
-    let mut positions = vec![0i32; MAX_ERROR_POSITIONS];
-    let mut n_positions = 0i32;
-    let mut scratch = [0u8; 16];
-    unsafe {
-        ffi::log_level_scan(
-            bytes.as_ptr(), bytes.len() as i32,
-            counts.as_mut_ptr(),
-            positions.as_mut_ptr(), MAX_ERROR_POSITIONS as i32, &mut n_positions,
-            scratch.as_mut_ptr(),
-        );
-    }
-    positions.truncate(n_positions as usize);
-
-    let mut epochs: Vec<i64> = Vec::with_capacity(positions.len());
-    for &err_pos in &positions {
-        let idx = ts_positions.partition_point(|&t| t <= err_pos);
-        if idx == 0 { continue; } // error before the first timestamp
-        let t = ts_positions[idx - 1] as usize;
-        if let Some(secs) = iso_bytes_to_seconds(&bytes[t..]) {
-            epochs.push(secs);
-        }
-    }
-    epochs
-}
-
 /// Bucket all streams onto one grid, z-score, sweep every cross-file
 /// pair with the corr_sweep kernel, keep the TOP_K strongest findings.
 fn correlate(streams: &[EventStream]) -> (Vec<Correlation>, Option<incident::Incident>) {
@@ -224,7 +202,16 @@ fn correlate(streams: &[EventStream]) -> (Vec<Correlation>, Option<incident::Inc
     // buckets for a credible Pearson r (the NASA +654h r=1.00 artifact). On the
     // usual fine grids (n in the hundreds) n/4 exceeds MAX_LAG_BUCKETS, so this
     // only binds on short, long-span logs — exactly where the artifact lived.
-    let max_lag = MAX_LAG_BUCKETS.min(n as i64 - 1).min(n as i64 / 4).max(0) as i32;
+    // Then clamp again to MAX_LAG_SECONDS of physical plausibility: on a coarse
+    // multi-day grid n/4 is still tens of hours, so this absolute ceiling is the
+    // bound that actually kills the diurnal "16h incident" artifact. At least one
+    // bucket survives so co-occurring streams can still align.
+    let max_lag_abs = (MAX_LAG_SECONDS / width).max(1);
+    let max_lag = MAX_LAG_BUCKETS
+        .min(n as i64 - 1)
+        .min(n as i64 / 4)
+        .min(max_lag_abs)
+        .max(0) as i32;
 
     // Bucketed series per stream; None when flat (zero variance).
     let series: Vec<Option<StreamSeries>> = streams.iter()

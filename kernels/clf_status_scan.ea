@@ -1,0 +1,114 @@
+// CLF HTTP 5xx status scanner. Emits the byte offset of the status digit
+// for every Common Log Format response whose status is 5xx (server error),
+// i.e. the `5` in the `" 5DD ` field that follows the quoted request:
+//
+//     ... "GET /x HTTP/1.1" 500 21 "-" "ua"
+//                          ^^^^^  here: '"' ' ' '5' D D ' '
+//
+// eacorrelate maps each emitted offset back to its line's CLF timestamp
+// (the greatest '[' position <= the offset) to build the error sub-stream,
+// exactly as log_level_scan's ERROR/FATAL matches feed the ISO path.
+//
+// SIMD strategy: identical cross-arch .==-only idiom as clf_scan. Per
+// 16-byte chunk, load four shifted views and build lane masks for the
+// structural anchors '"' (offset 0), ' ' (offset 1), '5' (offset 2),
+// ' ' (offset 5). AND them into one candidate mask; passing lanes are
+// scalar-walked through `clf_status_pos`, which validates the two status
+// digits and emits offset+2. Four exact-byte anchors make the joint
+// false-match probability tiny, so the scalar validator runs on hits only.
+//
+// out_positions      = byte offsets of the '5' starting a 5xx status.
+// out_n_positions[0] = number of positions written (<= max_positions);
+//                       always reset to 0 at the head of the kernel.
+// scratch (16 bytes) holds the per-chunk filter mask; contents after the
+// call are unspecified.
+
+func is_digit_byte(b: i32) -> i32 {
+    if b < 48 { return 0 }
+    if b > 57 { return 0 }
+    return 1
+}
+
+func clf_status_pos(text: *u8, p: i32, len: i32, positions: *mut i32, max_positions: i32, n_positions: *mut i32) {
+    if p + 6 > len { return }
+    if max_positions <= 0 { return }
+
+    // '"' ' ' '5' D D ' '
+    if to_i32(text[p + 0]) != 34 { return }
+    if to_i32(text[p + 1]) != 32 { return }
+    if to_i32(text[p + 2]) != 53 { return }
+    if is_digit_byte(to_i32(text[p + 3])) == 0 { return }
+    if is_digit_byte(to_i32(text[p + 4])) == 0 { return }
+    if to_i32(text[p + 5]) != 32 { return }
+
+    let cur: i32 = n_positions[0]
+    if cur < max_positions {
+        positions[cur] = p + 2
+        n_positions[0] = cur + 1
+    }
+}
+
+export func clf_status_scan(text: *u8, len: i32, out_positions: *mut i32, max_positions: i32, out_n_positions: *mut i32, scratch: *mut u8) {
+    out_n_positions[0] = 0
+
+    if len < 32 {
+        let mut p: i32 = 0
+        while p + 6 <= len {
+            clf_status_pos(text, p, len, out_positions, max_positions, out_n_positions)
+            p = p + 1
+        }
+        return
+    }
+
+    let v_quote: u8x16 = splat(34)
+    let v_space: u8x16 = splat(32)
+    let v_five:  u8x16 = splat(53)
+    let v_zero:  u8x16 = splat(0)
+    let v_one:   u8x16 = splat(1)
+
+    // Scalar prologue: positions [0..16).
+    let mut p: i32 = 0
+    while p < 16 {
+        clf_status_pos(text, p, len, out_positions, max_positions, out_n_positions)
+        p = p + 1
+    }
+
+    // SIMD body: chunks at i=16, 32, ... while the deepest anchor load
+    // (at i+5, covering lanes through i+20) stays in bounds.
+    let mut i: i32 = 16
+    while i + 21 <= len {
+        let c0: u8x16 = load(text, i + 0)
+        let c1: u8x16 = load(text, i + 1)
+        let c2: u8x16 = load(text, i + 2)
+        let c5: u8x16 = load(text, i + 5)
+
+        let m0: u8x16 = select(c0 .== v_quote, v_one, v_zero)
+        let m1: u8x16 = select(c1 .== v_space, v_one, v_zero)
+        let m2: u8x16 = select(c2 .== v_five,  v_one, v_zero)
+        let m5: u8x16 = select(c5 .== v_space, v_one, v_zero)
+
+        let cand: u8x16 = m0 .& m1 .& m2 .& m5
+        let any:  u8    = reduce_add(cand)
+
+        if to_i32(any) > 0 {
+            store(scratch, 0, cand)
+            let mut k: i32 = 0
+            while k < 16 {
+                if to_i32(scratch[k]) > 0 {
+                    clf_status_pos(text, i + k, len, out_positions, max_positions, out_n_positions)
+                }
+                k = k + 1
+            }
+        }
+
+        i = i + 16
+    }
+
+    // Scalar epilogue: positions past the last SIMD chunk with room for
+    // the 6-byte status field.
+    p = i
+    while p + 6 <= len {
+        clf_status_pos(text, p, len, out_positions, max_positions, out_n_positions)
+        p = p + 1
+    }
+}

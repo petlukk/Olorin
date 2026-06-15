@@ -273,6 +273,148 @@ fn long_span_excludes_boundary_lag_artifact() {
     let _ = std::fs::remove_file(&pb);
 }
 
+/// Emit a `burst`-line spike at each absolute-second anchor (all within one
+/// 1800s bucket). No baseline — the spikes alone make the series non-flat
+/// without a trivial lag-0 match.
+fn emit_spikes(anchors: &[i64], burst: usize) -> Vec<u8> {
+    let mut s = String::new();
+    for &a in anchors {
+        for k in 0..burst {
+            let t = a + k as i64;
+            writeln!(s, "{} INFO spike {k}", stamp_day(1 + t / 86400, t % 86400)).unwrap();
+        }
+    }
+    s.into_bytes()
+}
+
+#[test]
+fn multi_hour_lag_is_rejected_as_implausible() {
+    olorin::kernels::ffi::init().unwrap();
+    // The real srv1174152 artifact (2026-06-15): two long-span streams whose
+    // only alignment is at a 16h lag scored a confidence-0.60 "errors -> auth
+    // rises 16h later" incident. An incident cascade is seconds-to-minutes, so
+    // the absolute MAX_LAG_SECONDS (3600s) ceiling must refuse any multi-hour
+    // lag no matter how much history is fed. Plant ten irregular spikes in A and
+    // the SAME spikes 16h later in B over a ~6-day span (1800s grid). Pre-fix the
+    // sweep reached +57600s and reported it; now max_lag clamps to ~2 buckets,
+    // so that alignment is unreachable and no finding may claim it.
+    const SHIFT: i64 = 16 * 3600;
+    const CEILING: i64 = 3600; // mirrors eacorrelate::MAX_LAG_SECONDS
+    let anchors_a: [i64; 10] = [
+        10_000, 50_000, 95_000, 140_000, 200_000,
+        250_000, 310_000, 360_000, 410_000, 450_000,
+    ];
+    let anchors_b: Vec<i64> = anchors_a.iter().map(|&a| a + SHIFT).collect();
+    let pa = write_tmp("olorin_corr_16h_a.log", &emit_spikes(&anchors_a, 25));
+    let pb = write_tmp("olorin_corr_16h_b.log", &emit_spikes(&anchors_b, 25));
+
+    let result = run_rune("eacorrelate", &format!("--json {pa} {pb}")).unwrap();
+    assert!(result.success, "rune failed: {}", result.answer);
+    let out = parse_answer(&result.answer);
+
+    // No correlation — and no incident step — may claim a lag past the ceiling.
+    for c in &out.correlations {
+        assert!(
+            c.lag_seconds.abs() <= CEILING + c.width_seconds,
+            "multi-hour lag survived the physical ceiling: {:?}", c
+        );
+    }
+    if let Some(inc) = &out.incident {
+        for s in &inc.steps {
+            assert!(
+                s.lag_seconds <= CEILING + 1800,
+                "implausible multi-hour incident cascade: {:?}", s
+            );
+        }
+    }
+
+    let _ = std::fs::remove_file(&pa);
+    let _ = std::fs::remove_file(&pb);
+}
+
+/// CLF timestamp on a fixed June day at `secs` into the day.
+fn clf_stamp(secs: i64) -> String {
+    format!("11/Jun/2026:{:02}:{:02}:{:02} +0000", secs / 3600, (secs % 3600) / 60, secs % 60)
+}
+
+/// 8h nginx CLF access log: one 200 request per minute baseline, plus a
+/// 20-line HTTP 500 burst `lag_secs` after each deploy — the planted cascade.
+fn clf_with_5xx(deploy_secs: &[i64], lag_secs: i64) -> Vec<u8> {
+    let mut buf = String::new();
+    for m in 0..=(8 * 60) {
+        writeln!(buf, "10.0.0.1 - - [{}] \"GET /api/x HTTP/1.1\" 200 512 \"-\" \"ua\"", clf_stamp(m * 60)).unwrap();
+    }
+    for &d in deploy_secs {
+        for k in 0..20 {
+            writeln!(buf, "10.0.0.2 - - [{}] \"GET /api/y HTTP/1.1\" 500 21 \"-\" \"err{k}\"", clf_stamp(d + lag_secs)).unwrap();
+        }
+    }
+    buf.into_bytes()
+}
+
+#[test]
+fn recovers_planted_clf_5xx_lag() {
+    olorin::kernels::ffi::init().unwrap();
+    // Same shape as recovers_planted_deploy_error_lag, but the errors are HTTP
+    // 5xx in a CLF access log (clf_status_scan) rather than ERROR keywords in an
+    // ISO log. Deploys at 02:00/04:00/06:00, 500 bursts 240s later -> the CLF
+    // (errors) sub-stream must follow the deploys by exactly 240s.
+    let deploys = [2 * 3600, 4 * 3600, 6 * 3600];
+    let log_path = write_tmp("olorin_clf_access.log", &clf_with_5xx(&deploys, 240));
+    let csv_path = write_tmp("olorin_clf_deploys.csv", &deploys_csv(&deploys));
+
+    let result = run_rune("eacorrelate", &format!("--json {log_path} {csv_path}")).unwrap();
+    assert!(result.success, "rune failed: {}", result.answer);
+    let out = parse_answer(&result.answer);
+
+    // Streams: access all-events, access (errors)=5xx, deploys all-events.
+    assert_eq!(out.categories.len(), 3, "answer={}", result.answer);
+    let errs = out.categories.iter().find(|c| c.name == "olorin_clf_access.log (errors)")
+        .unwrap_or_else(|| panic!("no CLF errors substream: {}", result.answer));
+    assert_eq!(errs.count, 60, "5xx count off (3 bursts x 20): {:?}", errs);
+
+    let f = out.correlations.iter()
+        .find(|c| c.stream_a == "olorin_clf_access.log (errors)")
+        .unwrap_or_else(|| panic!("no 5xx-substream finding: {}", result.answer));
+    assert_eq!(f.stream_b, "olorin_clf_deploys.csv");
+    assert_eq!(f.lag_seconds, 240, "wrong lag: {:?}", f);
+    assert!(f.score > 0.8, "weak score: {:?}", f);
+
+    let _ = std::fs::remove_file(&log_path);
+    let _ = std::fs::remove_file(&csv_path);
+}
+
+#[test]
+fn clf_4xx_is_not_an_error_substream() {
+    olorin::kernels::ffi::init().unwrap();
+    // Negative control: 404 bursts must NOT register as errors (only 5xx does).
+    // The access log stays non-flat (the bursts vary the rate), so it forms a
+    // stream — proving the absence of an (errors) category is real, not vacuous.
+    let mut buf = String::new();
+    for m in 0..=(8 * 60) {
+        writeln!(buf, "10.0.0.1 - - [{}] \"GET /ok HTTP/1.1\" 200 512 \"-\" \"ua\"", clf_stamp(m * 60)).unwrap();
+    }
+    for &d in &[2 * 3600i64, 4 * 3600, 6 * 3600] {
+        for k in 0..20 {
+            writeln!(buf, "10.0.0.9 - - [{}] \"GET /missing HTTP/1.1\" 404 7 \"-\" \"bot{k}\"", clf_stamp(d)).unwrap();
+        }
+    }
+    let log_path = write_tmp("olorin_clf_4xx.log", buf.as_bytes());
+    let csv_path = write_tmp("olorin_clf_4xx_deploys.csv", &deploys_csv(&[2 * 3600, 4 * 3600, 6 * 3600]));
+
+    let result = run_rune("eacorrelate", &format!("--json {log_path} {csv_path}")).unwrap();
+    assert!(result.success, "rune failed: {}", result.answer);
+    let out = parse_answer(&result.answer);
+
+    assert!(out.categories.iter().any(|c| c.name == "olorin_clf_4xx.log"),
+        "access stream missing: {}", result.answer);
+    assert!(!out.categories.iter().any(|c| c.name.contains("(errors)")),
+        "4xx wrongly flagged as errors: {}", result.answer);
+
+    let _ = std::fs::remove_file(&log_path);
+    let _ = std::fs::remove_file(&csv_path);
+}
+
 #[test]
 fn correlations_block_round_trips_and_rounds_score() {
     olorin::kernels::ffi::init().unwrap();

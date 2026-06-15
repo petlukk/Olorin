@@ -16,6 +16,7 @@ pub mod eajson_aggregate;
 pub mod narration;
 pub mod report;
 pub mod stream;
+pub mod substream;
 pub mod timekey;
 pub mod anomaly;
 pub mod plot;
