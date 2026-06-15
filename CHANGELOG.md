@@ -8,6 +8,67 @@ order.
 
 ## [Unreleased]
 
+## [3.3.0] — 2026-06-15
+
+### Added
+
+- **`eacorrelate` incident timeline — "why did my service die".** When the
+  cross-file correlations form a cascade, eacorrelate now assembles them into a
+  single ordered story instead of a correlation list: it finds the cascade root
+  (a discrete trigger like a deploy when the stream is sparse, else the first
+  break), anchors on it, and orders the fallout by lag.
+
+  ```
+  incident timeline (confidence 0.91):
+    Deployment at 14:02
+    -> app errors rise 4 minutes later (r=0.93)
+    -> request traffic drops 12 minutes later (anomaly 0.91)
+  ```
+
+  Two kinds of follower step: a **correlated** rise (a co-spiking stream,
+  carrying its Pearson `r`) and a signed **drop** (`anomaly`) — a stream that
+  *falls* within the incident window, detected as a downward robust-median/MAD
+  break (kept as an observation, never a negative correlation, so the
+  disjoint-era guard is not reopened). `confidence` is the weakest link. Wording
+  is strictly temporal ("errors rise N later", never "the deploy *caused* it");
+  a zero-lag step reads "at the same time"; no cascade → no timeline. Surfaced
+  as an additive `incident` block on `RuneOutput v1` (`--json`) and the headline
+  of the text/narration output. Drop detection verified end-to-end on a real
+  systemd journal.
+- **Two new timestamp grammars**, auto-detected across `eatime`, `eacorrelate`,
+  and the incident timeline:
+  - **Space-separated ISO** `YYYY-MM-DD HH:MM:SS` (Postgres / MySQL / Python
+    `logging` / OpenStack; fractional seconds ignored) — the `timestamp_scan`
+    kernel now accepts `T` *or* space at the separator.
+  - **Classic BSD syslog** `MMM DD HH:MM:SS` (`Jun 14 15:16:01` — Linux
+    `/var/log`, sshd, cron, network gear; incl. the space-padded `Jun  4 …`) via
+    a new `syslog_scan` SIMD kernel. Yearless, so a fixed reference year is
+    assigned: bucketing and lag are exact, but the displayed year and the
+    `weekday` bucket are placeholders, and two syslog files from different real
+    years may falsely overlap. `--format syslog` added.
+
+### Fixed
+
+- **`eacorrelate` spurious `r=1.00` on long-span logs.** A near-boundary lag
+  could leave a tiny (e.g. 4-bucket) overlap window where Pearson hits `1.00`
+  trivially — a real 28-day NASA traffic/errors split scored errors "following"
+  traffic by **+654 h, r=1.00**. The active-window gate counted events, not
+  buckets; now an overlap-window floor (`MIN_OVERLAP_BUCKETS`) plus a lag cap at
+  a quarter of the span exclude it. Only bind on long-span/short grids; existing
+  goldens unchanged.
+- **`olorin report` on large single-file uploads.** The web-UI "download report"
+  button base64-wrapped the file into a JSON body, overflowing the 128 MB cap on
+  ~100 MB+ logs; single-file reports now stream raw via `/api/report_raw`.
+
+### Internal
+
+- **Standing fuzzing campaign.** Every file-parsing rune, the BPE tokenizer, and
+  the encrypted vault's crash recovery are now continuously fuzzed (mutation +
+  randomized on-disk crash-state injection), on **both x86 and Raspberry Pi
+  NEON**, each harness paired with a negative control that proves it can fail.
+  Tens of thousands of adversarial inputs, zero findings. Cross-architecture
+  bit-identical output remains a CI gate.
+
 ## [3.2.1] — 2026-06-14
 
 ### Fixed
