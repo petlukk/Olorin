@@ -169,11 +169,9 @@ pub fn correlate_files(files: &[(String, String)]) -> RuneOutput {
         // Not an error: the honest answer is "nothing to correlate".
         return out;
     }
-    out.correlations = correlate(&streams);
-    let metas: Vec<incident::StreamMeta> = streams.iter()
-        .map(|s| incident::StreamMeta { name: s.name.clone(), events: s.epochs.len() as u64 })
-        .collect();
-    out.incident = incident::build_incident(&metas, &out.correlations);
+    let (correlations, incident) = correlate(&streams);
+    out.correlations = correlations;
+    out.incident = incident;
     out
 }
 
@@ -212,12 +210,12 @@ fn error_substream(bytes: &[u8], ts_positions: &[i32]) -> Vec<i64> {
 
 /// Bucket all streams onto one grid, z-score, sweep every cross-file
 /// pair with the corr_sweep kernel, keep the TOP_K strongest findings.
-fn correlate(streams: &[EventStream]) -> Vec<Correlation> {
+fn correlate(streams: &[EventStream]) -> (Vec<Correlation>, Option<incident::Incident>) {
     let gmin = streams.iter().flat_map(|s| s.epochs.iter()).min().copied().unwrap_or(0);
     let gmax = streams.iter().flat_map(|s| s.epochs.iter()).max().copied().unwrap_or(0);
     let span = gmax - gmin;
     if span <= 0 {
-        return Vec::new(); // everything in one instant — no lag structure
+        return (Vec::new(), None); // everything in one instant — no lag structure
     }
     let width = stream::auto_width(span, TARGET_BUCKETS);
     let n = (span / width) as usize + 1;
@@ -297,7 +295,14 @@ fn correlate(streams: &[EventStream]) -> Vec<Correlation> {
             .then_with(|| x.stream_b.cmp(&y.stream_b))
     });
     findings.truncate(TOP_K);
-    findings
+
+    // Assemble the incident here, where the shared grid (gmin/width/n) is live —
+    // Stage 2's drop pass needs it to bucket each stream within the window.
+    let views: Vec<incident::StreamView> = streams.iter()
+        .map(|s| incident::StreamView { name: &s.name, epochs: &s.epochs })
+        .collect();
+    let incident = incident::build_incident(&views, &findings, gmin, width, n);
+    (findings, incident)
 }
 
 /// One stream on the shared grid: the z-scored series the kernel sweeps,

@@ -31,11 +31,24 @@ const TRIGGER_MAX_EVENTS: u64 = 50;
 /// ...sparser by at least this factor than the busiest stream in the cascade.
 const TRIGGER_SPARSITY: u64 = 10;
 
-/// Minimal per-stream metadata the incident builder needs from eacorrelate.
-pub struct StreamMeta {
-    pub name:   String,
-    pub events: u64,
+/// Per-stream view the incident builder borrows from eacorrelate: the stream
+/// name and its epoch list (event count + on-grid bucketing for drop detection
+/// are derived here, so eacorrelate doesn't pre-compute either).
+pub struct StreamView<'a> {
+    pub name:   &'a str,
+    pub epochs: &'a [i64],
 }
+
+/// Robust z threshold for a downward break (matches anomaly.rs's spike gate).
+const DROP_Z_THRESHOLD: f64 = 4.0;
+/// Flat-baseline (MAD=0) fallback: a bucket must collapse to <= 1/this of the
+/// median to count as a drop.
+const DROP_RATIO_THRESHOLD: f64 = 3.0;
+/// A drop must be at least this many events below baseline — guards tiny
+/// baselines from flagging trivial dips.
+const MIN_ABS_DROP: f64 = 5.0;
+/// Below this many buckets there isn't enough signal for a baseline.
+const MIN_DROP_BUCKETS: usize = 8;
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Anchor {
@@ -65,12 +78,16 @@ pub struct Incident {
 }
 
 /// Assemble an incident from the streams and the (already direction-normalized,
-/// positive-only) correlations. `None` when there is no cascade to tell.
-pub fn build_incident(streams: &[StreamMeta], correlations: &[Correlation]) -> Option<Incident> {
+/// positive-only) correlations. `gmin`/`width`/`n` describe the shared bucket
+/// grid, used for the Stage-2 drop pass. `None` when there is no cascade.
+pub fn build_incident(
+    streams: &[StreamView], correlations: &[Correlation],
+    gmin: i64, width: i64, n: usize,
+) -> Option<Incident> {
     if correlations.is_empty() {
         return None;
     }
-    let events_of = |name: &str| streams.iter().find(|s| s.name == name).map(|s| s.events);
+    let events_of = |name: &str| streams.iter().find(|s| s.name == name).map(|s| s.epochs.len() as u64);
 
     // Edge a<-b means "a follows b": b leads, a follows.
     let mut leads = std::collections::BTreeMap::<&str, u32>::new();
@@ -102,7 +119,7 @@ pub fn build_incident(streams: &[StreamMeta], correlations: &[Correlation]) -> O
     // Trigger vs spike: a sparse root that is a discrete event source is a
     // "trigger"; a busy rate stream that broke is a "spike".
     let root_events = events_of(&root).unwrap_or(0);
-    let busiest = streams.iter().map(|s| s.events).max().unwrap_or(0);
+    let busiest = streams.iter().map(|s| s.epochs.len() as u64).max().unwrap_or(0);
     let is_trigger = root_events > 0
         && root_events <= TRIGGER_MAX_EVENTS
         && root_events.saturating_mul(TRIGGER_SPARSITY) <= busiest;
@@ -113,14 +130,110 @@ pub fn build_incident(streams: &[StreamMeta], correlations: &[Correlation]) -> O
         time:   seconds_to_iso(anchor_epoch),
     };
 
-    let steps = walk_cascade(&root, correlations);
+    let mut steps = walk_cascade(&root, correlations);
     if steps.is_empty() {
         return None;
     }
+
+    // Stage 2: signed DROP detection. The cascade above is the positive
+    // co-spike spine ("errors rise"); a stream that instead *falls* after the
+    // anchor (traffic dropping under load) anti-correlates with it, so the
+    // positive-only correlation engine can't carry it without reopening the
+    // disjoint-era false positive. Detect it independently as a downward
+    // anomaly within the incident window — an observation, not a causal claim.
+    let anchor_bucket = (((anchor_epoch - gmin) / width).max(0)) as usize;
+    let max_lag = steps.iter().map(|s| s.lag_seconds).max().unwrap_or(0);
+    let horizon = (((max_lag / width) as usize) * 3).max(16);
+    let in_cascade: Vec<String> = steps.iter().map(|s| s.stream.clone()).collect();
+    let mut drops: Vec<Step> = Vec::new();
+    for sv in streams {
+        if sv.name == root || in_cascade.iter().any(|c| c == sv.name) {
+            continue; // the anchor and already-cascading streams aren't drops
+        }
+        if let Some((lag, score)) = detect_drop(sv.epochs, gmin, width, n, anchor_bucket, horizon) {
+            drops.push(Step {
+                stream:      sv.name.to_string(),
+                lag_seconds: lag,
+                direction:   "decrease".into(),
+                score:       round4(score),
+                kind:        "anomaly".into(),
+            });
+        }
+    }
+    steps.extend(drops);
+    steps.sort_by(|a, b| a.lag_seconds.cmp(&b.lag_seconds).then_with(|| a.stream.cmp(&b.stream)));
+
     let confidence = steps.iter().map(|s| s.score)
         .fold(f64::INFINITY, f64::min);
 
     Some(Incident { anchor, steps, confidence: round4(confidence) })
+}
+
+/// Within `[anchor_bucket, anchor_bucket+horizon)`, find the strongest DOWNWARD
+/// break in a stream's bucketed counts: a bucket whose count falls
+/// `>= DROP_Z_THRESHOLD` robust-σ below the stream's median baseline. Returns
+/// `(lag_from_anchor_seconds, confidence)`, or `None` if nothing qualifies.
+/// Robust median/MAD baseline, same idiom as anomaly.rs's spike pass.
+fn detect_drop(
+    epochs: &[i64], gmin: i64, width: i64, n: usize,
+    anchor_bucket: usize, horizon: usize,
+) -> Option<(i64, f64)> {
+    if n < MIN_DROP_BUCKETS {
+        return None;
+    }
+    let mut counts = vec![0u64; n];
+    for &e in epochs {
+        let i = ((e - gmin) / width) as usize;
+        if i < n { counts[i] += 1; }
+    }
+    let median = median_u64(&counts);
+    if median <= 0.0 {
+        return None; // no baseline to fall below
+    }
+    let mad    = median_abs_dev(&counts, median);
+    let sigma  = 1.4826 * mad;
+    let hi = (anchor_bucket + horizon).min(n);
+    let mut best: Option<(usize, f64)> = None;
+    for i in anchor_bucket.min(n)..hi {
+        let c = counts[i] as f64;
+        if c >= median || (median - c) < MIN_ABS_DROP {
+            continue;
+        }
+        // Robust z when there's spread; a ratio test on a flat baseline
+        // (MAD = 0 — the low-noise case anomaly.rs's spike pass also guards),
+        // where a collapse to <= 1/DROP_RATIO of the median is the signal.
+        let strength = if sigma > 0.0 {
+            let z = (median - c) / sigma;
+            if z < DROP_Z_THRESHOLD { continue; }
+            z / (z + 4.0) // → [0,1], 0.5 at the threshold
+        } else {
+            let ratio = if c > 0.0 { median / c } else { median };
+            if ratio < DROP_RATIO_THRESHOLD { continue; }
+            (1.0 - 1.0 / ratio).clamp(0.0, 1.0) // 3× → 0.67, deeper → ~1
+        };
+        if best.map(|(_, bs)| strength > bs).unwrap_or(true) {
+            best = Some((i, strength));
+        }
+    }
+    best.map(|(i, score)| (((i - anchor_bucket) as i64) * width, score))
+}
+
+fn median_u64(xs: &[u64]) -> f64 {
+    let mut v = xs.to_vec();
+    v.sort_unstable();
+    let n = v.len();
+    if n == 0 { 0.0 }
+    else if n % 2 == 1 { v[n / 2] as f64 }
+    else { (v[n / 2 - 1] as f64 + v[n / 2] as f64) / 2.0 }
+}
+
+fn median_abs_dev(xs: &[u64], median: f64) -> f64 {
+    let mut dev: Vec<f64> = xs.iter().map(|&c| (c as f64 - median).abs()).collect();
+    dev.sort_by(|a, b| a.partial_cmp(b).expect("counts are finite"));
+    let n = dev.len();
+    if n == 0 { 0.0 }
+    else if n % 2 == 1 { dev[n / 2] }
+    else { (dev[n / 2 - 1] + dev[n / 2]) / 2.0 }
 }
 
 /// Shortest-lag traversal from the root over the correlation edges (leader ->
@@ -202,14 +315,22 @@ pub fn format_incident(inc: &Incident) -> String {
     let t = inc.anchor.time.get(11..16).unwrap_or(&inc.anchor.time); // HH:MM
     s.push_str(&format!("  {} at {}\n", anchor_label(&inc.anchor), t));
     for step in &inc.steps {
+        // A correlated co-spike carries a Pearson r; an anomaly-detected drop
+        // carries an observation confidence — label them honestly, never
+        // conflate the two.
+        let label = if step.kind == "anomaly" {
+            format!("anomaly {:.2}", step.score)
+        } else {
+            format!("r={:.2}", step.score)
+        };
         // A zero lag is co-occurrence, not a cascade — say so rather than
         // "rises 0 seconds later" (honest: same-bucket, no lead/follow).
         if step.lag_seconds == 0 {
-            s.push_str(&format!("  -> {} {} at the same time (r={:.2})\n",
-                step.stream, step_verb(step), step.score));
+            s.push_str(&format!("  -> {} {} at the same time ({label})\n",
+                step.stream, step_verb(step)));
         } else {
-            s.push_str(&format!("  -> {} {} {} later (r={:.2})\n",
-                step.stream, step_verb(step), humanize_lag(step.lag_seconds), step.score));
+            s.push_str(&format!("  -> {} {} {} later ({label})\n",
+                step.stream, step_verb(step), humanize_lag(step.lag_seconds)));
         }
     }
     s

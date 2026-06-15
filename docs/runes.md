@@ -430,6 +430,33 @@ after the per-file kernel outputs and lead the narration, so the model opens
 with the conclusion. When nothing correlates, no block appears — silence is
 the honest finding.
 
+### Incident timeline
+
+When the correlations form a cascade, eacorrelate assembles them into a single
+ordered story — the additive `incident` block (`--json`), and the headline of
+the text/narration output:
+
+```
+incident timeline (confidence 0.95):
+  Deployment at 02:00
+  -> app errors rise 4 minutes later (r=0.93)
+  -> request traffic drops 12 minutes later (anomaly 0.95)
+```
+
+It finds the cascade **root** (a stream that leads but never follows), **anchors**
+on it — a discrete *trigger* like a deploy when the stream is sparse, otherwise
+the root's own first break — and orders the followers by cumulative lag. Two kinds
+of follower step: a **correlated** rise (a co-spiking stream, carrying its Pearson
+`r`) and a signed **drop** (`anomaly`): a stream that instead *falls* within the
+incident window, detected as a downward robust-median/MAD break — kept as an
+observation, never a negative correlation (which would reopen the disjoint-era
+artifact). `confidence` is the **weakest link** — `min` over the steps' scores.
+
+The wording is deliberately temporal — "errors rise 4 minutes later", never "the
+deploy *caused* it" — and a zero-lag step reads "at the same time" (co-occurrence,
+not a cascade). A correlation over too few overlap buckets is rejected (the guard
+that killed a real NASA `+654 h, r=1.00` artifact). No cascade → no `incident`.
+
 ## eadiff — structural delta between two rune runs
 
 ```
