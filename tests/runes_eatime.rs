@@ -245,3 +245,37 @@ fn eatime_emits_only_categories_not_fields() {
     assert!(!out.categories.is_empty(), "eatime must emit categories[]");
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+fn eatime_parses_space_separated_iso() {
+    olorin::kernels::ffi::init().unwrap();
+    // The space-separated ISO variant Postgres / MySQL / Python-logging /
+    // OpenStack emit (`YYYY-MM-DD HH:MM:SS`, often with fractional seconds).
+    // It must bucket IDENTICALLY to the 'T'-separated twin — the separator is
+    // cosmetic; both decode the same instant.
+    let space = b"\
+2024-03-01 06:00:00.123 LOG: a
+2024-03-01 06:30:00 LOG: b
+2024-03-01 07:00:00.9 ERROR: c
+2024-03-01 23:59:59 LOG: d
+";
+    let tee = b"\
+2024-03-01T06:00:00 LOG: a
+2024-03-01T06:30:00 LOG: b
+2024-03-01T07:00:00 ERROR: c
+2024-03-01T23:59:59 LOG: d
+";
+    let ps = write_tmp("olorin_eatime_space.log", space);
+    let pt = write_tmp("olorin_eatime_tee.log", tee);
+    let os = parse_answer(&run_rune("eatime", &format!("--json {ps}")).unwrap().answer);
+    let ot = parse_answer(&run_rune("eatime", &format!("--json {pt}")).unwrap().answer);
+
+    assert_eq!(os.totals.rows, 4, "space-ISO must find all 4 timestamps: {os:?}");
+    assert_eq!(os.source.as_ref().unwrap().format, "iso8601");
+    // Hour buckets must match the 'T' twin exactly (fractional seconds ignored).
+    assert_eq!(os.categories, ot.categories,
+        "space-separated and T-separated ISO must bucket identically");
+
+    let _ = std::fs::remove_file(&ps);
+    let _ = std::fs::remove_file(&pt);
+}

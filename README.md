@@ -112,7 +112,8 @@ anomalies:   2 spike(s) detected
 ```
 
 "Nearly twenty times" is the measured 19.5×; "afternoon of June 11th" is the
-14:08 bucket. eatime auto-detects **ISO-8601** and **Apache/nginx CLF** (a SIMD
+14:08 bucket. eatime auto-detects **ISO-8601** (both `T`- and space-separated —
+Postgres/Python-logging/OpenStack) and **Apache/nginx CLF** (a SIMD
 kernel each); `--bucket hour|weekday|series` picks the view.
 
 **Charts, in the terminal and the browser.** Drop a timestamped log into the web

@@ -56,7 +56,14 @@ func scan_pos(text: *u8, p: i32, len: i32, positions: *mut i32, max_positions: i
     let b9: i32 = to_i32(text[p + 9])
     if is_digit_byte(b8) == 0 { return }
     if is_digit_byte(b9) == 0 { return }
-    if to_i32(text[p + 10]) != 84 { return }
+    // Separator: 'T' (84) for RFC-3339, or ' ' (32) for the space-separated
+    // variant Postgres/MySQL/Python-logging/OpenStack emit. ISO 8601 permits
+    // the space by agreement; both decode identically (timekey reads digits
+    // at fixed offsets and ignores the separator char).
+    let sep: i32 = to_i32(text[p + 10])
+    if sep != 84 {
+        if sep != 32 { return }
+    }
 
     let cur: i32 = n_positions[0]
     if cur < max_positions {
@@ -79,6 +86,7 @@ export func timestamp_scan(text: *u8, len: i32, out_positions: *mut i32, max_pos
 
     let v_hyphen: u8x16 = splat(45)
     let v_T:      u8x16 = splat(84)
+    let v_space:  u8x16 = splat(32)
     let v_zero:   u8x16 = splat(0)
     let v_one:    u8x16 = splat(1)
 
@@ -98,9 +106,12 @@ export func timestamp_scan(text: *u8, len: i32, out_positions: *mut i32, max_pos
         let c7:  u8x16 = load(text, i + 7)
         let c10: u8x16 = load(text, i + 10)
 
-        let m4:  u8x16 = select(c4  .== v_hyphen, v_one, v_zero)
-        let m7:  u8x16 = select(c7  .== v_hyphen, v_one, v_zero)
-        let m10: u8x16 = select(c10 .== v_T,      v_one, v_zero)
+        let m4:   u8x16 = select(c4  .== v_hyphen, v_one, v_zero)
+        let m7:   u8x16 = select(c7  .== v_hyphen, v_one, v_zero)
+        // Separator lane passes on 'T' OR ' ' (space-separated ISO variant).
+        let m10t: u8x16 = select(c10 .== v_T,     v_one, v_zero)
+        let m10s: u8x16 = select(c10 .== v_space, v_one, v_zero)
+        let m10:  u8x16 = m10t .| m10s
 
         let cand: u8x16 = m4 .& m7 .& m10
         let any:  u8    = reduce_add(cand)

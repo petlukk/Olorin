@@ -28,7 +28,8 @@ pub fn iso_bytes_to_seconds(b: &[u8]) -> Option<i64> {
     let month:  i64 = parse_uint(&b[5..7])?  as i64;
     if b[7] != b'-' { return None; }
     let day:    i64 = parse_uint(&b[8..10])? as i64;
-    if b[10] != b'T' { return None; }
+    // 'T' (RFC-3339) or ' ' (Postgres/MySQL/Python-logging/OpenStack style).
+    if b[10] != b'T' && b[10] != b' ' { return None; }
     let hour:   i64 = parse_uint(&b[11..13])? as i64;
     if b[13] != b':' { return None; }
     let minute: i64 = parse_uint(&b[14..16])? as i64;

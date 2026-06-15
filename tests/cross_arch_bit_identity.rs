@@ -195,6 +195,16 @@ fn parity_eatime_multi_hour() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// Space-separated ISO (`YYYY-MM-DD HH:MM:SS`, with fractional seconds) —
+/// exercises the timestamp_scan kernel's `T`-or-space separator branch on
+/// both arches. The `.|`-combined lane mask must lower identically on NEON.
+#[test]
+fn parity_eatime_space_iso() {
+    let path = stage_fixture("parity_times_space.log");
+    run_case("eatime_space_parity", &format!("eatime --json {path}"));
+    let _ = std::fs::remove_file(&path);
+}
+
 /// eacorrelate is multi-input: a 2h ISO log with planted ERROR bursts
 /// 120s after each deploy in the CSV. Exercises the corr_sweep kernel,
 /// the shared-grid bucketing, AND the additive `correlations[]` block —
