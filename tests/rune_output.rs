@@ -137,6 +137,7 @@ fn rich_fixture() -> RuneOutput {
             },
         ],
         group_by: Some("supplier".to_string()),
+        incident: None,
         error: None,
     }
 }

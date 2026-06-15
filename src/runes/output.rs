@@ -17,6 +17,7 @@
 //! inputs which a rune will hit.
 
 use super::correlation::{correlation_from_obj, correlation_to_obj, Correlation};
+use super::incident::{incident_from_runeoutput, incident_to_obj, Incident};
 use super::grouping::{group_from_obj, group_to_obj, Group};
 use crate::storage::json::{self, Object, Value};
 
@@ -174,6 +175,9 @@ pub struct RuneOutput {
     /// The column `groups[]` is keyed on (eacrunch `--by`). Serialized only
     /// when grouping ran, so non-grouped output stays byte-identical to v1.
     pub group_by:       Option<String>,
+    /// Assembled incident timeline (eacorrelate). Serialized only when present,
+    /// so every other rune's JSON stays byte-identical to v1.
+    pub incident:       Option<Incident>,
     pub error:          Option<String>,
 }
 
@@ -193,6 +197,7 @@ impl RuneOutput {
             correlations:   Vec::new(),
             groups:         Vec::new(),
             group_by:       None,
+            incident:       None,
             error:          None,
         }
     }
@@ -228,6 +233,9 @@ impl RuneOutput {
         if let Some(gb) = &self.group_by {
             o.set("group_by", Value::Str(gb.clone()));
         }
+        if let Some(inc) = &self.incident {
+            o.set("incident", obj_value(incident_to_obj(inc)));
+        }
         if let Some(e) = &self.error {
             o.set("error", Value::Str(e.clone()));
         }
@@ -254,6 +262,7 @@ impl RuneOutput {
             correlations: array_of(&obj, "correlations", correlation_from_obj)?,
             groups:       array_of(&obj, "groups",     group_from_obj)?,
             group_by:     obj.get_str("group_by").map(str::to_string),
+            incident:     incident_from_runeoutput(&obj)?,
             error:        obj.get_str("error").map(str::to_string),
         })
     }

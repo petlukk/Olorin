@@ -20,6 +20,7 @@
 use super::{Rune, RuneResult, OutputSafety};
 use super::common::{resolve_path, open_capped, truncate_answer, PathError};
 use super::correlation::Correlation;
+use super::incident;
 use super::output::{Category, RuneOutput, Totals};
 use super::stream::{self, Format, MAX_POSITIONS};
 use super::timekey::{iso_bytes_to_seconds, seconds_to_iso};
@@ -31,6 +32,9 @@ const RUNE_VERSION: i64 = 1;
 /// Finer grid than eatime's 120: lag resolution equals bucket width.
 const TARGET_BUCKETS: i64 = 512;
 const MAX_LAG_BUCKETS: i64 = 128;
+/// A correlation window must span at least this many buckets — Pearson over a
+/// handful of points is meaningless (hits ±1 trivially). Floor for short grids.
+const MIN_OVERLAP_BUCKETS: usize = 8;
 const SCORE_THRESHOLD: f64 = 0.5;
 /// Streams with fewer events than this can align by luck; skip them.
 const MIN_EVENTS: usize = 3;
@@ -166,6 +170,10 @@ pub fn correlate_files(files: &[(String, String)]) -> RuneOutput {
         return out;
     }
     out.correlations = correlate(&streams);
+    let metas: Vec<incident::StreamMeta> = streams.iter()
+        .map(|s| incident::StreamMeta { name: s.name.clone(), events: s.epochs.len() as u64 })
+        .collect();
+    out.incident = incident::build_incident(&metas, &out.correlations);
     out
 }
 
@@ -213,7 +221,12 @@ fn correlate(streams: &[EventStream]) -> Vec<Correlation> {
     }
     let width = stream::auto_width(span, TARGET_BUCKETS);
     let n = (span / width) as usize + 1;
-    let max_lag = MAX_LAG_BUCKETS.min(n as i64 - 1) as i32;
+    // Cap the lag at a quarter of the grid so the overlap window stays at least
+    // 3/4 of the span — a lag that consumes most of the window leaves too few
+    // buckets for a credible Pearson r (the NASA +654h r=1.00 artifact). On the
+    // usual fine grids (n in the hundreds) n/4 exceeds MAX_LAG_BUCKETS, so this
+    // only binds on short, long-span logs — exactly where the artifact lived.
+    let max_lag = MAX_LAG_BUCKETS.min(n as i64 - 1).min(n as i64 / 4).max(0) as i32;
 
     // Bucketed series per stream; None when flat (zero variance).
     let series: Vec<Option<StreamSeries>> = streams.iter()
@@ -311,7 +324,15 @@ fn pearson_at_lag(
     } else {
         (0usize, (-lag) as usize, n - (-lag) as usize)
     };
-    if m == 0 {
+    // A correlation over a handful of buckets is not a correlation: Pearson
+    // over m points hits ±1 trivially as m shrinks, so a near-boundary lag
+    // (overlap = a few buckets) manufactures a spurious r=1.00 even though
+    // both windows hold thousands of events. The active-window gate below
+    // counts EVENTS, not buckets, so it can't catch this — a real 28-day
+    // NASA log scored errors "following" traffic by +654h, r=1.00, on a
+    // 4-bucket overlap (found 2026-06-15 via real-data incident testing).
+    // Require enough buckets for the statistic to mean anything.
+    if m < MIN_OVERLAP_BUCKETS {
         return 0.0;
     }
     let ev_a = sa.events[off_a + m] - sa.events[off_a];
@@ -413,10 +434,15 @@ pub fn findings_block(out: &RuneOutput) -> Option<String> {
 /// documents), so the model gets one flowing sentence with nothing to
 /// continue. Top finding only — the user-visible block carries the rest.
 pub fn findings_for_prompt(out: &RuneOutput) -> Option<String> {
-    let c = out.correlations.first()?;
     if !out.success {
         return None;
     }
+    // Lead with the assembled incident timeline when there is one — it IS the
+    // conclusion ("why did my service die"); the raw correlations are evidence.
+    if let Some(inc) = &out.incident {
+        return Some(incident::incident_for_prompt(inc));
+    }
+    let c = out.correlations.first()?;
     Some(format!(
         "A correlation pass across the files found that events in {} \
          consistently happen about {} seconds after events in {}, most \
@@ -449,6 +475,10 @@ fn format_text(out: &RuneOutput) -> String {
             "  {} follows {} by +{}s (r={:.2}, peak {}, bucket {}s)\n",
             c.stream_a, c.stream_b, c.lag_seconds, c.score, c.peak_bucket, c.width_seconds,
         ));
+    }
+    if let Some(inc) = &out.incident {
+        buf.push('\n');
+        buf.push_str(&incident::format_incident(inc));
     }
     buf
 }
