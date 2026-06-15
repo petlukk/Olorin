@@ -8,6 +8,38 @@ order.
 
 ## [Unreleased]
 
+## [3.4.0] — 2026-06-15
+
+### Added
+
+- **`eacorrelate` reads nginx/Apache 5xx as errors.** CLF access logs now
+  contribute an `(errors)` sub-stream built from HTTP 5xx responses, the way
+  ISO/syslog logs already split on `ERROR`/`FATAL`. So a deploy → 500s → traffic
+  cascade in a real web stack is now visible to the correlation and incident
+  passes, not just keyword-logged app errors. New SIMD kernel
+  `clf_status_scan.ea` (same cross-arch `.==`-anchor idiom as `clf_scan`, no new
+  eacompute intrinsics); verified bit-identical x86 ↔ Pi NEON.
+
+- **Incident timeline anchors on a single deploy line.** A real deploy is one log
+  line — too sparse to be a correlation stream — so the timeline used to anchor
+  on the first error stream. It now snaps the anchor onto a discrete trigger
+  event (a deploy) sitting at the cascade's inferred root, and re-bases the step
+  lags onto it, so the story names the cause:
+
+  ```
+  incident timeline (confidence 0.94):
+    Deployment at 12:56
+    -> access.log (errors) rise 34 seconds later (r=0.94)
+  ```
+
+### Fixed
+
+- **`eacorrelate` no longer invents multi-hour "incidents" from long logs.** The
+  lag cap scaled with the window (`span/4`), so a multi-day syslog could report a
+  confident "errors → auth rises 16h later" built from unrelated periodic noise.
+  An absolute ceiling (`MAX_LAG_SECONDS`, 1h) now bounds reported lags — an
+  incident cascade is minutes, not hours.
+
 ## [3.3.0] — 2026-06-15
 
 ### Added
