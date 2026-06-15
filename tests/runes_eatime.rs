@@ -247,6 +247,31 @@ fn eatime_emits_only_categories_not_fields() {
 }
 
 #[test]
+fn eatime_parses_classic_syslog() {
+    olorin::kernels::ffi::init().unwrap();
+    // Classic BSD syslog `MMM DD HH:MM:SS` (Linux /var/log, sshd, cron, network
+    // gear). Yearless — a fixed reference year is assigned; hour-of-day buckets
+    // are unaffected. Covers the space-padded single-digit day (`Jun  4`).
+    let log = b"\
+Jun 14 15:16:01 host sshd[1]: auth failure
+Jun 14 15:16:05 host sshd[2]: accepted
+Jun  4 02:13:01 host kernel: boot
+Dec 25 23:59:59 host cron[9]: nightly
+";
+    let path = write_tmp("olorin_eatime_syslog.log", log);
+    let out = parse_answer(&run_rune("eatime", &format!("--json {path}")).unwrap().answer);
+
+    assert_eq!(out.totals.rows, 4, "syslog must find all 4 timestamps: {out:?}");
+    assert_eq!(out.source.as_ref().unwrap().format, "syslog");
+    let count = |hh: &str| out.categories.iter().find(|c| c.name == hh).map(|c| c.count).unwrap_or(0);
+    assert_eq!(count("15:00"), 2, "two 15:xx events");
+    assert_eq!(count("02:00"), 1, "the space-padded `Jun  4 02:13` event");
+    assert_eq!(count("23:00"), 1, "the Dec 25 23:59 event");
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
 fn eatime_parses_space_separated_iso() {
     olorin::kernels::ffi::init().unwrap();
     // The space-separated ISO variant Postgres / MySQL / Python-logging /

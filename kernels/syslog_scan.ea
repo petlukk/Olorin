@@ -1,0 +1,119 @@
+// Classic BSD syslog timestamp position scanner. Emits byte offsets where the
+// 15-byte `MMM DD HH:MM:SS` instant occurs (e.g. `Jun 14 15:16:01`, or the
+// space-padded `Jun  4 02:13:01`). Caller decodes the month name + fields and
+// assigns a fixed reference year (syslog is yearless).
+//
+// SIMD strategy mirrors timestamp_scan (cross-arch, .==-only, no movemask):
+// the grammar's fixed punctuation is space@+3, space@+6, colon@+9, colon@+12
+// from the month start — four anchors, ANDed into one lane mask. A passing
+// lane is a *candidate* only; scan_pos scalar-walks it to validate the digit
+// positions (and the space-or-digit day-tens), and the Rust decoder validates
+// the month NAME and field ranges, dropping non-matches. Four fixed anchors
+// make the filter tighter than ISO's three.
+//
+// out_positions      = byte offsets where `MMM DD HH:MM:SS` starts.
+// out_n_positions[0] = number written (<= max_positions), reset to 0 first.
+// scratch (16 bytes) holds the per-chunk filter mask; contents unspecified
+// after the call.
+
+func is_digit_byte(b: i32) -> i32 {
+    if b < 48 { return 0 }
+    if b > 57 { return 0 }
+    return 1
+}
+
+func scan_pos(text: *u8, p: i32, len: i32, positions: *mut i32, max_positions: i32, n_positions: *mut i32) {
+    if p + 15 > len { return }
+    if max_positions <= 0 { return }
+
+    // Month bytes p..p+2 are letters — validated by the decoder, not here.
+    if to_i32(text[p + 3]) != 32 { return }   // space
+
+    // Day tens may be a space (zero-padded single digit) or a digit; ones digit.
+    let d4: i32 = to_i32(text[p + 4])
+    if d4 != 32 {
+        if is_digit_byte(d4) == 0 { return }
+    }
+    if is_digit_byte(to_i32(text[p + 5])) == 0 { return }
+    if to_i32(text[p + 6]) != 32 { return }   // space
+
+    if is_digit_byte(to_i32(text[p + 7])) == 0 { return }   // hour
+    if is_digit_byte(to_i32(text[p + 8])) == 0 { return }
+    if to_i32(text[p + 9]) != 58 { return }   // colon
+
+    if is_digit_byte(to_i32(text[p + 10])) == 0 { return }  // minute
+    if is_digit_byte(to_i32(text[p + 11])) == 0 { return }
+    if to_i32(text[p + 12]) != 58 { return }  // colon
+
+    if is_digit_byte(to_i32(text[p + 13])) == 0 { return }  // second
+    if is_digit_byte(to_i32(text[p + 14])) == 0 { return }
+
+    let cur: i32 = n_positions[0]
+    if cur < max_positions {
+        positions[cur] = p
+        n_positions[0] = cur + 1
+    }
+}
+
+export func syslog_scan(text: *u8, len: i32, out_positions: *mut i32, max_positions: i32, out_n_positions: *mut i32, scratch: *mut u8) {
+    out_n_positions[0] = 0
+
+    if len < 32 {
+        let mut p: i32 = 0
+        while p + 15 <= len {
+            scan_pos(text, p, len, out_positions, max_positions, out_n_positions)
+            p = p + 1
+        }
+        return
+    }
+
+    let v_space: u8x16 = splat(32)
+    let v_colon: u8x16 = splat(58)
+    let v_zero:  u8x16 = splat(0)
+    let v_one:   u8x16 = splat(1)
+
+    // Scalar prologue: positions [0..16).
+    let mut p: i32 = 0
+    while p < 16 {
+        scan_pos(text, p, len, out_positions, max_positions, out_n_positions)
+        p = p + 1
+    }
+
+    // SIMD body: chunks at i=16, 32, ... while i + 30 <= len (lane 15's
+    // candidate ends at i+15+14 = i+29, so text[i+29] must be readable).
+    let mut i: i32 = 16
+    while i + 30 <= len {
+        let c3:  u8x16 = load(text, i + 3)
+        let c6:  u8x16 = load(text, i + 6)
+        let c9:  u8x16 = load(text, i + 9)
+        let c12: u8x16 = load(text, i + 12)
+
+        let m3:  u8x16 = select(c3  .== v_space, v_one, v_zero)
+        let m6:  u8x16 = select(c6  .== v_space, v_one, v_zero)
+        let m9:  u8x16 = select(c9  .== v_colon, v_one, v_zero)
+        let m12: u8x16 = select(c12 .== v_colon, v_one, v_zero)
+
+        let cand: u8x16 = m3 .& m6 .& m9 .& m12
+        let any:  u8    = reduce_add(cand)
+
+        if to_i32(any) > 0 {
+            store(scratch, 0, cand)
+            let mut k: i32 = 0
+            while k < 16 {
+                if to_i32(scratch[k]) > 0 {
+                    scan_pos(text, i + k, len, out_positions, max_positions, out_n_positions)
+                }
+                k = k + 1
+            }
+        }
+
+        i = i + 16
+    }
+
+    // Scalar epilogue.
+    p = i
+    while p + 15 <= len {
+        scan_pos(text, p, len, out_positions, max_positions, out_n_positions)
+        p = p + 1
+    }
+}

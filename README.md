@@ -113,7 +113,8 @@ anomalies:   2 spike(s) detected
 
 "Nearly twenty times" is the measured 19.5×; "afternoon of June 11th" is the
 14:08 bucket. eatime auto-detects **ISO-8601** (both `T`- and space-separated —
-Postgres/Python-logging/OpenStack) and **Apache/nginx CLF** (a SIMD
+Postgres/Python-logging/OpenStack), **classic syslog** (`Jun 14 15:16:01` —
+Linux `/var/log`), and **Apache/nginx CLF** (a SIMD
 kernel each); `--bucket hour|weekday|series` picks the view.
 
 **Charts, in the terminal and the browser.** Drop a timestamped log into the web
@@ -163,7 +164,7 @@ Eight runes:
 - **`eajson`** — JSON Lines summarizer (systemd / container / web-server shapes); nested objects flatten to dotted keys up to `--depth N` (default 4)
 - **`eaparquet`** — Parquet metadata (per-column min/max/null_count from the footer; INT96 timestamps decode to ISO, DECIMAL to scaled value)
 - **`ealog`** — log severity scanner (DEBUG/INFO/WARN/ERROR/FATAL + sample lines)
-- **`eatime`** — timestamp histogram (ISO-8601 + Apache/nginx CLF); hour-of-day, weekday, or chronological `series` buckets with robust spike detection + charts
+- **`eatime`** — timestamp histogram (ISO-8601 + classic syslog + Apache/nginx CLF); hour-of-day, weekday, or chronological `series` buckets with robust spike detection + charts
 - **`easql`** — SQL-dump summarizer (`pg_dump` / `mysqldump`): dialect, table count, per-table row + column counts
 - **`eacorrelate`** — cross-file lag correlation: drop 2–8 timestamped files and find which event streams move together, at what lag ("errors follow deploys by 4 min")
 - **`eadiff`** — structural delta between any two `--json` rune outputs
