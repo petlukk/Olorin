@@ -118,8 +118,9 @@ Linux `/var/log`), and **Apache/nginx CLF** (a SIMD
 kernel each); `--bucket hour|weekday|series` picks the view.
 
 **Find *why* your service died.** Point `eacorrelate` at several timestamped
-logs — a deploy log, an app log, an access log — and it doesn't just correlate
-them, it assembles the answer into one ordered **incident timeline**:
+logs — a deploy log, an app log, an nginx access log (its **5xx** read as an
+error stream) — and it doesn't just correlate them, it assembles the answer
+into one ordered **incident timeline**:
 
 ```
 > olorin rune eacorrelate deploy.log app.log access.log

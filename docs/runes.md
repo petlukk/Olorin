@@ -408,7 +408,9 @@ correlations: 1 finding(s)
 
 Takes 2–8 timestamped files (ISO-8601 or CLF, auto-detected per file) and
 answers "what happened across these?": every file contributes its event
-stream, ISO logs contribute a second ERROR/FATAL sub-stream, all streams are
+stream, ISO/syslog logs contribute a second ERROR/FATAL keyword sub-stream and
+CLF access logs an HTTP-**5xx** sub-stream (so an nginx deploy→500s incident is
+visible, not just keyword-logged app errors), all streams are
 bucketed onto **one** shared time grid (512 target buckets — finer than
 eatime's 120 because lag resolution *is* bucket width), z-scored, and every
 cross-file pair is swept over ±128 lags by the `corr_sweep` kernel. A finding
@@ -423,9 +425,11 @@ additive `correlations[]` block (`--json`), each carrying `peak_bucket`
 (the instant of strongest co-occurrence) and `width_seconds` (the honest
 lag resolution). Verified against an independent numpy oracle on
 randomized planted-lag, independent-noise, and disjoint-era scenarios
-(`benchmarks/eacorrelate_diff.py`, 18/18). One caveat by design: two
-overlapping logs of the same system will correlate at ±24 h lags — real
-diurnal periodicity is a phase alignment, not causation.
+(`benchmarks/eacorrelate_diff.py`, 18/18). Reported lags are bounded by an
+absolute ceiling (1 h — an incident cascade is minutes, not hours), which also
+rejects the ±24 h diurnal phase-alignment that two overlapping logs of the same
+system would otherwise manufacture (a real srv1174152 syslog/auth pair scored a
+spurious "+16 h" before the ceiling).
 
 Dropping ≥ 2 files into the web UI runs it automatically: the findings stream
 after the per-file kernel outputs and lead the narration, so the model opens
@@ -446,8 +450,11 @@ incident timeline (confidence 0.95):
 ```
 
 It finds the cascade **root** (a stream that leads but never follows), **anchors**
-on it — a discrete *trigger* like a deploy when the stream is sparse, otherwise
-the root's own first break — and orders the followers by cumulative lag. Two kinds
+on it, and orders the followers by cumulative lag. When a discrete *trigger* event
+— even a single deploy-log line, too sparse to be a correlation stream itself —
+sits at the inferred root instant, the anchor snaps onto it and the lags re-base
+onto the deploy, so the story names the cause (`Deployment at 02:00`) instead of
+the first error stream. Two kinds
 of follower step: a **correlated** rise (a co-spiking stream, carrying its Pearson
 `r`) and a signed **drop** (`anomaly`): a stream that instead *falls* within the
 incident window, detected as a downward robust-median/MAD break — kept as an
