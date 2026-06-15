@@ -39,6 +39,15 @@ pub struct StreamView<'a> {
     pub epochs: &'a [i64],
 }
 
+/// A discrete trigger event (e.g. a deploy-log line) — too sparse to be a
+/// correlation stream, but a candidate anchor the incident can snap onto so the
+/// timeline names the cause ("Deployment at 14:02") instead of the first symptom.
+#[derive(Debug, Clone)]
+pub struct TriggerCandidate {
+    pub time:   i64,    // epoch seconds
+    pub source: String, // the file the event came from
+}
+
 /// Robust z threshold for a downward break (matches anomaly.rs's spike gate).
 const DROP_Z_THRESHOLD: f64 = 4.0;
 /// Flat-baseline (MAD=0) fallback: a bucket must collapse to <= 1/this of the
@@ -81,7 +90,7 @@ pub struct Incident {
 /// positive-only) correlations. `gmin`/`width`/`n` describe the shared bucket
 /// grid, used for the Stage-2 drop pass. `None` when there is no cascade.
 pub fn build_incident(
-    streams: &[StreamView], correlations: &[Correlation],
+    streams: &[StreamView], correlations: &[Correlation], triggers: &[TriggerCandidate],
     gmin: i64, width: i64, n: usize,
 ) -> Option<Incident> {
     if correlations.is_empty() {
@@ -112,7 +121,7 @@ pub fn build_incident(
     let anchor_edge = correlations.iter()
         .find(|c| c.stream_b == root)
         .or_else(|| correlations.first())?;
-    let anchor_epoch = iso_to_seconds(&anchor_edge.peak_bucket)
+    let mut anchor_epoch = iso_to_seconds(&anchor_edge.peak_bucket)
         .map(|p| p - anchor_edge.lag_seconds)
         .unwrap_or(0);
 
@@ -124,7 +133,7 @@ pub fn build_incident(
         && root_events <= TRIGGER_MAX_EVENTS
         && root_events.saturating_mul(TRIGGER_SPARSITY) <= busiest;
 
-    let anchor = Anchor {
+    let mut anchor = Anchor {
         kind:   if is_trigger { "trigger".into() } else { "spike".into() },
         stream: root.clone(),
         time:   seconds_to_iso(anchor_epoch),
@@ -133,6 +142,31 @@ pub fn build_incident(
     let mut steps = walk_cascade(&root, correlations);
     if steps.is_empty() {
         return None;
+    }
+
+    // Part B: a single discrete trigger (one deploy line) can't be a correlation
+    // stream — too few events for a Pearson window — so the cascade above
+    // inferred the root from the rate streams. If a trigger event sits near that
+    // inferred instant, snap the anchor onto it and name the cause. A deploy can
+    // precede the inferred root by at most the cascade's own propagation span, so
+    // the match window is that span (self-scaling, no magic constant). Re-base
+    // the step lags onto the deploy so "errors rose N seconds after the deploy".
+    let max_step_lag = steps.iter().map(|s| s.lag_seconds).max().unwrap_or(0);
+    let window = (2 * width).max(max_step_lag);
+    if let Some(trig) = triggers.iter()
+        .filter(|t| (t.time - anchor_epoch).abs() <= window)
+        .min_by_key(|t| (t.time - anchor_epoch).abs())
+    {
+        let shift = anchor_epoch - trig.time;
+        for s in steps.iter_mut() {
+            s.lag_seconds += shift;
+        }
+        anchor = Anchor {
+            kind:   "trigger".into(),
+            stream: trig.source.clone(),
+            time:   seconds_to_iso(trig.time),
+        };
+        anchor_epoch = trig.time;
     }
 
     // Stage 2: signed DROP detection. The cascade above is the positive

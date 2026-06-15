@@ -94,6 +94,58 @@ fn incident_anchors_on_trigger_and_orders_cascade() {
     let _ = std::fs::remove_file(&csv);
 }
 
+#[test]
+fn single_deploy_line_anchors_the_incident() {
+    olorin::kernels::ffi::init().unwrap();
+    // Part B: a real deploy is ONE line — too sparse to be a correlation stream.
+    // The cascade (db errors at the deploy -> app errors 240s later) infers its
+    // root instant; the lone deploy event sitting there snaps the anchor onto it,
+    // so the timeline names the DEPLOY instead of the first error stream.
+    let deploy_at = 2 * 3600;
+    let db  = write_tmp("olorin_b_db.log",  &log_with_error_bursts(&[deploy_at], 0));
+    let app = write_tmp("olorin_b_app.log", &log_with_error_bursts(&[deploy_at], 240));
+    let dep = write_tmp("olorin_b_deploy.csv", &deploys_csv(&[deploy_at]));
+
+    let result = run_rune("eacorrelate", &format!("--json {db} {app} {dep}")).unwrap();
+    assert!(result.success, "rune failed: {}", result.answer);
+    let out = parse(&result.answer);
+    let inc = out.incident.as_ref()
+        .unwrap_or_else(|| panic!("no incident: {}", result.answer));
+
+    // The single deploy line became the anchor (not the db error stream).
+    assert_eq!(inc.anchor.kind, "trigger", "anchor: {:?}", inc.anchor);
+    assert_eq!(inc.anchor.stream, "olorin_b_deploy.csv",
+        "anchor did not snap to the deploy: {:?}", inc.anchor);
+    assert!(inc.anchor.time.ends_with("02:00:00"), "anchor time: {}", inc.anchor.time);
+    assert!(inc.steps.iter().any(|s| s.stream.contains("app")),
+        "expected the app follower as a step: {:?}", inc.steps);
+
+    for p in [&db, &app, &dep] { let _ = std::fs::remove_file(p); }
+}
+
+#[test]
+fn distant_deploy_does_not_hijack_the_anchor() {
+    olorin::kernels::ffi::init().unwrap();
+    // The match window is the cascade's own span, so a deploy far outside it (an
+    // unrelated earlier release) must NOT be snapped onto — the anchor stays on
+    // the error stream. Guards the snap against over-eager matching.
+    let cascade_at = 4 * 3600;
+    let db  = write_tmp("olorin_b2_db.log",  &log_with_error_bursts(&[cascade_at], 0));
+    let app = write_tmp("olorin_b2_app.log", &log_with_error_bursts(&[cascade_at], 240));
+    let dep = write_tmp("olorin_b2_deploy.csv", &deploys_csv(&[0])); // 00:00, cascade at 04:00
+
+    let result = run_rune("eacorrelate", &format!("--json {db} {app} {dep}")).unwrap();
+    assert!(result.success, "rune failed: {}", result.answer);
+    let out = parse(&result.answer);
+    let inc = out.incident.as_ref()
+        .unwrap_or_else(|| panic!("no incident: {}", result.answer));
+
+    assert_ne!(inc.anchor.stream, "olorin_b2_deploy.csv",
+        "a distant deploy wrongly hijacked the anchor: {:?}", inc.anchor);
+
+    for p in [&db, &app, &dep] { let _ = std::fs::remove_file(p); }
+}
+
 /// Steady traffic with deterministic variation (so MAD > 0 — the robust-z
 /// path, as real traffic behaves), collapsing to near-zero for `drop_dur`
 /// seconds starting `drop_lag` after each deploy.

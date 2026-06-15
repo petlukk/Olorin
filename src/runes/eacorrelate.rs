@@ -123,6 +123,7 @@ struct EventStream {
 pub fn correlate_files(files: &[(String, String)]) -> RuneOutput {
     let home = crate::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
     let mut streams: Vec<EventStream> = Vec::new();
+    let mut triggers: Vec<incident::TriggerCandidate> = Vec::new();
     let mut scan_us_total: u64 = 0;
 
     for (idx, (display, path)) in files.iter().enumerate() {
@@ -161,6 +162,14 @@ pub fn correlate_files(files: &[(String, String)]) -> RuneOutput {
                     epochs: errors,
                 });
             }
+        } else if !epochs.is_empty() {
+            // Too sparse to be a correlation stream (e.g. a one-line deploy log).
+            // Keep its events as discrete trigger candidates the incident builder
+            // can snap its anchor onto — how a real deploy actually appears.
+            triggers.extend(epochs.into_iter().map(|t| incident::TriggerCandidate {
+                time:   t,
+                source: display.clone(),
+            }));
         }
     }
 
@@ -180,7 +189,7 @@ pub fn correlate_files(files: &[(String, String)]) -> RuneOutput {
         // Not an error: the honest answer is "nothing to correlate".
         return out;
     }
-    let (correlations, incident) = correlate(&streams);
+    let (correlations, incident) = correlate(&streams, &triggers);
     out.correlations = correlations;
     out.incident = incident;
     out
@@ -188,7 +197,7 @@ pub fn correlate_files(files: &[(String, String)]) -> RuneOutput {
 
 /// Bucket all streams onto one grid, z-score, sweep every cross-file
 /// pair with the corr_sweep kernel, keep the TOP_K strongest findings.
-fn correlate(streams: &[EventStream]) -> (Vec<Correlation>, Option<incident::Incident>) {
+fn correlate(streams: &[EventStream], triggers: &[incident::TriggerCandidate]) -> (Vec<Correlation>, Option<incident::Incident>) {
     let gmin = streams.iter().flat_map(|s| s.epochs.iter()).min().copied().unwrap_or(0);
     let gmax = streams.iter().flat_map(|s| s.epochs.iter()).max().copied().unwrap_or(0);
     let span = gmax - gmin;
@@ -288,7 +297,7 @@ fn correlate(streams: &[EventStream]) -> (Vec<Correlation>, Option<incident::Inc
     let views: Vec<incident::StreamView> = streams.iter()
         .map(|s| incident::StreamView { name: &s.name, epochs: &s.epochs })
         .collect();
-    let incident = incident::build_incident(&views, &findings, gmin, width, n);
+    let incident = incident::build_incident(&views, &findings, triggers, gmin, width, n);
     (findings, incident)
 }
 
