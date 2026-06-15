@@ -270,12 +270,14 @@ runs ~1.4 GB/s. The structural-anchor filter is cheaper per byte than
 `log_level_scan`'s keyword AND-chains — fewer SIMD lane masks per 16-byte chunk,
 scalar walk only on the (rare) candidate hits.
 
-eatime auto-detects two timestamp grammars and dispatches the matching SIMD
+eatime auto-detects three timestamp grammars and dispatches the matching SIMD
 kernel: **ISO-8601** `YYYY-MM-DD[T| ]HH:MM:SS` — the `T`-separated RFC-3339 form
 (JSON logs, container/k8s output, `journalctl -o short-iso`) **and** the
 space-separated variant Postgres / MySQL / Python-`logging` / OpenStack emit
-(`2024-01-01 15:00:00.123`, fractional seconds ignored) — via `timestamp_scan`,
-and **Common Log Format**
+(`2024-01-01 15:00:00.123`, fractional seconds ignored) — via `timestamp_scan`;
+**classic BSD syslog** `MMM DD HH:MM:SS` (`Jun 14 15:16:01`, the Linux
+`/var/log` / sshd / cron / network-gear default, including the space-padded
+`Jun  4 …`) via `syslog_scan`; and **Common Log Format**
 `[dd/MMM/yyyy:hh:mm:ss]` (the Apache/nginx access-log default) via `clf_scan`.
 Detection runs both kernels over a 64 KB head and picks whichever matches more,
 so the sniff can never disagree with the scan; force it with `--format iso|clf`.
@@ -579,11 +581,16 @@ entries) are blocked regardless of format.
   token). Severity values inside JSON-style logs (`"level":"info"`) *do* count,
   since `"` and `:` are boundaries. Sample buffer caps at 5 lines; counts
   remain accurate past that.
-- **eatime**: two grammars, auto-detected (or forced with `--format iso|clf`):
-  ISO-8601 `YYYY-MM-DD[T| ]HH:MM:SS` (both the `T` and space separators; a
-  trailing `_` — as in some filename stamps — is *not* matched) and Common Log
-  Format `[dd/MMM/yyyy:hh:mm:ss]`. Other formats (legacy syslog `May 11
-  10:54:00`, Unix epoch, RFC 2822, freeform) are out of scope — each needs its own kernel, and yearless formats need a
+- **eatime**: three grammars, auto-detected (or forced with
+  `--format iso|clf|syslog`): ISO-8601 `YYYY-MM-DD[T| ]HH:MM:SS` (both the `T`
+  and space separators; a trailing `_` — as in some filename stamps — is *not*
+  matched), Common Log Format `[dd/MMM/yyyy:hh:mm:ss]`, and classic BSD syslog
+  `MMM DD HH:MM:SS`. **Syslog is yearless**, so a fixed reference year is
+  assigned: hour/series buckets and cross-file lags (which use only time
+  *differences*) are exact, but the displayed year and the `weekday` bucket are
+  placeholders, and correlating two syslog files from *different real years* may
+  falsely overlap. A file that wraps Dec→Jan is assumed single-year. Other
+  formats (Unix epoch, RFC 2822, freeform) are out of scope — each needs its own kernel, and yearless formats need a
   year-inference policy. CLF's `±HHMM` zone is ignored (bucketing is on the log's
   own wall clock; a constant zone cancels out of bucket indices). Buckets cap at 16M
   positions per call. `--bucket series` auto-selects bucket width (1s…1w,

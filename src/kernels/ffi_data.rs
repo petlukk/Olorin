@@ -186,6 +186,24 @@ pub unsafe fn clf_scan(
     );
 }
 
+/// Classic BSD syslog `MMM DD HH:MM:SS` position scan. Identical contract to
+/// [`timestamp_scan`]. The decoder assigns a fixed reference year (syslog is
+/// yearless).
+///
+/// # Safety
+/// Same as [`clf_scan`].
+pub unsafe fn syslog_scan(
+    text: *const u8, len: i32,
+    out_positions: *mut i32, max_positions: i32, out_n_positions: *mut i32,
+    scratch: *mut u8,
+) {
+    (k().syslog_scan)(
+        text, len,
+        out_positions, max_positions, out_n_positions,
+        scratch,
+    );
+}
+
 /// Streaming stats over `len` f32 elements. Writes count, sum, min, max.
 ///
 /// # Safety

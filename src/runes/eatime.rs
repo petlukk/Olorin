@@ -38,9 +38,9 @@ impl Rune for Eatime {
          from baseline are reported as anomalies. Auto-detects ISO-8601 \
          (YYYY-MM-DDTHH:MM:SS) and Common Log Format ([dd/MMM/yyyy:hh:mm:ss], \
          the Apache/nginx access-log default); force with --format. Args: \
-         [--json] [--bucket hour|weekday|series] [--format iso|clf|auto] <path>."
+         [--json] [--bucket hour|weekday|series] [--format iso|clf|syslog|auto] <path>."
     }
-    fn usage(&self) -> &'static str { "eatime [--json] [--bucket hour|weekday|series] [--format iso|clf|auto] <path>" }
+    fn usage(&self) -> &'static str { "eatime [--json] [--bucket hour|weekday|series] [--format iso|clf|syslog|auto] <path>" }
     fn output_safety(&self) -> OutputSafety { OutputSafety::UntrustedQuoted }
 
     fn run(&self, args: &str) -> RuneResult {
@@ -100,8 +100,9 @@ fn parse_args(args: &str) -> Result<(String, bool, Bucket, Option<Format>), (Str
                 Some("auto")               => format = None,
                 Some("iso") | Some("iso8601") => format = Some(Format::Iso),
                 Some("clf")                => format = Some(Format::Clf),
+                Some("syslog")             => format = Some(Format::Syslog),
                 Some(other) => return Err((
-                    format!("unknown --format: {other} (expected iso|clf|auto)"),
+                    format!("unknown --format: {other} (expected iso|clf|syslog|auto)"),
                     json_mode,
                 )),
                 None => return Err((
@@ -114,7 +115,7 @@ fn parse_args(args: &str) -> Result<(String, bool, Bucket, Option<Format>), (Str
     }
     if path_tokens.is_empty() {
         return Err((
-            "usage: eatime [--json] [--bucket hour|weekday|series] [--format iso|clf|auto] <path>".to_string(),
+            "usage: eatime [--json] [--bucket hour|weekday|series] [--format iso|clf|syslog|auto] <path>".to_string(),
             json_mode,
         ));
     }
@@ -123,7 +124,7 @@ fn parse_args(args: &str) -> Result<(String, bool, Bucket, Option<Format>), (Str
 
 fn execute(path: &str, bucket: Bucket, format: Option<Format>) -> RuneOutput {
     if path.is_empty() {
-        return error_output("usage: eatime [--json] [--bucket hour|weekday|series] [--format iso|clf|auto] <path>");
+        return error_output("usage: eatime [--json] [--bucket hour|weekday|series] [--format iso|clf|syslog|auto] <path>");
     }
     let home = crate::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
     let resolved = match resolve_path(path, &home) {

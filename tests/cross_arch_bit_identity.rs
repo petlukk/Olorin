@@ -205,6 +205,16 @@ fn parity_eatime_space_iso() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// Classic BSD syslog (`MMM DD HH:MM:SS`, incl. the space-padded `Jun  4`) —
+/// exercises the syslog_scan kernel's 4-anchor filter (space@3/6, colon@9/12)
+/// on both arches. Month-name decode + the fixed reference year must agree.
+#[test]
+fn parity_eatime_syslog() {
+    let path = stage_fixture("parity_times_syslog.log");
+    run_case("eatime_syslog_parity", &format!("eatime --json {path}"));
+    let _ = std::fs::remove_file(&path);
+}
+
 /// eacorrelate is multi-input: a 2h ISO log with planted ERROR bursts
 /// 120s after each deploy in the CSV. Exercises the corr_sweep kernel,
 /// the shared-grid bucketing, AND the additive `correlations[]` block —

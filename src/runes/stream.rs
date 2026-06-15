@@ -7,7 +7,7 @@
 //! orchestration. `eatime` remains the single-file consumer; bucketing
 //! and formatting stay rune-local.
 
-use super::timekey::{clf_bytes_to_seconds, iso_bytes_to_seconds};
+use super::timekey::{clf_bytes_to_seconds, iso_bytes_to_seconds, syslog_bytes_to_seconds};
 use crate::kernels::ffi;
 use std::time::Instant;
 
@@ -17,14 +17,19 @@ use std::time::Instant;
 /// past that, the rune reports the cap was hit.
 pub const MAX_POSITIONS: usize = 16_000_000;
 
-/// Timestamp grammar. `Iso` = `YYYY-MM-DDTHH:MM:SS` (timestamp_scan kernel);
-/// `Clf` = `[dd/MMM/yyyy:hh:mm:ss` Common Log Format (clf_scan kernel).
+/// Timestamp grammar. `Iso` = `YYYY-MM-DD[T| ]HH:MM:SS` (timestamp_scan);
+/// `Clf` = `[dd/MMM/yyyy:hh:mm:ss` Common Log Format (clf_scan); `Syslog` =
+/// classic BSD `MMM DD HH:MM:SS` (syslog_scan, yearless — fixed reference year).
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Format { Iso, Clf }
+pub enum Format { Iso, Clf, Syslog }
 
 impl Format {
     pub fn tag(self) -> &'static str {
-        match self { Format::Iso => "iso8601", Format::Clf => "clf" }
+        match self {
+            Format::Iso    => "iso8601",
+            Format::Clf    => "clf",
+            Format::Syslog => "syslog",
+        }
     }
 }
 
@@ -43,8 +48,9 @@ pub fn scan_for(bytes: &[u8], format: Format, max_positions: usize) -> ScanResul
         return ScanResult { positions: Vec::new(), scan_us: 0 };
     }
     let kernel: ScanFn = match format {
-        Format::Iso => ffi::timestamp_scan,
-        Format::Clf => ffi::clf_scan,
+        Format::Iso    => ffi::timestamp_scan,
+        Format::Clf    => ffi::clf_scan,
+        Format::Syslog => ffi::syslog_scan,
     };
     let t_scan = Instant::now();
     let mut positions = vec![0i32; max_positions];
@@ -70,7 +76,13 @@ pub fn detect_format(bytes: &[u8]) -> Format {
     let head = &bytes[..bytes.len().min(SNIFF_BYTES)];
     let iso = scan_for(head, Format::Iso, SNIFF_CAP).positions.len();
     let clf = scan_for(head, Format::Clf, SNIFF_CAP).positions.len();
-    if clf > iso { Format::Clf } else { Format::Iso }
+    let sys = scan_for(head, Format::Syslog, SNIFF_CAP).positions.len();
+    // Pick the grammar that matches most. ISO wins ties (the most common), then
+    // CLF over syslog — a real CLF/ISO line never matches the syslog grammar,
+    // so syslog only wins on genuine `MMM DD HH:MM:SS` logs.
+    if sys > iso && sys > clf { Format::Syslog }
+    else if clf > iso { Format::Clf }
+    else { Format::Iso }
 }
 
 /// Decode each kernel position to epoch-seconds with the format's decoder;
@@ -81,8 +93,9 @@ pub fn positions_to_epochs(bytes: &[u8], positions: &[i32], format: Format) -> V
         let p = pos as usize;
         if p >= bytes.len() { continue; }
         let decoded = match format {
-            Format::Iso => iso_bytes_to_seconds(&bytes[p..]),
-            Format::Clf => clf_bytes_to_seconds(&bytes[p..]),
+            Format::Iso    => iso_bytes_to_seconds(&bytes[p..]),
+            Format::Clf    => clf_bytes_to_seconds(&bytes[p..]),
+            Format::Syslog => syslog_bytes_to_seconds(&bytes[p..]),
         };
         if let Some(secs) = decoded { epochs.push(secs); }
     }

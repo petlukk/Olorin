@@ -96,6 +96,35 @@ pub fn clf_bytes_to_seconds(b: &[u8]) -> Option<i64> {
     Some(days * 86400 + hour * 3600 + minute * 60 + second)
 }
 
+/// Fixed reference year for yearless classic-syslog timestamps. Bucketing and
+/// lag use only differences, so the absolute year is immaterial; a leap year is
+/// chosen so `Feb 29` parses. Consequences (documented): the displayed year and
+/// the weekday are placeholders, and two syslog files from *different real
+/// years* may falsely overlap — the inherent yearless ambiguity.
+const SYSLOG_YEAR: i64 = 2024;
+
+/// Parse classic BSD syslog `MMM DD HH:MM:SS` (`Jun 14 15:16:01`, or the
+/// space-padded `Jun  4 02:13:01`) to seconds since 2000, assigning
+/// `SYSLOG_YEAR`. Returns `None` on any field failure.
+pub fn syslog_bytes_to_seconds(b: &[u8]) -> Option<i64> {
+    if b.len() < 15 { return None; }
+    let month: i64 = month_from_name(&b[0..3])? as i64;
+    if b[3] != b' ' { return None; }
+    // Day tens digit may be space-padded (`Jun  4`).
+    let tens = if b[4] == b' ' { 0 } else if b[4].is_ascii_digit() { (b[4] - b'0') as i64 } else { return None; };
+    let ones = if b[5].is_ascii_digit() { (b[5] - b'0') as i64 } else { return None; };
+    let day  = tens * 10 + ones;
+    if b[6] != b' ' { return None; }
+    let hour:   i64 = parse_uint(&b[7..9])?  as i64;
+    if b[9] != b':' { return None; }
+    let minute: i64 = parse_uint(&b[10..12])? as i64;
+    if b[12] != b':' { return None; }
+    let second: i64 = parse_uint(&b[13..15])? as i64;
+    if day < 1 || day > 31 || hour > 23 || minute > 59 || second > 60 { return None; }
+    let days = days_since_2000(SYSLOG_YEAR, month, day);
+    Some(days * 86400 + hour * 3600 + minute * 60 + second)
+}
+
 /// Three-letter English month abbreviation → 1..12, case-insensitive.
 /// Folds each byte with `| 0x20` (the same letter-fold idiom as
 /// `log_level_scan`) so `Oct`/`OCT`/`oct` all match. `None` if not a month.

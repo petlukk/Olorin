@@ -1,0 +1,7 @@
+Jun 14 06:00:00 combo sshd[1]: session opened
+Jun 14 06:15:00 combo sshd[2]: auth failure
+Jun 14 06:45:30 combo kernel: cache warm
+Jun 14 07:00:00 combo cron[9]: job start
+Jun  4 07:30:00 combo cron[9]: job done
+Jun 14 12:00:00 combo systemd[1]: midday
+Dec 25 23:00:00 combo cron[9]: shutdown
