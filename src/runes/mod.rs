@@ -8,6 +8,7 @@ use crate::core::safety;
 
 pub mod common;
 pub mod correlation;
+pub mod incident;
 pub mod filter;
 pub mod grouping;
 pub mod output;

@@ -219,6 +219,60 @@ fn arg_errors_fail_closed() {
     assert!(!missing.success, "missing files must fail");
 }
 
+/// Emit `counts[i]` ISO events into 6h bucket `i` (day 1 + i/4, hour (i%4)*6),
+/// at distinct seconds so they land in the same bucket.
+fn emit_buckets(counts: &[u32]) -> Vec<u8> {
+    let mut s = String::new();
+    for (i, &c) in counts.iter().enumerate() {
+        let day = 1 + (i / 4) as i64;
+        let hour = ((i % 4) * 6) as i64;
+        for k in 0..c {
+            writeln!(s, "{} INFO event", stamp_day(day, hour * 3600 + k as i64)).unwrap();
+        }
+    }
+    s.into_bytes()
+}
+
+#[test]
+fn long_span_excludes_boundary_lag_artifact() {
+    olorin::kernels::ffi::init().unwrap();
+    // The NASA real-data bug (found 2026-06-15): a 28-day traffic/errors split
+    // scored errors "following" traffic by +654h, r=1.00, on a 4-bucket overlap
+    // — a near-boundary lag where Pearson hits 1.00 trivially. Reproduce the
+    // shape: a dense stream whose TAIL ramps and a sparse stream whose HEAD
+    // ramps, so the max-lag overlap (A-tail vs B-head) is a perfect 4-point
+    // correlation. The span/4 lag cap + the overlap-window floor must exclude
+    // it; no finding may claim a lag beyond a quarter of the span.
+    let span = 28 * 86400i64;
+    let mut a = vec![3u32; 112];        // dense, mild variation below
+    for (i, c) in a.iter_mut().enumerate() { *c = 3 + (i as u32 % 3); }
+    a[108..112].copy_from_slice(&[1, 2, 3, 4]); // ramp tail
+    let mut b = vec![0u32; 112];        // sparse
+    b[0..4].copy_from_slice(&[1, 2, 3, 4]);     // ramp head — aligns with A-tail at max lag
+    b[40] = 3; b[64] = 2; b[88] = 3;            // scatter: keep it active, non-flat
+
+    let pa = write_tmp("olorin_corr_boundary_a.log", &emit_buckets(&a));
+    let pb = write_tmp("olorin_corr_boundary_b.log", &emit_buckets(&b));
+    let result = run_rune("eacorrelate", &format!("--json {pa} {pb}")).unwrap();
+    assert!(result.success, "rune failed: {}", result.answer);
+    let out = parse_answer(&result.answer);
+
+    for c in &out.correlations {
+        assert!(c.lag_seconds.abs() <= span / 4 + c.width_seconds,
+            "boundary-lag artifact survived: lag {} on {}s span: {:?}", c.lag_seconds, span, c);
+        assert!(!(c.score >= 0.999 && c.lag_seconds.abs() > span / 8),
+            "degenerate r~1.00 at a large lag: {:?}", c);
+    }
+    if let Some(inc) = &out.incident {
+        for s in &inc.steps {
+            assert!(s.lag_seconds <= span / 4 + 21600, "absurd incident cascade lag: {:?}", s);
+        }
+    }
+
+    let _ = std::fs::remove_file(&pa);
+    let _ = std::fs::remove_file(&pb);
+}
+
 #[test]
 fn correlations_block_round_trips_and_rounds_score() {
     olorin::kernels::ffi::init().unwrap();
