@@ -1,0 +1,7 @@
+2026-05-11 06:00:00.100 startup
+2026-05-11 06:15:00 first request
+2026-05-11 06:45:30.5 cache warm
+2026-05-11 07:00:00 request handled
+2026-05-11 07:30:00.999 request handled
+2026-05-11 12:00:00 midday batch
+2026-05-11 23:00:00 shutdown
