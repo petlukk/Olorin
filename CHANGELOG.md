@@ -8,6 +8,20 @@ order.
 
 ## [Unreleased]
 
+## [3.7.0] — 2026-06-16
+
+### Added
+
+- **`eacorrelate` reads pino / bunyan numeric severity levels.** JSON logs that
+  encode severity as a number (`"level":50`) rather than a word now get their
+  errors separated into the `(errors)` sub-stream, like string-level logs
+  (`"level":"error"`, zap / zerolog) already did. A new SIMD kernel
+  (`json_level_scan`) matches `level` values ≥ 50 — pino's error (50) and fatal
+  (60), plus any custom level ≥ 100 — while leaving warn (40) and below in the
+  baseline, matching the ERROR/FATAL semantics of the keyword sub-stream. So a
+  deploy→error cascade in a pino feed is now visible to the incident timeline.
+  No new compiler intrinsics; verified x86 ≡ Pi NEON bit-identical.
+
 ## [3.6.0] — 2026-06-16
 
 ### Added
