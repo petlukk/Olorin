@@ -425,11 +425,11 @@ surprises.
 
 | Metric | Value |
 |---|---|
-| Rust source | 25,845 lines (130 files) |
-| Ea kernel source | 14,717 lines (74 files, 51 logical kernels) |
-| Tests | 18,767 lines (124 files, 680 tests) |
+| Rust source | 30,019 lines (144 files) |
+| Ea kernel source | 16,103 lines (83 files, 60 logical kernels) |
+| Tests | 23,809 lines (155 files, 830 tests) |
 | Runtime dependencies | 2 (libc, libloading) |
-| Release binary | 2.0 MB on x86_64 / 4.4 MB on ARM (all kernels embedded) |
+| Release binary | 2.4 MB on x86_64 / 4.4 MB on ARM (all kernels embedded) |
 | Max file size | 500 lines for Rust + tests (no exceptions); 2 Ea kernels exceed it |
 
 ## License
