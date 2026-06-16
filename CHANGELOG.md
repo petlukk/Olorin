@@ -8,6 +8,22 @@ order.
 
 ## [Unreleased]
 
+## [3.5.0] — 2026-06-16
+
+### Added
+
+- **`eacorrelate` / `eatime` read structured JSON logs.** ndjson is auto-detected
+  and flows through the correlation and incident timeline like any text log. JSON
+  with an **ISO-string** timestamp (`"ts":"2026-..."` — winston, zerolog,
+  structlog, bunyan, serilog) already worked, since the ISO kernel matches the
+  string inside the value. New this release: **numeric Unix-epoch** timestamps
+  (`"ts":1749600000`, `"time":1749600000000` — Go zap, pino), via a SIMD kernel
+  `json_epoch_scan.ea` that anchors a timestamp key (`time`/`ts`/`timestamp`/
+  `@timestamp`) followed by digits; the unit (s/ms/µs) is inferred from
+  magnitude, so a zap-seconds log and a pino-millis log correlate correctly.
+  String log levels (`"level":"error"`) form the error sub-stream as usual.
+  Numeric levels (pino `"level":50`) are not yet recognized.
+
 ## [3.4.0] — 2026-06-15
 
 ### Added
