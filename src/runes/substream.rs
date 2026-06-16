@@ -9,8 +9,8 @@
 //! line above it — and decodes that to an epoch.
 
 use super::timekey::{
-    apache_error_bytes_to_seconds, clf_bytes_to_seconds, iso_bytes_to_seconds,
-    json_epoch_bytes_to_seconds, syslog_bytes_to_seconds,
+    apache_error_bytes_to_seconds, clf_bytes_to_seconds, hdfs_bytes_to_seconds,
+    iso_bytes_to_seconds, json_epoch_bytes_to_seconds, syslog_bytes_to_seconds,
 };
 use crate::kernels::ffi;
 
@@ -33,6 +33,13 @@ pub fn syslog_errors(bytes: &[u8], ts_positions: &[i32]) -> Vec<i64> {
 /// keyword scan matches the word inside it — no Apache-specific scan needed.
 pub fn apache_errors(bytes: &[u8], ts_positions: &[i32]) -> Vec<i64> {
     keyword_errors(bytes, ts_positions, apache_error_bytes_to_seconds)
+}
+
+/// ERROR/FATAL keyword events for an HDFS / Hadoop log (`YYMMDD HHMMSS LEVEL`),
+/// mapped to each line's epoch. The level is a bare word field, so the keyword
+/// scan matches it directly.
+pub fn hdfs_errors(bytes: &[u8], ts_positions: &[i32]) -> Vec<i64> {
+    keyword_errors(bytes, ts_positions, hdfs_bytes_to_seconds)
 }
 
 /// Error events for a JSON/ndjson log, mapped to each line's numeric-epoch

@@ -155,6 +155,7 @@ pub fn correlate_files(files: &[(String, String)]) -> RuneOutput {
                 Format::JsonEpoch => substream::json_errors(&bytes, &scan.positions),
                 Format::Syslog => substream::syslog_errors(&bytes, &scan.positions),
                 Format::Apache => substream::apache_errors(&bytes, &scan.positions),
+                Format::Hdfs => substream::hdfs_errors(&bytes, &scan.positions),
             };
             streams.push(EventStream { name: display.clone(), file_idx: idx, epochs });
             if errors.len() >= MIN_EVENTS {

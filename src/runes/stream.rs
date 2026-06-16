@@ -8,8 +8,8 @@
 //! and formatting stay rune-local.
 
 use super::timekey::{
-    apache_error_bytes_to_seconds, clf_bytes_to_seconds, iso_bytes_to_seconds,
-    json_epoch_bytes_to_seconds, syslog_bytes_to_seconds,
+    apache_error_bytes_to_seconds, clf_bytes_to_seconds, hdfs_bytes_to_seconds,
+    iso_bytes_to_seconds, json_epoch_bytes_to_seconds, syslog_bytes_to_seconds,
 };
 use crate::kernels::ffi;
 use std::time::Instant;
@@ -26,8 +26,9 @@ pub const MAX_POSITIONS: usize = 16_000_000;
 /// `JsonEpoch` = a numeric Unix epoch under a JSON timestamp key
 /// (`"ts":1749600000`, json_epoch_scan) — ISO-string JSON timestamps are `Iso`.
 /// `Apache` = Apache error log `[Www Mmm DD HH:MM:SS YYYY]` (apache_error_scan).
+/// `Hdfs` = Hadoop/HDFS `YYMMDD HHMMSS` (hdfs_scan).
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Format { Iso, Clf, Syslog, JsonEpoch, Apache }
+pub enum Format { Iso, Clf, Syslog, JsonEpoch, Apache, Hdfs }
 
 impl Format {
     pub fn tag(self) -> &'static str {
@@ -37,6 +38,7 @@ impl Format {
             Format::Syslog    => "syslog",
             Format::JsonEpoch => "json-epoch",
             Format::Apache    => "apache-error",
+            Format::Hdfs      => "hdfs",
         }
     }
 }
@@ -61,6 +63,7 @@ pub fn scan_for(bytes: &[u8], format: Format, max_positions: usize) -> ScanResul
         Format::Syslog    => ffi::syslog_scan,
         Format::JsonEpoch => ffi::json_epoch_scan,
         Format::Apache    => ffi::apache_error_scan,
+        Format::Hdfs      => ffi::hdfs_scan,
     };
     let t_scan = Instant::now();
     let mut positions = vec![0i32; max_positions];
@@ -82,8 +85,8 @@ pub fn scan_for(bytes: &[u8], format: Format, max_positions: usize) -> ScanResul
 /// default), then the bracket/line-start text grammars, then JSON-epoch last
 /// (its `"ts":<digit>` anchor never fires on ISO-string JSON). The grammars are
 /// mutually disjoint on real lines, so ties only arise on sparse/noise input.
-const SNIFF_ORDER: [Format; 5] =
-    [Format::Iso, Format::Clf, Format::Syslog, Format::Apache, Format::JsonEpoch];
+const SNIFF_ORDER: [Format; 6] =
+    [Format::Iso, Format::Clf, Format::Syslog, Format::Apache, Format::Hdfs, Format::JsonEpoch];
 
 /// Sniff the timestamp grammar by running every kernel over a head sample and
 /// picking whichever matches most. Using the kernels themselves means the sniff
@@ -119,6 +122,7 @@ pub fn positions_to_epochs(bytes: &[u8], positions: &[i32], format: Format) -> V
             Format::Syslog    => syslog_bytes_to_seconds(&bytes[p..]),
             Format::JsonEpoch => json_epoch_bytes_to_seconds(&bytes[p..]),
             Format::Apache    => apache_error_bytes_to_seconds(&bytes[p..]),
+            Format::Hdfs      => hdfs_bytes_to_seconds(&bytes[p..]),
         };
         if let Some(secs) = decoded { epochs.push(secs); }
     }

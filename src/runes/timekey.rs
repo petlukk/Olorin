@@ -160,6 +160,25 @@ pub fn apache_error_bytes_to_seconds(b: &[u8]) -> Option<i64> {
     Some(days * 86400 + hour * 3600 + minute * 60 + second)
 }
 
+/// Parse an HDFS / Hadoop timestamp `YYMMDD HHMMSS` (`081109 203615`) to seconds
+/// since 2000. The 2-digit year is read as 20YY (HDFS/Hadoop logs are post-2000);
+/// like syslog this carries a century ambiguity, immaterial to bucketing/lag
+/// which use only differences. Returns `None` on any field failure.
+pub fn hdfs_bytes_to_seconds(b: &[u8]) -> Option<i64> {
+    if b.len() < 13 { return None; }
+    let year:   i64 = 2000 + parse_uint(&b[0..2])? as i64;
+    let month:  i64 = parse_uint(&b[2..4])? as i64;
+    let day:    i64 = parse_uint(&b[4..6])? as i64;
+    if b[6] != b' ' { return None; }
+    let hour:   i64 = parse_uint(&b[7..9])?   as i64;
+    let minute: i64 = parse_uint(&b[9..11])?  as i64;
+    let second: i64 = parse_uint(&b[11..13])? as i64;
+    if month < 1 || month > 12 || day < 1 || day > 31 { return None; }
+    if hour > 23 || minute > 59 || second > 60 { return None; }
+    let days = days_since_2000(year, month, day);
+    Some(days * 86400 + hour * 3600 + minute * 60 + second)
+}
+
 /// Seconds from 1970-01-01 to 2000-01-01 (10957 days). JSON epochs are
 /// Unix-based; this module's internal clock is 2000-based, so we rebase.
 const UNIX_TO_2000_SECS: i64 = 10957 * 86400;
