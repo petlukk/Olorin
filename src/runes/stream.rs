@@ -71,25 +71,32 @@ pub fn scan_for(bytes: &[u8], format: Format, max_positions: usize) -> ScanResul
     ScanResult { positions, scan_us: t_scan.elapsed().as_micros() as u64 }
 }
 
-/// Sniff the timestamp grammar by running both kernels over a head sample
-/// and picking whichever matches more. Using the kernels themselves means
-/// the sniff can never disagree with the scan that follows.
+/// Every grammar `detect_format` sniffs, in tie-break priority order: the
+/// earliest entry wins when counts tie. ISO leads (the safe, most-common
+/// default), then the bracket/line-start text grammars, then JSON-epoch last
+/// (its `"ts":<digit>` anchor never fires on ISO-string JSON). The grammars are
+/// mutually disjoint on real lines, so ties only arise on sparse/noise input.
+const SNIFF_ORDER: [Format; 4] = [Format::Iso, Format::Clf, Format::Syslog, Format::JsonEpoch];
+
+/// Sniff the timestamp grammar by running every kernel over a head sample and
+/// picking whichever matches most. Using the kernels themselves means the sniff
+/// can never disagree with the scan that follows. Ties resolve to the
+/// earlier-listed grammar (a fold that replaces only on a strictly greater
+/// count), so ISO stays the default.
 pub fn detect_format(bytes: &[u8]) -> Format {
     const SNIFF_BYTES: usize = 64 * 1024;
     const SNIFF_CAP: usize = 4096;
     let head = &bytes[..bytes.len().min(SNIFF_BYTES)];
-    let iso = scan_for(head, Format::Iso, SNIFF_CAP).positions.len();
-    let clf = scan_for(head, Format::Clf, SNIFF_CAP).positions.len();
-    let sys = scan_for(head, Format::Syslog, SNIFF_CAP).positions.len();
-    let json = scan_for(head, Format::JsonEpoch, SNIFF_CAP).positions.len();
-    // Pick the grammar that matches most. JSON-epoch wins outright when it leads
-    // (its `"ts":<digit>` anchor never fires on ISO-string JSON, which has no
-    // digit after the colon). Otherwise ISO wins ties (the most common), then
-    // CLF over syslog — a real CLF/ISO line never matches the syslog grammar.
-    if json > iso && json > clf && json > sys { Format::JsonEpoch }
-    else if sys > iso && sys > clf { Format::Syslog }
-    else if clf > iso { Format::Clf }
-    else { Format::Iso }
+    let mut best = SNIFF_ORDER[0];
+    let mut best_n = scan_for(head, best, SNIFF_CAP).positions.len();
+    for &fmt in &SNIFF_ORDER[1..] {
+        let n = scan_for(head, fmt, SNIFF_CAP).positions.len();
+        if n > best_n {
+            best = fmt;
+            best_n = n;
+        }
+    }
+    best
 }
 
 /// Decode each kernel position to epoch-seconds with the format's decoder;
