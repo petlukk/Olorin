@@ -1,10 +1,17 @@
 <!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <title>Olorin report — 2 files</title>
-<style>body{font:15px/1.5 -apple-system,'Segoe UI',Roboto,sans-serif;color:#1a2233;margin:0;background:#f4f6f9}main{max-width:760px;margin:0 auto;padding:24px}h1{font-size:21px;margin:0 0 2px}h2{font-size:16px;margin:26px 0 8px}.sub{color:#5a6478;font-size:13px;margin-bottom:18px}.findings{background:#0e2a47;color:#eaf2fb;border-radius:8px;padding:14px 18px;margin:18px 0}.findings h2{margin:0 0 8px;color:#9fc6ef;font-size:13px;text-transform:uppercase;letter-spacing:.08em}.findings p{margin:4px 0;font-size:15px}.findings .score{color:#9fc6ef;font-size:13px}section{background:#fff;border:1px solid #dde3ec;border-radius:8px;padding:14px 18px;margin:14px 0}section h2{margin-top:0}.rune{color:#5a6478;font-weight:400;font-size:13px}table{border-collapse:collapse;font-size:13px;margin:8px 0}td,th{padding:2px 14px 2px 0;text-align:left;vertical-align:top}th{color:#5a6478;font-weight:600}.num{font-variant-numeric:tabular-nums}.anom{color:#a33;font-size:13px;margin:2px 0}svg{display:block;margin:10px 0}footer{color:#5a6478;font-size:12px;margin:22px 0 8px}footer a{color:#2a6dad}</style></head>
+<style>body{font:15px/1.5 -apple-system,'Segoe UI',Roboto,sans-serif;color:#1a2233;margin:0;background:#f4f6f9}main{max-width:760px;margin:0 auto;padding:24px}h1{font-size:21px;margin:0 0 2px}h2{font-size:16px;margin:26px 0 8px}.sub{color:#5a6478;font-size:13px;margin-bottom:18px}.findings{background:#0e2a47;color:#eaf2fb;border-radius:8px;padding:14px 18px;margin:18px 0}.findings h2{margin:0 0 8px;color:#9fc6ef;font-size:13px;text-transform:uppercase;letter-spacing:.08em}.findings p{margin:4px 0;font-size:15px}.findings .score{color:#9fc6ef;font-size:13px}.incident{background:#10243d;color:#eaf2fb;border-radius:8px;padding:16px 18px;margin:18px 0;border-left:4px solid #4a9eff}.incident h2{margin:0 0 6px;color:#9fc6ef;font-size:13px;text-transform:uppercase;letter-spacing:.08em}.incident .conf{margin:0 0 10px;color:#7fa8d0;font-size:12px}.incident .anchor{margin:0 0 8px;font-size:18px}.incident ul{margin:0;padding-left:20px}.incident li{margin:4px 0;font-size:15px}.incident .score{color:#9fc6ef;font-size:13px}section{background:#fff;border:1px solid #dde3ec;border-radius:8px;padding:14px 18px;margin:14px 0}section h2{margin-top:0}.rune{color:#5a6478;font-weight:400;font-size:13px}table{border-collapse:collapse;font-size:13px;margin:8px 0}td,th{padding:2px 14px 2px 0;text-align:left;vertical-align:top}th{color:#5a6478;font-weight:600}.num{font-variant-numeric:tabular-nums}.anom{color:#a33;font-size:13px;margin:2px 0}svg{display:block;margin:10px 0}footer{color:#5a6478;font-size:12px;margin:22px 0 8px}footer a{color:#2a6dad}</style></head>
 <body><main>
 <h1>Olorin report — 2 files</h1>
 <div class="sub">deterministic SIMD analysis of syslog.log, deploys.csv</div>
+<div class="incident"><h2>Incident timeline</h2>
+<p class="conf">confidence 0.94</p>
+<p class="anchor"><strong>Deployment</strong> at 02:20</p>
+<ul>
+<li><strong>syslog.log (errors)</strong> rises 4 minutes later <span class="score">(r=0.94)</span></li>
+</ul>
+</div>
 <div class="findings"><h2>Cross-file correlations</h2>
 <p><strong>syslog.log (errors)</strong> follows <strong>deploys.csv</strong> by +240&thinsp;s <span class="score">(r=0.94, peak 2026-06-11T02:24:00, resolution 30&thinsp;s)</span></p>
 </div>
