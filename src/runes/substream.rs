@@ -28,10 +28,38 @@ pub fn syslog_errors(bytes: &[u8], ts_positions: &[i32]) -> Vec<i64> {
     keyword_errors(bytes, ts_positions, syslog_bytes_to_seconds)
 }
 
-/// ERROR/FATAL keyword events for a JSON/ndjson log with string levels
-/// (`"level":"error"`), mapped to each line's numeric-epoch timestamp.
+/// Error events for a JSON/ndjson log, mapped to each line's numeric-epoch
+/// timestamp. Covers both severity conventions: string levels
+/// (`"level":"error"`, zap/zerolog) via the ERROR/FATAL keyword scan, and
+/// numeric levels (`"level":50`, pino/bunyan) via `json_level_scan`. A line
+/// uses one convention or the other, so the two position sets are disjoint;
+/// their epochs are unioned (bucketing is a histogram — order-independent).
 pub fn json_errors(bytes: &[u8], ts_positions: &[i32]) -> Vec<i64> {
-    keyword_errors(bytes, ts_positions, json_epoch_bytes_to_seconds)
+    let mut epochs = keyword_errors(bytes, ts_positions, json_epoch_bytes_to_seconds);
+    epochs.extend(numeric_level_errors(bytes, ts_positions));
+    epochs
+}
+
+/// Numeric error-or-worse level events (`"level":50`/`60`, pino/bunyan) via
+/// `json_level_scan`, mapped to line epochs. The kernel emits only level-digit
+/// offsets whose value is >= 50, so this is the numeric twin of the keyword
+/// ERROR/FATAL sub-stream.
+fn numeric_level_errors(bytes: &[u8], ts_positions: &[i32]) -> Vec<i64> {
+    if ts_positions.is_empty() {
+        return Vec::new();
+    }
+    let mut positions = vec![0i32; MAX_ERROR_POSITIONS];
+    let mut n_positions = 0i32;
+    let mut scratch = [0u8; 16];
+    unsafe {
+        ffi::json_level_scan(
+            bytes.as_ptr(), bytes.len() as i32,
+            positions.as_mut_ptr(), MAX_ERROR_POSITIONS as i32, &mut n_positions,
+            scratch.as_mut_ptr(),
+        );
+    }
+    positions.truncate(n_positions as usize);
+    map_to_epochs(bytes, ts_positions, &positions, json_epoch_bytes_to_seconds)
 }
 
 /// ERROR/FATAL keyword sub-stream via `log_level_scan`, mapped to line epochs

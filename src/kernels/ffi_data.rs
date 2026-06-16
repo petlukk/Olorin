@@ -225,6 +225,26 @@ pub unsafe fn json_epoch_scan(
     );
 }
 
+/// Scan a JSON / ndjson log for numeric error-or-worse severity levels under a
+/// `"level"` key (pino / bunyan `"level":50`) and emit the byte offset of the
+/// first level digit. Used by `eacorrelate` to build the JSON error sub-stream
+/// for logs with numeric levels; string levels (`"level":"error"`, zap /
+/// zerolog) are caught by [`log_level_scan`]'s keyword match instead.
+///
+/// # Safety
+/// Same as [`clf_scan`].
+pub unsafe fn json_level_scan(
+    text: *const u8, len: i32,
+    out_positions: *mut i32, max_positions: i32, out_n_positions: *mut i32,
+    scratch: *mut u8,
+) {
+    (k().json_level_scan)(
+        text, len,
+        out_positions, max_positions, out_n_positions,
+        scratch,
+    );
+}
+
 /// Classic BSD syslog `MMM DD HH:MM:SS` position scan. Identical contract to
 /// [`timestamp_scan`]. The decoder assigns a fixed reference year (syslog is
 /// yearless).
