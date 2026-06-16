@@ -101,6 +101,7 @@ fn parse_args(args: &str) -> Result<(String, bool, Bucket, Option<Format>), (Str
                 Some("iso") | Some("iso8601") => format = Some(Format::Iso),
                 Some("clf")                => format = Some(Format::Clf),
                 Some("syslog")             => format = Some(Format::Syslog),
+                Some("json") | Some("json-epoch") => format = Some(Format::JsonEpoch),
                 Some(other) => return Err((
                     format!("unknown --format: {other} (expected iso|clf|syslog|auto)"),
                     json_mode,

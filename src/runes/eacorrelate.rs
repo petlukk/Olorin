@@ -152,6 +152,7 @@ pub fn correlate_files(files: &[(String, String)]) -> RuneOutput {
             let errors = match format {
                 Format::Iso => substream::iso_errors(&bytes, &scan.positions),
                 Format::Clf => substream::clf_errors(&bytes, &scan.positions),
+                Format::JsonEpoch => substream::json_errors(&bytes, &scan.positions),
                 Format::Syslog => Vec::new(),
             };
             streams.push(EventStream { name: display.clone(), file_idx: idx, epochs });

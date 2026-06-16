@@ -125,6 +125,36 @@ pub fn syslog_bytes_to_seconds(b: &[u8]) -> Option<i64> {
     Some(days * 86400 + hour * 3600 + minute * 60 + second)
 }
 
+/// Seconds from 1970-01-01 to 2000-01-01 (10957 days). JSON epochs are
+/// Unix-based; this module's internal clock is 2000-based, so we rebase.
+const UNIX_TO_2000_SECS: i64 = 10957 * 86400;
+
+/// Decode a JSON numeric epoch (the `json_epoch_scan` kernel emits the
+/// first-digit offset) to seconds since 2000. The unit is inferred from
+/// magnitude — ~10 digits = seconds, 13 = milliseconds, 16 = microseconds,
+/// 19 = nanoseconds — covering Go zap (`"ts":<s>` / float) and pino
+/// (`"time":<ms>`). A fractional part (zap's float seconds) truncates at the
+/// first non-digit. `None` if no digits or the value overflows.
+pub fn json_epoch_bytes_to_seconds(b: &[u8]) -> Option<i64> {
+    let mut val: i64 = 0;
+    let mut n = 0usize;
+    for &c in b {
+        if c.is_ascii_digit() {
+            val = val.checked_mul(10)?.checked_add((c - b'0') as i64)?;
+            n += 1;
+            if n >= 19 { break; }
+        } else {
+            break;
+        }
+    }
+    if n == 0 { return None; }
+    let unix_secs = if n <= 11 { val }
+        else if n <= 14 { val / 1_000 }
+        else if n <= 17 { val / 1_000_000 }
+        else { val / 1_000_000_000 };
+    Some(unix_secs - UNIX_TO_2000_SECS)
+}
+
 /// Three-letter English month abbreviation → 1..12, case-insensitive.
 /// Folds each byte with `| 0x20` (the same letter-fold idiom as
 /// `log_level_scan`) so `Oct`/`OCT`/`oct` all match. `None` if not a month.

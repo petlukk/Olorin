@@ -406,11 +406,12 @@ correlations: 1 finding(s)
   syslog (errors) follows deploys.csv by +240s (r=0.93, peak 2026-06-11T03:02:00, bucket 60s)
 ```
 
-Takes 2–8 timestamped files (ISO-8601 or CLF, auto-detected per file) and
-answers "what happened across these?": every file contributes its event
-stream, ISO/syslog logs contribute a second ERROR/FATAL keyword sub-stream and
-CLF access logs an HTTP-**5xx** sub-stream (so an nginx deploy→500s incident is
-visible, not just keyword-logged app errors), all streams are
+Takes 2–8 timestamped files (ISO-8601, CLF, syslog, or **JSON / ndjson**,
+auto-detected per file) and answers "what happened across these?": every file
+contributes its event stream, ISO/syslog/JSON logs contribute a second
+ERROR/FATAL keyword sub-stream and CLF access logs an HTTP-**5xx** sub-stream
+(so an nginx deploy→500s incident is visible, not just keyword-logged app
+errors), all streams are
 bucketed onto **one** shared time grid (512 target buckets — finer than
 eatime's 120 because lag resolution *is* bucket width), z-scored, and every
 cross-file pair is swept over ±128 lags by the `corr_sweep` kernel. A finding

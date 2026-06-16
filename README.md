@@ -114,8 +114,10 @@ anomalies:   2 spike(s) detected
 "Nearly twenty times" is the measured 19.5×; "afternoon of June 11th" is the
 14:08 bucket. eatime auto-detects **ISO-8601** (both `T`- and space-separated —
 Postgres/Python-logging/OpenStack), **classic syslog** (`Jun 14 15:16:01` —
-Linux `/var/log`), and **Apache/nginx CLF** (a SIMD
-kernel each); `--bucket hour|weekday|series` picks the view.
+Linux `/var/log`), **Apache/nginx CLF**, and **JSON / ndjson** (an ISO string,
+or a numeric Unix epoch under `ts`/`time`/`timestamp`/`@timestamp` — Go zap,
+pino — with the s/ms/µs unit inferred from magnitude; a SIMD kernel each);
+`--bucket hour|weekday|series` picks the view.
 
 **Find *why* your service died.** Point `eacorrelate` at several timestamped
 logs — a deploy log, an app log, an nginx access log (its **5xx** read as an
