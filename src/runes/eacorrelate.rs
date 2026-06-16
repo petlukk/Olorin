@@ -153,7 +153,7 @@ pub fn correlate_files(files: &[(String, String)]) -> RuneOutput {
                 Format::Iso => substream::iso_errors(&bytes, &scan.positions),
                 Format::Clf => substream::clf_errors(&bytes, &scan.positions),
                 Format::JsonEpoch => substream::json_errors(&bytes, &scan.positions),
-                Format::Syslog => Vec::new(),
+                Format::Syslog => substream::syslog_errors(&bytes, &scan.positions),
             };
             streams.push(EventStream { name: display.clone(), file_idx: idx, epochs });
             if errors.len() >= MIN_EVENTS {
