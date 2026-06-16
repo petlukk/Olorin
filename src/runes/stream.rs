@@ -82,11 +82,15 @@ pub fn scan_for(bytes: &[u8], format: Format, max_positions: usize) -> ScanResul
 
 /// Every grammar `detect_format` sniffs, in tie-break priority order: the
 /// earliest entry wins when counts tie. ISO leads (the safe, most-common
-/// default), then the bracket/line-start text grammars, then JSON-epoch last
-/// (its `"ts":<digit>` anchor never fires on ISO-string JSON). The grammars are
-/// mutually disjoint on real lines, so ties only arise on sparse/noise input.
+/// default), then CLF. Apache precedes Syslog deliberately: an Apache instant
+/// `[Www Mmm DD HH:MM:SS YYYY]` *contains* a valid syslog substring
+/// (`Mmm DD HH:MM:SS`), so both grammars match Apache lines one-for-one — the
+/// more-specific Apache must win that tie or the log decodes with syslog's
+/// fixed reference year and lands in the wrong era. A real syslog line has no
+/// leading `[`, so Apache never steals it. JSON-epoch is last (its
+/// `"ts":<digit>` anchor never fires on ISO-string JSON).
 const SNIFF_ORDER: [Format; 6] =
-    [Format::Iso, Format::Clf, Format::Syslog, Format::Apache, Format::Hdfs, Format::JsonEpoch];
+    [Format::Iso, Format::Clf, Format::Apache, Format::Syslog, Format::Hdfs, Format::JsonEpoch];
 
 /// Sniff the timestamp grammar by running every kernel over a head sample and
 /// picking whichever matches most. Using the kernels themselves means the sniff

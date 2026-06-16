@@ -82,6 +82,41 @@ fn apache_deploys(deploy_secs: &[i64]) -> Vec<u8> {
     buf.into_bytes()
 }
 
+/// ISO deploys at the SAME real wall-clock as `apache_stamp` (2025-06-16).
+fn iso_deploys_matching(deploy_secs: &[i64]) -> Vec<u8> {
+    let mut buf = String::new();
+    for &d in deploy_secs {
+        writeln!(buf, "2025-06-16T{:02}:{:02}:{:02} INFO deploy v1.1.0",
+            d / 3600, (d % 3600) / 60, d % 60).unwrap();
+    }
+    buf.into_bytes()
+}
+
+#[test]
+fn apache_shares_real_era_with_iso_not_misdetected_as_syslog() {
+    // Regression: an Apache instant `[Www Mmm DD HH:MM:SS YYYY]` contains a valid
+    // syslog substring `Mmm DD HH:MM:SS`, so syslog_scan also matches Apache
+    // lines. If Apache loses that detection tie it decodes with syslog's fixed
+    // reference YEAR and lands in a disjoint era — so it must still correlate
+    // with a real-dated ISO trigger at the SAME wall-clock. (An Apache-vs-Apache
+    // test can't catch this: both files misdetect identically and still align.)
+    olorin::kernels::ffi::init().unwrap();
+    let deploys = [2 * 3600, 4 * 3600, 6 * 3600];
+    let log = write_tmp("olorin_apache_era.log", &apache_app(&deploys, 240));
+    let dep = write_tmp("olorin_apache_era_iso_deploys.log", &iso_deploys_matching(&deploys));
+
+    let result = run_rune("eacorrelate", &format!("--json {log} {dep}")).unwrap();
+    assert!(result.success, "rune failed: {}", result.answer);
+    let out = parse_answer(&result.answer);
+    let f = out.correlations.iter()
+        .find(|c| c.stream_a == "olorin_apache_era.log (errors)")
+        .unwrap_or_else(|| panic!("Apache decoded to the wrong era (misdetected as syslog?): {}", result.answer));
+    assert_eq!(f.lag_seconds, 240, "wrong lag: {:?}", f);
+
+    let _ = std::fs::remove_file(&log);
+    let _ = std::fs::remove_file(&dep);
+}
+
 #[test]
 fn recovers_planted_apache_error_lag() {
     olorin::kernels::ffi::init().unwrap();
