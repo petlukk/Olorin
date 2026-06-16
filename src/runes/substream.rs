@@ -8,7 +8,10 @@
 //! stack-trace line without its own timestamp attributes to the last stamped
 //! line above it — and decodes that to an epoch.
 
-use super::timekey::{clf_bytes_to_seconds, iso_bytes_to_seconds, json_epoch_bytes_to_seconds};
+use super::timekey::{
+    clf_bytes_to_seconds, iso_bytes_to_seconds, json_epoch_bytes_to_seconds,
+    syslog_bytes_to_seconds,
+};
 use crate::kernels::ffi;
 
 /// Cap on recorded error positions per file (4 MB of i32).
@@ -17,6 +20,12 @@ const MAX_ERROR_POSITIONS: usize = 1_000_000;
 /// ERROR/FATAL keyword events for an ISO/syslog log, mapped to line epochs.
 pub fn iso_errors(bytes: &[u8], ts_positions: &[i32]) -> Vec<i64> {
     keyword_errors(bytes, ts_positions, iso_bytes_to_seconds)
+}
+
+/// ERROR/FATAL keyword events for a classic BSD syslog log (`MMM DD HH:MM:SS`),
+/// mapped to each line's yearless-syslog epoch.
+pub fn syslog_errors(bytes: &[u8], ts_positions: &[i32]) -> Vec<i64> {
+    keyword_errors(bytes, ts_positions, syslog_bytes_to_seconds)
 }
 
 /// ERROR/FATAL keyword events for a JSON/ndjson log with string levels
