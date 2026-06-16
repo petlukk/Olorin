@@ -1,0 +1,155 @@
+// JSON numeric-level error scanner. For ndjson / structured logs whose severity
+// is a NUMBER rather than a word (pino / bunyan `"level":50`), emits the byte
+// offset of the first digit of every error-or-worse level value. String levels
+// (`"level":"error"`, zap / zerolog) are already caught by log_level_scan's
+// keyword match; this is the numeric complement, so eacorrelate's JSON error
+// sub-stream covers both conventions.
+//
+// Severity scheme (pino, bunyan): trace=10 debug=20 info=30 warn=40 error=50
+// fatal=60. The keyword sub-stream surfaces ERROR+FATAL (not WARN), so the
+// numeric match is value >= 50: any 2-digit value whose first digit is >= '5',
+// or any value with 3+ digits (custom levels >= 100). 1-digit values (< 10) and
+// 2-digit values < 50 (warn and below) are skipped.
+//
+// Match: `"level":[space]<digit...>` with value >= 50. SIMD strategy: the same
+// cross-arch `.==`-anchor idiom as json_epoch_scan — per 16-byte chunk, mask the
+// closing-quote + colon pair (`"` at offset 0, `:` at offset 1); the scalar
+// validator confirms the quoted key is `level` and the numeric value is >= 50.
+//
+// out_positions      = byte offsets of the first level digit.
+// out_n_positions[0] = number written (<= max_positions); reset to 0 on entry.
+// scratch (16 bytes) holds the per-chunk filter mask; unspecified after return.
+
+func is_digit_byte(b: i32) -> i32 {
+    if b < 48 { return 0 }
+    if b > 57 { return 0 }
+    return 1
+}
+
+// Is the keylen-byte key at text[start..] exactly "level"?
+func is_level_key(text: *u8, start: i32, keylen: i32) -> i32 {
+    if keylen == 5 {
+        if to_i32(text[start + 0]) != 108 { return 0 }  // l
+        if to_i32(text[start + 1]) != 101 { return 0 }  // e
+        if to_i32(text[start + 2]) != 118 { return 0 }  // v
+        if to_i32(text[start + 3]) != 101 { return 0 }  // e
+        if to_i32(text[start + 4]) != 108 { return 0 }  // l
+        return 1
+    }
+    return 0
+}
+
+func json_level_pos(text: *u8, q: i32, len: i32, positions: *mut i32, max_positions: i32, n_positions: *mut i32) {
+    if max_positions <= 0 { return }
+    if q + 2 > len { return }
+    if to_i32(text[q]) != 34 { return }      // closing quote of the key
+    if to_i32(text[q + 1]) != 58 { return }  // colon
+
+    // First digit after the colon (allow at most one space).
+    let mut d: i32 = q + 2
+    if d < len {
+        if to_i32(text[d]) == 32 { d = d + 1 }
+    }
+    if d >= len { return }
+    if is_digit_byte(to_i32(text[d])) == 0 { return }  // string/object/array value
+
+    // Value >= 50 test. A 1-digit value is < 10 (skip). A 2-digit value matches
+    // iff its first digit is >= '5' (50..99). 3+ digits is >= 100 (match).
+    if d + 1 >= len { return }
+    if is_digit_byte(to_i32(text[d + 1])) == 0 { return }  // single digit < 10
+    if d + 2 < len {
+        if is_digit_byte(to_i32(text[d + 2])) == 1 {
+            // 3+ digits, value >= 100 — match, fall through to record.
+        } else {
+            if to_i32(text[d]) < 53 { return }  // exactly 2 digits, < 50
+        }
+    } else {
+        if to_i32(text[d]) < 53 { return }      // exactly 2 digits, < 50
+    }
+
+    // Opening quote of the key: scan back at most 11 bytes. `i = lo` ends the
+    // loop without a break statement.
+    let lo: i32 = q - 12
+    let mut i: i32 = q - 1
+    let mut open: i32 = 0 - 1
+    while i > lo {
+        if i >= 0 {
+            if to_i32(text[i]) == 34 {
+                open = i
+                i = lo
+            } else {
+                i = i - 1
+            }
+        } else {
+            i = lo
+        }
+    }
+    if open < 0 { return }
+
+    let keylen: i32 = q - open - 1
+    if is_level_key(text, open + 1, keylen) == 0 { return }
+
+    let cur: i32 = n_positions[0]
+    if cur < max_positions {
+        positions[cur] = d
+        n_positions[0] = cur + 1
+    }
+}
+
+export func json_level_scan(text: *u8, len: i32, out_positions: *mut i32, max_positions: i32, out_n_positions: *mut i32, scratch: *mut u8) {
+    out_n_positions[0] = 0
+
+    if len < 32 {
+        let mut p: i32 = 0
+        while p + 2 <= len {
+            json_level_pos(text, p, len, out_positions, max_positions, out_n_positions)
+            p = p + 1
+        }
+        return
+    }
+
+    let v_quote: u8x16 = splat(34)
+    let v_colon: u8x16 = splat(58)
+    let v_zero:  u8x16 = splat(0)
+    let v_one:   u8x16 = splat(1)
+
+    // Scalar prologue: positions [0..16).
+    let mut p: i32 = 0
+    while p < 16 {
+        json_level_pos(text, p, len, out_positions, max_positions, out_n_positions)
+        p = p + 1
+    }
+
+    // SIMD body: deepest load is at i+1 (covering lanes through i+16).
+    let mut i: i32 = 16
+    while i + 17 <= len {
+        let c0: u8x16 = load(text, i + 0)
+        let c1: u8x16 = load(text, i + 1)
+
+        let m0: u8x16 = select(c0 .== v_quote, v_one, v_zero)
+        let m1: u8x16 = select(c1 .== v_colon, v_one, v_zero)
+
+        let cand: u8x16 = m0 .& m1
+        let any:  u8    = reduce_add(cand)
+
+        if to_i32(any) > 0 {
+            store(scratch, 0, cand)
+            let mut k: i32 = 0
+            while k < 16 {
+                if to_i32(scratch[k]) > 0 {
+                    json_level_pos(text, i + k, len, out_positions, max_positions, out_n_positions)
+                }
+                k = k + 1
+            }
+        }
+
+        i = i + 16
+    }
+
+    // Scalar epilogue.
+    p = i
+    while p + 2 <= len {
+        json_level_pos(text, p, len, out_positions, max_positions, out_n_positions)
+        p = p + 1
+    }
+}
