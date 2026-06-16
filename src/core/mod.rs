@@ -1,5 +1,6 @@
 pub mod router;
 mod router_streaming;
+mod router_streaming_analyze;
 mod router_tools;
 mod router_toolcall;
 mod router_config;

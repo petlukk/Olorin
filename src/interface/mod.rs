@@ -3,6 +3,7 @@ pub mod server;
 pub mod server_http;
 pub mod server_auth;
 pub mod server_analyze;
+pub mod server_config;
 pub mod whatsapp;
 pub mod term_stream;
 pub mod ws;

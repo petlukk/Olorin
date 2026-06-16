@@ -248,10 +248,10 @@ fn handle_connection(stream: &mut std::net::TcpStream, ctx: Arc<Mutex<DispatchCo
             serve_json(stream, &body);
         }
         ("POST", "/api/config") => {
-            handle_config_update(stream, req, &buf[..n], n, ctx);
+            crate::interface::server_config::handle_config_update(stream, req, &buf[..n], n, ctx);
         }
         ("POST", "/api/config/apikey") => {
-            handle_config_apikey(stream, req, &buf[..n], n, ctx);
+            crate::interface::server_config::handle_config_apikey(stream, req, &buf[..n], n, ctx);
         }
         _ => {
             let _ = write!(
@@ -466,37 +466,4 @@ fn handle_command(
     let escaped = escape_json(&output);
     let body    = format!("{{\"output\":\"{escaped}\",\"success\":{success}}}");
     serve_json(stream, &body);
-}
-
-// ── Config handlers ──────────────────────────────────────────────────────────
-
-fn handle_config_update(
-    stream: &mut std::net::TcpStream,
-    req: &str,
-    buf: &[u8],
-    n: usize,
-    ctx: Arc<Mutex<DispatchContext>>,
-) {
-    let body_bytes = read_body(stream, req, buf, n);
-    let body_str = std::str::from_utf8(&body_bytes).unwrap_or("");
-    ctx.lock().unwrap_or_else(|e| e.into_inner()).update_config(body_str);
-    let config = ctx.lock().unwrap_or_else(|e| e.into_inner()).get_config();
-    serve_json(stream, &config);
-}
-
-fn handle_config_apikey(
-    stream: &mut std::net::TcpStream,
-    req: &str,
-    buf: &[u8],
-    n: usize,
-    ctx: Arc<Mutex<DispatchContext>>,
-) {
-    let body_bytes = read_body(stream, req, buf, n);
-    let key = std::str::from_utf8(&body_bytes).unwrap_or("").trim();
-    if key.is_empty() {
-        serve_json(stream, r#"{"ok":false,"error":"empty key"}"#);
-        return;
-    }
-    ctx.lock().unwrap_or_else(|e| e.into_inner()).store_api_key(key);
-    serve_json(stream, r#"{"ok":true}"#);
 }
