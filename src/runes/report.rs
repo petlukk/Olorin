@@ -12,6 +12,7 @@
 //! test like every other rune output. Every file-derived string is
 //! HTML-escaped.
 
+use super::incident::{self, Incident};
 use super::output::RuneOutput;
 use super::plot;
 
@@ -31,6 +32,13 @@ h1{font-size:21px;margin:0 0 2px}h2{font-size:16px;margin:26px 0 8px}\
 margin:18px 0}.findings h2{margin:0 0 8px;color:#9fc6ef;font-size:13px;\
 text-transform:uppercase;letter-spacing:.08em}.findings p{margin:4px 0;\
 font-size:15px}.findings .score{color:#9fc6ef;font-size:13px}\
+.incident{background:#10243d;color:#eaf2fb;border-radius:8px;padding:16px 18px;\
+margin:18px 0;border-left:4px solid #4a9eff}.incident h2{margin:0 0 6px;\
+color:#9fc6ef;font-size:13px;text-transform:uppercase;letter-spacing:.08em}\
+.incident .conf{margin:0 0 10px;color:#7fa8d0;font-size:12px}\
+.incident .anchor{margin:0 0 8px;font-size:18px}\
+.incident ul{margin:0;padding-left:20px}.incident li{margin:4px 0;font-size:15px}\
+.incident .score{color:#9fc6ef;font-size:13px}\
 section{background:#fff;border:1px solid #dde3ec;border-radius:8px;\
 padding:14px 18px;margin:14px 0}section h2{margin-top:0}\
 .rune{color:#5a6478;font-weight:400;font-size:13px}\
@@ -68,6 +76,9 @@ pub fn render_report(
     ));
 
     if let Some(corr) = correlation {
+        if let Some(inc) = &corr.incident {
+            h.push_str(&incident_banner(inc));
+        }
         h.push_str(&findings_banner(corr));
     }
     for s in sections {
@@ -85,7 +96,44 @@ pub fn render_report(
     h
 }
 
-/// The conclusion, before the evidence — mirrors the narration ordering.
+/// The assembled incident — the headline "why did my service die" conclusion,
+/// rendered above the raw correlations. Mirrors the terminal/narration ordering.
+/// Stream names are file-derived (untrusted), so every one is escaped.
+fn incident_banner(inc: &Incident) -> String {
+    let mut b = format!(
+        "<div class=\"incident\"><h2>Incident timeline</h2>\n\
+         <p class=\"conf\">confidence {:.2}</p>\n",
+        inc.confidence,
+    );
+    let t = inc.anchor.time.get(11..16).unwrap_or(&inc.anchor.time); // HH:MM
+    b.push_str(&format!(
+        "<p class=\"anchor\"><strong>{}</strong> at {}</p>\n<ul>\n",
+        esc(&incident::anchor_label(&inc.anchor)), esc(t),
+    ));
+    for s in &inc.steps {
+        // A correlated co-spike carries a Pearson r; an anomaly-detected drop
+        // carries an observation confidence — label them honestly.
+        let label = if s.kind == "anomaly" {
+            format!("anomaly {:.2}", s.score)
+        } else {
+            format!("r={:.2}", s.score)
+        };
+        // Zero lag is co-occurrence, not a cascade — say so, don't claim "0s later".
+        let when = if s.lag_seconds == 0 {
+            "at the same time".to_string()
+        } else {
+            format!("{} later", incident::humanize_lag(s.lag_seconds))
+        };
+        b.push_str(&format!(
+            "<li><strong>{}</strong> {} {} <span class=\"score\">({})</span></li>\n",
+            esc(&s.stream), incident::step_verb(s), when, label,
+        ));
+    }
+    b.push_str("</ul>\n</div>\n");
+    b
+}
+
+/// The raw cross-file correlations — the evidence beneath the incident headline.
 fn findings_banner(corr: &RuneOutput) -> String {
     if corr.correlations.is_empty() {
         return String::new();

@@ -319,7 +319,7 @@ fn round4(v: f64) -> f64 {
 /// Human label for the anchor — "Deployment" for a recognizable change source,
 /// otherwise the stream's own name. Wording only; the structured `anchor.stream`
 /// is always the raw name.
-fn anchor_label(anchor: &Anchor) -> String {
+pub fn anchor_label(anchor: &Anchor) -> String {
     let low = anchor.stream.to_lowercase();
     if anchor.kind == "trigger" {
         if low.contains("deploy") { return "Deployment".into(); }
@@ -332,14 +332,14 @@ fn anchor_label(anchor: &Anchor) -> String {
 }
 
 /// "4 minutes" / "12 seconds" / "2 hours" — the largest whole unit.
-fn humanize_lag(secs: i64) -> String {
+pub fn humanize_lag(secs: i64) -> String {
     let s = secs.max(0);
     if s >= 3600 { format!("{} hour{}", s / 3600, if s / 3600 == 1 { "" } else { "s" }) }
     else if s >= 60 { format!("{} minute{}", s / 60, if s / 60 == 1 { "" } else { "s" }) }
     else { format!("{s} second{}", if s == 1 { "" } else { "s" }) }
 }
 
-fn step_verb(step: &Step) -> &'static str {
+pub fn step_verb(step: &Step) -> &'static str {
     if step.direction == "decrease" { "drops" } else { "rises" }
 }
 

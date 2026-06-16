@@ -4,6 +4,7 @@
 //! and a spawn test of the `olorin report` CLI.
 
 use olorin::runes::correlation::Correlation;
+use olorin::runes::incident::{Anchor, Incident, Step};
 use olorin::runes::output::{Anomaly, Category, RuneOutput, Source, Totals};
 use olorin::runes::report::{build_report, render_report, svg_chart, ReportSection};
 use std::path::PathBuf;
@@ -54,6 +55,21 @@ fn fixed_sections() -> (Vec<ReportSection>, RuneOutput) {
         peak_bucket: "2026-06-11T02:24:00".into(),
         events_a: 45, events_b: 3, width_seconds: 30,
     }];
+    corr.incident = Some(Incident {
+        anchor: Anchor {
+            kind: "trigger".into(),
+            stream: "deploys.csv".into(),
+            time: "2026-06-11T02:20:00".into(),
+        },
+        steps: vec![Step {
+            stream: "syslog.log (errors)".into(),
+            lag_seconds: 240,
+            direction: "increase".into(),
+            score: 0.9375,
+            kind: "correlated".into(),
+        }],
+        confidence: 0.9375,
+    });
 
     let sections = vec![
         ReportSection { display: "syslog.log".into(),  rune: "eatime".into(),   output: log },
