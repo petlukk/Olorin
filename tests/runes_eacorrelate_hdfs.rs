@@ -27,8 +27,14 @@ fn hdfs_real_loghub_detects_with_no_error_substream() {
     olorin::kernels::ffi::init().unwrap();
     // Real Loghub sample. Oracle (verified with awk/grep): 2000 timestamped
     // lines, levels only INFO (1920) and WARN (80) — zero ERROR/FATAL, and no
-    // line contains the word "error". So no error sub-stream may form.
+    // line contains the word "error". So no error sub-stream may form. The data
+    // is fetched on demand (gitignored), so skip when absent; the planted test
+    // covers ERROR detection in CI.
     let src = concat!(env!("CARGO_MANIFEST_DIR"), "/benchmarks/robustness/data/HDFS_2k.log");
+    if !std::path::Path::new(src).exists() {
+        eprintln!("skip: {src} not fetched");
+        return;
+    }
     let bytes = std::fs::read(src).expect("read vendored HDFS_2k.log");
     let log = write_tmp("olorin_hdfs_real.log", &bytes);
     let trig = write_tmp("olorin_hdfs_real_trig.log",

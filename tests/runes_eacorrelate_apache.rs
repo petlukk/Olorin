@@ -25,10 +25,16 @@ fn parse_answer(answer: &str) -> RuneOutput {
 #[test]
 fn apache_error_substream_matches_loghub_oracle() {
     olorin::kernels::ffi::init().unwrap();
-    // Real Loghub sample vendored in the repo. Independent oracle (verified with
-    // `grep`): 2000 timestamped lines, of which 595 are `[error]` severity (the
-    // other 1405 are `[notice]`; no `[notice]` line contains the word "error").
+    // Real Loghub sample. Independent oracle (verified with `grep`): 2000
+    // timestamped lines, of which 595 are `[error]` severity (the other 1405 are
+    // `[notice]`; no `[notice]` line contains the word "error"). The data is
+    // fetched on demand (gitignored, see benchmarks/robustness/SOURCES.md), so
+    // skip when it is absent — CI relies on the inline dedup test below.
     let src = concat!(env!("CARGO_MANIFEST_DIR"), "/benchmarks/robustness/data/Apache_2k.log");
+    if !std::path::Path::new(src).exists() {
+        eprintln!("skip: {src} not fetched");
+        return;
+    }
     let bytes = std::fs::read(src).expect("read vendored Apache_2k.log");
     let log = write_tmp("olorin_apache_real.log", &bytes);
     // A 3-line Apache trigger so eacorrelate retains the log and forms substreams.
@@ -50,6 +56,38 @@ fn apache_error_substream_matches_loghub_oracle() {
         .find(|c| c.name == "olorin_apache_real.log (errors)")
         .unwrap_or_else(|| panic!("no Apache errors substream: {}", result.answer));
     assert_eq!(errs.count, 595, "error substream != the 595 [error] lines (dedup/severity drift)");
+
+    let _ = std::fs::remove_file(&log);
+    let _ = std::fs::remove_file(&trig);
+}
+
+#[test]
+fn apache_error_substream_dedups_repeated_keyword_per_line() {
+    // Inline (CI-runnable) guard for the map_to_epochs one-event-per-line fix:
+    // the first `[error]` line says "error" three times but is ONE event. Four
+    // `[error]` lines, three `[notice]` (none mention "error"); the errors
+    // substream must be 4, not 6.
+    olorin::kernels::ffi::init().unwrap();
+    let log = write_tmp("olorin_apache_dedup.log",
+        b"[Sun Dec 04 04:47:40 2005] [error] error: failed with error code 6\n\
+          [Sun Dec 04 04:47:41 2005] [error] connection refused\n\
+          [Sun Dec 04 04:47:42 2005] [error] upstream timeout\n\
+          [Sun Dec 04 04:47:43 2005] [error] disk full\n\
+          [Sun Dec 04 04:47:44 2005] [notice] startup complete\n\
+          [Sun Dec 04 04:47:45 2005] [notice] config loaded\n\
+          [Sun Dec 04 04:47:46 2005] [notice] worker ready\n");
+    let trig = write_tmp("olorin_apache_dedup_trig.log",
+        b"[Sun Dec 04 04:48:00 2005] [notice] a\n\
+          [Sun Dec 04 04:48:01 2005] [notice] b\n\
+          [Sun Dec 04 04:48:02 2005] [notice] c\n");
+
+    let result = run_rune("eacorrelate", &format!("--json {log} {trig}")).unwrap();
+    assert!(result.success, "rune failed: {}", result.answer);
+    let out = parse_answer(&result.answer);
+    let errs = out.categories.iter()
+        .find(|c| c.name == "olorin_apache_dedup.log (errors)")
+        .unwrap_or_else(|| panic!("no errors substream: {}", result.answer));
+    assert_eq!(errs.count, 4, "expected 4 error lines (deduped), not per-keyword");
 
     let _ = std::fs::remove_file(&log);
     let _ = std::fs::remove_file(&trig);
