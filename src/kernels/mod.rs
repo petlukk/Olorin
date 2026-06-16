@@ -3,6 +3,7 @@ pub mod ffi_crypto;
 pub mod ffi_data;
 pub mod ffi_inference;
 pub mod ffi_inference_types;
+pub mod ffi_types;
 pub mod loader;
 
 /// Platform-native dynamic-library filename for a kernel stem.
