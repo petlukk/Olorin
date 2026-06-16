@@ -1,0 +1,99 @@
+// HDFS / Hadoop log timestamp position scanner. Emits byte offsets where the
+// 13-byte `YYMMDD HHMMSS` instant starts (e.g. `081109 203615` = 2008-11-09
+// 20:36:15). The caller decodes the 2-digit year as 20YY and validates fields.
+//
+// SIMD strategy mirrors syslog_scan (cross-arch, .==-only): the grammar's only
+// fixed punctuation is the single space at +6 (between the 6-digit date and the
+// 6-digit time). One anchor — text[start+6] == space — masked per lane; a
+// passing lane is a candidate only, and scan_pos scalar-validates all twelve
+// digit positions. The 12-digit-around-a-space signature plus the decoder's
+// field-range checks reject non-HDFS lines.
+//
+// out_positions      = byte offsets where `YYMMDD HHMMSS` starts.
+// out_n_positions[0] = number written (<= max_positions), reset to 0 first.
+// scratch (16 bytes) holds the per-chunk filter mask; unspecified after return.
+
+func is_digit_byte(b: i32) -> i32 {
+    if b < 48 { return 0 }
+    if b > 57 { return 0 }
+    return 1
+}
+
+func scan_pos(text: *u8, p: i32, len: i32, positions: *mut i32, max_positions: i32, n_positions: *mut i32) {
+    if p + 13 > len { return }
+    if max_positions <= 0 { return }
+
+    if is_digit_byte(to_i32(text[p + 0])) == 0 { return }   // YY
+    if is_digit_byte(to_i32(text[p + 1])) == 0 { return }
+    if is_digit_byte(to_i32(text[p + 2])) == 0 { return }   // MM
+    if is_digit_byte(to_i32(text[p + 3])) == 0 { return }
+    if is_digit_byte(to_i32(text[p + 4])) == 0 { return }   // DD
+    if is_digit_byte(to_i32(text[p + 5])) == 0 { return }
+    if to_i32(text[p + 6]) != 32 { return }                 // space
+    if is_digit_byte(to_i32(text[p + 7])) == 0 { return }   // HH
+    if is_digit_byte(to_i32(text[p + 8])) == 0 { return }
+    if is_digit_byte(to_i32(text[p + 9])) == 0 { return }   // MM
+    if is_digit_byte(to_i32(text[p + 10])) == 0 { return }
+    if is_digit_byte(to_i32(text[p + 11])) == 0 { return }  // SS
+    if is_digit_byte(to_i32(text[p + 12])) == 0 { return }
+
+    let cur: i32 = n_positions[0]
+    if cur < max_positions {
+        positions[cur] = p
+        n_positions[0] = cur + 1
+    }
+}
+
+export func hdfs_scan(text: *u8, len: i32, out_positions: *mut i32, max_positions: i32, out_n_positions: *mut i32, scratch: *mut u8) {
+    out_n_positions[0] = 0
+
+    if len < 32 {
+        let mut p: i32 = 0
+        while p + 13 <= len {
+            scan_pos(text, p, len, out_positions, max_positions, out_n_positions)
+            p = p + 1
+        }
+        return
+    }
+
+    let v_space: u8x16 = splat(32)
+    let v_zero:  u8x16 = splat(0)
+    let v_one:   u8x16 = splat(1)
+
+    // Scalar prologue: positions [0..16).
+    let mut p: i32 = 0
+    while p < 16 {
+        scan_pos(text, p, len, out_positions, max_positions, out_n_positions)
+        p = p + 1
+    }
+
+    // SIMD body: lane k anchors on text[(i+k)+6] == space. The load reads
+    // text[i+6 .. i+21], so i + 22 <= len keeps it in bounds; scan_pos guards
+    // the per-lane validate against the tail.
+    let mut i: i32 = 16
+    while i + 22 <= len {
+        let c6: u8x16 = load(text, i + 6)
+        let m6: u8x16 = select(c6 .== v_space, v_one, v_zero)
+        let any: u8   = reduce_add(m6)
+
+        if to_i32(any) > 0 {
+            store(scratch, 0, m6)
+            let mut k: i32 = 0
+            while k < 16 {
+                if to_i32(scratch[k]) > 0 {
+                    scan_pos(text, i + k, len, out_positions, max_positions, out_n_positions)
+                }
+                k = k + 1
+            }
+        }
+
+        i = i + 16
+    }
+
+    // Scalar epilogue.
+    p = i
+    while p + 13 <= len {
+        scan_pos(text, p, len, out_positions, max_positions, out_n_positions)
+        p = p + 1
+    }
+}

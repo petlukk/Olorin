@@ -7,7 +7,10 @@
 //! orchestration. `eatime` remains the single-file consumer; bucketing
 //! and formatting stay rune-local.
 
-use super::timekey::{clf_bytes_to_seconds, iso_bytes_to_seconds, json_epoch_bytes_to_seconds, syslog_bytes_to_seconds};
+use super::timekey::{
+    apache_error_bytes_to_seconds, clf_bytes_to_seconds, hdfs_bytes_to_seconds,
+    iso_bytes_to_seconds, json_epoch_bytes_to_seconds, syslog_bytes_to_seconds,
+};
 use crate::kernels::ffi;
 use std::time::Instant;
 
@@ -22,8 +25,10 @@ pub const MAX_POSITIONS: usize = 16_000_000;
 /// classic BSD `MMM DD HH:MM:SS` (syslog_scan, yearless — fixed reference year);
 /// `JsonEpoch` = a numeric Unix epoch under a JSON timestamp key
 /// (`"ts":1749600000`, json_epoch_scan) — ISO-string JSON timestamps are `Iso`.
+/// `Apache` = Apache error log `[Www Mmm DD HH:MM:SS YYYY]` (apache_error_scan).
+/// `Hdfs` = Hadoop/HDFS `YYMMDD HHMMSS` (hdfs_scan).
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Format { Iso, Clf, Syslog, JsonEpoch }
+pub enum Format { Iso, Clf, Syslog, JsonEpoch, Apache, Hdfs }
 
 impl Format {
     pub fn tag(self) -> &'static str {
@@ -32,6 +37,8 @@ impl Format {
             Format::Clf       => "clf",
             Format::Syslog    => "syslog",
             Format::JsonEpoch => "json-epoch",
+            Format::Apache    => "apache-error",
+            Format::Hdfs      => "hdfs",
         }
     }
 }
@@ -55,6 +62,8 @@ pub fn scan_for(bytes: &[u8], format: Format, max_positions: usize) -> ScanResul
         Format::Clf       => ffi::clf_scan,
         Format::Syslog    => ffi::syslog_scan,
         Format::JsonEpoch => ffi::json_epoch_scan,
+        Format::Apache    => ffi::apache_error_scan,
+        Format::Hdfs      => ffi::hdfs_scan,
     };
     let t_scan = Instant::now();
     let mut positions = vec![0i32; max_positions];
@@ -71,25 +80,37 @@ pub fn scan_for(bytes: &[u8], format: Format, max_positions: usize) -> ScanResul
     ScanResult { positions, scan_us: t_scan.elapsed().as_micros() as u64 }
 }
 
-/// Sniff the timestamp grammar by running both kernels over a head sample
-/// and picking whichever matches more. Using the kernels themselves means
-/// the sniff can never disagree with the scan that follows.
+/// Every grammar `detect_format` sniffs, in tie-break priority order: the
+/// earliest entry wins when counts tie. ISO leads (the safe, most-common
+/// default), then CLF. Apache precedes Syslog deliberately: an Apache instant
+/// `[Www Mmm DD HH:MM:SS YYYY]` *contains* a valid syslog substring
+/// (`Mmm DD HH:MM:SS`), so both grammars match Apache lines one-for-one — the
+/// more-specific Apache must win that tie or the log decodes with syslog's
+/// fixed reference year and lands in the wrong era. A real syslog line has no
+/// leading `[`, so Apache never steals it. JSON-epoch is last (its
+/// `"ts":<digit>` anchor never fires on ISO-string JSON).
+const SNIFF_ORDER: [Format; 6] =
+    [Format::Iso, Format::Clf, Format::Apache, Format::Syslog, Format::Hdfs, Format::JsonEpoch];
+
+/// Sniff the timestamp grammar by running every kernel over a head sample and
+/// picking whichever matches most. Using the kernels themselves means the sniff
+/// can never disagree with the scan that follows. Ties resolve to the
+/// earlier-listed grammar (a fold that replaces only on a strictly greater
+/// count), so ISO stays the default.
 pub fn detect_format(bytes: &[u8]) -> Format {
     const SNIFF_BYTES: usize = 64 * 1024;
     const SNIFF_CAP: usize = 4096;
     let head = &bytes[..bytes.len().min(SNIFF_BYTES)];
-    let iso = scan_for(head, Format::Iso, SNIFF_CAP).positions.len();
-    let clf = scan_for(head, Format::Clf, SNIFF_CAP).positions.len();
-    let sys = scan_for(head, Format::Syslog, SNIFF_CAP).positions.len();
-    let json = scan_for(head, Format::JsonEpoch, SNIFF_CAP).positions.len();
-    // Pick the grammar that matches most. JSON-epoch wins outright when it leads
-    // (its `"ts":<digit>` anchor never fires on ISO-string JSON, which has no
-    // digit after the colon). Otherwise ISO wins ties (the most common), then
-    // CLF over syslog — a real CLF/ISO line never matches the syslog grammar.
-    if json > iso && json > clf && json > sys { Format::JsonEpoch }
-    else if sys > iso && sys > clf { Format::Syslog }
-    else if clf > iso { Format::Clf }
-    else { Format::Iso }
+    let mut best = SNIFF_ORDER[0];
+    let mut best_n = scan_for(head, best, SNIFF_CAP).positions.len();
+    for &fmt in &SNIFF_ORDER[1..] {
+        let n = scan_for(head, fmt, SNIFF_CAP).positions.len();
+        if n > best_n {
+            best = fmt;
+            best_n = n;
+        }
+    }
+    best
 }
 
 /// Decode each kernel position to epoch-seconds with the format's decoder;
@@ -104,6 +125,8 @@ pub fn positions_to_epochs(bytes: &[u8], positions: &[i32], format: Format) -> V
             Format::Clf       => clf_bytes_to_seconds(&bytes[p..]),
             Format::Syslog    => syslog_bytes_to_seconds(&bytes[p..]),
             Format::JsonEpoch => json_epoch_bytes_to_seconds(&bytes[p..]),
+            Format::Apache    => apache_error_bytes_to_seconds(&bytes[p..]),
+            Format::Hdfs      => hdfs_bytes_to_seconds(&bytes[p..]),
         };
         if let Some(secs) = decoded { epochs.push(secs); }
     }

@@ -9,8 +9,8 @@
 //! line above it — and decodes that to an epoch.
 
 use super::timekey::{
-    clf_bytes_to_seconds, iso_bytes_to_seconds, json_epoch_bytes_to_seconds,
-    syslog_bytes_to_seconds,
+    apache_error_bytes_to_seconds, clf_bytes_to_seconds, hdfs_bytes_to_seconds,
+    iso_bytes_to_seconds, json_epoch_bytes_to_seconds, syslog_bytes_to_seconds,
 };
 use crate::kernels::ffi;
 
@@ -26,6 +26,20 @@ pub fn iso_errors(bytes: &[u8], ts_positions: &[i32]) -> Vec<i64> {
 /// mapped to each line's yearless-syslog epoch.
 pub fn syslog_errors(bytes: &[u8], ts_positions: &[i32]) -> Vec<i64> {
     keyword_errors(bytes, ts_positions, syslog_bytes_to_seconds)
+}
+
+/// Error events for an Apache error log, mapped to each line's timestamp. The
+/// severity sits in a bracket (`[error]`, `[crit]`, ...), so the ERROR/FATAL
+/// keyword scan matches the word inside it — no Apache-specific scan needed.
+pub fn apache_errors(bytes: &[u8], ts_positions: &[i32]) -> Vec<i64> {
+    keyword_errors(bytes, ts_positions, apache_error_bytes_to_seconds)
+}
+
+/// ERROR/FATAL keyword events for an HDFS / Hadoop log (`YYMMDD HHMMSS LEVEL`),
+/// mapped to each line's epoch. The level is a bare word field, so the keyword
+/// scan matches it directly.
+pub fn hdfs_errors(bytes: &[u8], ts_positions: &[i32]) -> Vec<i64> {
+    keyword_errors(bytes, ts_positions, hdfs_bytes_to_seconds)
 }
 
 /// Error events for a JSON/ndjson log, mapped to each line's numeric-epoch
@@ -109,14 +123,24 @@ pub fn clf_errors(bytes: &[u8], ts_positions: &[i32]) -> Vec<i64> {
 
 /// Attribute each error offset to its line's timestamp and decode to epoch
 /// seconds. `decode` reads a timestamp from the start of the given slice.
+///
+/// One error *event* per line: the keyword scan emits a position per keyword
+/// occurrence, so a line whose message repeats "error" (common in prose-heavy
+/// logs like Apache — `[error] ... in error state`) would otherwise yield
+/// several identical epochs for one line. Error positions arrive sorted, so
+/// same-line hits share a timestamp index and collapse by skipping a repeat of
+/// the previous index.
 fn map_to_epochs(
     bytes: &[u8], ts_positions: &[i32], err_positions: &[i32],
     decode: fn(&[u8]) -> Option<i64>,
 ) -> Vec<i64> {
     let mut epochs: Vec<i64> = Vec::with_capacity(err_positions.len());
+    let mut last_idx = usize::MAX;
     for &err_pos in err_positions {
         let idx = ts_positions.partition_point(|&t| t <= err_pos);
         if idx == 0 { continue; } // error before the first timestamp
+        if idx == last_idx { continue; } // another hit on the same line
+        last_idx = idx;
         let t = ts_positions[idx - 1] as usize;
         if let Some(secs) = decode(&bytes[t..]) {
             epochs.push(secs);
