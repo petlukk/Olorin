@@ -125,6 +125,41 @@ pub fn syslog_bytes_to_seconds(b: &[u8]) -> Option<i64> {
     Some(days * 86400 + hour * 3600 + minute * 60 + second)
 }
 
+/// Parse an Apache error-log timestamp `[Www Mmm DD HH:MM:SS YYYY]`
+/// (`[Sun Dec 04 04:47:44 2005]`) to seconds since 2000. The weekday is
+/// ignored; the full 4-digit year makes this unambiguous (no reference year).
+/// Tolerates the Apache 2.4 fractional seconds `HH:MM:SS.ffffff` by skipping
+/// the dot + digits before the year. Returns `None` on any field failure.
+pub fn apache_error_bytes_to_seconds(b: &[u8]) -> Option<i64> {
+    if b.len() < 26 { return None; }
+    if b[0] != b'[' { return None; }
+    // b[1..4] = weekday, ignored.
+    if b[4] != b' ' { return None; }
+    let month: i64 = month_from_name(&b[5..8])? as i64;
+    if b[8] != b' ' { return None; }
+    // Day tens may be space-padded (`[... Dec  4 ...]`).
+    let tens = if b[9] == b' ' { 0 } else if b[9].is_ascii_digit() { (b[9] - b'0') as i64 } else { return None; };
+    let ones = if b[10].is_ascii_digit() { (b[10] - b'0') as i64 } else { return None; };
+    let day  = tens * 10 + ones;
+    if b[11] != b' ' { return None; }
+    let hour:   i64 = parse_uint(&b[12..14])? as i64;
+    if b[14] != b':' { return None; }
+    let minute: i64 = parse_uint(&b[15..17])? as i64;
+    if b[17] != b':' { return None; }
+    let second: i64 = parse_uint(&b[18..20])? as i64;
+    // Optional fractional seconds (Apache 2.4): skip `.` + digits to the space.
+    let mut i = 20;
+    if b[i] == b'.' {
+        i += 1;
+        while i < b.len() && b[i].is_ascii_digit() { i += 1; }
+    }
+    if i + 5 > b.len() || b[i] != b' ' { return None; }
+    let year: i64 = parse_uint(&b[i + 1..i + 5])? as i64;
+    if day < 1 || day > 31 || hour > 23 || minute > 59 || second > 60 { return None; }
+    let days = days_since_2000(year, month, day);
+    Some(days * 86400 + hour * 3600 + minute * 60 + second)
+}
+
 /// Seconds from 1970-01-01 to 2000-01-01 (10957 days). JSON epochs are
 /// Unix-based; this module's internal clock is 2000-based, so we rebase.
 const UNIX_TO_2000_SECS: i64 = 10957 * 86400;

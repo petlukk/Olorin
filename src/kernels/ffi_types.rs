@@ -138,6 +138,7 @@ pub struct KernelTable {
     pub json_epoch_scan:          TimestampScanFn,
     pub json_level_scan:          TimestampScanFn,
     pub syslog_scan:              TimestampScanFn,
+    pub apache_error_scan:        TimestampScanFn,
     pub f32_stats:                F32StatsFn,
     pub f64_stats:                F64StatsFn,
     pub col_reduce:               ColReduceFn,

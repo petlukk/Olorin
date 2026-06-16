@@ -245,6 +245,25 @@ pub unsafe fn json_level_scan(
     );
 }
 
+/// Apache error-log `[Www Mmm DD HH:MM:SS YYYY]` position scan — emits the
+/// offset of the opening `[`. Identical contract to [`timestamp_scan`]; the
+/// decoder reads the month name + full year (and tolerates Apache 2.4's
+/// fractional seconds).
+///
+/// # Safety
+/// Same as [`clf_scan`].
+pub unsafe fn apache_error_scan(
+    text: *const u8, len: i32,
+    out_positions: *mut i32, max_positions: i32, out_n_positions: *mut i32,
+    scratch: *mut u8,
+) {
+    (k().apache_error_scan)(
+        text, len,
+        out_positions, max_positions, out_n_positions,
+        scratch,
+    );
+}
+
 /// Classic BSD syslog `MMM DD HH:MM:SS` position scan. Identical contract to
 /// [`timestamp_scan`]. The decoder assigns a fixed reference year (syslog is
 /// yearless).

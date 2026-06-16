@@ -1,0 +1,126 @@
+// Apache error-log timestamp position scanner. Emits byte offsets of the `[`
+// that opens an Apache error-log instant: `[Www Mmm DD HH:MM:SS YYYY]`
+// (e.g. `[Sun Dec 04 04:47:44 2005]`). The caller decodes the month name, the
+// fields, and the full 4-digit year (and tolerates the optional `.ffffff`
+// microseconds of Apache 2.4) and validates ranges.
+//
+// SIMD strategy mirrors syslog_scan (cross-arch, .==-only, no movemask): the
+// grammar's fixed punctuation from the `[` is bracket@+0, space@+4 (after the
+// weekday), space@+8 (after the month), colon@+14 and colon@+17 (in HH:MM:SS) —
+// five anchors ANDed into one lane mask. space@+4 is what distinguishes this
+// from CLF (`[18/Sep/2024:..` has `/` there), so a CLF/ISO line never matches.
+// A passing lane is a candidate only; scan_pos scalar-validates the digit
+// fields and the Rust decoder validates the weekday/month letters + ranges.
+//
+// out_positions      = byte offsets of the opening `[`.
+// out_n_positions[0] = number written (<= max_positions), reset to 0 first.
+// scratch (16 bytes) holds the per-chunk filter mask; unspecified after return.
+
+func is_digit_byte(b: i32) -> i32 {
+    if b < 48 { return 0 }
+    if b > 57 { return 0 }
+    return 1
+}
+
+func scan_pos(text: *u8, p: i32, len: i32, positions: *mut i32, max_positions: i32, n_positions: *mut i32) {
+    if p + 20 > len { return }
+    if max_positions <= 0 { return }
+
+    if to_i32(text[p]) != 91 { return }        // '['
+    // text[p+1..p+3] weekday letters — validated by the decoder.
+    if to_i32(text[p + 4]) != 32 { return }    // space
+    // text[p+5..p+7] month letters — validated by the decoder.
+    if to_i32(text[p + 8]) != 32 { return }    // space
+
+    // Day: tens may be a space (zero-padded single digit) or a digit; ones digit.
+    let d9: i32 = to_i32(text[p + 9])
+    if d9 != 32 {
+        if is_digit_byte(d9) == 0 { return }
+    }
+    if is_digit_byte(to_i32(text[p + 10])) == 0 { return }
+    if to_i32(text[p + 11]) != 32 { return }   // space
+
+    if is_digit_byte(to_i32(text[p + 12])) == 0 { return }  // hour
+    if is_digit_byte(to_i32(text[p + 13])) == 0 { return }
+    if to_i32(text[p + 14]) != 58 { return }   // colon
+
+    if is_digit_byte(to_i32(text[p + 15])) == 0 { return }  // minute
+    if is_digit_byte(to_i32(text[p + 16])) == 0 { return }
+    if to_i32(text[p + 17]) != 58 { return }   // colon
+
+    if is_digit_byte(to_i32(text[p + 18])) == 0 { return }  // second
+    if is_digit_byte(to_i32(text[p + 19])) == 0 { return }
+
+    let cur: i32 = n_positions[0]
+    if cur < max_positions {
+        positions[cur] = p
+        n_positions[0] = cur + 1
+    }
+}
+
+export func apache_error_scan(text: *u8, len: i32, out_positions: *mut i32, max_positions: i32, out_n_positions: *mut i32, scratch: *mut u8) {
+    out_n_positions[0] = 0
+
+    if len < 32 {
+        let mut p: i32 = 0
+        while p + 20 <= len {
+            scan_pos(text, p, len, out_positions, max_positions, out_n_positions)
+            p = p + 1
+        }
+        return
+    }
+
+    let v_lb:    u8x16 = splat(91)
+    let v_space: u8x16 = splat(32)
+    let v_colon: u8x16 = splat(58)
+    let v_zero:  u8x16 = splat(0)
+    let v_one:   u8x16 = splat(1)
+
+    // Scalar prologue: positions [0..16).
+    let mut p: i32 = 0
+    while p < 16 {
+        scan_pos(text, p, len, out_positions, max_positions, out_n_positions)
+        p = p + 1
+    }
+
+    // SIMD body: lane 15's candidate validates through i+15+19 = i+34, so
+    // text[i+34] must be readable (i + 35 <= len). The deepest load (colon@+17)
+    // reads through i+32, well inside that bound.
+    let mut i: i32 = 16
+    while i + 35 <= len {
+        let c0:  u8x16 = load(text, i + 0)
+        let c4:  u8x16 = load(text, i + 4)
+        let c8:  u8x16 = load(text, i + 8)
+        let c14: u8x16 = load(text, i + 14)
+        let c17: u8x16 = load(text, i + 17)
+
+        let m0:  u8x16 = select(c0  .== v_lb,    v_one, v_zero)
+        let m4:  u8x16 = select(c4  .== v_space, v_one, v_zero)
+        let m8:  u8x16 = select(c8  .== v_space, v_one, v_zero)
+        let m14: u8x16 = select(c14 .== v_colon, v_one, v_zero)
+        let m17: u8x16 = select(c17 .== v_colon, v_one, v_zero)
+
+        let cand: u8x16 = m0 .& m4 .& m8 .& m14 .& m17
+        let any:  u8    = reduce_add(cand)
+
+        if to_i32(any) > 0 {
+            store(scratch, 0, cand)
+            let mut k: i32 = 0
+            while k < 16 {
+                if to_i32(scratch[k]) > 0 {
+                    scan_pos(text, i + k, len, out_positions, max_positions, out_n_positions)
+                }
+                k = k + 1
+            }
+        }
+
+        i = i + 16
+    }
+
+    // Scalar epilogue.
+    p = i
+    while p + 20 <= len {
+        scan_pos(text, p, len, out_positions, max_positions, out_n_positions)
+        p = p + 1
+    }
+}
