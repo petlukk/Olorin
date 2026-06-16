@@ -7,7 +7,7 @@
 //! orchestration. `eatime` remains the single-file consumer; bucketing
 //! and formatting stay rune-local.
 
-use super::timekey::{clf_bytes_to_seconds, iso_bytes_to_seconds, syslog_bytes_to_seconds};
+use super::timekey::{clf_bytes_to_seconds, iso_bytes_to_seconds, json_epoch_bytes_to_seconds, syslog_bytes_to_seconds};
 use crate::kernels::ffi;
 use std::time::Instant;
 
@@ -19,16 +19,19 @@ pub const MAX_POSITIONS: usize = 16_000_000;
 
 /// Timestamp grammar. `Iso` = `YYYY-MM-DD[T| ]HH:MM:SS` (timestamp_scan);
 /// `Clf` = `[dd/MMM/yyyy:hh:mm:ss` Common Log Format (clf_scan); `Syslog` =
-/// classic BSD `MMM DD HH:MM:SS` (syslog_scan, yearless — fixed reference year).
+/// classic BSD `MMM DD HH:MM:SS` (syslog_scan, yearless — fixed reference year);
+/// `JsonEpoch` = a numeric Unix epoch under a JSON timestamp key
+/// (`"ts":1749600000`, json_epoch_scan) — ISO-string JSON timestamps are `Iso`.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Format { Iso, Clf, Syslog }
+pub enum Format { Iso, Clf, Syslog, JsonEpoch }
 
 impl Format {
     pub fn tag(self) -> &'static str {
         match self {
-            Format::Iso    => "iso8601",
-            Format::Clf    => "clf",
-            Format::Syslog => "syslog",
+            Format::Iso       => "iso8601",
+            Format::Clf       => "clf",
+            Format::Syslog    => "syslog",
+            Format::JsonEpoch => "json-epoch",
         }
     }
 }
@@ -48,9 +51,10 @@ pub fn scan_for(bytes: &[u8], format: Format, max_positions: usize) -> ScanResul
         return ScanResult { positions: Vec::new(), scan_us: 0 };
     }
     let kernel: ScanFn = match format {
-        Format::Iso    => ffi::timestamp_scan,
-        Format::Clf    => ffi::clf_scan,
-        Format::Syslog => ffi::syslog_scan,
+        Format::Iso       => ffi::timestamp_scan,
+        Format::Clf       => ffi::clf_scan,
+        Format::Syslog    => ffi::syslog_scan,
+        Format::JsonEpoch => ffi::json_epoch_scan,
     };
     let t_scan = Instant::now();
     let mut positions = vec![0i32; max_positions];
@@ -77,10 +81,13 @@ pub fn detect_format(bytes: &[u8]) -> Format {
     let iso = scan_for(head, Format::Iso, SNIFF_CAP).positions.len();
     let clf = scan_for(head, Format::Clf, SNIFF_CAP).positions.len();
     let sys = scan_for(head, Format::Syslog, SNIFF_CAP).positions.len();
-    // Pick the grammar that matches most. ISO wins ties (the most common), then
-    // CLF over syslog — a real CLF/ISO line never matches the syslog grammar,
-    // so syslog only wins on genuine `MMM DD HH:MM:SS` logs.
-    if sys > iso && sys > clf { Format::Syslog }
+    let json = scan_for(head, Format::JsonEpoch, SNIFF_CAP).positions.len();
+    // Pick the grammar that matches most. JSON-epoch wins outright when it leads
+    // (its `"ts":<digit>` anchor never fires on ISO-string JSON, which has no
+    // digit after the colon). Otherwise ISO wins ties (the most common), then
+    // CLF over syslog — a real CLF/ISO line never matches the syslog grammar.
+    if json > iso && json > clf && json > sys { Format::JsonEpoch }
+    else if sys > iso && sys > clf { Format::Syslog }
     else if clf > iso { Format::Clf }
     else { Format::Iso }
 }
@@ -93,9 +100,10 @@ pub fn positions_to_epochs(bytes: &[u8], positions: &[i32], format: Format) -> V
         let p = pos as usize;
         if p >= bytes.len() { continue; }
         let decoded = match format {
-            Format::Iso    => iso_bytes_to_seconds(&bytes[p..]),
-            Format::Clf    => clf_bytes_to_seconds(&bytes[p..]),
-            Format::Syslog => syslog_bytes_to_seconds(&bytes[p..]),
+            Format::Iso       => iso_bytes_to_seconds(&bytes[p..]),
+            Format::Clf       => clf_bytes_to_seconds(&bytes[p..]),
+            Format::Syslog    => syslog_bytes_to_seconds(&bytes[p..]),
+            Format::JsonEpoch => json_epoch_bytes_to_seconds(&bytes[p..]),
         };
         if let Some(secs) = decoded { epochs.push(secs); }
     }

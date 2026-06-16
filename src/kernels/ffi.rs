@@ -141,6 +141,7 @@ pub struct KernelTable {
     pub timestamp_scan:           TimestampScanFn,
     pub clf_scan:                 TimestampScanFn,
     pub clf_status_scan:          TimestampScanFn,
+    pub json_epoch_scan:          TimestampScanFn,
     pub syslog_scan:              TimestampScanFn,
     pub f32_stats:                F32StatsFn,
     pub f64_stats:                F64StatsFn,
@@ -218,6 +219,7 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
     let timestamp_scan_lib = load("timestamp_scan")?;
     let clf_scan_lib    = load("clf_scan")?;
     let clf_status_lib  = load("clf_status_scan")?;
+    let json_epoch_lib  = load("json_epoch_scan")?;
     let syslog_scan_lib = load("syslog_scan")?;
     let f32_stats_lib   = load("f32_stats")?;
     let f64_stats_lib   = load("f64_stats")?;
@@ -282,6 +284,8 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
                 sym(&clf_scan_lib, b"clf_scan\0")?),
             clf_status_scan: std::mem::transmute(
                 sym(&clf_status_lib, b"clf_status_scan\0")?),
+            json_epoch_scan: std::mem::transmute(
+                sym(&json_epoch_lib, b"json_epoch_scan\0")?),
             syslog_scan: std::mem::transmute(
                 sym(&syslog_scan_lib, b"syslog_scan\0")?),
             f32_stats: std::mem::transmute(
@@ -330,7 +334,7 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
                 ansi_parser_lib, terminal_diff_lib,
                 csv_scan_lib, csv_groupby_lib, jsonl_struct_lib, log_level_scan_lib,
                 sql_scan_lib,
-                timestamp_scan_lib, clf_scan_lib, clf_status_lib, syslog_scan_lib,
+                timestamp_scan_lib, clf_scan_lib, clf_status_lib, json_epoch_lib, syslog_scan_lib,
                 f32_stats_lib, f64_stats_lib, col_reduce_lib,
                 corr_sweep_lib,
                 poly1305_lib,
@@ -459,8 +463,8 @@ pub unsafe fn chacha20_search_v2(
 // `kernels::ffi::<name>` call sites continue to compile unchanged.
 pub use super::ffi_data::{
     clf_scan, clf_status_scan, col_reduce, corr_sweep, csv_groupby_scan, csv_scan,
-    f32_stats, f64_stats, jsonl_struct_scan, log_level_scan, sql_scan, syslog_scan,
-    timestamp_scan,
+    f32_stats, f64_stats, json_epoch_scan, jsonl_struct_scan, log_level_scan, sql_scan,
+    syslog_scan, timestamp_scan,
 };
 
 /// SIMD-accelerated ANSI byte classification.

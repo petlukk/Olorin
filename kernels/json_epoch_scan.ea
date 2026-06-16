@@ -1,0 +1,167 @@
+// JSON numeric-epoch timestamp scanner. For ndjson / structured logs whose
+// timestamp is a NUMBER rather than an ISO string (Go zap `"ts":1749600000`,
+// pino `"time":1749600000000`), emits the byte offset of the first digit of the
+// epoch value. The caller decodes the integer and infers the unit (s/ms/us) by
+// magnitude. ISO-string JSON timestamps need no special handling — timestamp_scan
+// already finds the ISO substring inside `"ts":"2026-..."`.
+//
+// Match: `"<key>":[space]<digit>` where <key> is one of time / ts / timestamp /
+// @timestamp. SIMD strategy: same cross-arch `.==`-anchor idiom as
+// clf_status_scan. Per 16-byte chunk, mask the closing-quote + colon pair
+// (`"` at offset 0, `:` at offset 1) — every JSON key ends that way, so the
+// scalar validator confirms (a) a digit follows the colon (string/object values
+// don't) and (b) the quoted key before it is an allow-listed timestamp key.
+//
+// out_positions      = byte offsets of the first epoch digit.
+// out_n_positions[0] = number written (<= max_positions); reset to 0 on entry.
+// scratch (16 bytes) holds the per-chunk filter mask; unspecified after return.
+
+func is_digit_byte(b: i32) -> i32 {
+    if b < 48 { return 0 }
+    if b > 57 { return 0 }
+    return 1
+}
+
+// Is the keylen-byte key at text[start..] one of time/ts/timestamp/@timestamp?
+func is_ts_key(text: *u8, start: i32, keylen: i32) -> i32 {
+    if keylen == 2 {
+        if to_i32(text[start]) == 116 {       // t
+            if to_i32(text[start + 1]) == 115 { return 1 }  // s
+        }
+        return 0
+    }
+    if keylen == 4 {
+        if to_i32(text[start + 0]) != 116 { return 0 }  // t
+        if to_i32(text[start + 1]) != 105 { return 0 }  // i
+        if to_i32(text[start + 2]) != 109 { return 0 }  // m
+        if to_i32(text[start + 3]) != 101 { return 0 }  // e
+        return 1
+    }
+    if keylen == 9 {
+        if to_i32(text[start + 0]) != 116 { return 0 }  // t
+        if to_i32(text[start + 1]) != 105 { return 0 }  // i
+        if to_i32(text[start + 2]) != 109 { return 0 }  // m
+        if to_i32(text[start + 3]) != 101 { return 0 }  // e
+        if to_i32(text[start + 4]) != 115 { return 0 }  // s
+        if to_i32(text[start + 5]) != 116 { return 0 }  // t
+        if to_i32(text[start + 6]) != 97  { return 0 }  // a
+        if to_i32(text[start + 7]) != 109 { return 0 }  // m
+        if to_i32(text[start + 8]) != 112 { return 0 }  // p
+        return 1
+    }
+    if keylen == 10 {
+        if to_i32(text[start + 0]) != 64  { return 0 }  // @
+        if to_i32(text[start + 1]) != 116 { return 0 }  // t
+        if to_i32(text[start + 2]) != 105 { return 0 }  // i
+        if to_i32(text[start + 3]) != 109 { return 0 }  // m
+        if to_i32(text[start + 4]) != 101 { return 0 }  // e
+        if to_i32(text[start + 5]) != 115 { return 0 }  // s
+        if to_i32(text[start + 6]) != 116 { return 0 }  // t
+        if to_i32(text[start + 7]) != 97  { return 0 }  // a
+        if to_i32(text[start + 8]) != 109 { return 0 }  // m
+        if to_i32(text[start + 9]) != 112 { return 0 }  // p
+        return 1
+    }
+    return 0
+}
+
+func json_epoch_pos(text: *u8, q: i32, len: i32, positions: *mut i32, max_positions: i32, n_positions: *mut i32) {
+    if max_positions <= 0 { return }
+    if q + 2 > len { return }
+    if to_i32(text[q]) != 34 { return }      // closing quote of the key
+    if to_i32(text[q + 1]) != 58 { return }  // colon
+
+    // First digit after the colon (allow at most one space).
+    let mut d: i32 = q + 2
+    if d < len {
+        if to_i32(text[d]) == 32 { d = d + 1 }
+    }
+    if d >= len { return }
+    if is_digit_byte(to_i32(text[d])) == 0 { return }  // string/object/array value
+
+    // Opening quote of the key: scan back at most 11 bytes (longest key is
+    // "@timestamp" = 10). `i = lo` ends the loop without a break statement.
+    let lo: i32 = q - 12
+    let mut i: i32 = q - 1
+    let mut open: i32 = 0 - 1
+    while i > lo {
+        if i >= 0 {
+            if to_i32(text[i]) == 34 {
+                open = i
+                i = lo
+            } else {
+                i = i - 1
+            }
+        } else {
+            i = lo
+        }
+    }
+    if open < 0 { return }
+
+    let keylen: i32 = q - open - 1
+    if is_ts_key(text, open + 1, keylen) == 0 { return }
+
+    let cur: i32 = n_positions[0]
+    if cur < max_positions {
+        positions[cur] = d
+        n_positions[0] = cur + 1
+    }
+}
+
+export func json_epoch_scan(text: *u8, len: i32, out_positions: *mut i32, max_positions: i32, out_n_positions: *mut i32, scratch: *mut u8) {
+    out_n_positions[0] = 0
+
+    if len < 32 {
+        let mut p: i32 = 0
+        while p + 2 <= len {
+            json_epoch_pos(text, p, len, out_positions, max_positions, out_n_positions)
+            p = p + 1
+        }
+        return
+    }
+
+    let v_quote: u8x16 = splat(34)
+    let v_colon: u8x16 = splat(58)
+    let v_zero:  u8x16 = splat(0)
+    let v_one:   u8x16 = splat(1)
+
+    // Scalar prologue: positions [0..16).
+    let mut p: i32 = 0
+    while p < 16 {
+        json_epoch_pos(text, p, len, out_positions, max_positions, out_n_positions)
+        p = p + 1
+    }
+
+    // SIMD body: deepest load is at i+1 (covering lanes through i+16).
+    let mut i: i32 = 16
+    while i + 17 <= len {
+        let c0: u8x16 = load(text, i + 0)
+        let c1: u8x16 = load(text, i + 1)
+
+        let m0: u8x16 = select(c0 .== v_quote, v_one, v_zero)
+        let m1: u8x16 = select(c1 .== v_colon, v_one, v_zero)
+
+        let cand: u8x16 = m0 .& m1
+        let any:  u8    = reduce_add(cand)
+
+        if to_i32(any) > 0 {
+            store(scratch, 0, cand)
+            let mut k: i32 = 0
+            while k < 16 {
+                if to_i32(scratch[k]) > 0 {
+                    json_epoch_pos(text, i + k, len, out_positions, max_positions, out_n_positions)
+                }
+                k = k + 1
+            }
+        }
+
+        i = i + 16
+    }
+
+    // Scalar epilogue.
+    p = i
+    while p + 2 <= len {
+        json_epoch_pos(text, p, len, out_positions, max_positions, out_n_positions)
+        p = p + 1
+    }
+}

@@ -415,6 +415,55 @@ fn clf_4xx_is_not_an_error_substream() {
     let _ = std::fs::remove_file(&csv_path);
 }
 
+const EPOCH_BASE: i64 = 1_770_000_000; // ~2026-02-02 in Unix seconds
+
+/// ndjson: 600 lines at 6s spacing, with an `error` burst over
+/// `[err_start, err_start+40)`. The timestamp is a NUMBER under `key`, scaled by
+/// `unit` (1 = seconds like Go zap, 1000 = millis like pino).
+fn ndjson_epoch(key: &str, unit: i64, err_start: usize) -> Vec<u8> {
+    let mut buf = String::new();
+    for m in 0..600usize {
+        let lvl = if (err_start..err_start + 40).contains(&m) { "error" } else { "info" };
+        let ts = (EPOCH_BASE + (m as i64) * 6) * unit;
+        writeln!(buf, "{{\"level\":\"{lvl}\",\"{key}\":{ts},\"msg\":\"q\"}}").unwrap();
+    }
+    buf.into_bytes()
+}
+
+#[test]
+fn epoch_json_correlates_across_units() {
+    olorin::kernels::ffi::init().unwrap();
+    // Numeric-epoch JSON: Go zap ("ts":<seconds>) and pino ("time":<millis>).
+    // log_level_scan still finds the string "error" level → an (errors) stream;
+    // json_epoch_scan finds the numeric timestamp. The cross-file correlation
+    // only fires if BOTH decode to the same era — i.e. the magnitude-based unit
+    // inference (millis ÷ 1000) is correct. db errors at minute 300, app at 340
+    // (= the planted +240s lag at 6s/step).
+    let db  = write_tmp("olorin_ep_db.log",  &ndjson_epoch("ts", 1, 300));
+    let app = write_tmp("olorin_ep_app.log", &ndjson_epoch("time", 1000, 340));
+
+    let result = run_rune("eacorrelate", &format!("--json {db} {app}")).unwrap();
+    assert!(result.success, "rune failed: {}", result.answer);
+    let out = parse_answer(&result.answer);
+
+    assert!(out.categories.iter().any(|c| c.name == "olorin_ep_db.log (errors)"),
+        "no db errors substream: {}", result.answer);
+    assert!(out.categories.iter().any(|c| c.name == "olorin_ep_app.log (errors)"),
+        "no app errors substream: {}", result.answer);
+
+    let f = out.correlations.iter()
+        .find(|c| c.stream_a == "olorin_ep_app.log (errors)"
+               && c.stream_b == "olorin_ep_db.log (errors)")
+        .unwrap_or_else(|| panic!("no cross-unit error correlation: {}", result.answer));
+    assert_eq!(f.lag_seconds, 240, "wrong lag (units not reconciled?): {:?}", f);
+    assert!(f.score > 0.8, "weak score: {:?}", f);
+    // Sanity: decoded into the 2026 era, not 1970 (millis mistaken for seconds).
+    assert!(f.peak_bucket.starts_with("2026-"), "epoch decoded to wrong era: {}", f.peak_bucket);
+
+    let _ = std::fs::remove_file(&db);
+    let _ = std::fs::remove_file(&app);
+}
+
 #[test]
 fn correlations_block_round_trips_and_rounds_score() {
     olorin::kernels::ffi::init().unwrap();

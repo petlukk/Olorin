@@ -8,7 +8,7 @@
 //! stack-trace line without its own timestamp attributes to the last stamped
 //! line above it — and decodes that to an epoch.
 
-use super::timekey::{clf_bytes_to_seconds, iso_bytes_to_seconds};
+use super::timekey::{clf_bytes_to_seconds, iso_bytes_to_seconds, json_epoch_bytes_to_seconds};
 use crate::kernels::ffi;
 
 /// Cap on recorded error positions per file (4 MB of i32).
@@ -16,6 +16,19 @@ const MAX_ERROR_POSITIONS: usize = 1_000_000;
 
 /// ERROR/FATAL keyword events for an ISO/syslog log, mapped to line epochs.
 pub fn iso_errors(bytes: &[u8], ts_positions: &[i32]) -> Vec<i64> {
+    keyword_errors(bytes, ts_positions, iso_bytes_to_seconds)
+}
+
+/// ERROR/FATAL keyword events for a JSON/ndjson log with string levels
+/// (`"level":"error"`), mapped to each line's numeric-epoch timestamp.
+pub fn json_errors(bytes: &[u8], ts_positions: &[i32]) -> Vec<i64> {
+    keyword_errors(bytes, ts_positions, json_epoch_bytes_to_seconds)
+}
+
+/// ERROR/FATAL keyword sub-stream via `log_level_scan`, mapped to line epochs
+/// with `decode` (ISO bytes, or JSON numeric epoch). Shared by the text-log and
+/// JSON paths — they differ only in how the line's timestamp is decoded.
+fn keyword_errors(bytes: &[u8], ts_positions: &[i32], decode: fn(&[u8]) -> Option<i64>) -> Vec<i64> {
     if ts_positions.is_empty() {
         return Vec::new();
     }
@@ -32,7 +45,7 @@ pub fn iso_errors(bytes: &[u8], ts_positions: &[i32]) -> Vec<i64> {
         );
     }
     positions.truncate(n_positions as usize);
-    map_to_epochs(bytes, ts_positions, &positions, iso_bytes_to_seconds)
+    map_to_epochs(bytes, ts_positions, &positions, decode)
 }
 
 /// HTTP 5xx events for a CLF access log, mapped to line epochs. The kernel emits

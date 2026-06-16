@@ -205,6 +205,26 @@ pub unsafe fn clf_status_scan(
     );
 }
 
+/// Scan a JSON / ndjson log for numeric Unix-epoch timestamps under a JSON
+/// timestamp key (`"ts":1749600000`, `"time":1749600000000`, ...) and emit the
+/// byte offset of the first epoch digit. Used by `eatime`/`eacorrelate` for
+/// structured logs whose timestamp is a number (Go zap, pino); ISO-string JSON
+/// timestamps are found by [`timestamp_scan`] instead.
+///
+/// # Safety
+/// Same as [`clf_scan`].
+pub unsafe fn json_epoch_scan(
+    text: *const u8, len: i32,
+    out_positions: *mut i32, max_positions: i32, out_n_positions: *mut i32,
+    scratch: *mut u8,
+) {
+    (k().json_epoch_scan)(
+        text, len,
+        out_positions, max_positions, out_n_positions,
+        scratch,
+    );
+}
+
 /// Classic BSD syslog `MMM DD HH:MM:SS` position scan. Identical contract to
 /// [`timestamp_scan`]. The decoder assigns a fixed reference year (syslog is
 /// yearless).
