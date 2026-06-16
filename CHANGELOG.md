@@ -8,6 +8,30 @@ order.
 
 ## [Unreleased]
 
+## [3.8.0] — 2026-06-16
+
+### Added
+
+- **`eacorrelate` / `eatime` read Apache error logs and HDFS/Hadoop logs.** Two
+  more formats are auto-detected and flow through correlation and the incident
+  timeline like any other log:
+  - **Apache error** — `[Sun Dec 04 04:47:44 2005] [error] ...` (full year; the
+    `[error]`/`[crit]` severity drives the error sub-stream). Apache 2.4
+    fractional seconds are tolerated.
+  - **HDFS / Hadoop** — `081109 203615 148 INFO dfs.DataNode: ...` (2-digit year
+    read as 20YY; the `ERROR`/`FATAL` level field drives the error sub-stream).
+  Each adds a SIMD timestamp kernel reusing the existing cross-arch idiom (no new
+  compiler intrinsics); both verified x86 ≡ Pi NEON bit-identical on the public
+  Loghub samples.
+
+### Fixed
+
+- **Error sub-streams now count one event per line, not per keyword.** A log line
+  whose message repeats a level word (common in Apache prose — `[error] ... in
+  error state`) previously contributed several identical error events; it now
+  contributes one. Matches the line count exactly (e.g. the Loghub Apache sample:
+  595, was 1134); no change for logs that mention a level once per line.
+
 ## [3.7.0] — 2026-06-16
 
 ### Added
