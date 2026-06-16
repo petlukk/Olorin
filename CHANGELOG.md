@@ -8,6 +8,20 @@ order.
 
 ## [Unreleased]
 
+## [3.6.0] — 2026-06-16
+
+### Added
+
+- **`eacorrelate` separates errors in classic BSD syslog logs.** A syslog app
+  log (`Jun 14 15:16:01 host app[42]: ERROR ...`) now gets an `(errors)`
+  sub-stream alongside its all-events stream — the ERROR/FATAL lines, keyed to
+  each line's timestamp — exactly as ISO, CLF (HTTP 5xx) and JSON logs already
+  did. Previously syslog was the one detected format whose errors stayed folded
+  into the baseline traffic, so a deploy→error cascade in a syslog feed was
+  invisible to the incident timeline. No new kernel: the format-agnostic
+  `log_level_scan` is reused with the syslog timestamp decoder. Verified
+  x86 ≡ Pi NEON bit-identical.
+
 ## [3.5.1] — 2026-06-16
 
 ### Fixed
