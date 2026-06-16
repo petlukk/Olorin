@@ -8,6 +8,17 @@ order.
 
 ## [Unreleased]
 
+## [3.5.1] — 2026-06-16
+
+### Fixed
+
+- **The HTML report now renders the incident timeline.** `olorin report` showed
+  the raw cross-file correlations but dropped the assembled incident — so the
+  shareable artifact was missing the deploy-anchored "why did my service die"
+  headline that the terminal and web outputs already lead with. The report now
+  opens with it (*"Deployment at 06:25 → app.log errors rise 22 seconds later"*)
+  above the correlation evidence.
+
 ## [3.5.0] — 2026-06-16
 
 ### Added
