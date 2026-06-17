@@ -8,6 +8,18 @@ order.
 
 ## [Unreleased]
 
+## [3.8.4] — 2026-06-17
+
+### Added
+
+- **Cloud fallback now narrates rune output.** When no local model is loaded
+  (cloud-only configuration), dropping a file or running a rune previously
+  showed the kernel output with no model narration — the followup paths were
+  wired only to the local engine. Both the web-UI/file-drop and REPL paths now
+  narrate via the Anthropic client when there's no local engine, reusing the
+  same narration prompt and the same grid/dump/empty discard filters. A failed
+  or absent cloud call degrades to the bare kernel output, as before.
+
 ## [3.8.3] — 2026-06-17
 
 ### Fixed
