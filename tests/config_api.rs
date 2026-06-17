@@ -135,6 +135,26 @@ fn cloud_failure_surfaces_real_error_not_no_backend() {
     );
 }
 
+/// Regression: the default cloud-fallback model must be a currently-served
+/// model id. `claude-3-5-haiku-latest` aliased `claude-3-5-haiku-20241022`,
+/// retired 2026-02-19, so the API rejected it with "model: claude-3-5-haiku-latest"
+/// the moment a key was configured. The default is now `claude-haiku-4-5`.
+#[test]
+fn default_cloud_model_is_currently_served() {
+    let _h = IsolatedHome::new("default-cloud-model");
+    let mut ctx = DispatchContext::new(None, None);
+    ctx.store_api_key("sk-ant-test-key");
+    let json = ctx.get_config();
+    assert!(
+        json.contains("\"cloud_model\":\"claude-haiku-4-5\""),
+        "default cloud model should be claude-haiku-4-5, got: {json}"
+    );
+    assert!(
+        !json.contains("claude-3-5-haiku"),
+        "retired haiku-3.5 id must not appear, got: {json}"
+    );
+}
+
 #[test]
 fn store_api_key_then_update_cloud_model() {
     let _h = IsolatedHome::new("store-then-update");

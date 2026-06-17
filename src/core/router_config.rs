@@ -14,7 +14,7 @@ impl DispatchContext {
         };
         let (cloud_model, cloud_max, has_key) = match &self.anthropic {
             Some(a) => (a.model(), a.max_tokens(), a.has_key()),
-            None => ("claude-3-5-haiku-latest", 4096, false),
+            None => ("claude-haiku-4-5", 4096, false),
         };
         let system_prompt = crate::interface::server::escape_json(&self.system_prompt);
         let available = crate::inference::generate::available_models();
