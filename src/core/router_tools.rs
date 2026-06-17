@@ -163,7 +163,8 @@ impl DispatchContext {
     /// Sync narration after a rune's kernel output; persists the turn on success.
     fn run_followup_sync(&mut self, input: &str, head: String, prompt: &str) -> Response {
         let Some(engine) = self.engine.as_mut() else {
-            return Response::text(head);
+            // No local model — narrate via the cloud client if one is configured.
+            return self.run_followup_cloud_sync(input, head, prompt);
         };
         let system = NARRATION_SYSTEM_PROMPT;
         let prompt_tokens = engine.count_prompt_tokens(prompt, system);
@@ -181,24 +182,50 @@ impl DispatchContext {
         engine.max_tokens = prior_max;
         engine.thinking = prior_thinking;
         match result {
-            Ok(narr) => {
-                let trimmed = narr.trim();
-                if trimmed.is_empty()
-                    || crate::runes::narration::is_grid_continuation(prompt, trimmed)
-                    || crate::runes::narration::looks_like_data_dump(trimmed)
-                {
-                    return Response::text(head);
-                }
-                self.messages.push(handlers::user_message(input));
-                self.messages.push(handlers::assistant_message(trimmed));
-                self.vault_save(b"assistant", trimmed.as_bytes());
-                Response::text(format!("{head}\n\n{trimmed}"))
-            }
+            Ok(narr) => self.finalize_narration_sync(input, head, prompt, &narr),
             Err(e) => {
                 eprintln!("[rune] narration failed: {e}");
                 Response::text(head)
             }
         }
+    }
+
+    /// Narrate a rune's kernel output via the Anthropic cloud client when no
+    /// local engine is loaded. Returns the bare kernel output if no client is
+    /// configured or the cloud call fails.
+    fn run_followup_cloud_sync(&mut self, input: &str, head: String, prompt: &str) -> Response {
+        let Some(client) = &self.anthropic else {
+            return Response::text(head);
+        };
+        match client.generate(NARRATION_SYSTEM_PROMPT, &[("user", prompt)]) {
+            Ok(narr) => self.finalize_narration_sync(input, head, prompt, &narr),
+            Err(e) => {
+                eprintln!("[rune] cloud narration failed: {e}");
+                Response::text(head)
+            }
+        }
+    }
+
+    /// Apply the narration discard filters and, on a usable narration, persist
+    /// the rune turn. Shared by the local-engine and cloud sync paths.
+    fn finalize_narration_sync(
+        &mut self,
+        input: &str,
+        head: String,
+        prompt: &str,
+        narration: &str,
+    ) -> Response {
+        let trimmed = narration.trim();
+        if trimmed.is_empty()
+            || crate::runes::narration::is_grid_continuation(prompt, trimmed)
+            || crate::runes::narration::looks_like_data_dump(trimmed)
+        {
+            return Response::text(head);
+        }
+        self.messages.push(handlers::user_message(input));
+        self.messages.push(handlers::assistant_message(trimmed));
+        self.vault_save(b"assistant", trimmed.as_bytes());
+        Response::text(format!("{head}\n\n{trimmed}"))
     }
 
     // ── Teleport handling ────────────────────────────────────────────────────
