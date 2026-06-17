@@ -19,7 +19,7 @@ pub struct AnthropicClient {
 
 impl AnthropicClient {
     pub fn new(api_key: String) -> Self {
-        Self { api_key, model: "claude-3-5-haiku-latest".to_string(), max_tokens: DEFAULT_CLOUD_MAX_TOKENS }
+        Self { api_key, model: "claude-haiku-4-5".to_string(), max_tokens: DEFAULT_CLOUD_MAX_TOKENS }
     }
 
     pub fn with_model(api_key: String, model: String) -> Self {
