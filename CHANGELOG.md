@@ -8,6 +8,18 @@ order.
 
 ## [Unreleased]
 
+## [3.8.3] — 2026-06-17
+
+### Fixed
+
+- **Cloud fallback now points at a current model.** The hardcoded default
+  cloud model was `claude-3-5-haiku-latest`, which aliased a model Anthropic
+  retired on 2026-02-19 — so once a valid API key was configured, every cloud
+  request failed with `Anthropic API error: model: claude-3-5-haiku-latest`
+  (now visible thanks to the v3.8.2 error-surfacing fix). The default is now
+  `claude-haiku-4-5`, in both the client default and the config display. Users
+  who set a custom cloud model are unaffected.
+
 ## [3.8.2] — 2026-06-17
 
 ### Fixed
