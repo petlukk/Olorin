@@ -109,6 +109,32 @@ fn update_cloud_model_with_client() {
     assert!(json.contains("claude-sonnet-4-6"), "cloud_model not updated: {json}");
 }
 
+/// Regression: once an API key is applied, a failing cloud request must
+/// surface the real error (so the user can see *why* it failed), not the
+/// generic "No LLM backend available" message — which made a configured-
+/// but-failing backend indistinguishable from no backend at all.
+///
+/// The fake key can never authenticate, so `client.generate` always returns
+/// Err (HTTP 401 with network, connection error without). Either way the
+/// dispatch must report a cloud failure, never the no-backend message.
+#[test]
+fn cloud_failure_surfaces_real_error_not_no_backend() {
+    let _h = IsolatedHome::new("cloud-fail-surfaces");
+    let mut ctx = DispatchContext::new(None, None);
+    ctx.store_api_key("sk-ant-invalid-test-key");
+    assert!(ctx.get_config().contains("\"has_api_key\":true"), "key not applied");
+
+    let resp = ctx.dispatch("hello there");
+    assert!(
+        resp.text.contains("Cloud inference failed"),
+        "should surface the real cloud error, got: {}", resp.text
+    );
+    assert!(
+        !resp.text.contains("No LLM backend available"),
+        "must not mask a configured backend as missing, got: {}", resp.text
+    );
+}
+
 #[test]
 fn store_api_key_then_update_cloud_model() {
     let _h = IsolatedHome::new("store-then-update");

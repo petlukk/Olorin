@@ -434,7 +434,10 @@ impl DispatchContext {
             match client.generate(&system, &msg_pairs) {
                 Ok(text) => return Ok(text),
                 Err(e) => {
+                    // Backend IS configured — surface the real failure instead of
+                    // masking it as the generic "no backend" message below.
                     eprintln!("[olorin] cloud inference failed: {e}");
+                    return Err(format!("Cloud inference failed: {e}"));
                 }
             }
         }
