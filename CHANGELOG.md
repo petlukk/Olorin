@@ -8,6 +8,27 @@ order.
 
 ## [Unreleased]
 
+## [3.8.1] — 2026-06-17
+
+### Changed
+
+- **Clearer "unsupported file" and rune help, everywhere.** Dropping a file
+  whose type isn't supported now names the file, says it isn't supported, and
+  lists what *is* (CSV, JSON/JSON Lines, Parquet, SQL, logs & text) instead of a
+  terse one-liner that had silently gone stale (it omitted `.sql`). Naming a rune
+  that doesn't exist — via `olorin rune <name>` or the REPL `/rune` — now prints
+  the full list of available runes. The REPL `/help` gained an accurate runes
+  section and a supported-files block. The format list and the rune list are now
+  derived from the same place routing and the registry live, with drift-guard
+  tests so they can't fall out of sync again.
+
+### Internal
+
+- Split the two source files that had reached the 500-line cap
+  (`interface/server.rs` → `server_config.rs`; `core/router_streaming.rs` →
+  `router_streaming_analyze.rs`), and refreshed the README project-stats table to
+  measured values. No behavior change.
+
 ## [3.8.0] — 2026-06-16
 
 ### Added
