@@ -159,7 +159,8 @@ impl DispatchContext {
         tx: &std::sync::mpsc::Sender<StreamEvent>,
     ) {
         let Some(engine) = self.engine.as_mut() else {
-            let _ = tx.send(StreamEvent::Done { full_text: rune_text.to_string() });
+            // No local model — narrate via the cloud client if one is configured.
+            self.run_followup_cloud(input, rune_text, prompt, tx);
             return;
         };
         // The narration system prompt is load-bearing: A/B on the Pi
@@ -203,8 +204,50 @@ impl DispatchContext {
         engine.max_tokens = prior_max;
         engine.thinking = prior_thinking;
         let narration = buf.into_inner();
-        let trimmed = narration.trim();
+        self.finalize_narration(input, rune_text, prompt, &narration, tx);
+    }
 
+    /// Narrate a rune's kernel output via the Anthropic cloud client when no
+    /// local engine is loaded. Falls back to the bare kernel output if no
+    /// client is configured or the cloud call fails — the rune output has
+    /// already streamed, so a missing narration just leaves it standing alone.
+    fn run_followup_cloud(
+        &mut self,
+        input: &str,
+        rune_text: &str,
+        prompt: &str,
+        tx: &std::sync::mpsc::Sender<StreamEvent>,
+    ) {
+        let system = crate::core::router_tools::NARRATION_SYSTEM_PROMPT;
+        let narration = match &self.anthropic {
+            Some(client) => match client.generate(system, &[("user", prompt)]) {
+                Ok(text) => text,
+                Err(e) => {
+                    eprintln!("[olorin] cloud narration failed: {e}");
+                    let _ = tx.send(StreamEvent::Done { full_text: rune_text.to_string() });
+                    return;
+                }
+            },
+            None => {
+                let _ = tx.send(StreamEvent::Done { full_text: rune_text.to_string() });
+                return;
+            }
+        };
+        self.finalize_narration(input, rune_text, prompt, &narration, tx);
+    }
+
+    /// Apply the narration discard filters and, on a usable narration, stream
+    /// it and persist the rune turn. Shared by the local-engine and cloud
+    /// narration paths so suppression stays identical across backends.
+    fn finalize_narration(
+        &mut self,
+        input: &str,
+        rune_text: &str,
+        prompt: &str,
+        narration: &str,
+        tx: &std::sync::mpsc::Sender<StreamEvent>,
+    ) {
+        let trimmed = narration.trim();
         // Empty, grid-continuation, or a reformatted data dump (the multi-file
         // failure mode) → discard the narration; the kernel output stands alone.
         let empty = trimmed.is_empty();
