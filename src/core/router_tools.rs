@@ -216,12 +216,16 @@ impl DispatchContext {
             None => (full, ""),
         };
         if name.is_empty() {
-            return Response::text(
-                "usage: /rune <name> [args] — try `/rune eacrunch <path.csv>`"
-            );
+            return Response::text(format!(
+                "usage: /rune <name> [args] — e.g. /rune eacrunch <path.csv>\n\navailable runes:\n{}",
+                crate::runes::rune_list()
+            ));
         }
         let Some(rune) = crate::runes::RUNES.iter().find(|r| r.name() == name) else {
-            return Response::text(format!("unknown rune: {name}"));
+            return Response::text(format!(
+                "unknown rune: {name}\n\navailable runes:\n{}",
+                crate::runes::rune_list()
+            ));
         };
         let result = rune.run(args);
         let safety_class = rune.output_safety();
@@ -362,6 +366,7 @@ impl DispatchContext {
         } else {
             ""
         };
+        let formats = crate::runes::select::supported_formats();
         format!("\
 Commands:
   /help  /quit  /tools  /clear  /model  /profile  /think [on|off]
@@ -374,9 +379,12 @@ Tools:
   /grep <pattern> [path]  /git <subcommand> [args]  /remind <time> <message>
   /recall <query>  /teleport
 
-Runes (SIMD tool calls):
-  /rune eacrunch <csv>     — summarize a CSV via SIMD
-  /rune eajson <jsonl>     — summarize a JSON Lines file via SIMD
+Runes (SIMD file analysis) — drop a file in the web UI, or run one directly:
+  /rune <name> [args] <path>   — in the REPL (run /rune alone to list all)
+  olorin rune <name> …         — one-shot CLI, clean stdout for piping
+
+Supported files:
+{formats}
 {mode_line}
 Agent: Olorin")
     }

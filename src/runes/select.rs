@@ -37,6 +37,18 @@ pub fn pick_rune_name(filename: &str, bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
+/// Human-readable list of the file types the file-drop analyst accepts, kept
+/// right next to `pick_rune_name` so the two can't drift — a drift-guard test
+/// asserts every extension routed above appears in this string. Surfaced by the
+/// "unsupported file" message, the REPL `/help`, and the CLI.
+pub fn supported_formats() -> &'static str {
+    "  • CSV (.csv) — row counts, group-by, aggregates\n  \
+     • JSON / JSON Lines (.json, .jsonl, .ndjson) — field stats\n  \
+     • Parquet (.parquet) — columnar summaries\n  \
+     • SQL (.sql) — schema / query inspection\n  \
+     • Logs & text (.log, .txt, or no extension) — timing spikes or severity counts"
+}
+
 /// Default rune arguments for a file-drop analysis (flags only; the file path
 /// is appended by the caller). For `eatime` we lead with spike detection —
 /// the forensic "when did the rate break" story — rather than the plain

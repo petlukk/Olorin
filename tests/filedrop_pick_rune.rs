@@ -70,3 +70,24 @@ fn pick_rune_resolves_against_registry() {
 
     assert!(pick_rune("photo.png", b"").is_none());
 }
+
+#[test]
+fn supported_formats_mentions_every_routed_extension() {
+    // Drift guard: every extension `pick_rune_name` routes must appear in the
+    // user-facing help, so the "unsupported file" message never lies by
+    // omission (it once dropped .sql). Add a case here when you add a route.
+    let help = olorin::runes::select::supported_formats();
+    for ext in ["csv", "json", "jsonl", "ndjson", "parquet", "sql", "log", "txt"] {
+        assert!(help.contains(ext), "supported_formats() must mention .{ext}: {help}");
+    }
+}
+
+#[test]
+fn rune_list_names_every_registered_rune() {
+    // The "available runes" help is built from the live registry, so it can't
+    // go stale — assert every rune surfaces.
+    let list = olorin::runes::rune_list();
+    for r in olorin::runes::RUNES {
+        assert!(list.contains(r.name()), "rune_list() missing {}: {list}", r.name());
+    }
+}

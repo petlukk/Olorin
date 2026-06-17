@@ -199,8 +199,21 @@ fn cli_rune_subcommand_emits_only_clean_json() {
 }
 
 #[test]
-fn cli_rune_unknown_name_exits_nonzero() {
-    let (stdout, ok) = run_olorin_rune(&["definitely_not_a_rune"]);
-    assert!(!ok, "unknown rune must exit non-zero");
+fn cli_rune_unknown_name_exits_nonzero_and_lists_runes() {
+    // Direct invocation (the shared helper drops stderr, where the help goes).
+    let out = Command::new(OLORIN)
+        .args(["rune", "definitely_not_a_rune"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("spawn olorin rune");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "unknown rune must exit non-zero");
     assert!(stdout.is_empty(), "nothing should reach stdout for an unknown rune:\n{stdout}");
+    // The error names the problem AND points the user at the real options.
+    assert!(stderr.contains("unknown rune"), "should say unknown rune:\n{stderr}");
+    assert!(stderr.contains("available runes"), "should list runes:\n{stderr}");
+    assert!(stderr.contains("eacrunch") && stderr.contains("eatime"),
+        "listing should include real rune names:\n{stderr}");
 }
