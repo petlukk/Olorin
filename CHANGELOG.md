@@ -8,6 +8,25 @@ order.
 
 ## [Unreleased]
 
+## [3.8.2] — 2026-06-17
+
+### Fixed
+
+- **Cloud (Anthropic) failures no longer masked as "no backend".** After
+  pasting an API key into the web-UI config modal and pressing Apply, a failing
+  cloud request used to fall through to the generic *"No LLM backend available.
+  Load a model or set ANTHROPIC_API_KEY."* message — making a configured-but-
+  failing backend indistinguishable from no backend at all, so the key looked
+  like it never applied. Both dispatch paths now surface the real reason
+  (`Cloud inference failed: <reason>`, e.g. an invalid `x-api-key`), pointing
+  straight at the fix. The no-backend message now fires only when no client is
+  configured, where it is accurate.
+
+### Changed
+
+- The Anthropic curl call is bounded with `--connect-timeout 15 --max-time 120`
+  so a stuck cloud request reports an error instead of hanging the UI.
+
 ## [3.8.1] — 2026-06-17
 
 ### Changed
