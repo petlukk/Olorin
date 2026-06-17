@@ -44,6 +44,8 @@ impl AnthropicClient {
         let output = Command::new("curl")
             .arg("--silent")
             .arg("--fail-with-body")
+            .arg("--connect-timeout").arg("15")
+            .arg("--max-time").arg("120")
             .arg("-X").arg("POST")
             .arg(API_URL)
             .arg("-H").arg(format!("x-api-key: {}", self.api_key))

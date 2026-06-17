@@ -132,7 +132,15 @@ impl DispatchContext {
                     let _ = tx.send(StreamEvent::Done { full_text: final_text });
                     return;
                 }
-                Err(e) => eprintln!("[olorin] cloud inference failed: {e}"),
+                Err(e) => {
+                    // Backend IS configured — surface the real failure instead of
+                    // masking it as the generic "no backend" message below.
+                    eprintln!("[olorin] cloud inference failed: {e}");
+                    let msg = format!("Cloud inference failed: {e}");
+                    let _ = tx.send(StreamEvent::Error(msg));
+                    let _ = tx.send(StreamEvent::Done { full_text: String::new() });
+                    return;
+                }
             }
         }
 
