@@ -64,7 +64,9 @@ fn run_rune_cli(rest: &[String]) -> ! {
     let Some(name) = rest.first() else {
         eprintln!(
             "usage: olorin rune <name> [args…]\n  \
-             e.g. olorin rune eatime --bucket series --json access.log > out.json"
+             e.g. olorin rune eatime --bucket series --json access.log > out.json\n\n\
+             available runes:\n{}",
+            olorin::runes::rune_list()
         );
         std::process::exit(2);
     };
@@ -77,7 +79,7 @@ fn run_rune_cli(rest: &[String]) -> ! {
             std::process::exit(if result.success { 0 } else { 1 });
         }
         None => {
-            eprintln!("unknown rune: {name}");
+            eprintln!("unknown rune: {name}\n\navailable runes:\n{}", olorin::runes::rune_list());
             std::process::exit(1);
         }
     }

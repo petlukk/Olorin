@@ -135,8 +135,9 @@ impl DispatchContext {
         let prefix = read_prefix(tmp_path, 8192);
         let Some(rune) = crate::runes::select::pick_rune(display_name, &prefix) else {
             let _ = tx.send(StreamEvent::Token(format!(
-                "(no rune matched {display_name} — I can analyze CSV, JSON Lines, \
-                 Parquet, and log files.)"
+                "I can't analyze {display_name} — that file type isn't supported yet.\n\n\
+                 I can analyze:\n{}",
+                crate::runes::select::supported_formats()
             )));
             return None;
         };

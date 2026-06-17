@@ -80,7 +80,11 @@ fn unknown_type_returns_graceful_message() {
     let (text, done, _) = collect(rx);
 
     assert!(done);
-    assert!(text.contains("no rune matched"), "graceful fallback: {text:?}");
+    // Names the rejected file, says it's unsupported, and lists what IS.
+    assert!(text.contains("photo.png"), "should name the file: {text:?}");
+    assert!(text.contains("isn't supported"), "should say unsupported: {text:?}");
+    assert!(text.to_lowercase().contains("csv") && text.contains("Parquet"),
+        "should list supported formats: {text:?}");
     assert!(!text.contains("ran `"), "no rune should have run: {text:?}");
 }
 

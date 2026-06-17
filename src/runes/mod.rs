@@ -67,6 +67,31 @@ pub trait Rune: Sync {
 
 include!(concat!(env!("OUT_DIR"), "/runes_registry.rs"));
 
+/// One line per rune — `name — lead clause` — built from the live registry, so
+/// the list always matches what's actually runnable. Surfaced when a user names
+/// a rune that doesn't exist (CLI and REPL). The full `description()` is the
+/// verbose LLM tool spec; for a human one-liner we take the lead clause (up to
+/// the first `:` or sentence end), which every rune writes as its summary.
+pub fn rune_list() -> String {
+    let mut s = String::new();
+    for r in RUNES {
+        s.push_str(&format!("  {:<11} — {}\n", r.name(), short_desc(r.description())));
+    }
+    s
+}
+
+/// The lead clause of a rune description: everything up to the first `:` or
+/// `. ` (whichever comes first), else the whole string. Turns a paragraph-long
+/// LLM tool spec into a scannable one-liner.
+fn short_desc(desc: &str) -> &str {
+    let colon = desc.find(':');
+    let period = desc.find(". ");
+    match colon.into_iter().chain(period).min() {
+        Some(end) => &desc[..end],
+        None => desc,
+    }
+}
+
 /// Look up and invoke a rune by name. Returns None if not found.
 pub fn run_rune(name: &str, args: &str) -> Option<RuneResult> {
     RUNES.iter()
