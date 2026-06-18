@@ -8,6 +8,22 @@ order.
 
 ## [Unreleased]
 
+## [3.10.0] — 2026-06-18
+
+### Added
+
+- **Palantír alert sinks (`--notify`).** The log watcher can now route alerts
+  beyond stdout, repeatably:
+  - `webhook:URL` — HTTP POST a JSON body (`{text, source, kind, severity}`)
+    via curl. Works with Slack/PagerDuty/Discord directly, or a WhatsApp webhook
+    service (CallMeBot/Twilio) for phone alerts.
+  - `exec:CMD` — run a command per alert with the alert in the environment
+    (`PALANTIR_ALERT` / `_KIND` / `_SEVERITY`) — wire it to the local wa-bridge,
+    `ntfy`, `mail`, desktop notifications, anything.
+  - `stdout` remains the default. `--notify` is repeatable, so alerts can fan
+    out to several destinations at once. A sink failure logs to stderr and never
+    blocks the watcher or the other sinks.
+
 ## [3.9.0] — 2026-06-18
 
 ### Added
