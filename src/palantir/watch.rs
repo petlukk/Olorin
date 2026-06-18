@@ -41,6 +41,16 @@ impl Sensitivity {
             Self::Low => (1, 3),
         }
     }
+
+    /// Rate-anomaly knobs: (MAD multiplier, consecutive anomalous buckets to
+    /// confirm). Lower `k` and shorter streak = more sensitive.
+    fn rate_knobs(self) -> (f64, usize) {
+        match self {
+            Self::High => (3.0, 2),
+            Self::Medium => (5.0, 3),
+            Self::Low => (8.0, 4),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -51,6 +61,10 @@ pub enum Alert {
     Confirmed { trigger_at: i64, at: i64, errors: usize },
     /// The window passed without a cascade.
     Clear { trigger_at: i64, window: i64 },
+    /// The error rate rose abnormally above its trailing baseline, with no
+    /// trigger line — a leak / degradation / spike. `baseline` is the median
+    /// per-bucket error count over the recent window.
+    Anomaly { at: i64, rate: u64, baseline: f64 },
 }
 
 impl Alert {
@@ -60,6 +74,7 @@ impl Alert {
             Alert::Predicted { .. } => "predicted",
             Alert::Confirmed { .. } => "confirmed",
             Alert::Clear { .. } => "clear",
+            Alert::Anomaly { .. } => "anomaly",
         }
     }
 
@@ -70,6 +85,7 @@ impl Alert {
             Alert::Predicted { .. } => "warning",
             Alert::Confirmed { .. } => "critical",
             Alert::Clear { .. } => "info",
+            Alert::Anomaly { .. } => "warning",
         }
     }
 
@@ -94,6 +110,13 @@ impl Alert {
                 "✓  PALANTÍR  {}  window clear — no cascade {window}s after the trigger",
                 seconds_to_iso(trigger_at + window)
             ),
+            Alert::Anomaly { at, rate, baseline } => {
+                let factor = *rate as f64 / baseline.max(1.0);
+                format!(
+                    "📈 PALANTÍR  {}  RATE ANOMALY — {rate} errors/bucket vs ~{baseline:.0} baseline ({factor:.0}× normal)",
+                    seconds_to_iso(*at)
+                )
+            }
         }
     }
 }
@@ -125,6 +148,13 @@ impl Detector {
 
     pub fn window(&self) -> i64 { self.window }
     pub fn lag(&self) -> Option<i64> { self.lag }
+
+    /// True while a trigger incident is being tracked (armed or cooling down).
+    /// The watch loop uses this to suppress rate-anomaly alerts during a
+    /// trigger incident, so one incident isn't reported twice.
+    pub fn is_active(&self) -> bool {
+        !matches!(self.phase, Phase::Idle)
+    }
 
     /// Advance the machine with one poll's worth of observations at arrival
     /// time `now` (epoch seconds): `triggers` trigger lines and `errors` error
@@ -176,6 +206,102 @@ impl Detector {
             Phase::Idle => {}
         }
         out
+    }
+}
+
+// ── rate anomaly ────────────────────────────────────────────────────────────
+
+/// Trailing buckets kept for the baseline (≈ this many polls of history).
+const RATE_WINDOW: usize = 120;
+/// Buckets to collect before any alert is allowed — a baseline can't be defined
+/// from nothing, and warming up suppresses startup-transient false positives.
+const RATE_WARMUP: usize = 15;
+/// Never alert below this many errors/bucket, however quiet the baseline — a
+/// flat-zero baseline must not let one or two stray errors trip the alarm.
+const RATE_ABS_FLOOR: u64 = 3;
+/// One anomaly → one alert chain, for this many seconds.
+const RATE_COOLDOWN_SECS: i64 = 60;
+
+/// Streaming rate-anomaly detector: flags an abnormal rise in the per-bucket
+/// error count against a robust trailing baseline (median + MAD), with no
+/// trigger line needed. The same robust statistic `eatime --bucket series`
+/// uses, run incrementally over a ring of recent buckets.
+///
+/// False-positive control is the point, not the median/MAD math: a warm-up
+/// before alerting, a required streak of consecutive anomalous buckets (one
+/// blip is not an incident), an absolute floor, a MAD floor of 1.0 (so a
+/// flat-zero baseline needs a real jump, not a single event), and a cooldown.
+pub struct RateDetector {
+    window:         std::collections::VecDeque<u64>,
+    k:              f64,
+    min_streak:     usize,
+    streak:         usize,
+    cooldown_until: i64,
+}
+
+impl RateDetector {
+    pub fn new(sensitivity: Sensitivity) -> Self {
+        let (k, min_streak) = sensitivity.rate_knobs();
+        Self {
+            window: std::collections::VecDeque::with_capacity(RATE_WINDOW),
+            k,
+            min_streak,
+            streak: 0,
+            cooldown_until: 0,
+        }
+    }
+
+    /// Feed one bucket's error count at arrival time `now`. Returns an alert
+    /// when the rate has been anomalously high for `min_streak` buckets in a
+    /// row. The trailing window is always updated, including during warm-up and
+    /// cooldown, so the baseline tracks the live rate.
+    pub fn observe(&mut self, now: i64, errors: u64) -> Option<Alert> {
+        let mut out = None;
+        if now < self.cooldown_until {
+            self.streak = 0;
+        } else if self.window.len() >= RATE_WARMUP {
+            let (median, mad) = median_mad(self.window.make_contiguous());
+            let threshold = median + self.k * mad.max(1.0);
+            if errors >= RATE_ABS_FLOOR && (errors as f64) > threshold {
+                self.streak += 1;
+                if self.streak >= self.min_streak {
+                    out = Some(Alert::Anomaly { at: now, rate: errors, baseline: median });
+                    self.cooldown_until = now + RATE_COOLDOWN_SECS;
+                    self.streak = 0;
+                }
+            } else {
+                self.streak = 0;
+            }
+        }
+        self.window.push_back(errors);
+        if self.window.len() > RATE_WINDOW {
+            self.window.pop_front();
+        }
+        out
+    }
+}
+
+/// Median and median-absolute-deviation of a bucket-count window.
+fn median_mad(xs: &[u64]) -> (f64, f64) {
+    if xs.is_empty() {
+        return (0.0, 0.0);
+    }
+    let mut v: Vec<f64> = xs.iter().map(|&x| x as f64).collect();
+    v.sort_by(|a, b| a.partial_cmp(b).expect("counts are finite"));
+    let median = median_sorted(&v);
+    let mut dev: Vec<f64> = v.iter().map(|x| (x - median).abs()).collect();
+    dev.sort_by(|a, b| a.partial_cmp(b).expect("deviations are finite"));
+    (median, median_sorted(&dev))
+}
+
+fn median_sorted(v: &[f64]) -> f64 {
+    let n = v.len();
+    if n == 0 {
+        0.0
+    } else if n % 2 == 1 {
+        v[n / 2]
+    } else {
+        (v[n / 2 - 1] + v[n / 2]) / 2.0
     }
 }
 
