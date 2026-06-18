@@ -17,7 +17,7 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use std::time::Duration;
-use watch::{Detector, Sensitivity};
+use watch::{Detector, RateDetector, Sensitivity};
 
 /// Cap on the history read for the learn pass: the recent tail is the relevant
 /// part and bounds memory on a multi-GB log.
@@ -96,19 +96,30 @@ pub fn run(opts: Opts) -> ! {
         opts.sinks.len(),
     );
 
+    let mut rate = RateDetector::new(opts.sensitivity);
     let mut tailer = tail::Tailer::at_end(&opts.path);
     loop {
         std::thread::sleep(Duration::from_secs(opts.poll_secs));
         let now = now_epoch();
         let lines = tailer.poll();
-        let alerts = if lines.is_empty() {
-            detector.observe(now, 0, 0) // drives window expiry / stand-down
+        let (triggers, errors) = if lines.is_empty() {
+            (0, 0) // empty tick still drives window expiry and the rate baseline
         } else {
             let chunk = lines.join("\n");
             let f = *fmt.get_or_insert_with(|| stream::detect_format(chunk.as_bytes()));
-            let (triggers, errors) = watch::classify_chunk(chunk.as_bytes(), f);
-            detector.observe(now, triggers, errors)
+            watch::classify_chunk(chunk.as_bytes(), f)
         };
+
+        let mut alerts = detector.observe(now, triggers, errors);
+        // Rate-anomaly runs every tick to keep its baseline current, but its
+        // alert is suppressed while a trigger incident is active so one incident
+        // isn't reported by both detectors.
+        if let Some(a) = rate.observe(now, errors as u64) {
+            if !detector.is_active() {
+                alerts.push(a);
+            }
+        }
+
         for a in alerts {
             for s in &opts.sinks {
                 s.deliver(&a);
