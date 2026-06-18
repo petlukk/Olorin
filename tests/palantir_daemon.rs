@@ -79,7 +79,8 @@ fn snapshot_is_written_atomically_with_the_last_alert() {
     assert!(body.contains("\"lag\":10"));
     assert!(body.contains("\"status\":\"alerting\""), "an anomaly means alerting: {body}");
     assert!(body.contains("\"kind\":\"anomaly\""));
-    assert!(body.contains("\"at_unix\":1234"));
+    assert!(body.contains("\"at_unix\":5"), "alert time is the alert's own, not the write time: {body}");
+    assert!(body.contains("\"updated_at_unix\":1234"));
     // No leftover temp file.
     assert!(!state_dir().join("w.json.tmp").exists(), "temp file should be renamed away");
 }

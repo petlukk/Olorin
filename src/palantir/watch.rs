@@ -78,6 +78,17 @@ impl Alert {
         }
     }
 
+    /// When the alert fired (epoch seconds) — for snapshot freshness, so a
+    /// heartbeat re-write doesn't make an old alert look current.
+    pub fn at(&self) -> i64 {
+        match self {
+            Alert::Predicted { at, .. } => *at,
+            Alert::Confirmed { at, .. } => *at,
+            Alert::Clear { trigger_at, window } => trigger_at + window,
+            Alert::Anomaly { at, .. } => *at,
+        }
+    }
+
     /// Severity for alert routing: a prediction is a warning, a confirmed
     /// cascade is critical, a stand-down is informational.
     pub fn severity(&self) -> &'static str {

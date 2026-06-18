@@ -66,7 +66,7 @@ impl DispatchContext {
         self.audit_result(audit_turn, audit_start, "llm_start", &[]);
         self.messages.push(handlers::user_message(input));
 
-        let system = self.system_prompt.clone();
+        let system = self.system_prompt_for_turn();
         let prompt = match &recall_context {
             Some(ctx) => format!("{ctx}\n\n{}", self.last_user_text()),
             None => self.last_user_text(),
@@ -112,7 +112,7 @@ impl DispatchContext {
         }
 
         if let Some(client) = &self.anthropic {
-            let system = self.system_prompt.clone();
+            let system = self.system_prompt_for_turn();
             let owned = self.build_cloud_messages();
             let msg_pairs: Vec<(&str, &str)> = owned.iter()
                 .map(|(r, t)| (r.as_str(), t.as_str())).collect();
