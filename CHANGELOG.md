@@ -8,6 +8,23 @@ order.
 
 ## [Unreleased]
 
+## [3.11.0] — 2026-06-18
+
+### Added
+
+- **Palantír rate-anomaly detection.** The log watcher now catches incidents
+  with **no trigger line** — memory leaks, gradual degradation, traffic spikes —
+  by flagging an abnormal rise in the per-bucket error rate against a robust
+  trailing baseline (median + MAD, the same statistic `eatime --bucket series`
+  uses, run incrementally; no new kernel). It complements the v1 trigger-during-
+  lag detection — both run together, and a rate anomaly is suppressed while a
+  trigger incident is already being tracked so one event isn't reported twice.
+  False-positive control is deliberate: a warm-up before alerting, a required
+  streak of consecutive anomalous buckets, an absolute floor, a MAD floor, and a
+  cooldown. Tunable via the existing `--sensitivity low|med|high`. Verified live
+  on the Pi: a no-trigger error ramp fired a `RATE ANOMALY` alert from a quiet
+  baseline.
+
 ## [3.10.0] — 2026-06-18
 
 ### Added
