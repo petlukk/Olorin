@@ -54,6 +54,25 @@ pub enum Alert {
 }
 
 impl Alert {
+    /// Machine-readable kind, for webhook payloads and exec env.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Alert::Predicted { .. } => "predicted",
+            Alert::Confirmed { .. } => "confirmed",
+            Alert::Clear { .. } => "clear",
+        }
+    }
+
+    /// Severity for alert routing: a prediction is a warning, a confirmed
+    /// cascade is critical, a stand-down is informational.
+    pub fn severity(&self) -> &'static str {
+        match self {
+            Alert::Predicted { .. } => "warning",
+            Alert::Confirmed { .. } => "critical",
+            Alert::Clear { .. } => "info",
+        }
+    }
+
     /// One human-facing line for stdout.
     pub fn render(&self) -> String {
         match self {

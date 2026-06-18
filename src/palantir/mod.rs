@@ -7,10 +7,12 @@
 //! `watch.rs` for the detector and the honest scope (it predicts the
 //! trigger+lag class of incidents, not precursor-free instant crashes).
 
+pub mod sink;
 pub mod tail;
 pub mod watch;
 
 use crate::runes::stream::{self, Format};
+use sink::Sink;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
@@ -26,6 +28,7 @@ pub struct Opts {
     pub sensitivity: Sensitivity,
     pub poll_secs:   u64,
     pub learn:       bool,
+    pub sinks:       Vec<Sink>,
 }
 
 /// Parse `palantir` args. Returns Err(usage) on a bad invocation.
@@ -34,6 +37,7 @@ pub fn parse_args(args: &[String]) -> Result<Opts, String> {
     let mut sensitivity = Sensitivity::Medium;
     let mut poll_secs = 1u64;
     let mut learn = true;
+    let mut sinks: Vec<Sink> = Vec::new();
     let mut it = args.iter();
     while let Some(tok) = it.next() {
         match tok.as_str() {
@@ -48,17 +52,25 @@ pub fn parse_args(args: &[String]) -> Result<Opts, String> {
                 poll_secs = v.parse().map_err(|_| format!("bad --poll seconds: {v}"))?;
                 if poll_secs == 0 { return Err("--poll must be >= 1".to_string()); }
             }
+            "--notify" => {
+                let v = it.next().ok_or("missing value after --notify")?;
+                sinks.push(Sink::parse(v)?);
+            }
             "--no-learn" => learn = false,
             other => return Err(format!("unknown argument: {other}")),
         }
     }
     let path = path.ok_or("missing --alert <file>")?;
-    Ok(Opts { path, sensitivity, poll_secs, learn })
+    if sinks.is_empty() {
+        sinks.push(Sink::Stdout); // default sink
+    }
+    Ok(Opts { path, sensitivity, poll_secs, learn, sinks })
 }
 
 pub const USAGE: &str =
-    "usage: olorin palantir --alert <file> [--sensitivity low|med|high] [--poll SECS] [--no-learn]\n  \
-     e.g. olorin palantir --alert /app/log/system.log";
+    "usage: olorin palantir --alert <file> [--sensitivity low|med|high] [--poll SECS]\n         \
+     [--notify stdout|webhook:URL|exec:CMD]... [--no-learn]\n  \
+     e.g. olorin palantir --alert /app/log/system.log --notify webhook:https://hooks.slack.com/…";
 
 /// Run the foreground watcher. Diverges: loops until the process is killed
 /// (Ctrl-C). Kernel init happens here, as for the rune/report subcommands.
@@ -75,12 +87,13 @@ pub fn run(opts: Opts) -> ! {
     let mut detector = Detector::new(lag, opts.sensitivity);
 
     eprintln!(
-        "[palantír] watching {}  format={}  lag={}  sensitivity={:?}  window={}s  (Ctrl-C to stop)",
+        "[palantír] watching {}  format={}  lag={}  sensitivity={:?}  window={}s  sinks={}  (Ctrl-C to stop)",
         opts.path,
         fmt.map(Format::tag).unwrap_or("pending"),
         lag.map(|l| format!("~{l}s")).unwrap_or_else(|| "unknown (no history pattern)".to_string()),
         opts.sensitivity,
         detector.window(),
+        opts.sinks.len(),
     );
 
     let mut tailer = tail::Tailer::at_end(&opts.path);
@@ -97,7 +110,9 @@ pub fn run(opts: Opts) -> ! {
             detector.observe(now, triggers, errors)
         };
         for a in alerts {
-            println!("{}", a.render());
+            for s in &opts.sinks {
+                s.deliver(&a);
+            }
         }
     }
 }
