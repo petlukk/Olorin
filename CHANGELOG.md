@@ -8,6 +8,19 @@ order.
 
 ## [Unreleased]
 
+## [3.13.0] — 2026-06-18
+
+### Added
+
+- **Olorin's chat senses live palantír incidents.** When a palantír daemon is
+  reporting a fresh incident, the chat turn's system prompt gains a
+  `<recent_observations>` block — so asking "anything happening with the logs?"
+  works, and incidents surface in conversation without being asked about. It
+  reads the daemon's status snapshot; only fresh watchers with a recent alert
+  are surfaced (quiet/stale watchers contribute nothing, so the prompt is
+  unchanged outside an incident). Per-turn only, sanitized; rune narration is
+  unaffected.
+
 ## [3.12.0] — 2026-06-18
 
 ### Added
