@@ -147,3 +147,37 @@ pub fn auto_width(span_secs: i64, target_buckets: i64) -> i64 {
     }
     NICE_WIDTHS[NICE_WIDTHS.len() - 1]
 }
+
+/// Robust grid bounds for a pooled set of event epochs, as a Tukey far-outlier
+/// fence `(Q1 − 3·IQR, Q3 + 3·IQR)` intersected with the actual range.
+///
+/// A handful of far-offset timestamps — a 1970 epoch from a missing field, a
+/// clock-skew future, or a yearless log format (BSD syslog) parsed to a fixed
+/// reference era while its dated peers sit in the real year — otherwise stretch
+/// `max − min` across months. `auto_width` then snaps to a coarse rung and a
+/// genuinely short incident collapses into a single bucket (trivial r=1.00).
+/// Clipping the span to the central distribution keeps short incidents at fine
+/// resolution; events outside the window fall out of the grid in `bucket_series`
+/// (a stream entirely outside goes flat → dropped, which is correct — it cannot
+/// align with the incident).
+///
+/// The fence width scales with the IQR, so a genuinely multi-day incident keeps
+/// a wide window. On data with no outliers the fence sits beyond `[min, max]`,
+/// so the result equals `(min, max)` and bucketing is unchanged. Returns `None`
+/// on empty input; falls back to `(min, max)` when the IQR is zero (robust scale
+/// undefined — e.g. most events share one instant).
+pub fn robust_bounds(epochs: &[i64]) -> Option<(i64, i64)> {
+    if epochs.is_empty() { return None; }
+    let mut v: Vec<i64> = epochs.to_vec();
+    v.sort_unstable();
+    let (min, max) = (v[0], v[v.len() - 1]);
+    let q = |p: f64| v[(((v.len() - 1) as f64) * p).round() as usize];
+    let (q1, q3) = (q(0.25), q(0.75));
+    let iqr = q3 - q1;
+    if iqr == 0 {
+        return Some((min, max));
+    }
+    let lo = q1.saturating_sub(3 * iqr);
+    let hi = q3.saturating_add(3 * iqr);
+    Some((min.max(lo), max.min(hi)))
+}

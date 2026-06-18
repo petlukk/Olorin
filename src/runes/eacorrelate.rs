@@ -201,8 +201,15 @@ pub fn correlate_files(files: &[(String, String)]) -> RuneOutput {
 /// Bucket all streams onto one grid, z-score, sweep every cross-file
 /// pair with the corr_sweep kernel, keep the TOP_K strongest findings.
 fn correlate(streams: &[EventStream], triggers: &[incident::TriggerCandidate]) -> (Vec<Correlation>, Option<incident::Incident>) {
-    let gmin = streams.iter().flat_map(|s| s.epochs.iter()).min().copied().unwrap_or(0);
-    let gmax = streams.iter().flat_map(|s| s.epochs.iter()).max().copied().unwrap_or(0);
+    // Robust grid bounds, not raw min/max: a minority of far-offset timestamps
+    // (1970 epochs, clock-skew futures, a yearless format parsed to a fixed era)
+    // would otherwise stretch the span across months and collapse a short
+    // incident into one coarse bucket. See stream::robust_bounds.
+    let pooled: Vec<i64> = streams.iter().flat_map(|s| s.epochs.iter().copied()).collect();
+    let (gmin, gmax) = match stream::robust_bounds(&pooled) {
+        Some(b) => b,
+        None => return (Vec::new(), None),
+    };
     let span = gmax - gmin;
     if span <= 0 {
         return (Vec::new(), None); // everything in one instant — no lag structure
