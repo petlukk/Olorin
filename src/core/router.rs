@@ -221,6 +221,31 @@ impl DispatchContext {
         &self.system_prompt
     }
 
+    /// The system prompt for one chat turn: the base prompt, plus a
+    /// `<recent_observations>` block when a palantír daemon is reporting a live
+    /// incident — so the chat model is aware of it without being asked. Per-turn
+    /// only; never persisted. Quiet/stale watchers contribute nothing, so the
+    /// prompt is unchanged outside an incident.
+    #[doc(hidden)]
+    pub fn system_prompt_for_turn(&self) -> String {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let obs = crate::palantir::daemon::recent_observations(now);
+        if obs.is_empty() {
+            return self.system_prompt.clone();
+        }
+        let mut s = self.system_prompt.clone();
+        s.push_str("\n\n<recent_observations>\n");
+        for line in &obs {
+            s.push_str(line);
+            s.push('\n');
+        }
+        s.push_str("</recent_observations>");
+        s
+    }
+
 
     /// Steps 1-4: safety scan, slash, intent, recall.
     /// Returns Ok(recall_context) to continue to inference,
@@ -409,7 +434,7 @@ impl DispatchContext {
         &mut self,
         recall_context: &Option<String>,
     ) -> Result<String, String> {
-        let system = self.system_prompt.clone();
+        let system = self.system_prompt_for_turn();
 
         // Try local engine first
         let prompt = match recall_context {

@@ -83,8 +83,8 @@ pub fn write_snapshot(
     let lag_json = lag.map(|l| l.to_string()).unwrap_or_else(|| "null".to_string());
     let last_json = match last {
         Some(a) => format!(
-            "{{\"kind\":\"{}\",\"severity\":\"{}\",\"message\":\"{}\",\"at_unix\":{now}}}",
-            a.kind(), a.severity(), json_escape(&a.render())
+            "{{\"kind\":\"{}\",\"severity\":\"{}\",\"message\":\"{}\",\"at_unix\":{}}}",
+            a.kind(), a.severity(), json_escape(&a.render()), a.at()
         ),
         None => "null".to_string(),
     };
@@ -201,6 +201,59 @@ pub fn stop(name: Option<&str>) -> i32 {
         }
     }
     code
+}
+
+// ── pipe injection ──────────────────────────────────────────────────────────
+
+/// A watcher's snapshot is fresh enough to trust only if it was updated within
+/// this window (a stale snapshot means a dead/hung daemon — don't surface it).
+const SNAPSHOT_FRESH_SECS: i64 = 120;
+/// Surface alerts from at most this far back, so the chat sees *current*
+/// incidents, not last hour's.
+const ALERT_FRESH_SECS: i64 = 600;
+
+/// One-line observations for the chat Pipe: each fresh watcher that has a recent
+/// alert. Quiet and stale watchers are omitted so the system prompt (and the Pi
+/// prefill) stays lean — the chat only learns about live incidents. Text is
+/// sanitized for safe injection into the system prompt.
+pub fn recent_observations(now: i64) -> Vec<String> {
+    let mut out = Vec::new();
+    let Ok(rd) = std::fs::read_dir(state_dir()) else { return out };
+    for e in rd.flatten() {
+        if e.path().extension().and_then(|x| x.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(e.path()) else { continue };
+        let Ok(o) = crate::storage::json::parse(&bytes) else { continue };
+        if now - o.get_i64("updated_at_unix").unwrap_or(0) > SNAPSHOT_FRESH_SECS {
+            continue; // stale daemon
+        }
+        let Some(la) = o.get_object("last_alert") else { continue }; // quiet watcher
+        let at = la.get_i64("at_unix").unwrap_or(0);
+        if now - at > ALERT_FRESH_SECS {
+            continue; // old incident
+        }
+        let name = sanitize(o.get_str("name").unwrap_or("?"));
+        let msg = sanitize(la.get_str("message").unwrap_or(""));
+        out.push(format!("[palantir:{name}] {msg} ({})", humanize_age(now - at)));
+    }
+    out.sort();
+    out
+}
+
+fn humanize_age(secs: i64) -> String {
+    if secs < 0 { "just now".to_string() }
+    else if secs < 60 { format!("{secs}s ago") }
+    else { format!("{}m ago", secs / 60) }
+}
+
+/// Strip anything that could break or forge the injected block: angle brackets
+/// (no fake tags), control chars, and an overlong line.
+fn sanitize(s: &str) -> String {
+    s.chars()
+        .filter(|c| *c != '<' && *c != '>' && !c.is_control())
+        .take(200)
+        .collect()
 }
 
 fn discover_names() -> Vec<String> {
