@@ -8,6 +8,30 @@ order.
 
 ## [Unreleased]
 
+## [3.9.0] — 2026-06-18
+
+### Added
+
+- **Palantír — predictive log watching (`olorin palantir --alert <file>`).** A new
+  subsystem, peer to the runes: an ambient log watcher that warns *before* an
+  error cascade instead of reporting it after. It tails a log file and, when a
+  deploy-class trigger line appears, predicts an incoming cascade — with an ETA
+  learned from the file's own history — then confirms if the errors arrive in
+  the window or stands down if they don't.
+
+  v1 is a foreground, single-file, trigger-during-lag watcher with stdout
+  alerts and tunable `--sensitivity low|med|high`. Error classification reuses
+  the same per-format sub-stream kernels the runes use (ISO/CLF/syslog/Apache/
+  HDFS/JSON), so "error" means exactly what `eacorrelate`/`ealog` call an error;
+  it needs no new SIMD kernel. Verified live on the Pi (NEON): learned a 10s
+  deploy→error lag and predicted the cascade at the deploy line, before the
+  user-visible error storm.
+
+  Honest scope: it predicts the trigger+lag class of incidents, not
+  precursor-free instant crashes. Deferred to later versions: folder/multi-file
+  correlation, depleting-gauge trends, streaming rate-anomaly detection,
+  WhatsApp/webhook alert sinks, and a background daemon mode.
+
 ## [3.8.5] — 2026-06-18
 
 ### Fixed
