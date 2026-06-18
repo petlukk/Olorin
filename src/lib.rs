@@ -17,5 +17,6 @@ pub mod kernels;
 pub mod platform;
 pub mod recall;
 pub mod runes;
+pub mod palantir;
 
 pub use platform::home::home_dir;
