@@ -8,6 +8,20 @@ order.
 
 ## [Unreleased]
 
+## [3.12.0] — 2026-06-18
+
+### Added
+
+- **Palantír daemon mode + lifecycle.** The log watcher can now run detached:
+  - `palantir --alert <file> --daemon [--name NAME]` backgrounds the watcher
+    (no controlling terminal; survives the shell — including the web-UI terminal
+    — that launched it), logging to `~/.olorin/palantir/<name>.log`.
+  - `palantir --status [--name NAME]` lists watchers (running/stopped + last
+    alert).
+  - `palantir --stop [--name NAME]` stops a watcher and cleans up its state.
+  State (pid, an atomically-written status snapshot, and the log) lives under
+  `~/.olorin/palantir/`. Foreground mode is unchanged. Unix only.
+
 ## [3.11.0] — 2026-06-18
 
 ### Added
