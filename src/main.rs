@@ -22,6 +22,18 @@ fn main() {
         run_report_cli(&args[2..]); // never returns
     }
 
+    // One-shot palantír subcommand: `olorin palantir --alert <file>` runs the
+    // foreground log watcher (trigger-during-lag early warning) until Ctrl-C.
+    if args.get(1).map(String::as_str) == Some("palantir") {
+        match olorin::palantir::parse_args(&args[2..]) {
+            Ok(opts) => olorin::palantir::run(opts), // never returns
+            Err(e) => {
+                eprintln!("{e}\n\n{}", olorin::palantir::USAGE);
+                std::process::exit(2);
+            }
+        }
+    }
+
     let serve    = args.contains(&"--serve".into());
     let whatsapp = args.contains(&"--whatsapp".into());
     let strict   = args.contains(&"--strict".into());
