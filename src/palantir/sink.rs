@@ -109,7 +109,7 @@ fn deliver_exec(cmd: &str, alert: &Alert) {
 
 /// Minimal JSON string escaper — quotes, backslashes, and control chars. Kept
 /// local so the palantír subsystem doesn't reach into the web layer.
-fn json_escape(s: &str) -> String {
+pub(crate) fn json_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 8);
     for c in s.chars() {
         match c {

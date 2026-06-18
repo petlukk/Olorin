@@ -7,6 +7,7 @@
 //! `watch.rs` for the detector and the honest scope (it predicts the
 //! trigger+lag class of incidents, not precursor-free instant crashes).
 
+pub mod daemon;
 pub mod sink;
 pub mod tail;
 pub mod watch;
@@ -28,20 +29,36 @@ pub struct Opts {
     pub sensitivity: Sensitivity,
     pub poll_secs:   u64,
     pub learn:       bool,
+    pub daemon:      bool,
+    pub name:        Option<String>,
     pub sinks:       Vec<Sink>,
 }
 
+/// What the invocation asks for: watch a file, or a lifecycle query/command.
+pub enum Mode {
+    Watch(Opts),
+    Status(Option<String>),
+    Stop(Option<String>),
+}
+
 /// Parse `palantir` args. Returns Err(usage) on a bad invocation.
-pub fn parse_args(args: &[String]) -> Result<Opts, String> {
+pub fn parse_args(args: &[String]) -> Result<Mode, String> {
     let mut path: Option<String> = None;
     let mut sensitivity = Sensitivity::Medium;
     let mut poll_secs = 1u64;
     let mut learn = true;
+    let mut daemon = false;
+    let mut name: Option<String> = None;
     let mut sinks: Vec<Sink> = Vec::new();
+    let mut lifecycle: Option<&str> = None;
     let mut it = args.iter();
     while let Some(tok) = it.next() {
         match tok.as_str() {
             "--alert" => path = Some(it.next().ok_or("missing path after --alert")?.clone()),
+            "--name" => name = Some(it.next().ok_or("missing value after --name")?.clone()),
+            "--status" => lifecycle = Some("status"),
+            "--stop" => lifecycle = Some("stop"),
+            "--daemon" => daemon = true,
             "--sensitivity" => {
                 let v = it.next().ok_or("missing value after --sensitivity")?;
                 sensitivity = Sensitivity::parse(v)
@@ -60,22 +77,44 @@ pub fn parse_args(args: &[String]) -> Result<Opts, String> {
             other => return Err(format!("unknown argument: {other}")),
         }
     }
-    let path = path.ok_or("missing --alert <file>")?;
+    match lifecycle {
+        Some("status") => return Ok(Mode::Status(name)),
+        Some("stop") => return Ok(Mode::Stop(name)),
+        _ => {}
+    }
+    let path = path.ok_or("missing --alert <file> (or --status / --stop)")?;
     if sinks.is_empty() {
         sinks.push(Sink::Stdout); // default sink
     }
-    Ok(Opts { path, sensitivity, poll_secs, learn, sinks })
+    Ok(Mode::Watch(Opts { path, sensitivity, poll_secs, learn, daemon, name, sinks }))
 }
 
 pub const USAGE: &str =
-    "usage: olorin palantir --alert <file> [--sensitivity low|med|high] [--poll SECS]\n         \
-     [--notify stdout|webhook:URL|exec:CMD]... [--no-learn]\n  \
-     e.g. olorin palantir --alert /app/log/system.log --notify webhook:https://hooks.slack.com/…";
+    "usage: olorin palantir --alert <file> [--daemon] [--name NAME] [--sensitivity low|med|high]\n         \
+     [--poll SECS] [--notify stdout|webhook:URL|exec:CMD]... [--no-learn]\n       \
+     olorin palantir --status [--name NAME]\n       \
+     olorin palantir --stop   [--name NAME]\n  \
+     e.g. olorin palantir --alert /app/log/system.log --daemon --notify webhook:https://hooks.slack.com/…";
 
-/// Run the foreground watcher. Diverges: loops until the process is killed
-/// (Ctrl-C). Kernel init happens here, as for the rune/report subcommands.
-pub fn run(opts: Opts) -> ! {
+/// Dispatch a parsed mode. Diverges (watch loops forever; status/stop exit).
+pub fn run(mode: Mode) -> ! {
+    match mode {
+        Mode::Status(name) => std::process::exit(daemon::status(name.as_deref())),
+        Mode::Stop(name) => std::process::exit(daemon::stop(name.as_deref())),
+        Mode::Watch(opts) => run_watch(opts),
+    }
+}
+
+/// Watch a file. Foreground by default; `--daemon` detaches first. Loops until
+/// the process is killed (Ctrl-C, or `--stop`).
+fn run_watch(opts: Opts) -> ! {
     crate::kernels::ffi::init().expect("kernel init failed");
+    let name = daemon::watcher_name(&opts.path, opts.name.as_deref());
+
+    if let Some(pid) = daemon::already_running(&name) {
+        eprintln!("[palantír] '{name}' is already watching (pid {pid}) — `--stop` it first");
+        std::process::exit(1);
+    }
 
     // Learn pass over existing history: pick the format and a trigger→error lag.
     let history = read_tail(Path::new(&opts.path));
@@ -84,10 +123,22 @@ pub fn run(opts: Opts) -> ! {
         (true, Some(f)) => watch::learn_lag(&history, f),
         _ => None,
     };
-    let mut detector = Detector::new(lag, opts.sensitivity);
 
+    // Detach BEFORE the loop, while stderr still reaches the terminal — tell the
+    // user where the log went, then redirect stdio into it.
+    if opts.daemon {
+        let log = daemon::log_path(&name);
+        eprintln!("[palantír] '{name}' → background; log {}, `--status`/`--stop` to manage", log.display());
+        if let Err(e) = daemon::daemonize(&log) {
+            eprintln!("[palantír] daemonize failed: {e}");
+            std::process::exit(1);
+        }
+    }
+    let _ = daemon::write_pid(&name); // the (now possibly detached) daemon's pid
+
+    let mut detector = Detector::new(lag, opts.sensitivity);
     eprintln!(
-        "[palantír] watching {}  format={}  lag={}  sensitivity={:?}  window={}s  sinks={}  (Ctrl-C to stop)",
+        "[palantír] '{name}' watching {}  format={}  lag={}  sensitivity={:?}  window={}s  sinks={}",
         opts.path,
         fmt.map(Format::tag).unwrap_or("pending"),
         lag.map(|l| format!("~{l}s")).unwrap_or_else(|| "unknown (no history pattern)".to_string()),
@@ -96,8 +147,15 @@ pub fn run(opts: Opts) -> ! {
         opts.sinks.len(),
     );
 
+    // Initial snapshot so `--status` is meaningful from the first moment, before
+    // any alert or heartbeat.
+    let fmt0 = fmt.map(Format::tag).unwrap_or("pending");
+    daemon::write_snapshot(&name, &opts.path, fmt0, lag, None, now_epoch());
+
     let mut rate = RateDetector::new(opts.sensitivity);
     let mut tailer = tail::Tailer::at_end(&opts.path);
+    let mut last_alert: Option<watch::Alert> = None;
+    let mut tick: u64 = 0;
     loop {
         std::thread::sleep(Duration::from_secs(opts.poll_secs));
         let now = now_epoch();
@@ -120,10 +178,19 @@ pub fn run(opts: Opts) -> ! {
             }
         }
 
+        let had_alert = !alerts.is_empty();
         for a in alerts {
             for s in &opts.sinks {
                 s.deliver(&a);
             }
+            last_alert = Some(a);
+        }
+
+        // Snapshot on every alert, plus a heartbeat, so `--status` stays fresh.
+        tick += 1;
+        if had_alert || tick % 10 == 0 {
+            let fmt_tag = fmt.map(Format::tag).unwrap_or("pending");
+            daemon::write_snapshot(&name, &opts.path, fmt_tag, lag, last_alert.as_ref(), now);
         }
     }
 }

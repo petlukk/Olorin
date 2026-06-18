@@ -53,7 +53,7 @@ impl Sensitivity {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum Alert {
     /// A trigger fired; a cascade is predicted (with an ETA when a lag is known).
     Predicted { at: i64, eta: Option<i64>, window: i64 },

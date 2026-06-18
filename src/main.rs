@@ -26,7 +26,7 @@ fn main() {
     // foreground log watcher (trigger-during-lag early warning) until Ctrl-C.
     if args.get(1).map(String::as_str) == Some("palantir") {
         match olorin::palantir::parse_args(&args[2..]) {
-            Ok(opts) => olorin::palantir::run(opts), // never returns
+            Ok(mode) => olorin::palantir::run(mode), // never returns
             Err(e) => {
                 eprintln!("{e}\n\n{}", olorin::palantir::USAGE);
                 std::process::exit(2);
