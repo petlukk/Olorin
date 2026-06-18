@@ -8,6 +8,23 @@ order.
 
 ## [Unreleased]
 
+## [3.8.5] — 2026-06-18
+
+### Fixed
+
+- **`eacorrelate` no longer collapses a short incident into one coarse bucket
+  when a few timestamps are far off.** The shared correlation grid took its
+  bucket width from the raw min..max of all event times, so a minority of
+  outlier timestamps — a 1970 epoch from a missing field, a clock-skew future,
+  or a yearless format (BSD syslog) parsed to a fixed reference era while its
+  dated peers sit in the real year — stretched the span across months and
+  snapped the bucket to the coarsest rung (up to a 1-week bucket), manufacturing
+  a trivial `r=1.00` with no lag resolution. The grid span is now clipped to a
+  Tukey fence (Q1−3·IQR, Q3+3·IQR); the fence scales with the data's own spread,
+  so genuine multi-day incidents keep a wide window and outlier-free data is
+  unchanged. A real ~50s deploy→errors incident that bucketed at 604800s now
+  buckets at 1s.
+
 ## [3.8.4] — 2026-06-17
 
 ### Added
