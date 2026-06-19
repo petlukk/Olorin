@@ -57,11 +57,16 @@ pub fn build_system_json(recall_level: usize, config_json: &str) -> String {
         None    => "null".to_string(),
     };
     let cpu_percent = sysinfo::cpu_percent().unwrap_or(0);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let palantir = crate::palantir::daemon::status_json(now);
     format!(
         "{{\"cpu_percent\":{cpu_percent},\"cpu_temp\":{cpu_temp},\
          \"memory_used_mb\":{mem_used},\"memory_total_mb\":{mem_total},\
          \"os\":\"{os}\",\"arch\":\"{arch}\",\"uptime_seconds\":{uptime},\
-         \"recall_level\":{recall_level},\"config\":{config_json}}}"
+         \"recall_level\":{recall_level},\"palantir\":{palantir},\"config\":{config_json}}}"
     )
 }
 

@@ -85,9 +85,12 @@ body{background:var(--crust);color:var(--text);font-family:'Inter',system-ui,san
 .cfg-buttons button{padding:6px 16px;border:none;border-radius:4px;cursor:pointer;font-family:inherit;font-size:12px}
 .cfg-btn-apply{background:var(--teal);color:var(--base)}.cfg-btn-cancel{background:var(--surface1);color:var(--text)}
 .cfg-scope{display:flex;gap:12px;align-items:center;margin-bottom:16px;color:var(--subtext1)}.cfg-scope label{width:auto}
+#pal-pop{display:none;position:fixed;top:30px;left:8px;z-index:1000;background:var(--mantle);border:1px solid var(--surface0);border-radius:4px;padding:4px 0;font:11px/16px 'JetBrains Mono',monospace;max-width:540px;box-shadow:0 6px 16px rgba(0,0,0,.5)}
+.pal-row{padding:3px 10px;white-space:nowrap}
+.pal-msg{padding:1px 10px 2px 18px;white-space:normal;max-width:500px}
 </style></head><body>
 <div class="hyprbar">
-<div class="left"><span id="olorin-btn" style="cursor:pointer"><span class="c-teal">&#9670;</span> <span class="c-teal">Olorin</span></span><span class="sep">|</span><span><span class="c-mauve">&#9670;</span> <span id="hb-model" class="c-text">—</span></span><span class="sep">|</span><span id="hb-backend" class="c-blue">—</span><span class="sep">|</span><span><span id="hb-tps" class="c-green">0.0</span> <span class="c-green">tok/s</span></span><span class="sep">|</span><span>temp <span id="hb-cfg-temp" class="c-yellow">0.4</span></span><span class="sep">|</span><span>k:<span id="hb-cfg-topk" class="c-yellow">40</span></span><span class="sep">|</span><span>p:<span id="hb-cfg-topp" class="c-yellow">0.9</span></span><span class="sep">|</span><span>rep:<span id="hb-cfg-rep" class="c-yellow">1.05</span></span><span class="sep">|</span><span>max:<span id="hb-cfg-max" class="c-yellow">64</span></span><span class="sep">|</span><span>recall <span id="hb-recall" class="c-yellow">—</span></span><span class="sep">|</span><span>sessions <span id="hb-sessions" class="c-peach">0</span></span></div>
+<div class="left"><span id="olorin-btn" style="cursor:pointer"><span class="c-teal">&#9670;</span> <span class="c-teal">Olorin</span></span><span class="sep">|</span><span><span class="c-mauve">&#9670;</span> <span id="hb-model" class="c-text">—</span></span><span class="sep">|</span><span id="hb-backend" class="c-blue">—</span><span class="sep">|</span><span><span id="hb-tps" class="c-green">0.0</span> <span class="c-green">tok/s</span></span><span class="sep">|</span><span>temp <span id="hb-cfg-temp" class="c-yellow">0.4</span></span><span class="sep">|</span><span>k:<span id="hb-cfg-topk" class="c-yellow">40</span></span><span class="sep">|</span><span>p:<span id="hb-cfg-topp" class="c-yellow">0.9</span></span><span class="sep">|</span><span>rep:<span id="hb-cfg-rep" class="c-yellow">1.05</span></span><span class="sep">|</span><span>max:<span id="hb-cfg-max" class="c-yellow">64</span></span><span class="sep">|</span><span>recall <span id="hb-recall" class="c-yellow">—</span></span><span class="sep">|</span><span>sessions <span id="hb-sessions" class="c-peach">0</span></span><span class="sep">|</span><span id="hb-palantir" class="c-subtext1" style="cursor:pointer" title="Palantír watchers — click for detail">&#128302; —</span></div>
 <div class="right">
 <span>cpu <span id="hb-cpu" class="c-teal">—</span> <span id="hb-temp" class="c-peach">—</span></span>
 <span class="sep">|</span>
@@ -100,6 +103,7 @@ body{background:var(--crust);color:var(--text);font-family:'Inter',system-ui,san
 <span id="hb-clock" class="c-lavender">--:--</span>
 </div>
 </div>
+<div id="pal-pop"></div>
 <div id="tiles" class="tile-container"></div>
 <div id="cfg-overlay" class="cfg-overlay" onclick="if(event.target===this)closeCfg()"><div class="cfg-panel">
 <h2>Configuration</h2>
@@ -549,6 +553,7 @@ function updateSystem(){
     const h=Math.floor(d.uptime_seconds/3600),mi=Math.floor((d.uptime_seconds%3600)/60);
     document.getElementById('hb-uptime').textContent=h+'h '+mi+'m';
     if(d.recall_level!=null)document.getElementById('hb-recall').textContent=d.recall_level;
+    if(d.palantir)updatePalantir(d.palantir);
     if(d.config){
       const c=d.config;
       document.getElementById('hb-cfg-temp').textContent=c.temperature;
@@ -561,6 +566,35 @@ function updateSystem(){
   }).catch(()=>{});
 }
 updateSystem();setInterval(updateSystem,3000);
+
+// ── Palantír header badge ────────────────────────────────────────────────
+let palList=[];
+function escapeHtml(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+function updatePalantir(list){
+  palList=Array.isArray(list)?list:[];
+  const el=document.getElementById('hb-palantir');
+  const n=palList.length,m=palList.filter(w=>w.status==='alerting').length;
+  if(n===0){el.className='c-subtext1';el.innerHTML='&#128302; —';}
+  else{el.className=m>0?'c-red':'c-green';el.innerHTML='&#128302; '+n+(m>0?'·'+m+'▲':'');}
+  if(document.getElementById('pal-pop').style.display==='block')renderPalPop();
+}
+function renderPalPop(){
+  const pop=document.getElementById('pal-pop');
+  if(!palList.length){pop.innerHTML='<div class="pal-row c-subtext1">no palantír watchers running</div>';return;}
+  pop.innerHTML=palList.map(w=>{
+    const dot=w.status==='alerting'?'<span class="c-red">▲</span>':'<span class="c-green">●</span>';
+    const msg=w.alert?('<div class="pal-msg c-subtext1">'+escapeHtml(w.alert)+'</div>'):'';
+    return '<div class="pal-row">'+dot+' <b>'+escapeHtml(w.name)+'</b> <span class="c-subtext1">'+escapeHtml(w.status)+'</span>'+msg+'</div>';
+  }).join('');
+}
+document.getElementById('hb-palantir').addEventListener('click',e=>{
+  e.stopPropagation();
+  const pop=document.getElementById('pal-pop');
+  const show=pop.style.display!=='block';
+  pop.style.display=show?'block':'none';
+  if(show)renderPalPop();
+});
+document.addEventListener('click',()=>{document.getElementById('pal-pop').style.display='none';});
 
 window._globalConfig={};
 
