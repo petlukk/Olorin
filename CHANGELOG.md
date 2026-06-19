@@ -8,6 +8,8 @@ order.
 
 ## [Unreleased]
 
+## [3.15.0] — 2026-06-19
+
 ### Added
 
 - **Start/stop palantír watchers from the web UI.** The 🔮 badge dropdown now has
