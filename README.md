@@ -35,6 +35,7 @@ schema and `--json` chaining contract are stable across releases.
 ./olorin rune eajson ~/access.log.jsonl           # one-shot: rune output to stdout
 ./olorin rune eatime --bucket series --json x.log > out.json   # clean JSON for jq/matplotlib
 ./olorin report app.log deploys.csv -o report.html             # self-contained HTML report
+./olorin palantir --alert /var/log/app.log --daemon            # predictive log watcher (background)
 ./olorin --serve                                  # HTTP + web UI on :8080
 ./olorin --strict                                 # LLM disabled (~25ms startup)
 ```
@@ -203,6 +204,67 @@ deterministic pipeline (a rune per file, `eacorrelate` across them) and writes
 **one self-contained HTML file** — inline charts, zero external assets, zero
 JavaScript — that opens anywhere and prints cleanly. In the web UI, a
 "📄 download report" link appears under every file-drop analysis.
+
+## Palantír — the predictive log watch
+
+A *palantír* reads a log the way runes read a file — SIMD scan, no model in the
+loop — but **continuously**, and it calls the incident *before* the error storm.
+It's the first new subsystem since runes.
+
+Most cascades have a trigger: a deploy, a restart, a config push. Palantír learns
+the lag from the file's own history — the gap between past triggers and the
+errors that followed — and when a fresh trigger arrives it **predicts** the
+cascade with an ETA, then watches the window to **confirm** it or stand down. You
+get the warning during the propagation delay, not after the pager fires:
+
+```
+⚠  PALANTÍR  14:02:11  trigger detected — cascade predicted by 14:02:31 (historical lag), watching 45s…
+🔴 PALANTÍR  14:02:33  CASCADE CONFIRMED — 36 error(s), 20s after the trigger
+✓  PALANTÍR  14:02:56  window clear — no cascade 45s after the trigger
+```
+
+It detects two incident shapes:
+
+- **Triggered** — a deploy/restart line followed by the predicted error cascade
+  (above). Confirmed when enough errors land inside the window; stood down with a
+  `✓ window clear` when they don't.
+- **Rate anomaly** — no trigger, just errors creeping up. A streaming
+  **median/MAD** over per-bucket error counts catches leaks and slow degradation,
+  with warmup, streak, and cooldown gating to keep false positives down.
+
+The detector reuses the rune format engine — ISO-8601, classic syslog, Apache/
+nginx CLF (5xx as an error stream), JSON string/numeric levels — so it needs no
+new kernel.
+
+**Run it.** Foreground for a quick look, or `--daemon` to detach (double-fork +
+setsid; the watcher outlives the launching shell, the web-UI terminal, and the
+server itself):
+
+```bash
+olorin palantir --alert /var/log/app.log --daemon     # start, detached
+olorin palantir --status                               # list watchers + last alert
+olorin palantir --stop --name app.log                  # stop one
+```
+
+Tune detection with `--sensitivity low|med|high`. Route alerts with repeatable
+`--notify stdout|webhook:URL|exec:CMD` — POST a Slack/PagerDuty-shaped JSON, or
+run any command with the alert details in its environment. State lives under
+`~/.olorin/palantir/<name>.{pid,json,log}`; the `.json` snapshot is the contract
+the web UI and chat read.
+
+**From the web UI.** The 🔮 badge in the heartbeat bar shows how many watchers are
+running and how many are alerting — **green** while watching, **red** during a
+live incident. Click it to list each watcher with its last alert, start a new one
+from the "watch a file…" field, or stop one with ✕. Web-started watchers are
+read-only and refuse alert sinks (no `exec:`/`webhook:` over the wire); their path
+guard permits `$HOME`, `/tmp`, and read-only `/var/log` — kept separate from the
+agent's file-tool guard, so it widens nothing else.
+
+**Chat-aware.** While an incident is live, the local model senses it: the Pipe
+injects a short `<recent_observations>` block, so you can ask "what's going on?"
+and get an answer grounded in the actual watcher state — and only during an
+incident, so quiet runs add nothing to the prompt. Pi-NEON gated end-to-end, like
+the runes.
 
 ## The Vault
 
