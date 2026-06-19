@@ -8,6 +8,17 @@ order.
 
 ## [Unreleased]
 
+### Added
+
+- **Start/stop palantír watchers from the web UI.** The 🔮 badge dropdown now has
+  a "watch a file…" field and a per-watcher ✕ stop, backed by `POST
+  /api/palantir/watch` and `/api/palantir/stop`. No CLI needed to launch a
+  logwatch daemon. The watched path is validated by a palantír-specific guard
+  that permits read-only `/var/log` on top of `$HOME`/`/tmp` (kept separate from
+  the LLM-tool guard, so this doesn't widen what `read_file`/`grep`/`ls` can
+  reach), and alert sinks (`--notify exec:`/`webhook:`) are refused from the web
+  to keep RCE/SSRF off the exposed surface.
+
 ## [3.14.1] — 2026-06-19
 
 ### Fixed

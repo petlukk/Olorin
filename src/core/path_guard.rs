@@ -89,12 +89,22 @@ const SENSITIVE_ABSOLUTE: &[(&str, &str)] = &[
     ("/etc/sudoers.d",  "sudo config"),
 ];
 
+/// Extra read-only roots permitted for palantír *watch* targets, beyond
+/// `$HOME` and `/tmp`. Ops logs live here. The LLM-tool guard does NOT include
+/// these — only [`resolve_watch_path`] does, so widening palantír's reach never
+/// widens what `read_file`/`grep`/`ls` can touch.
+const WATCH_EXTRA_ROOTS: &[&str] = &["/var/log"];
+
 /// Resolve a user-supplied path string, returning the expanded
 /// `PathBuf` if every guard passes. Performs no I/O — purely lexical.
-pub fn resolve_safe_path(path: &str, _mode: AccessMode) -> Result<PathBuf, PathError> {
+pub fn resolve_safe_path(path: &str, mode: AccessMode) -> Result<PathBuf, PathError> {
+    resolve_lexical(path, mode, &[])
+}
+
+fn resolve_lexical(path: &str, _mode: AccessMode, extra_roots: &[&str]) -> Result<PathBuf, PathError> {
     let home = crate::home_dir().ok_or(PathError::NoHome)?;
     let expanded = expand(path, &home);
-    enforce_policy(&expanded, &home)?;
+    enforce_policy(&expanded, &home, extra_roots)?;
     Ok(expanded)
 }
 
@@ -108,8 +118,22 @@ pub fn resolve_safe_path(path: &str, _mode: AccessMode) -> Result<PathBuf, PathE
 /// Returns the canonical path on success so callers operate on the same
 /// resolved target the guard approved.
 pub fn resolve_safe_path_checked(path: &str, mode: AccessMode) -> Result<PathBuf, PathError> {
+    resolve_checked(path, mode, &[])
+}
+
+/// Resolve a palantír *watch* target: the symlink-aware guard of
+/// [`resolve_safe_path_checked`] in `Read` mode, but additionally permitting the
+/// read-only [`WATCH_EXTRA_ROOTS`] (`/var/log`). The `..`-traversal,
+/// symlink-escape, and sensitive-denylist checks all still apply, and the
+/// canonicalized real target is re-checked — so a `/var/log` symlink into
+/// `/etc` is still refused.
+pub fn resolve_watch_path(path: &str) -> Result<PathBuf, PathError> {
+    resolve_checked(path, AccessMode::Read, WATCH_EXTRA_ROOTS)
+}
+
+fn resolve_checked(path: &str, mode: AccessMode, extra_roots: &[&str]) -> Result<PathBuf, PathError> {
     let home = crate::home_dir().ok_or(PathError::NoHome)?;
-    let expanded = resolve_safe_path(path, mode)?;
+    let expanded = resolve_lexical(path, mode, extra_roots)?;
 
     // Compare against canonical roots so prefix matching is consistent
     // even when $HOME itself contains a symlink (or Windows adds a
@@ -119,7 +143,7 @@ pub fn resolve_safe_path_checked(path: &str, mode: AccessMode) -> Result<PathBuf
     // Fully-resolvable path: canonicalize follows every symlink in the chain;
     // re-check the real target.
     if let Ok(real) = expanded.canonicalize() {
-        enforce_policy(&real, &home_real)?;
+        enforce_policy(&real, &home_real, extra_roots)?;
         return Ok(real);
     }
 
@@ -140,7 +164,7 @@ pub fn resolve_safe_path_checked(path: &str, mode: AccessMode) -> Result<PathBuf
         (Some(parent), Some(file)) => match parent.canonicalize() {
             Ok(c) => {
                 let candidate = c.join(file);
-                enforce_policy(&candidate, &home_real)?;
+                enforce_policy(&candidate, &home_real, extra_roots)?;
                 Ok(candidate)
             }
             // Parent missing too: nothing to follow, lexical guard already
@@ -155,7 +179,7 @@ pub fn resolve_safe_path_checked(path: &str, mode: AccessMode) -> Result<PathBuf
 /// `$HOME`-relative sensitive subtrees against — the caller passes the
 /// lexical home for [`resolve_safe_path`] and the canonical home for
 /// [`resolve_safe_path_checked`].
-fn enforce_policy(expanded: &Path, home: &Path) -> Result<(), PathError> {
+fn enforce_policy(expanded: &Path, home: &Path, extra_roots: &[&str]) -> Result<(), PathError> {
     for comp in expanded.components() {
         if matches!(comp, std::path::Component::ParentDir) {
             return Err(PathError::ParentTraversal);
@@ -166,7 +190,8 @@ fn enforce_policy(expanded: &Path, home: &Path) -> Result<(), PathError> {
     // `/private/tmp` is the canonical form of `/tmp` on macOS; accept both
     // so the checked variant doesn't reject a legitimate /tmp target.
     let under_tmp = expanded.starts_with("/tmp") || expanded.starts_with("/private/tmp");
-    if !under_home && !under_tmp {
+    let under_extra = extra_roots.iter().any(|r| expanded.starts_with(r));
+    if !under_home && !under_tmp && !under_extra {
         return Err(PathError::OutsideAllowlist);
     }
 

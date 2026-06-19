@@ -4,6 +4,8 @@ pub mod server_http;
 pub mod server_auth;
 pub mod server_analyze;
 pub mod server_config;
+#[cfg(unix)]
+pub mod server_palantir;
 pub mod whatsapp;
 pub mod term_stream;
 pub mod ws;

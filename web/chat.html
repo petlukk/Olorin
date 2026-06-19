@@ -88,6 +88,13 @@ body{background:var(--crust);color:var(--text);font-family:'Inter',system-ui,san
 #pal-pop{display:none;position:fixed;top:30px;left:8px;z-index:1000;background:var(--mantle);border:1px solid var(--surface0);border-radius:4px;padding:4px 0;font:11px/16px 'JetBrains Mono',monospace;max-width:540px;box-shadow:0 6px 16px rgba(0,0,0,.5)}
 .pal-row{padding:3px 10px;white-space:nowrap}
 .pal-msg{padding:1px 10px 2px 18px;white-space:normal;max-width:500px}
+.pal-stop{cursor:pointer;color:var(--overlay0);margin-left:4px}
+.pal-stop:hover{color:var(--red)}
+.pal-form{display:flex;gap:4px;padding:5px 10px;border-top:1px solid var(--surface0);margin-top:2px}
+.pal-form input{flex:1;min-width:240px;background:var(--base);border:1px solid var(--surface0);color:var(--text);font:11px 'JetBrains Mono',monospace;padding:2px 5px;border-radius:3px;outline:none}
+.pal-form button{background:var(--surface0);color:var(--text);border:none;border-radius:3px;padding:2px 9px;cursor:pointer;font:11px 'JetBrains Mono',monospace}
+.pal-form button:hover{background:var(--surface1)}
+#pal-watch-err:empty{display:none}
 </style></head><body>
 <div class="hyprbar">
 <div class="left"><span id="olorin-btn" style="cursor:pointer"><span class="c-teal">&#9670;</span> <span class="c-teal">Olorin</span></span><span class="sep">|</span><span><span class="c-mauve">&#9670;</span> <span id="hb-model" class="c-text">—</span></span><span class="sep">|</span><span id="hb-backend" class="c-blue">—</span><span class="sep">|</span><span><span id="hb-tps" class="c-green">0.0</span> <span class="c-green">tok/s</span></span><span class="sep">|</span><span>temp <span id="hb-cfg-temp" class="c-yellow">0.4</span></span><span class="sep">|</span><span>k:<span id="hb-cfg-topk" class="c-yellow">40</span></span><span class="sep">|</span><span>p:<span id="hb-cfg-topp" class="c-yellow">0.9</span></span><span class="sep">|</span><span>rep:<span id="hb-cfg-rep" class="c-yellow">1.05</span></span><span class="sep">|</span><span>max:<span id="hb-cfg-max" class="c-yellow">64</span></span><span class="sep">|</span><span>recall <span id="hb-recall" class="c-yellow">—</span></span><span class="sep">|</span><span>sessions <span id="hb-sessions" class="c-peach">0</span></span><span class="sep">|</span><span id="hb-palantir" class="c-subtext1" style="cursor:pointer" title="Palantír watchers — click for detail">&#128302; —</span></div>
@@ -580,12 +587,33 @@ function updatePalantir(list){
 }
 function renderPalPop(){
   const pop=document.getElementById('pal-pop');
-  if(!palList.length){pop.innerHTML='<div class="pal-row c-subtext1">no palantír watchers running</div>';return;}
-  pop.innerHTML=palList.map(w=>{
+  // Build the static shell (list container + watch form) once, so the 3s poll
+  // re-renders only the list and never wipes a half-typed path or steals focus.
+  if(!pop._built){
+    pop.innerHTML='<div id="pal-list"></div>'
+      +'<div class="pal-row pal-form"><input id="pal-watch-path" type="text" placeholder="log file to watch…" spellcheck="false"><button id="pal-watch-go">watch</button></div>'
+      +'<div id="pal-watch-err" class="pal-row c-red"></div>';
+    pop._built=true;
+  }
+  document.getElementById('pal-list').innerHTML=palList.length?palList.map(w=>{
     const dot=w.status==='alerting'?'<span class="c-red">▲</span>':'<span class="c-green">●</span>';
     const msg=w.alert?('<div class="pal-msg c-subtext1">'+escapeHtml(w.alert)+'</div>'):'';
-    return '<div class="pal-row">'+dot+' <b>'+escapeHtml(w.name)+'</b> <span class="c-subtext1">'+escapeHtml(w.status)+'</span>'+msg+'</div>';
-  }).join('');
+    return '<div class="pal-row">'+dot+' <b>'+escapeHtml(w.name)+'</b> <span class="c-subtext1">'+escapeHtml(w.status)+'</span>'
+      +' <span class="pal-stop" data-name="'+escapeHtml(w.name)+'" title="stop watcher">&#10005;</span>'+msg+'</div>';
+  }).join(''):'<div class="pal-row c-subtext1">no palantír watchers running</div>';
+}
+function palantirWatch(){
+  const inp=document.getElementById('pal-watch-path'),errEl=document.getElementById('pal-watch-err');
+  const path=(inp.value||'').trim();
+  if(!path){errEl.textContent='enter a file path';return;}
+  errEl.textContent='starting…';
+  fetch('/api/palantir/watch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path})})
+    .then(r=>r.json()).then(d=>{if(d.ok){inp.value='';errEl.textContent='';updateSystem();}else{errEl.textContent=d.error||'failed';}})
+    .catch(()=>{errEl.textContent='request failed';});
+}
+function palantirStop(name){
+  fetch('/api/palantir/stop',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})})
+    .then(r=>r.json()).then(()=>updateSystem()).catch(()=>{});
 }
 document.getElementById('hb-palantir').addEventListener('click',e=>{
   e.stopPropagation();
@@ -594,6 +622,16 @@ document.getElementById('hb-palantir').addEventListener('click',e=>{
   pop.style.display=show?'block':'none';
   if(show)renderPalPop();
 });
+// Keep clicks/typing inside the popover from bubbling to the document handler
+// that closes it; delegate the watch button and per-row stop ✕.
+const _palPop=document.getElementById('pal-pop');
+_palPop.addEventListener('click',e=>{
+  e.stopPropagation();
+  const stop=e.target.closest('.pal-stop');
+  if(stop){palantirStop(stop.dataset.name);}
+  else if(e.target.id==='pal-watch-go'){palantirWatch();}
+});
+_palPop.addEventListener('keydown',e=>{if(e.target.id==='pal-watch-path'&&e.key==='Enter'){e.preventDefault();palantirWatch();}});
 document.addEventListener('click',()=>{document.getElementById('pal-pop').style.display='none';});
 
 window._globalConfig={};

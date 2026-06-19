@@ -253,6 +253,14 @@ fn handle_connection(stream: &mut std::net::TcpStream, ctx: Arc<Mutex<DispatchCo
         ("POST", "/api/config/apikey") => {
             crate::interface::server_config::handle_config_apikey(stream, req, &buf[..n], n, ctx);
         }
+        #[cfg(unix)]
+        ("POST", "/api/palantir/watch") => {
+            crate::interface::server_palantir::handle_palantir_watch(stream, req, &buf[..n], n);
+        }
+        #[cfg(unix)]
+        ("POST", "/api/palantir/stop") => {
+            crate::interface::server_palantir::handle_palantir_stop(stream, req, &buf[..n], n);
+        }
         _ => {
             let _ = write!(
                 stream,
