@@ -8,6 +8,18 @@ order.
 
 ## [Unreleased]
 
+## [3.14.1] — 2026-06-19
+
+### Fixed
+
+- **Palantír badge stayed red after an incident cleared.** The web-UI badge
+  (and the chat Pipe's `<recent_observations>`) treated *any* recent alert as
+  active, so a `clear` stand-down — the all-clear that fires when a predicted
+  cascade never arrives — kept the badge red for the full 10-minute freshness
+  window instead of returning it to green. The badge now distinguishes "an alert
+  is recent" from "an incident is active": `predicted`/`confirmed`/`anomaly`
+  read alerting (red), `clear` reads watching (green).
+
 ## [3.14.0] — 2026-06-19
 
 ### Added

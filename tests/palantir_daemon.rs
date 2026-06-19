@@ -121,6 +121,31 @@ fn status_json_reflects_live_watchers_only() {
 }
 
 #[test]
+fn cleared_stand_down_returns_the_badge_to_green() {
+    // Regression: a predicted cascade that resolves to a `clear` stand-down is a
+    // recent alert but *good news*. The badge must read "watching" (green), not
+    // stay red for the rest of the freshness window. A live `predicted` incident
+    // alongside it still reads "alerting" (red), so the badge can change colour.
+    let _h = IsoHome::new("clear");
+    let now = 1_000_000i64;
+
+    write_pid("c").unwrap();
+    write_snapshot("c", "/p/c.log", "iso8601", Some(10),
+        Some(&Alert::Clear { trigger_at: now - 45, window: 45 }), now);
+    write_pid("p").unwrap();
+    write_snapshot("p", "/p/p.log", "iso8601", Some(10),
+        Some(&Alert::Predicted { at: now - 3, eta: Some(now + 7), window: 45 }), now);
+
+    let j = status_json(now);
+    assert!(j.contains("\"name\":\"c\""), "cleared watcher still listed: {j}");
+    assert!(!j.contains("window clear"), "a clear must not surface as an alert: {j}");
+    assert!(j.contains("\"name\":\"p\"") && j.contains("trigger detected"),
+        "the live predicted incident still alerts: {j}");
+    assert_eq!(j.matches("\"status\":\"alerting\"").count(), 1,
+        "only the predicted incident is alerting, not the clear: {j}");
+}
+
+#[test]
 fn status_and_stop_handle_a_recorded_then_missing_watcher() {
     let _h = IsoHome::new("life");
     write_pid("w").unwrap(); // this process is the "daemon" for the test

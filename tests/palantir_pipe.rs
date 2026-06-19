@@ -59,6 +59,18 @@ fn surfaces_only_fresh_watchers_with_a_recent_alert() {
 }
 
 #[test]
+fn a_cleared_stand_down_is_not_surfaced_as_a_live_incident() {
+    // A recent `clear` is good news (the predicted cascade never came), not an
+    // incident — the chat must not be told there's a live problem.
+    let _h = IsoHome::new("clear");
+    let now = 3_000_000i64;
+    write_snapshot("c", "/p/c.log", "iso8601", Some(10),
+        Some(&Alert::Clear { trigger_at: now - 45, window: 45 }), now);
+    assert!(recent_observations(now).is_empty(),
+        "a cleared cascade must not surface as a live incident");
+}
+
+#[test]
 fn nothing_to_surface_when_all_quiet() {
     let _h = IsoHome::new("quiet");
     let now = 2_000_000i64;
