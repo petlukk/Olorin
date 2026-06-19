@@ -8,6 +8,18 @@ order.
 
 ## [Unreleased]
 
+## [3.14.0] — 2026-06-19
+
+### Added
+
+- **Palantír status badge in the web UI.** The top heartbeat bar now shows a 🔮
+  indicator of how many palantír daemons are watching and how many are alerting;
+  clicking it opens a dropdown listing each watcher, its status, and its last
+  alert. It reads a new `palantir` field on the existing `/api/system` response
+  (no new endpoint or stream), so it updates on the same heartbeat poll as the
+  rest of the bar. With the v3.13.0 chat-awareness, this completes the
+  Palantír web-UI integration.
+
 ## [3.13.0] — 2026-06-18
 
 ### Added
