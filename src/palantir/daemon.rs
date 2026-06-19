@@ -229,10 +229,10 @@ pub fn recent_observations(now: i64) -> Vec<String> {
             continue; // stale daemon
         }
         let Some(la) = o.get_object("last_alert") else { continue }; // quiet watcher
-        let at = la.get_i64("at_unix").unwrap_or(0);
-        if now - at > ALERT_FRESH_SECS {
-            continue; // old incident
+        if !active_incident(la, now) {
+            continue; // old incident, or a cleared stand-down — not live
         }
+        let at = la.get_i64("at_unix").unwrap_or(0);
         let name = sanitize(o.get_str("name").unwrap_or("?"));
         let msg = sanitize(la.get_str("message").unwrap_or(""));
         out.push(format!("[palantir:{name}] {msg} ({})", humanize_age(now - at)));
@@ -265,12 +265,22 @@ pub fn status_json(now: i64) -> String {
     format!("[{}]", parts.join(","))
 }
 
+/// A recent `last_alert` is an *active* incident — a red badge, a chat-Pipe
+/// injection — for every kind except `clear`. A `clear` is the stand-down that
+/// fires when a predicted cascade never arrives: the watcher is back to normal,
+/// so it must return to green instead of staying red for the rest of the
+/// freshness window. ("alert is recent" ≠ "incident is active".)
+fn active_incident(la: &crate::storage::json::Object, now: i64) -> bool {
+    now - la.get_i64("at_unix").unwrap_or(0) <= ALERT_FRESH_SECS
+        && la.get_str("kind") != Some("clear")
+}
+
 /// (status, recent-alert message) for a running watcher from its snapshot.
 fn live_state(name: &str, now: i64) -> (&'static str, Option<String>) {
     let Ok(bytes) = std::fs::read(snapshot_path(name)) else { return ("watching", None) };
     let Ok(o) = crate::storage::json::parse(&bytes) else { return ("watching", None) };
     if let Some(la) = o.get_object("last_alert") {
-        if now - la.get_i64("at_unix").unwrap_or(0) <= ALERT_FRESH_SECS {
+        if active_incident(la, now) {
             return ("alerting", la.get_str("message").map(sanitize));
         }
     }
