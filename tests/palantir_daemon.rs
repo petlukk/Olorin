@@ -5,7 +5,7 @@
 //! `$HOME/.olorin/palantir`, so each test isolates `HOME` to a tmpdir.
 
 use olorin::palantir::daemon::{
-    is_alive, read_pid, remove_pid, state_dir, status, stop, watcher_name, write_pid,
+    is_alive, read_pid, remove_pid, state_dir, status, status_json, stop, watcher_name, write_pid,
     write_snapshot,
 };
 use olorin::palantir::watch::Alert;
@@ -93,6 +93,31 @@ fn snapshot_status_is_watching_without_an_alert() {
     assert!(body.contains("\"status\":\"watching\""), "{body}");
     assert!(body.contains("\"lag\":null"));
     assert!(body.contains("\"last_alert\":null"));
+}
+
+#[test]
+fn status_json_reflects_live_watchers_only() {
+    let _h = IsoHome::new("statusjson");
+    let now = 1_000_000i64;
+
+    // live (this process) + a recent alert → "alerting" with the message
+    write_pid("a").unwrap();
+    write_snapshot("a", "/p/a.log", "iso8601", Some(10),
+        Some(&Alert::Confirmed { trigger_at: now - 10, at: now - 5, errors: 114 }), now);
+    // live + no alert → "watching"
+    write_pid("b").unwrap();
+    write_snapshot("b", "/p/b.log", "iso8601", None, None, now);
+    // a stale pidfile (bogus pid) → omitted from the badge
+    std::fs::write(state_dir().join("dead.pid"), "2147483647").unwrap();
+    write_snapshot("dead", "/p/dead.log", "iso8601", None,
+        Some(&Alert::Anomaly { at: now, rate: 9, baseline: 0.0 }), now);
+
+    let j = status_json(now);
+    assert!(j.starts_with('[') && j.ends_with(']'), "valid array: {j}");
+    assert!(j.contains("\"name\":\"a\"") && j.contains("\"status\":\"alerting\""), "{j}");
+    assert!(j.contains("CASCADE CONFIRMED"), "alert message surfaced: {j}");
+    assert!(j.contains("\"name\":\"b\""), "watching watcher listed: {j}");
+    assert!(!j.contains("\"name\":\"dead\""), "stale daemon excluded: {j}");
 }
 
 #[test]

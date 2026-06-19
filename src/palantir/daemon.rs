@@ -241,6 +241,42 @@ pub fn recent_observations(now: i64) -> Vec<String> {
     out
 }
 
+/// JSON array of the LIVE watchers, for the web-UI header badge — one
+/// `{name, status, alert}` per running daemon. `status` is `"alerting"` with the
+/// message when the last alert is recent, else `"watching"`. Stale/stopped
+/// watchers are omitted (the badge only shows what's actually running).
+pub fn status_json(now: i64) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for name in discover_names() {
+        match read_pid(&name) {
+            Some(pid) if is_alive(pid) => {}
+            _ => continue,
+        }
+        let (status, alert) = live_state(&name, now);
+        let alert_json = match alert {
+            Some(m) => format!("\"{}\"", json_escape(&m)),
+            None => "null".to_string(),
+        };
+        parts.push(format!(
+            "{{\"name\":\"{}\",\"status\":\"{status}\",\"alert\":{alert_json}}}",
+            json_escape(&name)
+        ));
+    }
+    format!("[{}]", parts.join(","))
+}
+
+/// (status, recent-alert message) for a running watcher from its snapshot.
+fn live_state(name: &str, now: i64) -> (&'static str, Option<String>) {
+    let Ok(bytes) = std::fs::read(snapshot_path(name)) else { return ("watching", None) };
+    let Ok(o) = crate::storage::json::parse(&bytes) else { return ("watching", None) };
+    if let Some(la) = o.get_object("last_alert") {
+        if now - la.get_i64("at_unix").unwrap_or(0) <= ALERT_FRESH_SECS {
+            return ("alerting", la.get_str("message").map(sanitize));
+        }
+    }
+    ("watching", None)
+}
+
 fn humanize_age(secs: i64) -> String {
     if secs < 0 { "just now".to_string() }
     else if secs < 60 { format!("{secs}s ago") }
