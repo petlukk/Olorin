@@ -22,3 +22,11 @@
 
 # Robustness-campaign real datasets (fetched on demand, see benchmarks/robustness/SOURCES.md)
 benchmarks/robustness/data/
+
+# incident-lab: live-server-generated logs (the committed fixtures live in goldens/,
+# which these globs don't reach since * doesn't cross /). Plus Python bytecode.
+benchmarks/incident-lab/*.log
+benchmarks/incident-lab/*.jsonl
+benchmarks/incident-lab/*.syslog
+benchmarks/incident-lab/version
+benchmarks/incident-lab/__pycache__/
