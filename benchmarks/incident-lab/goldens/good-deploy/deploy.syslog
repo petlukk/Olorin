@@ -1,0 +1,2 @@
+Jun 15 09:00:00 pi-host deploy[4242]: released none -> v1.0.0 commit=4283fe
+Jun 15 09:01:00 pi-host deploy[4242]: released v1.0.0 -> v1.1.0 commit=82bdc0
