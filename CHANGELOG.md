@@ -8,6 +8,8 @@ order.
 
 ## [Unreleased]
 
+## [3.16.0] — 2026-06-22
+
 ### Added
 
 - **Incident lab (`benchmarks/incident-lab/`).** The Pi-only log generator used to
