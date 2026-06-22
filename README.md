@@ -266,6 +266,16 @@ and get an answer grounded in the actual watcher state — and only during an
 incident, so quiet runs add nothing to the prompt. Pi-NEON gated end-to-end, like
 the runes.
 
+**Proven against a service that has incidents.** The runes and the palantír are
+exercised by an **incident lab** (`benchmarks/incident-lab/`): a leaderboard API
+with a deploy-introduced bug whose DB pool fails first, serves cached data
+through a propagation delay, then cascades into HTTP 500s — logged in all nine
+rune formats. A deterministic simulator freezes five scenarios as committed
+fixtures, and a CI gate asserts both that a bad deploy yields the cascade
+timeline *and* that the controls — a healthy baseline and a clean deploy under
+realistic diurnal, bursty traffic — raise no false alarm. Detecting an incident
+is half the job; not crying wolf on a normal evening is the other half.
+
 ## The Vault
 
 Every conversation is encrypted at rest using ChaCha20-Poly1305 AEAD.

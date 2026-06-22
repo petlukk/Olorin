@@ -8,6 +8,19 @@ order.
 
 ## [Unreleased]
 
+### Added
+
+- **Incident lab (`benchmarks/incident-lab/`).** The Pi-only log generator used to
+  exercise the runes and the palantír is now in the repo and closer to a real
+  service: realistic diurnal/bursty baseline traffic, a `response_time` on every
+  request, and five scenarios — including two controls (`quiet`, `good-deploy`)
+  that assert the *absence* of a false alarm, which a flat-traffic generator
+  can't test. A deterministic simulator (`simulate.py`, seed → byte-identical
+  across CPython 3.11/3.12) freezes the scenarios as committed goldens; a CI gate
+  (`tests/incident_lab_goldens.rs`) runs `eacorrelate` on them and asserts the
+  bad-deploy cascade timeline plus no false incident on the controls. Test
+  infrastructure only — nothing in the shipped binary changes.
+
 ## [3.15.0] — 2026-06-19
 
 ### Added
