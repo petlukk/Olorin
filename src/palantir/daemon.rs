@@ -211,10 +211,16 @@ const SNAPSHOT_FRESH_SECS: i64 = 120;
 /// Surface alerts from at most this far back, so the chat sees *current*
 /// incidents, not last hour's.
 const ALERT_FRESH_SECS: i64 = 600;
+/// A stand-down (`clear`) surfaces only this briefly — long enough for the chat
+/// to announce the all-clear after a prediction resolves, then it ages out so a
+/// resolved incident doesn't linger as stale context. Much shorter than
+/// `ALERT_FRESH_SECS`: an all-clear is only interesting right after it fires.
+const CLEAR_FRESH_SECS: i64 = 90;
 
 /// One-line observations for the chat Pipe: each fresh watcher that has a recent
-/// alert. Quiet and stale watchers are omitted so the system prompt (and the Pi
-/// prefill) stays lean — the chat only learns about live incidents. Text is
+/// alert — a live incident (up to `ALERT_FRESH_SECS`) or a just-fired stand-down
+/// (the all-clear, up to `CLEAR_FRESH_SECS`). Quiet and stale watchers are
+/// omitted so the system prompt (and the Pi prefill) stays lean. Text is
 /// sanitized for safe injection into the system prompt.
 pub fn recent_observations(now: i64) -> Vec<String> {
     let mut out = Vec::new();
@@ -229,10 +235,20 @@ pub fn recent_observations(now: i64) -> Vec<String> {
             continue; // stale daemon
         }
         let Some(la) = o.get_object("last_alert") else { continue }; // quiet watcher
-        if !active_incident(la, now) {
-            continue; // old incident, or a cleared stand-down — not live
-        }
         let at = la.get_i64("at_unix").unwrap_or(0);
+        // A live incident surfaces for ALERT_FRESH_SECS; a stand-down surfaces
+        // only briefly as an all-clear so the chat can announce the resolution
+        // (the badge already flips green via `active_incident`, but the chat must
+        // be *told* — otherwise it can warn of a cascade and never report that it
+        // cleared). Both age out; an old incident or a stale all-clear is dropped.
+        let surface = if la.get_str("kind") == Some("clear") {
+            now - at <= CLEAR_FRESH_SECS
+        } else {
+            active_incident(la, now)
+        };
+        if !surface {
+            continue;
+        }
         let name = sanitize(o.get_str("name").unwrap_or("?"));
         let msg = sanitize(la.get_str("message").unwrap_or(""));
         out.push(format!("[palantir:{name}] {msg} ({})", humanize_age(now - at)));
