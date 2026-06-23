@@ -26,5 +26,6 @@ echo "[scenario:$KIND] traffic after the deploy (${BROKEN}s)..."
 python3 loadgen.py "$BROKEN" "$RATE" "$WORKERS"
 kill $SVC 2>/dev/null || true; trap - EXIT
 echo "[scenario:$KIND] done:"
-wc -l access.log db.log system.log
-echo "--- 5xx in access.log: $(grep -cE '\" 5[0-9][0-9] ' access.log) | db errors: $(grep -c ERROR db.log) | lag=${LAG}s kind=${KIND} ---"
+wc -l access.log $([ -f db.log ] && echo db.log) system.log
+db_errs=$(grep -c ERROR db.log 2>/dev/null || true)
+echo "--- 5xx in access.log: $(grep -cE '\" 5[0-9][0-9] ' access.log || true) | db errors: ${db_errs:-0} | lag=${LAG}s kind=${KIND} ---"
