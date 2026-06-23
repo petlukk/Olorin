@@ -59,15 +59,33 @@ fn surfaces_only_fresh_watchers_with_a_recent_alert() {
 }
 
 #[test]
-fn a_cleared_stand_down_is_not_surfaced_as_a_live_incident() {
-    // A recent `clear` is good news (the predicted cascade never came), not an
-    // incident — the chat must not be told there's a live problem.
+fn a_recent_stand_down_surfaces_as_an_all_clear() {
+    // A just-fired `clear` is good news (the predicted cascade never came). It
+    // surfaces briefly so the chat can announce the resolution — but it must read
+    // as an all-clear ("no cascade"), never as a live problem.
     let _h = IsoHome::new("clear");
     let now = 3_000_000i64;
     write_snapshot("c", "/p/c.log", "iso8601", Some(10),
         Some(&Alert::Clear { trigger_at: now - 45, window: 45 }), now);
-    assert!(recent_observations(now).is_empty(),
-        "a cleared cascade must not surface as a live incident");
+    let obs = recent_observations(now);
+    assert_eq!(obs.len(), 1, "a recent stand-down should surface: {obs:?}");
+    assert!(obs[0].contains("no cascade"),
+        "the stand-down must read as an all-clear, not an alarm: {:?}", obs[0]);
+}
+
+#[test]
+fn an_aged_out_stand_down_stops_surfacing() {
+    // The all-clear is transient: once it ages past the clear-freshness window it
+    // drops out, so the chat doesn't keep repeating a stale "all clear". The
+    // snapshot itself stays fresh here (updated at `later`) so this isolates the
+    // clear-age gate, not the stale-daemon gate.
+    let _h = IsoHome::new("clear_aged");
+    let now = 3_000_000i64;
+    let later = now + 200; // > CLEAR_FRESH_SECS past the stand-down
+    write_snapshot("c", "/p/c.log", "iso8601", Some(10),
+        Some(&Alert::Clear { trigger_at: now - 45, window: 45 }), later);
+    assert!(recent_observations(later).is_empty(),
+        "an aged-out stand-down must not linger in the chat context");
 }
 
 #[test]
