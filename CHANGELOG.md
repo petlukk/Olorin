@@ -8,6 +8,21 @@ order.
 
 ## [Unreleased]
 
+## [3.16.2] — 2026-06-24
+
+### Fixed
+
+- **Palantír now gives the chat an affirmative all-clear.** v3.16.1 told the chat
+  about a live incident or a just-fired stand-down, but when an incident resolved
+  any other way — a confirmed cascade aging out, or a prediction that never
+  cascaded — `recent_observations` returned nothing, so the chat got no context
+  and fell back to a generic reply even though the badge had gone green. It also
+  couldn't distinguish "all clear" from "no watcher running". Now every *fresh*
+  watcher contributes exactly one line: the incident or stand-down when there's
+  news, otherwise `all clear — watching, no active incident`, so asking "is
+  everything ok?" gets a definite answer. A *stale* daemon still contributes
+  nothing (its state is unknown — a quiet line would be a false all-clear).
+
 ## [3.16.1] — 2026-06-24
 
 ### Fixed
