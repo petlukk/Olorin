@@ -8,6 +8,21 @@ order.
 
 ## [Unreleased]
 
+## [3.16.4] — 2026-06-24
+
+### Fixed
+
+- **Rune narration now names the concrete finding.** The narration system prompt
+  told the model to "avoid repeating raw numbers verbatim", which made it hedge —
+  e.g. an `eatime` traffic spike was narrated as *"a significant peak around a
+  specific date and time"* while the exact date and magnitude sat in the output
+  in front of it. The prompt now asks the model to name the headline figure (the
+  date/category and the magnitude of the peak/spike/anomaly) and only forbids
+  reproducing the whole table; the `is_grid_continuation` filter still catches
+  the one real failure mode (continuing the numeric grid). Pi-validated 3/3 at
+  production temperature: a spike now narrates as *"peak activity occurred on
+  2026-03-13T14:00:00 … 226× the baseline."* Applies to every rune narration.
+
 ## [3.16.3] — 2026-06-24
 
 ### Fixed

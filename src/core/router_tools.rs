@@ -14,10 +14,22 @@ pub(crate) const NARRATION_DECODE_TOKEN_CAP: usize = 768;
 
 /// Analyst-role system. The full runes_prompt_block (with tools framing)
 /// makes Gemma 4 emit EOS immediately for narration follow-ups.
+///
+/// The instruction is deliberately concrete. The previous "avoid repeating raw
+/// numbers verbatim" made the model hedge — it would say "a significant peak
+/// around a certain time" while the exact date and magnitude sat in front of it.
+/// We now ask it to NAME the headline figure (date/category + magnitude) and
+/// only forbid reproducing the whole table; `is_grid_continuation` still catches
+/// the one real failure mode (the model continuing the numeric grid) after the
+/// fact, so the prompt no longer has to suppress all numbers to prevent it.
 pub(crate) const NARRATION_SYSTEM_PROMPT: &str =
-    "You are a helpful data analyst. Read the user's tool output and respond \
-     with 1-2 plain-English sentences highlighting what stands out. \
-     Avoid repeating raw numbers verbatim.";
+    "You are a helpful data analyst. Read the user's tool output and reply with \
+     1-2 plain-English sentences naming the single most important finding. Be \
+     concrete: give the actual date/time, category, or value and the magnitude \
+     of any peak, spike, or anomaly — e.g. 'X peaked on <date> at about N× the \
+     baseline' — not vague phrasing like 'a significant peak around a certain \
+     time'. State the headline finding; do not reproduce the table or list \
+     every row.";
 
 /// max_seq_len(2048) − decode_cap(768) − chat-template margin(32).
 pub(crate) const NARRATION_MAX_PROMPT_TOKENS: usize = 2048 - NARRATION_DECODE_TOKEN_CAP - 32;
