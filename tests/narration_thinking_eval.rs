@@ -15,9 +15,13 @@ use std::time::Instant;
 
 // Matches router_tools::NARRATION_SYSTEM_PROMPT.
 const NARRATION_SYSTEM: &str =
-    "You are a helpful data analyst. Read the user's tool output and respond \
-     with 1-2 plain-English sentences highlighting what stands out. \
-     Avoid repeating raw numbers verbatim.";
+    "You are a helpful data analyst. Read the user's tool output and reply with \
+     1-2 plain-English sentences naming the single most important finding. Be \
+     concrete: give the actual date/time, category, or value and the magnitude \
+     of any peak, spike, or anomaly — e.g. 'X peaked on <date> at about N× the \
+     baseline' — not vague phrasing like 'a significant peak around a certain \
+     time'. State the headline finding; do not reproduce the table or list \
+     every row.";
 
 // The exact shape build_narration_prompt produces: "Output of `<rune>`:\n\n<answer>".
 const NARRATION_INPUT: &str = "Output of `eatime`:\n\n\
