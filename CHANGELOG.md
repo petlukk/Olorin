@@ -8,6 +8,26 @@ order.
 
 ## [Unreleased]
 
+## [3.16.1] — 2026-06-24
+
+### Fixed
+
+- **Palantír stand-down now reaches the chat as an all-clear.** When a predicted
+  cascade never arrived, the watcher stood down and the web-UI badge flipped
+  green, but the chat model was never told — the `<recent_observations>` block
+  dropped the resolved incident silently, so the assistant could warn "watching
+  for a cascade" and then revert to a generic greeting without ever reporting it
+  cleared. A recent `clear` now surfaces as a transient all-clear ("window clear
+  — no cascade") for 90s, then ages out so a resolved incident doesn't linger as
+  stale context. `active_incident()` and the badge are unchanged.
+- **Incident lab good-deploy run ends cleanly.** `scenario.sh` aborted under
+  `set -e` on a healthy deploy because its summary line referenced `db.log`,
+  which only exists when the bug arms on a bad deploy; the missing-file `wc`
+  killed the script before the summary printed. The `db.log` references are now
+  guarded (0 db errors when absent). Also marked `deploy.sh` / `ramp.sh` /
+  `scenario.sh` executable — they were committed `100644`, so `./scenario.sh`
+  failed with "Permission denied" on a fresh checkout. Test infrastructure only.
+
 ## [3.16.0] — 2026-06-22
 
 ### Added
