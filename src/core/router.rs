@@ -243,7 +243,18 @@ impl DispatchContext {
             s.push_str(line);
             s.push('\n');
         }
-        s.push_str("</recent_observations>");
+        s.push_str("</recent_observations>\n");
+        // The minimal Pi prompt gives the model no guidance on this block, so a
+        // terse all-clear line gets ignored on some turns (it reads as low-signal
+        // next to a rich incident line). Spell out the contract so "what's going
+        // on?" / "is everything ok?" answers from it every time, not just when an
+        // incident is loud enough to notice.
+        s.push_str(
+            "The block above is the live state of the palantír log watchers on \
+             this machine. When the user asks what is going on, whether there is \
+             a problem, or if everything is ok, answer from it: report any active \
+             incident, or state that all is clear when none is active.",
+        );
         s
     }
 

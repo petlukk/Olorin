@@ -8,6 +8,21 @@ order.
 
 ## [Unreleased]
 
+## [3.16.3] — 2026-06-24
+
+### Fixed
+
+- **Palantír all-clear is now reported consistently.** v3.16.2 injected the
+  affirmative all-clear, but the `<recent_observations>` block carried no
+  instruction on how to use it, so under the Pi's minimal system prompt the small
+  model relayed a rich incident line but intermittently ignored the terse
+  all-clear (≈half the turns fell back to a generic "could you provide more
+  context" at the web UI's temperature 0.4). The block is now framed with a short
+  directive — *"answer from it: report any active incident, or state all is clear
+  when none is active"* — so "what's going on?" / "is everything ok?" is answered
+  from the watcher state every time. Pi-validated: 6/6 quiet turns → "All is
+  clear", and an injected incident still reports the incident, not a false clear.
+
 ## [3.16.2] — 2026-06-24
 
 ### Fixed
