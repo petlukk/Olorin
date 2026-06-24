@@ -140,12 +140,15 @@ fn system_prompt_gains_observations_block_for_a_fresh_watcher() {
         .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
 
     // A fresh quiet watcher → the block appears with an affirmative all-clear, so
-    // the chat can say "everything's ok" rather than going generic.
+    // the chat can say "everything's ok" rather than going generic. The block is
+    // framed with a directive so the model reliably answers from it.
     write_snapshot("system", "/var/log/system.log", "iso8601", Some(10), None, now);
     let quiet = ctx.system_prompt_for_turn();
     assert!(quiet.starts_with(&base), "base prompt preserved");
     assert!(quiet.contains("<recent_observations>") && quiet.contains("</recent_observations>"));
     assert!(quiet.contains("[palantir:system]") && quiet.contains("all clear"), "{quiet}");
+    assert!(quiet.contains("live state of the palantír log watchers"),
+        "the block must carry a directive on how to use it: {quiet}");
 
     // A live incident on the same watcher → the block now carries the incident.
     write_snapshot("system", "/var/log/system.log", "iso8601", Some(10),
