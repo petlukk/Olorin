@@ -217,11 +217,13 @@ const ALERT_FRESH_SECS: i64 = 600;
 /// `ALERT_FRESH_SECS`: an all-clear is only interesting right after it fires.
 const CLEAR_FRESH_SECS: i64 = 90;
 
-/// One-line observations for the chat Pipe: each fresh watcher that has a recent
-/// alert — a live incident (up to `ALERT_FRESH_SECS`) or a just-fired stand-down
-/// (the all-clear, up to `CLEAR_FRESH_SECS`). Quiet and stale watchers are
-/// omitted so the system prompt (and the Pi prefill) stays lean. Text is
-/// sanitized for safe injection into the system prompt.
+/// One-line observations for the chat Pipe: every *fresh* watcher reports a
+/// line so the chat is never silent about a daemon it can see. When there's news
+/// it's the live incident (up to `ALERT_FRESH_SECS`) or the just-fired stand-down
+/// (up to `CLEAR_FRESH_SECS`); otherwise it's an affirmative all-clear, so the
+/// model can say "everything's ok" instead of falling back to a generic reply.
+/// A *stale* daemon contributes nothing — its state is unknown, and a quiet line
+/// would be a false all-clear. Text is sanitized for injection into the prompt.
 pub fn recent_observations(now: i64) -> Vec<String> {
     let mut out = Vec::new();
     let Ok(rd) = std::fs::read_dir(state_dir()) else { return out };
@@ -232,26 +234,19 @@ pub fn recent_observations(now: i64) -> Vec<String> {
         let Ok(bytes) = std::fs::read(e.path()) else { continue };
         let Ok(o) = crate::storage::json::parse(&bytes) else { continue };
         if now - o.get_i64("updated_at_unix").unwrap_or(0) > SNAPSHOT_FRESH_SECS {
-            continue; // stale daemon
-        }
-        let Some(la) = o.get_object("last_alert") else { continue }; // quiet watcher
-        let at = la.get_i64("at_unix").unwrap_or(0);
-        // A live incident surfaces for ALERT_FRESH_SECS; a stand-down surfaces
-        // only briefly as an all-clear so the chat can announce the resolution
-        // (the badge already flips green via `active_incident`, but the chat must
-        // be *told* — otherwise it can warn of a cascade and never report that it
-        // cleared). Both age out; an old incident or a stale all-clear is dropped.
-        let surface = if la.get_str("kind") == Some("clear") {
-            now - at <= CLEAR_FRESH_SECS
-        } else {
-            active_incident(la, now)
-        };
-        if !surface {
-            continue;
+            continue; // stale daemon — unknown state, claim nothing
         }
         let name = sanitize(o.get_str("name").unwrap_or("?"));
-        let msg = sanitize(la.get_str("message").unwrap_or(""));
-        out.push(format!("[palantir:{name}] {msg} ({})", humanize_age(now - at)));
+        out.push(match o.get_object("last_alert") {
+            Some(la) if surfaceable(la, now) => {
+                let at = la.get_i64("at_unix").unwrap_or(0);
+                let msg = sanitize(la.get_str("message").unwrap_or(""));
+                format!("[palantir:{name}] {msg} ({})", humanize_age(now - at))
+            }
+            // No alert, or one that has resolved (an aged incident / stale
+            // stand-down) — the watcher is healthy and quiet. Say so.
+            _ => format!("[palantir:{name}] all clear — watching, no active incident"),
+        });
     }
     out.sort();
     out
@@ -289,6 +284,18 @@ pub fn status_json(now: i64) -> String {
 fn active_incident(la: &crate::storage::json::Object, now: i64) -> bool {
     now - la.get_i64("at_unix").unwrap_or(0) <= ALERT_FRESH_SECS
         && la.get_str("kind") != Some("clear")
+}
+
+/// Whether a `last_alert` is still worth a dedicated chat line: a live incident
+/// (up to `ALERT_FRESH_SECS`) or a just-fired stand-down (up to
+/// `CLEAR_FRESH_SECS`). Anything older has resolved, so the watcher reports an
+/// all-clear instead of this alert.
+fn surfaceable(la: &crate::storage::json::Object, now: i64) -> bool {
+    if la.get_str("kind") == Some("clear") {
+        now - la.get_i64("at_unix").unwrap_or(0) <= CLEAR_FRESH_SECS
+    } else {
+        active_incident(la, now)
+    }
 }
 
 /// (status, recent-alert message) for a running watcher from its snapshot.

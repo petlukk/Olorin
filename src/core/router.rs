@@ -222,10 +222,11 @@ impl DispatchContext {
     }
 
     /// The system prompt for one chat turn: the base prompt, plus a
-    /// `<recent_observations>` block when a palantír daemon is reporting a live
-    /// incident — so the chat model is aware of it without being asked. Per-turn
-    /// only; never persisted. Quiet/stale watchers contribute nothing, so the
-    /// prompt is unchanged outside an incident.
+    /// `<recent_observations>` block whenever a fresh palantír daemon has
+    /// something to report — a live incident, a just-fired stand-down, or an
+    /// affirmative all-clear when it's healthy and quiet — so the chat is aware
+    /// without being asked. Per-turn only; never persisted. With no watcher (or
+    /// only stale daemons) the prompt is unchanged.
     #[doc(hidden)]
     pub fn system_prompt_for_turn(&self) -> String {
         let now = std::time::SystemTime::now()
