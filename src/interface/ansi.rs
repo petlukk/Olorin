@@ -210,6 +210,7 @@ impl TermGrid {
             b'D' => { self.cursor_col = self.cursor_col.saturating_sub(p0.max(1)); }
             b'J' => self.erase_display(p0),
             b'K' => self.erase_line(p0),
+            b'P' => self.delete_chars(p0.max(1)),
             b'h' | b'l' => {
                 if self.question_mark && p0 == 25 {
                     self.cursor_visible = cmd == b'h';
@@ -368,6 +369,23 @@ impl TermGrid {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// DCH (`CSI n P`): delete `n` characters at the cursor. The remainder of
+    /// the line shifts left and the freed cells at the right are blanked; the
+    /// cursor does not move. readline emits this when recalling a shorter
+    /// history entry or backspacing mid-line — without it the deleted glyphs
+    /// linger in the grid (e.g. "lscpu" left behind "ls").
+    fn delete_chars(&mut self, n: u16) {
+        let cols = self.cols as usize;
+        let col = self.cursor_col as usize;
+        let rs = self.cursor_row as usize * cols;
+        let n = (n as usize).min(cols - col);
+        let line_end = rs + cols;
+        self.cells.copy_within(rs + col + n..line_end, rs + col);
+        for c in &mut self.cells[line_end - n..line_end] {
+            *c = Cell::default();
         }
     }
 
