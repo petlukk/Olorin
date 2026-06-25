@@ -22,7 +22,7 @@ English. 1 GB NASA-HTTP access log (July 1995) is SIMD-scanned in 755 ms, a real
   is 11× faster end-to-end than pandas on a 100K-row CSV; eatime's
   `timestamp_scan` kernel scans at 6.34 GB/s on x86. See [`benchmarks/results.md`](benchmarks/results.md).
 - **Honest scope** — Single binary, two dependencies (libc + libloading),
-  ~2 MB release on x86_64 / ~4.4 MB on ARM. Runs on a Raspberry Pi 5.
+  ~2.4 MB release on x86_64 / ~5.2 MB on ARM. Runs on a Raspberry Pi 5.
 
 Prebuilt for Linux x86_64, Linux aarch64 (Pi 5), and Windows x86_64. See
 [`CHANGELOG.md`](CHANGELOG.md) for version history; the `RuneOutput v1`
@@ -420,7 +420,7 @@ The installer downloads the latest release binary, verifies its SHA256
 against the published `SHA256SUMS`, optionally prompts for an
 `ANTHROPIC_API_KEY` (cloud fallback when no local model is loaded),
 and optionally fetches the WhatsApp `/teleport` bridge. Cloud-fallback
-and bridge are both opt-in; the core binary is ~2 MB on x86 / ~4.3 MB
+and bridge are both opt-in; the core binary is ~2.4 MB on x86 / ~5.2 MB
 on ARM with all SIMD kernels embedded. Olorin reads `~/.olorin/env` at
 startup, so the key written by the installer is picked up without any
 shell-rc plumbing.
@@ -470,7 +470,7 @@ layout, kernel inventory, and runtime contracts.
 
 ## What isn't in the binary
 
-The 2 MB / 2-dep figure isn't aspirational — it's the result of deliberately
+The 2.4 MB / 2-dep figure isn't aspirational — it's the result of deliberately
 not pulling in the things most LLM agents depend on.
 
 | Layer | Common choice | Olorin |
@@ -497,11 +497,11 @@ surprises.
 
 | Metric | Value |
 |---|---|
-| Rust source | 30,019 lines (144 files) |
+| Rust source | 31,613 lines (150 files) |
 | Ea kernel source | 16,103 lines (83 files, 60 logical kernels) |
-| Tests | 23,809 lines (155 files, 830 tests) |
+| Tests | 24,862 lines (163 files, 887 tests) |
 | Runtime dependencies | 2 (libc, libloading) |
-| Release binary | 2.4 MB on x86_64 / 4.4 MB on ARM (all kernels embedded) |
+| Release binary | 2.4 MB on x86_64 / 5.2 MB on ARM (all kernels embedded) |
 | Max file size | 500 lines for Rust + tests (no exceptions); 2 Ea kernels exceed it |
 
 ## License
