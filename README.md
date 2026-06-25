@@ -18,7 +18,7 @@ Olorin is built around one principle: **SIMD kernels and tools do the real
 work; the language model is a presentation layer, not an answer engine.**
 That makes it categorically different from chat-first agents — Olorin's job
 is to give you reproducible analysis, then let the model phrase it in plain
-English. 1 GB NASA-HTTP access log (July 1995) is SIMD-scanned in 755 ms, a real traffic spike flagged on the 13th, and narrated by the local model — zero cloud, on a Raspberry Pi.
+English. 1 GB NASA-HTTP access log (July 1995) is SIMD-scanned in 789 ms, a real traffic spike flagged on the 13th, and narrated by the local model — zero cloud, on a Raspberry Pi.
 
 ## Why Olorin?
 
