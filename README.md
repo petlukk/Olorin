@@ -3,6 +3,11 @@
 [![CI](https://github.com/petlukk/Olorin/actions/workflows/ci.yml/badge.svg)](https://github.com/petlukk/Olorin/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
+
+https://github.com/user-attachments/assets/575bfd7a-341b-4e1e-ab94-05a0be093510
+
+
+
 > Deterministic SIMD analyst with LLM narration
 
 Olorin is built around one principle: **SIMD kernels and tools do the real
