@@ -8,6 +8,23 @@ order.
 
 ## [Unreleased]
 
+## [3.16.5] — 2026-06-25
+
+### Fixed
+
+- **Web terminal no longer leaves residue when recalling a shorter command.**
+  The terminal's ANSI emulator handled erase-to-EOL (`CSI K`) and type-over but
+  not DCH (`CSI n P` — Delete Character). `readline` emits DCH when recalling a
+  *shorter* history entry over a longer one (`\x1b[2P`) and when backspacing
+  mid-line (`\x1b[1P`), so the deleted glyphs lingered in the grid — recalling
+  `ls` over `lscpu` rendered as a mix of the two even though the command
+  executed correctly. The emulator now implements DCH (shift the line tail left,
+  blank the freed cells, cursor unmoved). Only DCH is added — a byte capture of
+  `readline` showed it rewrites-and-deletes rather than emitting ICH/ECH in
+  these flows, so those sequences stay unimplemented.
+- **Chat composer attach/send buttons now have breathing room.** The two buttons
+  sat flush against each other; added an 8px gap to the input row.
+
 ## [3.16.4] — 2026-06-24
 
 ### Fixed
