@@ -230,7 +230,7 @@ fn main() {
                 || name == "anomaly.rs" || name == "plot.rs"
                 || name == "select.rs" || name == "grouping.rs"
                 || name == "filter.rs" || name == "incident.rs"
-                || name == "substream.rs" { continue; }
+                || name == "substream.rs" || name == "netflow.rs" { continue; }
             let stem = name.strip_suffix(".rs").unwrap();
             let contents = fs::read_to_string(entry.path()).unwrap_or_default();
             if !contents.contains("pub const RUNE") {

@@ -195,6 +195,17 @@ fn parity_eatime_multi_hour() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// eanet on a fixture with KNOWN ground truth — a port scanner (10.0.0.66 → 50
+/// destinations) and a data exfil (10.0.0.99 → 203.0.113.7, the heavy talker)
+/// buried in benign traffic. The golden pins that pcap_scan + netflow recover
+/// both as flagged anomalies, byte-identically across arches (NEON == SSE2).
+#[test]
+fn parity_eanet_incident_pcap() {
+    let path = stage_fixture("eanet_sample.pcap");
+    run_case("eanet_parity", &format!("eanet --json {path}"));
+    let _ = std::fs::remove_file(&path);
+}
+
 /// Space-separated ISO (`YYYY-MM-DD HH:MM:SS`, with fractional seconds) —
 /// exercises the timestamp_scan kernel's `T`-or-space separator branch on
 /// both arches. The `.|`-combined lane mask must lower identically on NEON.

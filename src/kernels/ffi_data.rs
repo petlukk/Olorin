@@ -164,6 +164,25 @@ pub unsafe fn timestamp_scan(
     );
 }
 
+/// Walk a classic-pcap PACKET REGION (caller strips the 24-byte global header
+/// and guarantees native-little-endian + Ethernet linktype) and emit one record
+/// per IPv4 TCP/UDP packet into `out`: six `i32`s
+/// `{proto, src, dst, sport, dport, bytes}` (IPs are network-order bits, read
+/// back as `u32`).
+/// - `data` must be readable for `len` bytes.
+/// - `out` must be writable for `6 * max_records` i32s; the kernel clamps writes
+///   at that capacity.
+/// - `out_n` must point to one writable i32 (set to 0 on entry, then the count
+///   of records written).
+/// - `out_consumed` must point to one writable i32; on return it holds the byte
+///   offset of the first record not fully processed (carry point for chunking).
+pub unsafe fn pcap_scan(
+    data: *const u8, len: i32,
+    out: *mut i32, max_records: i32, out_n: *mut i32, out_consumed: *mut i32,
+) {
+    (k().pcap_scan)(data, len, out, max_records, out_n, out_consumed);
+}
+
 /// Scan `text` for Common Log Format timestamps (`[dd/MMM/yyyy:hh:mm:ss`,
 /// the Apache/nginx access-log default) and emit each match's `[` byte
 /// offset. Used by `eatime` — the caller decodes the fixed-width fields

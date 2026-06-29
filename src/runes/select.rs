@@ -28,10 +28,22 @@ pub fn pick_rune_name(filename: &str, bytes: &[u8]) -> Option<&'static str> {
         Some("jsonl") | Some("ndjson") | Some("json") => Some("eajson"),
         Some("parquet") => Some("eaparquet"),
         Some("sql") => Some("easql"),
+        Some("pcap") | Some("pcapng") => Some("eanet"),
         // Logs and untyped text: forensics-first — prefer timing-spike
         // detection when the file carries timestamps, else severity counts.
-        Some("log") | Some("txt") | None => {
+        Some("log") | Some("txt") => {
             Some(if has_timestamp(bytes) { "eatime" } else { "ealog" })
+        }
+        // No extension: sniff the pcap magic (binary, never has a timestamp
+        // prefix) before the text forensics split.
+        None => {
+            if is_pcap(bytes) {
+                Some("eanet")
+            } else if has_timestamp(bytes) {
+                Some("eatime")
+            } else {
+                Some("ealog")
+            }
         }
         _ => None,
     }
@@ -46,6 +58,7 @@ pub fn supported_formats() -> &'static str {
      • JSON / JSON Lines (.json, .jsonl, .ndjson) — field stats\n  \
      • Parquet (.parquet) — columnar summaries\n  \
      • SQL (.sql) — schema / query inspection\n  \
+     • Packet capture (.pcap) — network flow triage (top talkers, scans)\n  \
      • Logs & text (.log, .txt, or no extension) — timing spikes or severity counts"
 }
 
@@ -58,6 +71,22 @@ pub fn default_args(rune_name: &str) -> &'static str {
         "eatime" => "--bucket series",
         _ => "",
     }
+}
+
+/// True if the first 4 bytes are a pcap/pcapng magic number (classic
+/// microsecond/nanosecond in either endianness, or pcapng). Routes
+/// extensionless captures to `eanet`, which gives a friendly reason for the
+/// formats it can't yet read (big-endian, pcapng).
+fn is_pcap(bytes: &[u8]) -> bool {
+    bytes.len() >= 4
+        && matches!(
+            bytes[0..4],
+            [0xd4, 0xc3, 0xb2, 0xa1]      // classic, microsecond, little-endian
+                | [0x4d, 0x3c, 0xb2, 0xa1] // classic, nanosecond, little-endian
+                | [0xa1, 0xb2, 0xc3, 0xd4] // classic, microsecond, big-endian
+                | [0xa1, 0xb2, 0x3c, 0x4d] // classic, nanosecond, big-endian
+                | [0x0a, 0x0d, 0x0d, 0x0a] // pcapng section header block
+        )
 }
 
 /// Lowercased extension (no dot) of a filename's basename, or `None` if it has
