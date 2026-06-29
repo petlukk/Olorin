@@ -157,6 +157,23 @@ fn eanet_answer_is_narratable_not_safety_blocked() {
 }
 
 #[test]
+fn eanet_output_is_chartable() {
+    ffi::init().unwrap();
+    let path = write_incident_pcap("olorin_eanet_chart.pcap");
+    let r = run_rune("eanet", &format!("--json {path}")).expect("eanet runs");
+    std::fs::remove_file(&path).ok();
+    let out = RuneOutput::from_json(r.answer.as_bytes()).expect("valid json");
+
+    // categories[] is the source fan-out ranking — the chartable bar series.
+    assert!(olorin::runes::plot::is_chartable(&out), "eanet output should be chartable");
+    assert_eq!(out.categories[0].name, "10.0.0.66", "scanner should top the fan-out ranking");
+    // The scan anomaly's bucket equals its bar's name, so spike_flags highlights it.
+    assert!(out.anomalies.iter().any(|a| a.bucket == "10.0.0.66"), "scan bucket must match its bar");
+    // The report renders an inline SVG for it.
+    assert!(olorin::runes::report::svg_chart(&out).is_some(), "report should render an eanet SVG chart");
+}
+
+#[test]
 fn eanet_rejects_pcapng_with_reason() {
     ffi::init().unwrap();
     let path = std::env::temp_dir().join("olorin_eanet_ng.pcap");
