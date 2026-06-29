@@ -14,6 +14,7 @@ pub mod grouping;
 pub mod output;
 pub mod eajson_aggregate;
 pub mod narration;
+pub mod netflow;
 pub mod report;
 pub mod stream;
 pub mod substream;

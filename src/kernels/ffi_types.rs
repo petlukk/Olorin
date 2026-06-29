@@ -47,6 +47,11 @@ type TimestampScanFn    = unsafe extern "C" fn(
     *mut i32, i32, *mut i32,
     *mut u8,
 );
+type PcapScanFn         = unsafe extern "C" fn(
+    *const u8, i32,
+    *mut i32, i32, *mut i32,
+    *mut i32,
+);
 type F32StatsFn         = unsafe extern "C" fn(
     *const f32, i32,
     *mut i32,
@@ -140,6 +145,7 @@ pub struct KernelTable {
     pub syslog_scan:              TimestampScanFn,
     pub apache_error_scan:        TimestampScanFn,
     pub hdfs_scan:                TimestampScanFn,
+    pub pcap_scan:                PcapScanFn,
     pub f32_stats:                F32StatsFn,
     pub f64_stats:                F64StatsFn,
     pub col_reduce:               ColReduceFn,

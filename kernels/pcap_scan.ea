@@ -1,0 +1,123 @@
+// pcap record walk + IPv4 5-tuple extractor (eanet rune, step 1).
+//
+// Walks a classic-pcap PACKET REGION (caller strips the 24-byte global header
+// and guarantees native-little-endian + Ethernet linktype). For each IPv4
+// TCP/UDP packet it emits one record into `out`:
+//     out[6*k + 0] = proto   (6 = TCP, 17 = UDP)
+//     out[6*k + 1] = src IP   (network-order bits, read back as u32 in Rust)
+//     out[6*k + 2] = dst IP
+//     out[6*k + 3] = src port
+//     out[6*k + 4] = dst port
+//     out[6*k + 5] = bytes    (on-wire incl_len of the record)
+// out_n[0] = number of records written (<= max_records), reset at head.
+//
+// SIMD NOTE (deliberate): pcap records are variable-length, chained by the
+// incl_len field, so the walk is INHERENTLY SEQUENTIAL — unlike timestamp_scan
+// you cannot parallelise across packets without first knowing their offsets.
+// This kernel therefore showcases Ea doing real binary-protocol parsing (typed
+// loads + full control flow over Ethernet/VLAN/IPv4/TCP-UDP), not data-parallel
+// SIMD. The measured triage bottleneck is the downstream hash aggregation
+// (memory-bound), done in Rust (netflow.rs) exactly as eatime buckets in Rust
+// after timestamp_scan emits positions.
+//
+// v1 scope: IPv4, TCP/UDP, single 802.1Q VLAN tag. Non-IPv4 / non-TCP-UDP
+// packets are skipped (not emitted). pcapng, IPv6 per-flow, and stacked VLANs
+// are out of scope by design.
+
+// Zero-extended byte load. to_i32 SIGN-extends a u8, so any byte >= 128 would
+// corrupt the multi-byte assembly below (and a packet length with a high
+// low-byte would read negative and halt the walk). Mask to keep 0..255.
+func ub(d: *u8, o: i32) -> i32 {
+    return to_i32(d[o]) & 255
+}
+// Network byte order (IP / TCP-UDP header fields are always big-endian).
+func be16(d: *u8, o: i32) -> i32 {
+    return (ub(d, o) << 8) | ub(d, o + 1)
+}
+func be32(d: *u8, o: i32) -> i32 {
+    return (ub(d, o) << 24) | (ub(d, o + 1) << 16) | (ub(d, o + 2) << 8) | ub(d, o + 3)
+}
+// pcap record-header length field (native little-endian for v1 captures).
+func le32(d: *u8, o: i32) -> i32 {
+    return ub(d, o) | (ub(d, o + 1) << 8) | (ub(d, o + 2) << 16) | (ub(d, o + 3) << 24)
+}
+
+// Parse one packet's headers; emit a record on an IPv4 TCP/UDP match.
+func parse_packet(d: *u8, pkt: i32, pkt_end: i32, incl: i32, out: *mut i32, max_records: i32, out_n: *mut i32) {
+    // Ethernet: ethertype at pkt+12. 0x8100 (33024) = 802.1Q VLAN -> L3 +4.
+    let mut et: i32 = be16(d, pkt + 12)
+    let mut l3: i32 = pkt + 14
+    if et == 33024 {
+        if pkt + 18 > pkt_end { return }
+        et = be16(d, pkt + 16)
+        l3 = pkt + 18
+    }
+    if et != 2048 { return }                 // 0x0800 IPv4 only
+
+    if l3 + 20 > pkt_end { return }          // room for a minimal IPv4 header
+    let vihl: i32 = ub(d, l3)
+    if (vihl >> 4) != 4 { return }           // IP version 4
+    let ihl: i32 = (vihl & 15) * 4
+    if ihl < 20 { return }                   // malformed IHL
+
+    let proto: i32 = ub(d, l3 + 9)
+    if proto != 6 {
+        if proto != 17 { return }            // TCP (6) or UDP (17) only
+    }
+
+    let l4: i32 = l3 + ihl
+    if l4 + 4 > pkt_end { return }            // room for src/dst ports
+
+    let src: i32 = be32(d, l3 + 12)
+    let dst: i32 = be32(d, l3 + 16)
+    let sport: i32 = be16(d, l4)
+    let dport: i32 = be16(d, l4 + 2)
+
+    let cur: i32 = out_n[0]
+    if cur < max_records {
+        let base: i32 = cur * 6
+        out[base + 0] = proto
+        out[base + 1] = src
+        out[base + 2] = dst
+        out[base + 3] = sport
+        out[base + 4] = dport
+        out[base + 5] = incl
+        out_n[0] = cur + 1
+    }
+}
+
+// out_consumed[0] = byte offset of the first record NOT fully processed, so a
+// chunked caller can carry the trailing partial record into the next chunk.
+export func pcap_scan(data: *u8, len: i32, out: *mut i32, max_records: i32, out_n: *mut i32, out_consumed: *mut i32) {
+    out_n[0] = 0
+    out_consumed[0] = 0
+    if max_records <= 0 { return }
+
+    // Sequential record walk: 16-byte record header + incl_len bytes each.
+    let mut off: i32 = 0
+    while off + 16 <= len {
+        // Output buffer full: stop at this record so the caller can drain and
+        // resume from `off`. No silent record loss regardless of chunk density.
+        if out_n[0] >= max_records {
+            out_consumed[0] = off
+            return
+        }
+        let incl: i32 = le32(data, off + 8)
+        let pkt: i32 = off + 16
+        let pkt_end: i32 = pkt + incl
+
+        if incl < 0 {                        // garbage length -> stop
+            out_consumed[0] = off
+            return
+        }
+        if pkt_end > len {                   // straddling / truncated record -> stop
+            out_consumed[0] = off
+            return
+        }
+        if incl >= 14 {
+            parse_packet(data, pkt, pkt_end, incl, out, max_records, out_n)
+        }
+        off = pkt_end
+    }
+    out_consumed[0] = off
+}
