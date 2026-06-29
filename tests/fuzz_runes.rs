@@ -364,6 +364,12 @@ const SQL: &[u8] = b"CREATE TABLE t (id INT, name TEXT);\nINSERT INTO t VALUES (
 // Mutating the footer-length field is the point — it drives the bounds math in
 // the footer/thrift decoder, a classic out-of-range-read crash site.
 const PARQUET: &[u8] = b"PAR1\x15\x00\x15\x10\x15\x10\x2c\x15\x04\x00\x00\x00\x08\x00\x00\x00PAR1";
+// pcap: 24-byte global header (native-LE magic, Ethernet linktype) + one record
+// (16-byte header with the little-endian `incl_len` length field) + one IPv4
+// TCP packet. Mutating `incl_len` is the point — the same length-math crash
+// site as parquet's footer length, driving pcap_scan's record walk and the
+// chunked netflow straddle/carry into out-of-range territory.
+const PCAP: &[u8] = b"\xd4\xc3\xb2\xa1\x02\x00\x04\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x36\x00\x00\x00\x36\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x08\x00\x45\x00\x00\x28\x00\x00\x00\x00\x40\x06\x00\x00\x0a\x00\x00\x01\x0a\x00\x00\x02\x04\xd2\x00\x50\x00\x00\x00\x00\x00\x00\x00\x00\x50\x02\x00\x00\x00\x00\x00\x00";
 // A valid serialized RuneOutput line — the input grammar eadiff consumes. Its
 // hand-rolled `RuneOutput::from_json` parser (no serde) is the fuzz target;
 // mutations that still parse reach the structural-diff math behind it.
@@ -371,8 +377,8 @@ const RUNEOUT: &[u8] = b"{\"schema_version\":1,\"rune\":\"eatime\",\"rune_versio
 
 /// The other seeds are visible to the splice strategy so it can graft one
 /// grammar's tail onto another — cross-format confusion is a real bug class.
-fn all_seeds() -> [&'static [u8]; 6] {
-    [CSV, JSONL, LOG, TIMELOG, SQL, PARQUET]
+fn all_seeds() -> [&'static [u8]; 7] {
+    [CSV, JSONL, LOG, TIMELOG, SQL, PARQUET, PCAP]
 }
 
 fn corpus_for(primary: &'static [u8]) -> Vec<&'static [u8]> {
@@ -401,6 +407,13 @@ fn fuzz_easql() { fuzz_rune("easql", &corpus_for(SQL)); }
 
 #[test]
 fn fuzz_eaparquet() { fuzz_rune("eaparquet", &corpus_for(PARQUET)); }
+
+/// eanet's pcap parser is a binary length-prefixed format — the highest-risk
+/// parser class. Mutations hammer the global-header validation, the record
+/// `incl_len` length math (over-large / negative / truncated), and the chunked
+/// straddle/carry, hunting for a panic, hang, or OOM the unit tests can't reach.
+#[test]
+fn fuzz_eanet() { fuzz_rune("eanet", &corpus_for(PCAP)); }
 
 /// eadiff takes two RuneOutput JSON files. Side A is mutated (hammers the
 /// hand-rolled JSON parser); side B is a fixed valid output so any mutation
