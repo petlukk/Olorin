@@ -8,6 +8,26 @@ order.
 
 ## [Unreleased]
 
+## [3.17.0] — 2026-06-29
+
+### Added
+
+- **`eanet` — packet-capture network triage (new rune).** Drop a `.pcap` and
+  get a deterministic flow summary — top talkers by bytes, source fan-out
+  (a horizontal-scan signal), and destination fan-in (a DDoS/brute signal) —
+  with the standout hosts narrated in plain English. A new Ea kernel
+  (`pcap_scan.ea`) walks the Ethernet/VLAN/IPv4 TCP-UDP records and emits
+  5-tuples; `netflow.rs` aggregates them in chunks (so multi-GB captures don't
+  load whole into RAM). The model is fed only the compact findings (the verbose
+  ranking tables go to `details`, shown but not narrated), so it names the
+  concrete host + magnitude — e.g. *"10.0.0.99 moved 8.01 MB to a single
+  destination, potentially indicating exfiltration."* Validated against real
+  CTU-13 botnet traffic: the generic metrics rank the documented bot #1,
+  matching tshark, with no knowledge of the labels — and on a 1.1 GB capture
+  the deterministic scan runs ~64× faster than `tshark -z conv,ip`. v1 reads
+  classic-pcap Ethernet captures (not pcapng, big-endian, or live capture).
+  Drop a `.pcap` in the web UI or run `olorin rune eanet <file>`.
+
 ## [3.16.5] — 2026-06-25
 
 ### Fixed
