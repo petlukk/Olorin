@@ -53,16 +53,22 @@ impl Rune for Eanet {
 }
 
 fn result(out: RuneOutput, triage: Option<Triage>, json_mode: bool, t0: Instant) -> RuneResult {
-    let answer = if json_mode {
-        out.to_json()
+    // The narration path (build_narration_prompt) feeds the LLM `answer` ONLY,
+    // while the REPL/web body shows `answer` + `details`. So `answer` is the
+    // compact summary (stats + findings) the small model narrates cleanly —
+    // exactly the shape eatime narrates well — and the verbose ranking tables
+    // go in `details`, seen by the user but never drowning the model in grid.
+    let (answer, details) = if json_mode {
+        (out.to_json(), None)
     } else if let Some(err) = &out.error {
-        err.clone()
+        (err.clone(), None)
     } else {
-        format_text(&out, triage.as_ref())
+        let t = triage.as_ref().expect("success path carries the triage");
+        (format_answer(&out, t), Some(format_details(t)))
     };
     RuneResult {
         answer: truncate_answer(&answer),
-        details: None,
+        details: details.map(|d| truncate_answer(&d)),
         success: out.success,
         timing_us: t0.elapsed().as_micros() as u64,
         structured: json_mode,
@@ -168,10 +174,14 @@ fn build_output(t: &Triage, path: String, n_bytes: u64, scan_us: u64) -> RuneOut
     out
 }
 
-fn format_text(out: &RuneOutput, triage: Option<&Triage>) -> String {
+/// The compact, LLM-facing summary: stats + the prose findings headline. This
+/// is what `build_narration_prompt` feeds the model — no ranking tables, so the
+/// small model summarises the finding instead of drowning in grid (the same
+/// compact shape eatime's text answer narrates well). The full tables live in
+/// `format_details`, shown to the user but withheld from the model.
+fn format_answer(out: &RuneOutput, t: &Triage) -> String {
     let src = out.source.as_ref().expect("build_output populates source on success");
-    let t = triage.expect("success path carries the triage");
-    let mut buf = String::with_capacity(1024);
+    let mut buf = String::with_capacity(512);
     buf.push_str("NETWORK FLOW TRIAGE\n");
     buf.push_str(&format!("packets:       {}\n", t.packets));
     buf.push_str(&format!("bytes:         {}\n", format_bytes(src.bytes)));
@@ -183,14 +193,26 @@ fn format_text(out: &RuneOutput, triage: Option<&Triage>) -> String {
         buf.push_str("(no IPv4 TCP/UDP packets found)\n");
         return buf;
     }
+    if out.anomalies.is_empty() {
+        // No flagged scan/exfil — still hand the model one concrete headline.
+        if let Some(&(s, d, b)) = t.top_talkers.first() {
+            buf.push_str(&format!(
+                "findings:\n  • no scan or exfil signal stood out; the busiest conversation was {} → {} ({})\n",
+                ip(s), ip(d), format_bytes(b)
+            ));
+        } else {
+            buf.push_str("findings:\n  • no notable activity\n");
+        }
+    } else {
+        buf.push_str(&format_findings(&out.anomalies));
+    }
+    buf
+}
 
-    // Lead with the headline findings as explicit prose (host + magnitude), so
-    // the small model narrates the concrete figure instead of paraphrasing it
-    // — the v3.16.4 concrete-figure lesson. These prose lines also differ in
-    // shape from the ranking rows, so the is_grid_continuation filter still
-    // catches a model that echoes a table row.
-    buf.push_str(&format_findings(&out.anomalies));
-
+/// The verbose ranking tables — shown to the user (REPL/web append `details`
+/// after the answer) but NOT fed to the narration model.
+fn format_details(t: &Triage) -> String {
+    let mut buf = String::with_capacity(512);
     buf.push_str("top source fan-out (distinct destinations — scan signal):\n");
     for &(s, c) in &t.top_fanout {
         buf.push_str(&format!("  {}   {} destinations\n", ip(s), c));

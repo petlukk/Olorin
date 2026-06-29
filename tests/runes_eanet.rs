@@ -115,23 +115,26 @@ fn eanet_json_flags_scanner_anomaly() {
 }
 
 #[test]
-fn eanet_narration_survives_grid_filter() {
+fn eanet_answer_compact_tables_in_details() {
     ffi::init().unwrap();
     let path = write_incident_pcap("olorin_eanet_grid.pcap");
     let r = run_rune("eanet", &path).expect("eanet runs");
     std::fs::remove_file(&path).ok();
     let answer = &r.answer;
 
-    // A plausible 1–2 sentence prose narration must survive BOTH filters.
-    let prose = "Host 10.0.0.66 contacted thousands of distinct destinations, a likely \
-                 horizontal port scan, while 10.0.0.99 moved hundreds of megabytes to a \
-                 single external host — possible exfiltration.";
-    assert!(!is_grid_continuation(answer, prose), "prose narration wrongly flagged as grid");
-    assert!(!looks_like_data_dump(prose), "prose narration wrongly flagged as a data dump");
+    // The LLM-facing `answer` is compact (stats + findings), so the ranking
+    // tables live in `details` — the model never sees the grid and can't be
+    // drowned by it. The verbose tables are still shown to the user via details.
+    assert!(answer.contains("findings:"), "answer should carry the findings");
+    assert!(!answer.contains("top destination fan-in"), "ranking tables must NOT be in the answer");
+    let details = r.details.as_deref().expect("eanet should populate details with the tables");
+    assert!(details.contains("top destination fan-in"), "tables belong in details");
 
-    // A model that echoes one of the ranking rows must be discarded.
-    let grid_echo = "10.0.0.66   6000 destinations";
-    assert!(is_grid_continuation(answer, grid_echo), "grid-row echo should be caught");
+    // A plausible prose narration of the compact answer survives both filters.
+    let prose = "Host 10.0.0.66 contacted thousands of distinct destinations, a likely \
+                 horizontal port scan, while 10.0.0.99 moved data to a single external host.";
+    assert!(!is_grid_continuation(answer, prose), "compact answer must not trip the grid filter");
+    assert!(!looks_like_data_dump(prose));
 }
 
 #[test]
