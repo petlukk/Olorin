@@ -8,6 +8,24 @@ order.
 
 ## [Unreleased]
 
+## [3.17.1] — 2026-06-29
+
+### Added
+
+- **`eanet` fan-out bar chart.** The source fan-out ranking now renders as a
+  block-bar chart (REPL and web chat) and an inline SVG (`olorin report`) — a
+  scanner towers over the benign hosts above the median baseline, the scan
+  signal at a glance — reusing the same `col_reduce` chart pipeline as eatime's
+  series chart.
+
+### Changed
+
+- eanet's `--json` `categories[]` now carries the source fan-out ranking
+  (host → distinct destinations) instead of the tcp/udp split; the protocol
+  counts remain in the text summary. Ranking ties break deterministically on
+  the address, so output is stable run-to-run and bit-identical across x86 SSE2
+  and Pi NEON.
+
 ## [3.17.0] — 2026-06-29
 
 ### Added
