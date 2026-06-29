@@ -3,6 +3,7 @@
 //! generic metrics — the same property the real CTU-13 capture validated.
 
 use olorin::kernels::ffi;
+use olorin::runes::narration::{is_grid_continuation, looks_like_data_dump};
 use olorin::runes::output::RuneOutput;
 use olorin::runes::select::pick_rune_name;
 use olorin::runes::{run_rune, OutputSafety, RUNES};
@@ -111,6 +112,45 @@ fn eanet_json_flags_scanner_anomaly() {
         "scanner anomaly missing: {:?}", out.anomalies
     );
     std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn eanet_narration_survives_grid_filter() {
+    ffi::init().unwrap();
+    let path = write_incident_pcap("olorin_eanet_grid.pcap");
+    let r = run_rune("eanet", &path).expect("eanet runs");
+    std::fs::remove_file(&path).ok();
+    let answer = &r.answer;
+
+    // A plausible 1–2 sentence prose narration must survive BOTH filters.
+    let prose = "Host 10.0.0.66 contacted thousands of distinct destinations, a likely \
+                 horizontal port scan, while 10.0.0.99 moved hundreds of megabytes to a \
+                 single external host — possible exfiltration.";
+    assert!(!is_grid_continuation(answer, prose), "prose narration wrongly flagged as grid");
+    assert!(!looks_like_data_dump(prose), "prose narration wrongly flagged as a data dump");
+
+    // A model that echoes one of the ranking rows must be discarded.
+    let grid_echo = "10.0.0.66   6000 destinations";
+    assert!(is_grid_continuation(answer, grid_echo), "grid-row echo should be caught");
+}
+
+#[test]
+fn eanet_answer_is_narratable_not_safety_blocked() {
+    // build_narration_prompt returns None (silently killing narration) if the
+    // rune answer trips safety::scan. eanet's output is full of "scan",
+    // "exfiltration", and IPs — exactly the kind of content a safety classifier
+    // might flag. Guard against the rune's own findings blocking its narration.
+    ffi::init().unwrap();
+    let path = write_incident_pcap("olorin_eanet_narr.pcap");
+    let result = run_rune("eanet", &path).expect("eanet runs");
+    std::fs::remove_file(&path).ok();
+    let safety = RUNES.iter().find(|r| r.name() == "eanet").unwrap().output_safety();
+    let prompt = olorin::runes::build_narration_prompt("eanet", safety, result);
+    assert!(
+        prompt.is_some(),
+        "eanet answer was safety-blocked from narration — narration would silently never run"
+    );
+    assert!(prompt.unwrap().contains("findings:"), "narration prompt should carry the findings");
 }
 
 #[test]

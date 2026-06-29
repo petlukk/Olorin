@@ -16,7 +16,7 @@ use std::io::Read;
 
 use crate::kernels::ffi;
 
-const TOP_N: usize = 10;
+const TOP_N: usize = 5;
 const CHUNK: usize = 16 << 20; // 16 MiB read window
 const REC_INTS: usize = 6; // i32s the kernel emits per record
 const OUT_RECORDS: usize = CHUNK / 40; // > max emittable records per chunk
@@ -34,16 +34,22 @@ pub struct Triage {
     pub top_talkers: Vec<(u32, u32, u64)>, // (src, dst, bytes)
     pub top_fanout: Vec<Ranked>,           // (src, distinct destinations)
     pub top_fanin: Vec<Ranked>,            // (dst, distinct sources)
-    /// Robust baselines (median across all hosts/pairs) for ratio framing.
+    /// Robust baselines: the median across all hosts/pairs EXCLUDING the single
+    /// top entry, so a lone scanner or exfil flow never sets its own baseline
+    /// (which would make its ratio ~1 and hide it on small captures).
     pub fanout_median: u64,
     pub talker_median: u64,
 }
 
-fn median(mut v: Vec<u64>) -> u64 {
-    if v.is_empty() {
+/// Median of `v` after dropping its single largest element. The candidate being
+/// scored is always the max, so excluding it keeps the baseline honest even when
+/// there are only a handful of hosts.
+fn median_excluding_max(mut v: Vec<u64>) -> u64 {
+    if v.len() <= 1 {
         return 0;
     }
     v.sort_unstable();
+    v.pop(); // drop the max (the candidate)
     v[v.len() / 2]
 }
 
@@ -74,8 +80,8 @@ impl Agg {
     }
 
     fn finish(self) -> Triage {
-        let fanout_median = median(self.fanout.values().map(|s| s.len() as u64).collect());
-        let talker_median = median(self.pair_bytes.values().copied().collect());
+        let fanout_median = median_excluding_max(self.fanout.values().map(|s| s.len() as u64).collect());
+        let talker_median = median_excluding_max(self.pair_bytes.values().copied().collect());
 
         let mut talkers: Vec<(u32, u32, u64)> =
             self.pair_bytes.iter().map(|(&(s, d), &b)| (s, d, b)).collect();

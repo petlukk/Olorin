@@ -184,6 +184,13 @@ fn format_text(out: &RuneOutput, triage: Option<&Triage>) -> String {
         return buf;
     }
 
+    // Lead with the headline findings as explicit prose (host + magnitude), so
+    // the small model narrates the concrete figure instead of paraphrasing it
+    // — the v3.16.4 concrete-figure lesson. These prose lines also differ in
+    // shape from the ranking rows, so the is_grid_continuation filter still
+    // catches a model that echoes a table row.
+    buf.push_str(&format_findings(&out.anomalies));
+
     buf.push_str("top source fan-out (distinct destinations — scan signal):\n");
     for &(s, c) in &t.top_fanout {
         buf.push_str(&format!("  {}   {} destinations\n", ip(s), c));
@@ -199,6 +206,34 @@ fn format_text(out: &RuneOutput, triage: Option<&Triage>) -> String {
         buf.push_str(&format!("  {}   {} sources\n", ip(d), c));
     }
     buf
+}
+
+/// Headline findings as plain-English prose derived from the flagged anomalies
+/// — the host and the concrete magnitude, so narration names the figure.
+fn format_findings(anomalies: &[Anomaly]) -> String {
+    if anomalies.is_empty() {
+        return String::new();
+    }
+    let mut s = String::from("findings:\n");
+    for a in anomalies {
+        if let Some(host) = a.bucket.strip_suffix(" fan-out") {
+            // The absolute count is the concrete, narratable signal — the ratio
+            // (vs a tiny median) reads as an absurd number and confuses the
+            // small model, so we lead with the magnitude instead.
+            s.push_str(&format!(
+                "  • {host} contacted {} distinct destinations — likely a horizontal scan\n",
+                a.count
+            ));
+        } else {
+            s.push_str(&format!(
+                "  • {} moved {} to a single destination — heavy talker, possible exfiltration\n",
+                a.bucket,
+                format_bytes(a.count)
+            ));
+        }
+    }
+    s.push('\n');
+    s
 }
 
 fn format_bytes(n: u64) -> String {
