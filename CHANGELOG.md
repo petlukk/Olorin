@@ -8,6 +8,18 @@ order.
 
 ## [Unreleased]
 
+## [3.17.2] — 2026-06-29
+
+### Tests
+
+- **eanet added to the standing rune fuzzer** (`tests/fuzz_runes.rs`). The pcap
+  parser — the suite's only binary, length-prefixed format, the highest-risk
+  parser class — is now soaked against mutated/malformed captures (the
+  `incl_len` length-math, truncation, oversize) for panics, hangs, and
+  silent-wrong output, at parity with every other rune. Soaked 5000 iterations
+  clean. No binary change vs v3.17.1; this release tags the regression guard
+  into the release tree.
+
 ## [3.17.1] — 2026-06-29
 
 ### Added
