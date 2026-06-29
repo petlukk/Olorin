@@ -271,20 +271,23 @@ pub(crate) fn chart_for(
     title: Option<&str>,
     color: bool,
 ) -> Option<String> {
-    if rune_name != "eatime" {
+    // Only runes that emit a chartable series are worth a second --json scan.
+    if rune_name != "eatime" && rune_name != "eanet" {
         return None;
     }
-    let result = crate::runes::run_rune("eatime", &format!("{rune_args} --json"))?;
+    let result = crate::runes::run_rune(rune_name, &format!("{rune_args} --json"))?;
     if !result.success {
         return None;
     }
     let out = crate::runes::output::RuneOutput::from_json(result.answer.as_bytes()).ok()?;
-    // Chart only a real chronological series (ISO-instant labels carry a
-    // 'T'), matching eatime's own series detection; skip hour/weekday
-    // histograms and anything too short to read as a timeline.
-    let is_series = out.categories.first().is_some_and(|c| c.name.contains('T'));
-    if !is_series || out.categories.len() < 2 {
+    if !crate::runes::plot::is_chartable(&out) {
         return None;
     }
-    Some(crate::runes::plot::render_series(&out, 56, 10, color, title))
+    // eanet's bars are a host ranking, not a timeline — label what they are.
+    let chart_title = if rune_name == "eanet" {
+        Some("source fan-out — distinct destinations per host")
+    } else {
+        title
+    };
+    Some(crate::runes::plot::render_series(&out, 56, 10, color, chart_title))
 }

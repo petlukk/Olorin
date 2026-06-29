@@ -138,18 +138,23 @@ fn build_output(t: &Triage, path: String, n_bytes: u64, scan_us: u64) -> RuneOut
     let mut out = RuneOutput::new("eanet", RUNE_VERSION);
     out.source = Some(Source { path, bytes: n_bytes, format: "pcap".to_string() });
     out.totals = Totals { rows: t.packets, scan_us };
-    out.categories = vec![
-        Category { name: "tcp".to_string(), count: t.tcp },
-        Category { name: "udp".to_string(), count: t.udp },
-    ];
+    // categories[] carries the source fan-out ranking — one bar per source host
+    // (distinct destinations contacted), descending. This is the chartable
+    // series the block-bar / SVG pipeline reads; a scanner towers over the rest.
+    out.categories = t
+        .top_fanout
+        .iter()
+        .map(|&(src, n)| Category { name: ip(src), count: n })
+        .collect();
 
     // Likely horizontal scanner: top fan-out clears the floor and the median.
+    // The bucket is the bare IP so it matches its categories[] bar (spike flag).
     if let Some(&(src, n_dst)) = t.top_fanout.first() {
         let base = t.fanout_median.max(1);
         let ratio = n_dst as f64 / base as f64;
         if n_dst >= SCAN_FLOOR && ratio >= SCAN_RATIO {
             out.anomalies.push(Anomaly {
-                bucket: format!("{} fan-out", ip(src)),
+                bucket: ip(src),
                 count: n_dst,
                 baseline: base as f64,
                 ratio,
@@ -238,19 +243,20 @@ fn format_findings(anomalies: &[Anomaly]) -> String {
     }
     let mut s = String::from("findings:\n");
     for a in anomalies {
-        if let Some(host) = a.bucket.strip_suffix(" fan-out") {
-            // The absolute count is the concrete, narratable signal — the ratio
-            // (vs a tiny median) reads as an absurd number and confuses the
-            // small model, so we lead with the magnitude instead.
-            s.push_str(&format!(
-                "  • {host} contacted {} distinct destinations — likely a horizontal scan\n",
-                a.count
-            ));
-        } else {
+        // A talker anomaly's bucket is "src -> dst"; a scan anomaly's bucket is
+        // a bare host IP. Lead with the absolute magnitude — the ratio (vs a
+        // tiny median) reads as an absurd number and confuses the small model.
+        if a.bucket.contains("->") {
             s.push_str(&format!(
                 "  • {} moved {} to a single destination — heavy talker, possible exfiltration\n",
                 a.bucket,
                 format_bytes(a.count)
+            ));
+        } else {
+            s.push_str(&format!(
+                "  • {} contacted {} distinct destinations — likely a horizontal scan\n",
+                a.bucket,
+                a.count
             ));
         }
     }

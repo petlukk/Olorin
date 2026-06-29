@@ -83,19 +83,23 @@ impl Agg {
         let fanout_median = median_excluding_max(self.fanout.values().map(|s| s.len() as u64).collect());
         let talker_median = median_excluding_max(self.pair_bytes.values().copied().collect());
 
+        // Rankings break ties on the address(es) so the order is deterministic
+        // — same output every run AND bit-identical across arches (HashMap
+        // iteration order is neither). Without this the cross-arch golden and
+        // the chart's bar order would flap on tied counts.
         let mut talkers: Vec<(u32, u32, u64)> =
             self.pair_bytes.iter().map(|(&(s, d), &b)| (s, d, b)).collect();
-        talkers.sort_unstable_by(|a, b| b.2.cmp(&a.2));
+        talkers.sort_unstable_by(|a, b| b.2.cmp(&a.2).then((a.0, a.1).cmp(&(b.0, b.1))));
         talkers.truncate(TOP_N);
 
         let mut fanout: Vec<Ranked> =
             self.fanout.iter().map(|(&s, set)| (s, set.len() as u64)).collect();
-        fanout.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+        fanout.sort_unstable_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
         fanout.truncate(TOP_N);
 
         let mut fanin: Vec<Ranked> =
             self.fanin.iter().map(|(&d, set)| (d, set.len() as u64)).collect();
-        fanin.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+        fanin.sort_unstable_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
         fanin.truncate(TOP_N);
 
         Triage {

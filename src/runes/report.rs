@@ -268,8 +268,7 @@ const PAD_T: f32 = 8.0;
 /// output isn't one. Same series test as `chart_for` (ISO labels carry a
 /// 'T'); same `col_reduce` reduction and spike flags as the block bars.
 pub fn svg_chart(out: &RuneOutput) -> Option<String> {
-    let is_series = out.categories.first().is_some_and(|c| c.name.contains('T'));
-    if !is_series || out.categories.len() < 2 {
+    if !plot::is_chartable(out) {
         return None;
     }
     let counts: Vec<f32> = out.categories.iter().map(|c| c.count as f32).collect();

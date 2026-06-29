@@ -312,6 +312,22 @@ pub fn render_series(
     render(&bars)
 }
 
+/// True when a rune's `RuneOutput` carries a chartable bar series in
+/// `categories[]`. eatime charts a chronological series (ISO-instant labels
+/// carry a 'T'); eanet charts its source fan-out ranking (one bar per host).
+/// Other runes don't chart. Shared by the REPL/web (`chart_for`) and the
+/// report (`svg_chart`) gates so they stay in sync.
+pub fn is_chartable(out: &RuneOutput) -> bool {
+    if out.categories.len() < 2 {
+        return false;
+    }
+    match out.rune.as_str() {
+        "eatime" => out.categories.first().is_some_and(|c| c.name.contains('T')),
+        "eanet" => true,
+        _ => false,
+    }
+}
+
 /// Downsample `counts` to `cols` peak-per-column heights. Uses `col_reduce`
 /// (returns the max envelope) when there is something to reduce; otherwise
 /// the series already fits and is returned as-is.
