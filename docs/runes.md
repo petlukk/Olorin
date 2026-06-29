@@ -33,7 +33,7 @@ fuzzing over real-file seeds; see `tests/fuzz_runes.rs`), as are the tokenizer
 both x86 and Raspberry Pi NEON, each harness paired with a negative control that
 proves it can fail.
 
-The eight runes:
+The nine runes:
 
 - [`eacrunch`](#eacrunch--csv-summarizer) — CSV summarizer
 - [`eajson`](#eajson--json-lines-summarizer) — JSON Lines summarizer
@@ -42,6 +42,7 @@ The eight runes:
 - [`eatime`](#eatime--iso-8601-timestamp-histogram) — timestamp histogram + chronological spike detection
 - [`easql`](#easql--sql-dump-summarizer) — SQL-dump summarizer (`pg_dump` / `mysqldump`)
 - [`eacorrelate`](#eacorrelate--cross-file-lag-correlation) — cross-file lag correlation
+- [`eanet`](#eanet--packet-capture-network-triage) — packet-capture network triage (`.pcap`)
 - [`eadiff`](#eadiff--structural-delta-between-two-rune-runs) — structural delta between two rune runs
 
 The `--json` flag on any rune emits the same data as machine-readable JSON Lines
@@ -466,6 +467,56 @@ The wording is deliberately temporal — "errors rise 4 minutes later", never "t
 deploy *caused* it" — and a zero-lag step reads "at the same time" (co-occurrence,
 not a cascade). A correlation over too few overlap buckets is rejected (the guard
 that killed a real NASA `+654 h, r=1.00` artifact). No cascade → no `incident`.
+
+## eanet — packet-capture network triage
+
+```
+olorin rune eanet ~/capture.pcap
+```
+
+```
+NETWORK FLOW TRIAGE
+packets:       321487
+bytes:         55.57 MB
+conversations: 6510
+protocols:     tcp 235622 / udp 85865
+scan:          138 ms
+
+findings:
+  • 147.32.84.165 contacted 4197 distinct destinations — likely a horizontal scan
+  • 147.32.84.165 -> 212.117.171.138 moved 10.94 MB to a single destination — heavy talker, possible exfiltration
+```
+
+Drop a packet capture and eanet ranks the hosts that stand out — by bytes
+(**top talkers**), by distinct destinations contacted (**source fan-out**, a
+horizontal-scan signal), and by distinct sources connecting in (**destination
+fan-in**, a DDoS/brute signal) — and flags the standouts in plain English. The
+full ranking tables are returned in the rune's `details` (shown in the REPL and
+web UI); the model is handed only the compact findings, so it names the concrete
+host and magnitude instead of drowning in grid. For bulk triage, not deep packet
+inspection — Wireshark still wins for per-packet work.
+
+The `pcap_scan.ea` kernel walks the capture's Ethernet / 802.1Q VLAN / IPv4
+TCP-UDP records and emits each packet's 5-tuple; `netflow.rs` streams the kernel
+over the file in 16 MiB windows (so a multi-GB capture never loads whole into
+RAM) and aggregates the flow table, fan-out, and fan-in. Detection is generic —
+every host is ranked by the same metrics, none hardcoded — and a host is flagged
+only when it clears an absolute floor **and** dwarfs the median of the others.
+
+**Independently validated on real botnet traffic.** On the
+[CTU-13](https://www.stratosphereips.org/datasets-ctu13) Neris captures, eanet's
+generic metrics rank the host the dataset documents as infected
+(`147.32.84.165`) #1 by fan-out and bytes — matching `tshark -z conv,ip`, with
+no knowledge of the labels. On a 1.1 GB capture the deterministic scan runs
+**~64× faster than `tshark -z conv,ip`** (Pi 5 NEON: 0.48 s vs 30.8 s); a golden
+fixture pins the output bit-identically across x86 SSE2 and Pi NEON
+(`tests/cross_arch_bit_identity.rs`), and `benchmarks/eanet-differential.md`
+documents the wild-capture differential.
+
+v1 reads **classic-pcap, Ethernet, IPv4 TCP/UDP** (single VLAN tag). pcapng,
+big-endian captures, IPv6 per-flow, and live capture are out of scope by
+design — live capture would pull `libpcap` + root and turn Olorin into an IDS.
+`.pcap` files only.
 
 ## eadiff — structural delta between two rune runs
 

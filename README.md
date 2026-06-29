@@ -31,7 +31,7 @@ English. 1 GB NASA-HTTP access log (July 1995) is SIMD-scanned in 789 ms, a real
   is 11× faster end-to-end than pandas on a 100K-row CSV; eatime's
   `timestamp_scan` kernel scans at 6.34 GB/s on x86. See [`benchmarks/results.md`](benchmarks/results.md).
 - **Honest scope** — Single binary, two dependencies (libc + libloading),
-  ~2.4 MB release on x86_64 / ~5.2 MB on ARM. Runs on a Raspberry Pi 5.
+  ~2.4 MB release on x86_64 / ~5.3 MB on ARM. Runs on a Raspberry Pi 5.
 
 Prebuilt for Linux x86_64, Linux aarch64 (Pi 5), and Windows x86_64. See
 [`CHANGELOG.md`](CHANGELOG.md) for version history; the `RuneOutput v1`
@@ -194,7 +194,7 @@ injection — on **both x86 and Raspberry Pi NEON**, with every standing harness
 paired with a negative control that proves it can actually fail. Bit-identical
 output across architectures is a CI gate.
 
-Eight runes:
+Nine runes:
 
 - **`eacrunch`** — CSV summarizer (rows, columns, per-column stats + top-N); SQL-style `GROUP BY` (`--by`/`--agg`) and `WHERE` (`--where`) row filtering
 - **`eajson`** — JSON Lines summarizer (systemd / container / web-server shapes); nested objects flatten to dotted keys up to `--depth N` (default 4)
@@ -203,6 +203,7 @@ Eight runes:
 - **`eatime`** — timestamp histogram (ISO-8601 + classic syslog + Apache/nginx CLF); hour-of-day, weekday, or chronological `series` buckets with robust spike detection + charts
 - **`easql`** — SQL-dump summarizer (`pg_dump` / `mysqldump`): dialect, table count, per-table row + column counts
 - **`eacorrelate`** — cross-file lag correlation → **incident timeline**: drop 2–8 timestamped files and get the ordered story ("deploy at 14:02 → errors rise +4 min → traffic drops +12 min, confidence 0.91")
+- **`eanet`** — packet-capture triage (`.pcap`): top talkers, source fan-out (horizontal-scan signal), destination fan-in (DDoS/brute signal); flags the standout host (scanner / exfil) in plain English
 - **`eadiff`** — structural delta between any two `--json` rune outputs
 
 See **[`docs/runes.md`](docs/runes.md)** for the full catalog with per-rune
@@ -429,7 +430,7 @@ The installer downloads the latest release binary, verifies its SHA256
 against the published `SHA256SUMS`, optionally prompts for an
 `ANTHROPIC_API_KEY` (cloud fallback when no local model is loaded),
 and optionally fetches the WhatsApp `/teleport` bridge. Cloud-fallback
-and bridge are both opt-in; the core binary is ~2.4 MB on x86 / ~5.2 MB
+and bridge are both opt-in; the core binary is ~2.4 MB on x86 / ~5.3 MB
 on ARM with all SIMD kernels embedded. Olorin reads `~/.olorin/env` at
 startup, so the key written by the installer is picked up without any
 shell-rc plumbing.
@@ -506,11 +507,11 @@ surprises.
 
 | Metric | Value |
 |---|---|
-| Rust source | 31,613 lines (150 files) |
-| Ea kernel source | 16,103 lines (83 files, 60 logical kernels) |
-| Tests | 24,862 lines (163 files, 887 tests) |
+| Rust source | 32,163 lines (152 files) |
+| Ea kernel source | 16,226 lines (84 files, 61 logical kernels) |
+| Tests | 25,258 lines (166 files, 901 tests) |
 | Runtime dependencies | 2 (libc, libloading) |
-| Release binary | 2.4 MB on x86_64 / 5.2 MB on ARM (all kernels embedded) |
+| Release binary | 2.4 MB on x86_64 / 5.3 MB on ARM (all kernels embedded) |
 | Max file size | 500 lines for Rust + tests (no exceptions); 2 Ea kernels exceed it |
 
 ## License
