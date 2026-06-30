@@ -8,6 +8,18 @@ order.
 
 ## [Unreleased]
 
+## [3.17.3] — 2026-06-30
+
+### Changed
+
+- **eanet findings now read identically across the chat, narration, and the HTML
+  report.** The report previously rendered eanet's anomalies in the generic
+  time-spike format with raw byte counts (`spike at X — count 98946012
+  (211423× baseline 468)`); it now uses the rune's own plain-English findings
+  with human byte units (`X -> Y moved 94.4 MB to a single destination — heavy
+  talker, possible exfiltration`), via a single shared `finding_line` so the
+  three surfaces can't drift.
+
 ## [3.17.2] — 2026-06-29
 
 ### Tests
