@@ -235,30 +235,34 @@ fn format_details(t: &Triage) -> String {
     buf
 }
 
-/// Headline findings as plain-English prose derived from the flagged anomalies
-/// — the host and the concrete magnitude, so narration names the figure.
+/// One flagged anomaly as plain-English prose — shared by the rune's findings
+/// block, narration, and the HTML report so all three read identically. A
+/// talker anomaly's bucket is "src -> dst"; a scan anomaly's is a bare host IP.
+/// Leads with the absolute magnitude (human bytes for talkers) — the ratio vs
+/// a tiny median reads as an absurd number and confuses the small model.
+pub(crate) fn finding_line(a: &Anomaly) -> String {
+    if a.bucket.contains("->") {
+        format!(
+            "{} moved {} to a single destination — heavy talker, possible exfiltration",
+            a.bucket,
+            format_bytes(a.count)
+        )
+    } else {
+        format!(
+            "{} contacted {} distinct destinations — likely a horizontal scan",
+            a.bucket, a.count
+        )
+    }
+}
+
+/// Headline findings as plain-English prose derived from the flagged anomalies.
 fn format_findings(anomalies: &[Anomaly]) -> String {
     if anomalies.is_empty() {
         return String::new();
     }
     let mut s = String::from("findings:\n");
     for a in anomalies {
-        // A talker anomaly's bucket is "src -> dst"; a scan anomaly's bucket is
-        // a bare host IP. Lead with the absolute magnitude — the ratio (vs a
-        // tiny median) reads as an absurd number and confuses the small model.
-        if a.bucket.contains("->") {
-            s.push_str(&format!(
-                "  • {} moved {} to a single destination — heavy talker, possible exfiltration\n",
-                a.bucket,
-                format_bytes(a.count)
-            ));
-        } else {
-            s.push_str(&format!(
-                "  • {} contacted {} distinct destinations — likely a horizontal scan\n",
-                a.bucket,
-                a.count
-            ));
-        }
+        s.push_str(&format!("  • {}\n", finding_line(a)));
     }
     s.push('\n');
     s

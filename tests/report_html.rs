@@ -98,6 +98,41 @@ fn fixed_report_matches_golden() {
 }
 
 #[test]
+fn eanet_report_uses_findings_prose() {
+    olorin::kernels::ffi::init().unwrap(); // svg_chart uses col_reduce
+    let mut net = RuneOutput::new("eanet", 1);
+    net.source = Some(Source {
+        path: "/tmp/capture.pcap".into(), bytes: 22_084, format: "pcap".into(),
+    });
+    net.totals = Totals { rows: 80, scan_us: 138 };
+    net.categories = vec![
+        Category { name: "10.0.0.66".into(), count: 50 },
+        Category { name: "192.168.0.2".into(), count: 1 },
+    ];
+    net.anomalies = vec![
+        Anomaly { bucket: "10.0.0.66".into(), count: 50, baseline: 1.0, ratio: 50.0, score: 50.0 },
+        Anomaly { bucket: "10.0.0.99 -> 203.0.113.7".into(), count: 15_000, baseline: 54.0, ratio: 277.0, score: 277.0 },
+    ];
+    let sections = vec![ReportSection {
+        display: "capture.pcap".into(), rune: "eanet".into(), output: net,
+    }];
+    let html = render_report(&sections, None, "vTEST");
+
+    // The report renders eanet's anomalies in the rune's own findings prose
+    // (human byte units), identical to the chat — not the generic time-spike
+    // phrasing meant for eatime.
+    assert!(
+        html.contains("contacted 50 distinct destinations — likely a horizontal scan"),
+        "scan findings prose missing from report"
+    );
+    assert!(
+        html.contains("moved 14.6 KB to a single destination"),
+        "talker findings prose with human bytes missing from report"
+    );
+    assert!(!html.contains("spike at"), "report must not use the generic spike phrasing for eanet");
+}
+
+#[test]
 fn renders_deterministically() {
     olorin::kernels::ffi::init().unwrap();
     let (sections, corr) = fixed_sections();

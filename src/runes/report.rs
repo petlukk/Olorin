@@ -183,6 +183,16 @@ fn section_html(s: &ReportSection) -> String {
     h.push_str(&fields_table(out));
 
     for a in &out.anomalies {
+        // eanet's anomalies are hosts, not time-spikes — render them in the
+        // rune's own findings prose (with human byte units) so the report reads
+        // the same as the chat. Other runes keep the generic spike phrasing.
+        if out.rune == "eanet" {
+            h.push_str(&format!(
+                "<p class=\"anom\">{}</p>\n",
+                esc(&crate::runes::eanet::finding_line(a)),
+            ));
+            continue;
+        }
         let ratio = if a.ratio.is_finite() {
             format!("{:.1}×", a.ratio)
         } else {
