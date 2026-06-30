@@ -8,6 +8,17 @@ order.
 
 ## [Unreleased]
 
+## [3.17.4] — 2026-06-30
+
+### Changed
+
+- **Web UI polish.** A softer, more modern look — same Catppuccin palette and
+  functionality: rounder tiles with a subtle border + soft shadow and breathing
+  room between them, hover/active feedback on buttons, a focus ring on the chat
+  composer, a backdrop blur behind the config modal, and thin theme-matched
+  scrollbars. The terminal-shell tile now opens on start alongside chat and the
+  REPL — all three tiles by default.
+
 ## [3.17.3] — 2026-06-30
 
 ### Changed
