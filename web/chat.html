@@ -14,15 +14,15 @@ body{background:var(--crust);color:var(--text);font-family:'Inter',system-ui,san
 .hyprbar{height:32px;background:var(--mantle);border-bottom:1px solid var(--surface0);display:flex;align-items:center;justify-content:space-between;padding:0 12px;font:12px/32px 'JetBrains Mono',monospace;color:var(--subtext0);user-select:none}
 .hyprbar .left,.hyprbar .right{display:flex;align-items:center;gap:14px}
 .hyprbar .sep{color:var(--surface1)}
-.tile-container{flex:1;display:grid;gap:2px;background:var(--crust);overflow:hidden}
-.tile{display:flex;flex-direction:column;background:var(--base);border-radius:4px;overflow:hidden}
-.tile.focused{box-shadow:0 0 0 2px var(--lavender)}
+.tile-container{flex:1;display:grid;gap:8px;padding:8px;background:var(--crust);overflow:hidden}
+.tile{display:flex;flex-direction:column;background:var(--base);border:1px solid var(--surface0);border-radius:12px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.28);transition:box-shadow .16s ease,border-color .16s ease}
+.tile.focused{border-color:var(--lavender);box-shadow:0 0 0 1px var(--lavender),0 6px 18px rgba(180,190,254,.16)}
 .tile-header{height:28px;background:var(--mantle);font:11px/28px 'JetBrains Mono',monospace;display:flex;align-items:center;justify-content:space-between;padding:0 10px;color:var(--subtext0)}
 .c-lavender{color:var(--lavender)}.c-teal{color:var(--teal)}.c-green{color:var(--green)}
 .c-yellow{color:var(--yellow)}.c-peach{color:var(--peach)}.c-red{color:var(--red)}
 .c-mauve{color:var(--mauve)}.c-blue{color:var(--blue)}.c-text{color:var(--text)}.c-subtext1{color:var(--subtext1)}
-.tile-close{background:none;border:none;color:var(--overlay0);cursor:pointer;font:14px monospace;padding:0 2px}
-.tile-close:hover{color:var(--red)}
+.tile-close{background:none;border:none;color:var(--overlay0);cursor:pointer;font:14px monospace;padding:0 4px;border-radius:6px;transition:color .14s ease,background .14s ease}
+.tile-close:hover{color:var(--red);background:var(--surface0)}
 .chat-body{display:flex;flex-direction:column;gap:24px;font-family:'Inter',system-ui,sans-serif;overflow-y:auto;padding:24px 20px;flex:1;min-height:0}
 .chat-body.drag-over{outline:2px dashed var(--teal,#94e2d5);outline-offset:-8px;background:rgba(148,226,213,0.06)}
 .chat-msg{display:flex;gap:14px}
@@ -54,10 +54,12 @@ body{background:var(--crust);color:var(--text);font-family:'Inter',system-ui,san
    spawns a stray vertical scrollbar. */
 .chart{line-height:0.8;white-space:pre;overflow-x:auto;overflow-y:hidden;font-family:'OlorinChartMono','DejaVu Sans Mono',ui-monospace,'Liberation Mono',Menlo,Consolas,monospace}
 .chat-input-area{padding:16px 20px;border-top:1px solid var(--surface0);background:var(--mantle)}
-.chat-input-box{display:flex;align-items:center;gap:8px;background:var(--base);border:1px solid var(--surface1);border-radius:12px;padding:10px 16px}
-.chat-input-box:focus-within{border-color:var(--lavender)}
+.chat-input-box{display:flex;align-items:center;gap:8px;background:var(--base);border:1px solid var(--surface1);border-radius:14px;padding:10px 16px;transition:border-color .15s ease,box-shadow .15s ease}
+.chat-input-box:focus-within{border-color:var(--lavender);box-shadow:0 0 0 3px rgba(180,190,254,.12)}
 .chat-input{flex:1;background:transparent;border:none;color:var(--text);font:14px 'Inter',system-ui,sans-serif;outline:none}
-.chat-send{background:var(--lavender);color:var(--crust);border:none;border-radius:8px;width:32px;height:32px;cursor:pointer;font-size:16px}
+.chat-send{background:var(--lavender);color:var(--crust);border:none;border-radius:10px;width:32px;height:32px;cursor:pointer;font-size:16px;display:flex;align-items:center;justify-content:center;transition:filter .15s ease,transform .08s ease}
+.chat-send:hover{filter:brightness(1.08)}
+.chat-send:active{transform:scale(.93)}
 .cursor-blink{display:inline-block;width:2px;height:16px;background:var(--teal);vertical-align:text-bottom;animation:blink 1s step-end infinite}
 .report-link{display:inline-block;margin:6px 0 2px;font-size:13px;color:var(--teal);cursor:pointer;text-decoration:none}
 .report-link:hover{text-decoration:underline}
@@ -74,18 +76,20 @@ body{background:var(--crust);color:var(--text);font-family:'Inter',system-ui,san
 .repl-input{flex:1;background:transparent;border:none;color:var(--text);font:13px 'JetBrains Mono',monospace;outline:none;padding:0}
 .repl-cursor{display:inline-block;width:7px;height:15px;background:var(--mauve);animation:blink 1s step-end infinite;vertical-align:text-bottom}
 .term-canvas{flex:1;min-height:0;width:100%;display:block;background:var(--base);image-rendering:pixelated;outline:none}
-.cfg-overlay{position:fixed;inset:0;background:rgba(17,17,27,0.85);display:none;z-index:100;align-items:center;justify-content:center}.cfg-overlay.open{display:flex}
-.cfg-panel{background:var(--base);border:1px solid var(--surface0);border-radius:8px;padding:20px;width:480px;max-height:80vh;overflow-y:auto;color:var(--text);font-family:'JetBrains Mono',monospace;font-size:12px}
+.cfg-overlay{position:fixed;inset:0;background:rgba(17,17,27,0.78);backdrop-filter:blur(3px);display:none;z-index:100;align-items:center;justify-content:center}.cfg-overlay.open{display:flex}
+.cfg-panel{background:var(--base);border:1px solid var(--surface0);border-radius:14px;padding:20px;width:480px;max-height:80vh;overflow-y:auto;color:var(--text);font-family:'JetBrains Mono',monospace;font-size:12px;box-shadow:0 16px 48px rgba(0,0,0,.5)}
 .cfg-panel h2{margin:0 0 16px;font-size:14px;color:var(--lavender)}.cfg-section{margin-bottom:16px}
 .cfg-section h3{margin:0 0 8px;font-size:12px;color:var(--mauve);text-transform:uppercase;letter-spacing:1px}
 .cfg-row{display:flex;align-items:center;margin-bottom:8px;gap:8px}.cfg-row label{width:120px;color:var(--subtext1);flex-shrink:0}
-.cfg-row input[type=range]{flex:1;accent-color:var(--teal)}.cfg-row select,.cfg-row textarea,.cfg-row input[type=number],.cfg-row input[type=text],.cfg-row input[type=password]{background:var(--surface0);border:1px solid var(--surface1);color:var(--text);padding:4px 8px;border-radius:4px;font-family:inherit;font-size:12px}
+.cfg-row input[type=range]{flex:1;accent-color:var(--teal)}.cfg-row select,.cfg-row textarea,.cfg-row input[type=number],.cfg-row input[type=text],.cfg-row input[type=password]{background:var(--surface0);border:1px solid var(--surface1);color:var(--text);padding:4px 8px;border-radius:6px;font-family:inherit;font-size:12px;transition:border-color .14s ease}
+.cfg-row select:focus,.cfg-row textarea:focus,.cfg-row input:focus{outline:none;border-color:var(--lavender)}
 .cfg-row input[type=number],.cfg-row input[type=text],.cfg-row input[type=password]{width:70px}.cfg-row input[type=text].wide,.cfg-row input[type=password].wide,.cfg-row textarea{width:100%;flex:1}
 .cfg-row textarea{resize:vertical;min-height:60px}.cfg-buttons{display:flex;gap:8px;justify-content:flex-end;margin-top:16px}
-.cfg-buttons button{padding:6px 16px;border:none;border-radius:4px;cursor:pointer;font-family:inherit;font-size:12px}
+.cfg-buttons button{padding:6px 16px;border:none;border-radius:8px;cursor:pointer;font-family:inherit;font-size:12px;transition:filter .14s ease,transform .08s ease}
+.cfg-buttons button:hover{filter:brightness(1.08)}.cfg-buttons button:active{transform:scale(.96)}
 .cfg-btn-apply{background:var(--teal);color:var(--base)}.cfg-btn-cancel{background:var(--surface1);color:var(--text)}
 .cfg-scope{display:flex;gap:12px;align-items:center;margin-bottom:16px;color:var(--subtext1)}.cfg-scope label{width:auto}
-#pal-pop{display:none;position:fixed;top:30px;left:8px;z-index:1000;background:var(--mantle);border:1px solid var(--surface0);border-radius:4px;padding:4px 0;font:11px/16px 'JetBrains Mono',monospace;max-width:540px;box-shadow:0 6px 16px rgba(0,0,0,.5)}
+#pal-pop{display:none;position:fixed;top:36px;left:8px;z-index:1000;background:var(--mantle);border:1px solid var(--surface0);border-radius:10px;padding:6px 0;font:11px/16px 'JetBrains Mono',monospace;max-width:540px;box-shadow:0 10px 28px rgba(0,0,0,.5)}
 .pal-row{padding:3px 10px;white-space:nowrap}
 .pal-msg{padding:1px 10px 2px 18px;white-space:normal;max-width:500px}
 .pal-stop{cursor:pointer;color:var(--overlay0);margin-left:4px}
@@ -95,6 +99,12 @@ body{background:var(--crust);color:var(--text);font-family:'Inter',system-ui,san
 .pal-form button{background:var(--surface0);color:var(--text);border:none;border-radius:3px;padding:2px 9px;cursor:pointer;font:11px 'JetBrains Mono',monospace}
 .pal-form button:hover{background:var(--surface1)}
 #pal-watch-err:empty{display:none}
+/* Thin, rounded, theme-matched scrollbars (replaces the chunky OS default). */
+*{scrollbar-width:thin;scrollbar-color:var(--surface1) transparent}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--surface1);border-radius:8px;border:2px solid transparent;background-clip:padding-box}
+::-webkit-scrollbar-thumb:hover{background:var(--overlay0);background-clip:padding-box}
 </style></head><body>
 <div class="hyprbar">
 <div class="left"><span id="olorin-btn" style="cursor:pointer"><span class="c-teal">&#9670;</span> <span class="c-teal">Olorin</span></span><span class="sep">|</span><span><span class="c-mauve">&#9670;</span> <span id="hb-model" class="c-text">—</span></span><span class="sep">|</span><span id="hb-backend" class="c-blue">—</span><span class="sep">|</span><span><span id="hb-tps" class="c-green">0.0</span> <span class="c-green">tok/s</span></span><span class="sep">|</span><span>temp <span id="hb-cfg-temp" class="c-yellow">0.4</span></span><span class="sep">|</span><span>k:<span id="hb-cfg-topk" class="c-yellow">40</span></span><span class="sep">|</span><span>p:<span id="hb-cfg-topp" class="c-yellow">0.9</span></span><span class="sep">|</span><span>rep:<span id="hb-cfg-rep" class="c-yellow">1.05</span></span><span class="sep">|</span><span>max:<span id="hb-cfg-max" class="c-yellow">64</span></span><span class="sep">|</span><span>recall <span id="hb-recall" class="c-yellow">—</span></span><span class="sep">|</span><span>sessions <span id="hb-sessions" class="c-peach">0</span></span><span class="sep">|</span><span id="hb-palantir" class="c-subtext1" style="cursor:pointer" title="Palantír watchers — click for detail">&#128302; —</span></div>
@@ -544,7 +554,7 @@ document.addEventListener('keydown',e=>{
     focusTile(tiles[next].id);
   }
 },true);
-openTile('chat');openTile('repl');
+openTile('chat');openTile('repl');openTile('term');
 
 fetch('/api/model').then(r=>r.json()).then(d=>{
   document.getElementById('hb-model').textContent=d.name||'—';
