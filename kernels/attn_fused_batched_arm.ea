@@ -54,10 +54,31 @@ export func attn_fused_batched(
                 d = d + 4
             }
 
-            // Dot product: q[qi] . kv_scratch
+            // Dot product: q[qi] . kv_scratch — 4 f32x4 accumulators (16 lanes),
+            // matching the x86 kernel's 2×f32x8 reduction width. The prior 2×f32x4
+            // (8 lanes) accumulated ~2× more rounding error over the 512-wide
+            // global-attention dot; softmax over long contexts amplified it, so
+            // NEON diverged ~3× from the SSE2/f64 reference (tests/attn_fused_parity).
             let mut acc0: f32x4 = splat(0.0)
             let mut acc1: f32x4 = splat(0.0)
+            let mut acc2: f32x4 = splat(0.0)
+            let mut acc3: f32x4 = splat(0.0)
             d = 0
+            while d + 16 <= head_dim {
+                let q0: f32x4 = load(q, q_off + d)
+                let k0: f32x4 = load(kv_scratch, d)
+                let q1: f32x4 = load(q, q_off + d + 4)
+                let k1: f32x4 = load(kv_scratch, d + 4)
+                let q2: f32x4 = load(q, q_off + d + 8)
+                let k2: f32x4 = load(kv_scratch, d + 8)
+                let q3: f32x4 = load(q, q_off + d + 12)
+                let k3: f32x4 = load(kv_scratch, d + 12)
+                acc0 = fma(q0, k0, acc0)
+                acc1 = fma(q1, k1, acc1)
+                acc2 = fma(q2, k2, acc2)
+                acc3 = fma(q3, k3, acc3)
+                d = d + 16
+            }
             while d + 8 <= head_dim {
                 let vq0: f32x4 = load(q, q_off + d)
                 let vk0: f32x4 = load(kv_scratch, d)
@@ -73,7 +94,7 @@ export func attn_fused_batched(
                 acc0 = fma(vq, vk, acc0)
                 d = d + 4
             }
-            let dot: f32 = reduce_add(acc0) + reduce_add(acc1)
+            let dot: f32 = (reduce_add(acc0) + reduce_add(acc1)) + (reduce_add(acc2) + reduce_add(acc3))
             scores_buf[j] = dot
 
             j = j + 1
