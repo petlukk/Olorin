@@ -59,7 +59,6 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
 
     let command_router  = load("command_router")?;
     let fused_safety    = load("fused_safety")?;
-    let intent_router   = load("intent_router")?;
     let csv_scan_lib    = load("csv_scan")?;
     let csv_groupby_lib = load("csv_groupby_scan")?;
     let jsonl_struct_lib = load("jsonl_struct")?;
@@ -119,8 +118,6 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
                 sym(&command_router, b"match_command\0")?),
             scan_safety_fused: std::mem::transmute(
                 sym(&fused_safety, b"scan_safety_fused\0")?),
-            classify_intent: std::mem::transmute(
-                sym(&intent_router, b"classify_intent\0")?),
             csv_scan: std::mem::transmute(
                 sym(&csv_scan_lib, b"csv_scan\0")?),
             csv_groupby_scan: std::mem::transmute(
@@ -189,7 +186,7 @@ fn load_kernels(lib_dir: &Path) -> Result<KernelTable, String> {
                 sym(&argon2_block_lib, b"argon2_block_compress\0")?),
             libs: vec![
                 command_router,
-                fused_safety, intent_router, expr_eval,
+                fused_safety, expr_eval,
                 zeroize_lib, search, jl_project_lib,
                 chacha20_lib, chacha20_sv2, pretokenize_lib,
                 ansi_parser_lib, terminal_diff_lib,
@@ -219,13 +216,6 @@ pub unsafe fn scan_safety_fused(
     out_inject: *mut i32, out_leak: *mut i32, out_n: *mut i32,
 ) {
     (k().scan_safety_fused)(text, len, out_inject, out_leak, out_n);
-}
-
-pub unsafe fn classify_intent(
-    text: *const u8, len: i32,
-    out_intent: *mut i32, out_arg_start: *mut i32, out_arg_len: *mut i32,
-) {
-    (k().classify_intent)(text, len, out_intent, out_arg_start, out_arg_len);
 }
 
 pub unsafe fn eval_expr(

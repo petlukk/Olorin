@@ -1,7 +1,7 @@
 use olorin::kernels::ffi;
 use olorin::core::dispatch::{
-    CMD_HELP, CMD_CALC, INTENT_CALC, INTENT_NONE,
-    command_name, build_tool_params, intent_to_tool_name, extract_math_expr,
+    CMD_HELP, CMD_CALC,
+    command_name, build_tool_params,
 };
 use olorin::core::handlers::{
     user_message, assistant_message, extract_text, TurnTiming,
@@ -11,16 +11,6 @@ use olorin::core::llm::{
 };
 
 // ── dispatch.rs tests ─────────────────────────────────────────────────────────
-
-#[test]
-fn extract_math_simple() {
-    assert_eq!(extract_math_expr("6*7"), "6*7");
-}
-
-#[test]
-fn extract_math_natural_language() {
-    assert_eq!(extract_math_expr("what is 6 * 7"), "6 * 7");
-}
 
 #[test]
 fn command_name_known() {
@@ -43,16 +33,6 @@ fn build_tool_params_calc() {
 #[test]
 fn build_tool_params_empty_calc() {
     assert!(build_tool_params(CMD_CALC, "").is_err());
-}
-
-#[test]
-fn intent_to_tool_name_calc() {
-    assert_eq!(intent_to_tool_name(INTENT_CALC), Some("calc"));
-}
-
-#[test]
-fn intent_to_tool_name_none() {
-    assert_eq!(intent_to_tool_name(INTENT_NONE), None);
 }
 
 // ── handlers.rs tests ─────────────────────────────────────────────────────────
@@ -217,6 +197,26 @@ fn test_dispatch_profile_no_timing() {
     let mut ctx = olorin::core::router::DispatchContext::new(None, None);
     let resp = ctx.dispatch("/profile");
     assert!(resp.text.contains("No timing data yet"));
+}
+
+/// Regression: natural-language intent classification was removed. A message
+/// that merely *contains* a tool keyword (e.g. "time", which also lives inside
+/// words like "sometimes"/"downtime") must fall through to the normal pipeline,
+/// NOT get hijacked into the time tool. The explicit `/time` slash command still
+/// works and yields the tool's timestamp; the natural-language phrasing must not
+/// reproduce that timestamp (it goes to inference, or errors — either way it is
+/// not the tool output). Before removal, "what time is it" returned the timestamp.
+#[test]
+fn test_tool_keyword_falls_through_to_inference() {
+    ffi::init().unwrap();
+    let mut ctx = olorin::core::router::DispatchContext::new(None, None);
+    let tool_out = ctx.dispatch("/time").text; // deterministic time-tool timestamp
+    let nl = ctx.dispatch("what time is it");
+    assert!(!nl.blocked, "plain message must not be blocked: {}", nl.text);
+    assert_ne!(
+        nl.text, tool_out,
+        "natural-language 'time' must not be answered by the time tool (was intent-hijacked before removal)"
+    );
 }
 
 /// Regression: with recall_level=1, a user question must surface the *prior*
