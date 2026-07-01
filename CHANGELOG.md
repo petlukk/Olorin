@@ -8,6 +8,24 @@ order.
 
 ## [Unreleased]
 
+## [3.17.5] — 2026-07-01
+
+### Fixed
+
+- **Natural-language intent classification removed — it misrouted on keyword
+  substrings.** The intent router scanned the entire message for tool keywords
+  (`time`, `tid`, `clock`, `weather`, `cpu`, `calc`) with an unanchored
+  substring match and no length guard, then answered with the tool *before*
+  inference. Any message merely containing such a substring was hijacked —
+  "recovery **time**", "some**time**s", "down**time**", "run**time**" all
+  returned the clock instead of an answer. All four intents already have
+  explicit slash commands (`/time`, `/calc`, `/cpu`, `/weather`), and natural
+  language now reaches the model (which answers more honestly, e.g. "I don't
+  have access to the real-time clock"). The Olorin Pipe is now
+  `Safety → Slash → Recall → Infer`; the `intent_router` kernel and its
+  supporting code are deleted (net −527 lines), which also shrinks the
+  pre-inference attack surface.
+
 ## [3.17.4] — 2026-06-30
 
 ### Changed
