@@ -47,14 +47,6 @@ pub const CMD_THINK:     i32 = 29;
 pub const CMD_TOOL_FIRST: i32 = CMD_TIME;
 pub const CMD_TOOL_LAST:  i32 = CMD_RUNE;
 
-// Intent constants from classify_intent kernel
-// Kernel: 0=CALC, 1=TIME, 2=CPU, 3=WEATHER, -1=NONE
-pub const INTENT_NONE:    i32 = -1;
-pub const INTENT_CALC:    i32 = 0;
-pub const INTENT_TIME:    i32 = 1;
-pub const INTENT_CPU:     i32 = 2;
-pub const INTENT_WEATHER: i32 = 3;
-
 /// Full command names for two-stage verification.
 const ALL_CMD_NAMES: &[(i32, &str)] = &[
     (CMD_HELP, "help"),     (CMD_QUIT, "quit"),       (CMD_TOOLS, "tools"),
@@ -115,71 +107,6 @@ pub fn command_name(cmd_id: i32) -> &'static str {
         if id == cmd_id { return name; }
     }
     "unknown"
-}
-
-// ── Intent classification ────────────────────────────────────────────────────
-
-/// Classify user intent using the SIMD kernel.
-/// Returns (intent_id, argument_start, argument_len).
-pub fn classify_intent(input: &[u8]) -> (i32, usize, usize) {
-    if input.is_empty() {
-        return (INTENT_NONE, 0, 0);
-    }
-    let mut intent: i32 = 0;
-    let mut arg_start: i32 = 0;
-    let mut arg_len: i32 = 0;
-    unsafe {
-        ffi::classify_intent(
-            input.as_ptr(), input.len() as i32,
-            &mut intent, &mut arg_start, &mut arg_len,
-        );
-    }
-    (intent, arg_start as usize, arg_len as usize)
-}
-
-/// Map an intent to the tool name that handles it.
-pub fn intent_to_tool_name(intent: i32) -> Option<&'static str> {
-    match intent {
-        INTENT_CALC    => Some("calc"),
-        INTENT_TIME    => Some("time"),
-        INTENT_CPU     => Some("cpu"),
-        INTENT_WEATHER => Some("weather"),
-        _ => None,
-    }
-}
-
-/// Build tool parameters from an intent classification.
-pub fn intent_to_params(intent: i32, arg_bytes: &[u8]) -> Vec<(&'static str, String)> {
-    let arg_str = std::str::from_utf8(arg_bytes).unwrap_or("").trim();
-    match intent {
-        INTENT_CALC => {
-            let expr = extract_math_expr(arg_str);
-            vec![("expr", expr)]
-        }
-        INTENT_WEATHER => {
-            // Kernel returns full input — extract city after keyword
-            let city = extract_after_keyword(arg_str, &["weather", "väder"]);
-            vec![("city", city)]
-        }
-        _ => vec![],
-    }
-}
-
-/// Extract the text after a keyword, stripping common prepositions.
-fn extract_after_keyword(input: &str, keywords: &[&str]) -> String {
-    let lower = input.to_ascii_lowercase();
-    for kw in keywords {
-        if let Some(pos) = lower.find(kw) {
-            let after = input[pos + kw.len()..].trim();
-            // Strip "in" / "i" prepositions
-            let after = after.strip_prefix("in ").or_else(|| after.strip_prefix("i "))
-                .unwrap_or(after).trim();
-            if !after.is_empty() {
-                return after.to_string();
-            }
-        }
-    }
-    input.to_string()
 }
 
 // ── Tool parameter building ─────────────────────────────────────────────────
@@ -259,26 +186,6 @@ pub fn build_tool_params(cmd_id: i32, arg: &str) -> Result<(&'static str, Vec<(&
         }
         _ => Err(Error::Tool(format!("unknown tool command: {cmd_id}"))),
     }
-}
-
-// ── Math expression extraction ───────────────────────────────────────────────
-
-/// Extract a math expression from a natural language string.
-pub fn extract_math_expr(input: &str) -> String {
-    let bytes = input.as_bytes();
-    let start = match bytes.iter().position(|&b| b.is_ascii_digit()) {
-        Some(pos) => pos,
-        None => return input.to_string(),
-    };
-    let end = bytes.iter()
-        .rposition(|&b| b.is_ascii_digit() || b == b')')
-        .unwrap_or(start);
-    let slice = &input[start..=end];
-    slice.chars()
-        .filter(|&c| c.is_ascii_digit() || "+-*/%^(). ".contains(c))
-        .collect::<String>()
-        .trim()
-        .to_string()
 }
 
 // ── Eval expression (SIMD kernel) ────────────────────────────────────────────

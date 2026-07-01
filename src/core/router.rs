@@ -54,8 +54,8 @@ impl Response {
 /// block is pure dead prefill: ~30s/turn on a Pi 5, and it measurably degrades
 /// reasoning (it primes the model to reconcile non-existent tool context).
 /// aarch64 therefore uses a minimal identity prompt; the working tool paths
-/// there — explicit `/weather`, the intent kernel ("weather haparanda"), and
-/// file-drop analysis — don't depend on the block.
+/// there — explicit slash commands (`/weather`, `/time`) and file-drop
+/// analysis — don't depend on the block.
 ///
 /// x86_64 emits tool calls reliably (16/16), so it keeps the full block for
 /// autonomous tool-calling (local dev chat + the cloud fallback path).
@@ -311,20 +311,7 @@ impl DispatchContext {
             )));
         }
 
-        // ── Step 3: Intent Router ────────────────────────────────────
-        let (intent, arg_start, arg_len) = dispatch::classify_intent(input_bytes);
-        if intent != dispatch::INTENT_NONE {
-            if let Some(tool_name) = dispatch::intent_to_tool_name(intent) {
-                let arg_bytes = if arg_start + arg_len <= input_bytes.len() {
-                    &input_bytes[arg_start..arg_start + arg_len]
-                } else {
-                    &[]
-                };
-                return Err(self.execute_intent(tool_name, intent, arg_bytes));
-            }
-        }
-
-        // ── Step 4: Recall ───────────────────────────────────────────
+        // ── Step 3: Recall ───────────────────────────────────────────
         // Search PRIOR entries, then add the current turn. Adding before
         // searching causes the current query to self-match and crowd out
         // the actual recalled context — fatal at recall_level=1.

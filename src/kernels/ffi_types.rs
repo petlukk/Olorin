@@ -13,7 +13,6 @@ use libloading::Library;
 type PretokenizeFn      = unsafe extern "C" fn(*const u8, *mut u8, *mut u8, i32);
 type MatchCommandFn     = unsafe extern "C" fn(*const u8, i32, *mut i32);
 type FusedSafetyFn      = unsafe extern "C" fn(*const u8, i32, *mut i32, *mut i32, *mut i32);
-type ClassifyIntentFn   = unsafe extern "C" fn(*const u8, i32, *mut i32, *mut i32, *mut i32);
 type CsvScanFn          = unsafe extern "C" fn(
     *const u8, i32,
     *mut i32, *mut i32,
@@ -131,7 +130,6 @@ pub struct KernelTable {
     pub libs: Vec<Library>,
     pub match_command:            MatchCommandFn,
     pub scan_safety_fused:        FusedSafetyFn,
-    pub classify_intent:          ClassifyIntentFn,
     pub csv_scan:                 CsvScanFn,
     pub csv_groupby_scan:         CsvGroupbyScanFn,
     pub jsonl_struct_scan:        JsonlStructFn,

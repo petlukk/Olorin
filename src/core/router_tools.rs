@@ -355,20 +355,6 @@ impl DispatchContext {
         }
     }
 
-    // ── Intent execution ─────────────────────────────────────────────────────
-
-    pub(crate) fn execute_intent(&mut self, tool_name: &str, intent: i32, arg_bytes: &[u8]) -> Response {
-        let params = dispatch::intent_to_params(intent, arg_bytes);
-        match self.execute_tool(tool_name, &params) {
-            Ok(output) => {
-                self.vault_save(b"user", arg_bytes);
-                self.vault_save(b"tool", output.as_bytes());
-                Response::text(output)
-            }
-            Err(e) => Response::text(format!("Tool error: {e}")),
-        }
-    }
-
     // ── Tool execution ───────────────────────────────────────────────────────
 
     pub(crate) fn execute_tool(
