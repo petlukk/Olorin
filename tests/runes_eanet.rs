@@ -169,8 +169,11 @@ fn eanet_output_is_chartable() {
     assert_eq!(out.categories[0].name, "10.0.0.66", "scanner should top the fan-out ranking");
     // The scan anomaly's bucket equals its bar's name, so spike_flags highlights it.
     assert!(out.anomalies.iter().any(|a| a.bucket == "10.0.0.66"), "scan bucket must match its bar");
-    // The report renders an inline SVG for it.
-    assert!(olorin::runes::report::svg_chart(&out).is_some(), "report should render an eanet SVG chart");
+    // The report renders an inline SVG for it, captioned "typical" (the
+    // fan-out median) rather than borrowing eatime's time-series "median".
+    let svg = olorin::runes::report::svg_chart(&out).expect("report should render an eanet SVG chart");
+    assert!(svg.contains("typical"), "eanet SVG baseline should read 'typical':\n{svg}");
+    assert!(!svg.contains(">median"), "eanet SVG must not label its baseline 'median':\n{svg}");
 }
 
 #[test]
