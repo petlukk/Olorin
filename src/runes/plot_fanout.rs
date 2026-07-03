@@ -10,7 +10,7 @@
 //! `Bars` the shared renderer draws; `plot::render` still does the drawing.
 
 use super::output::RuneOutput;
-use super::plot::{render, spike_flags, Bars, XTick};
+use super::plot::{render, spike_flags, Bars, Ink, XTick};
 
 /// Render eanet's source fan-out ranking: one wide, host-labeled bar per top
 /// host, towering from a zero baseline over the dashed `typical` line (the
@@ -20,7 +20,7 @@ pub(super) fn render_fanout<'a>(
     out: &'a RuneOutput,
     width: usize,
     height: usize,
-    color: bool,
+    ink: Ink,
     title: Option<&'a str>,
 ) -> String {
     let n = out.categories.len();
@@ -52,7 +52,7 @@ pub(super) fn render_fanout<'a>(
         median: fanout_baseline(out),
         x_ticks: &ticks,
         height_rows: height,
-        color,
+        ink,
         zero_based: true,
         baseline_label: "typical",
     };

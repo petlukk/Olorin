@@ -299,7 +299,7 @@ impl DispatchContext {
         let display = if structured {
             body.clone()
         } else {
-            match crate::core::router_streaming_analyze::chart_for(name, args, None, true) {
+            match crate::core::router_streaming_analyze::chart_for(name, args, None, crate::runes::plot::Ink::Ansi) {
                 Some(chart) if !safety::scan(chart.as_bytes()).blocked => {
                     format!("{chart}\n{body}")
                 }

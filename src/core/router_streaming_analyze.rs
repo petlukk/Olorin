@@ -182,7 +182,7 @@ impl DispatchContext {
         // never reaches the model's narration context (block glyphs would
         // just confuse it). color=false: the web chat bubble is monospace
         // but not ANSI-aware (it appends via textContent).
-        if let Some(chart) = chart_for(name, &args, Some(display_name), false) {
+        if let Some(chart) = chart_for(name, &args, Some(display_name), crate::runes::plot::Ink::Web) {
             if !safety::scan(chart.as_bytes()).blocked {
                 // Private-Use-Area sentinels (U+E000/E001) bracket the chart so
                 // the web UI renders it in a dedicated line-height:1 block (block
@@ -269,7 +269,7 @@ pub(crate) fn chart_for(
     rune_name: &str,
     rune_args: &str,
     title: Option<&str>,
-    color: bool,
+    ink: crate::runes::plot::Ink,
 ) -> Option<String> {
     // Only runes that emit a chartable series are worth a second --json scan.
     if rune_name != "eatime" && rune_name != "eanet" {
@@ -289,5 +289,5 @@ pub(crate) fn chart_for(
     } else {
         title
     };
-    Some(crate::runes::plot::render_series(&out, 56, 10, color, chart_title))
+    Some(crate::runes::plot::render_series(&out, 56, 10, ink, chart_title))
 }

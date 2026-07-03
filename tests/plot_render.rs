@@ -3,7 +3,7 @@
 //! exactly. Color is verified separately so the golden grid stays readable.
 
 use olorin::runes::output::{Anomaly, Category, RuneOutput, Source};
-use olorin::runes::plot::{render, render_series, Bars, XTick};
+use olorin::runes::plot::{render, render_series, Bars, Ink, XTick};
 
 /// A small hand-checkable chart: 8 columns, a clear peak at column 5, a
 /// median line at 20, no color. The exact grid is pinned so any change to
@@ -23,7 +23,7 @@ fn golden_block_bars_no_color() {
         median: Some(20.0),
         x_ticks: &ticks,
         height_rows: 5,
-        color: false,
+        ink: Ink::Plain,
         zero_based: false,
         baseline_label: "median",
     };
@@ -65,7 +65,7 @@ fn median_line_shows_through_gaps() {
         median: Some(50.0),
         x_ticks: &[],
         height_rows: 4,
-        color: false,
+        ink: Ink::Plain,
         zero_based: false,
         baseline_label: "median",
     };
@@ -87,7 +87,7 @@ fn color_wraps_spike_columns_in_red() {
         median: None,
         x_ticks: &[],
         height_rows: 3,
-        color: true,
+        ink: Ink::Ansi,
         zero_based: false,
         baseline_label: "median",
     };
@@ -142,7 +142,7 @@ fn high_floor_series_auto_zooms_off_zero() {
         median: Some(1700.0),
         x_ticks: &[],
         height_rows: 8,
-        color: false,
+        ink: Ink::Plain,
         zero_based: false,
         baseline_label: "median",
     };
@@ -168,7 +168,7 @@ fn spiky_low_floor_series_keeps_zero_baseline() {
         median: Some(200.0),
         x_ticks: &[],
         height_rows: 8,
-        color: false,
+        ink: Ink::Plain,
         zero_based: false,
         baseline_label: "median",
     };
@@ -210,7 +210,7 @@ fn eanet_fanout_chart_is_readable() {
     // The bug this fixes: a 5px sliver of identical "192.168." bars, a lifted
     // 1600 floor compressing the ~2000 values, and a stray eatime "median (5)".
     let out = fanout_output();
-    let chart = render_series(&out, 56, 10, false, None);
+    let chart = render_series(&out, 56, 10, Ink::Plain, None);
 
     // Labels drop the shared 192.168 prefix — the third octet varies (202 vs
     // 204) so two octets remain. The old truncation collapsed all to "192.168.".
@@ -235,6 +235,46 @@ fn eanet_fanout_chart_is_readable() {
 }
 
 #[test]
+fn eanet_web_ink_marks_scanner_and_bars() {
+    // Web mode brackets bar runs in PUA sentinels the frontend colours: the
+    // flagged scanner (spike) in U+E002..E003 (red), other bars in U+E004..E005
+    // (accent). Restores the "scanner towers red" the ANSI/terminal + SVG paths
+    // have but the monochrome web `<pre>` dropped. No ANSI leaks into the web.
+    let out = fanout_output(); // 192.168.202.73 is the flagged scanner
+    let chart = render_series(&out, 56, 10, Ink::Web, None);
+    assert!(chart.contains('\u{E002}'), "scanner bar must open a spike run:\n{chart:?}");
+    assert!(chart.contains('\u{E003}'), "spike run must close:\n{chart:?}");
+    assert!(chart.contains('\u{E004}'), "non-scanner bars must open a bar run:\n{chart:?}");
+    assert!(chart.contains('\u{E005}'), "bar run must close:\n{chart:?}");
+    assert!(!chart.contains('\u{1b}'), "web chart must not contain ANSI escapes:\n{chart:?}");
+    // Sentinels are balanced (every open has a matching close).
+    assert_eq!(
+        chart.matches('\u{E002}').count(),
+        chart.matches('\u{E003}').count(),
+        "unbalanced spike sentinels:\n{chart:?}"
+    );
+    assert_eq!(
+        chart.matches('\u{E004}').count(),
+        chart.matches('\u{E005}').count(),
+        "unbalanced bar sentinels:\n{chart:?}"
+    );
+}
+
+#[test]
+fn plain_and_ansi_inks_carry_no_web_sentinels() {
+    // The web PUA sentinels must never leak into the terminal (Ansi) or the
+    // golden (Plain) surfaces.
+    let out = fanout_output();
+    for ink in [Ink::Plain, Ink::Ansi] {
+        let chart = render_series(&out, 56, 10, ink, None);
+        assert!(
+            !chart.contains('\u{E002}') && !chart.contains('\u{E004}'),
+            "web sentinels leaked into a non-web ink:\n{chart:?}"
+        );
+    }
+}
+
+#[test]
 fn empty_series_is_graceful() {
     let bars = Bars {
         title: None,
@@ -243,7 +283,7 @@ fn empty_series_is_graceful() {
         median: None,
         x_ticks: &[],
         height_rows: 5,
-        color: false,
+        ink: Ink::Plain,
         zero_based: false,
         baseline_label: "median",
     };

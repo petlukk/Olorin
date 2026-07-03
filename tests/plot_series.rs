@@ -6,7 +6,7 @@
 
 use olorin::kernels::ffi;
 use olorin::runes::output::{Anomaly, Category, RuneOutput, Source, Totals};
-use olorin::runes::plot::render_series;
+use olorin::runes::plot::{render_series, Ink};
 
 const RUNE_VERSION: i64 = 1;
 
@@ -60,7 +60,7 @@ fn nasa_spike_renders_mockup_shape() {
     let json = nasa_series().to_json();
     let out = RuneOutput::from_json(json.as_bytes()).expect("v1 reader");
 
-    let chart = render_series(&out, 56, 10, false, Some("anomalies.log"));
+    let chart = render_series(&out, 56, 10, Ink::Plain, Some("anomalies.log"));
 
     // Title is the friendly display name, NOT the temp path in `source`.
     assert!(chart.contains("anomalies.log"), "title override:\n{chart}");
@@ -113,7 +113,7 @@ fn multi_day_span_shows_dates_in_ticks() {
             }
         })
         .collect();
-    let chart = render_series(&out, 56, 8, false, None);
+    let chart = render_series(&out, 56, 8, Ink::Plain, None);
     assert!(
         chart.contains("07-01") || chart.contains("07-02"),
         "multi-day ticks should carry the MM-DD date:\n{chart}"
@@ -128,7 +128,7 @@ fn single_day_span_keeps_hhmm_ticks() {
     out.categories = (0..20)
         .map(|i| Category { name: format!("2024-01-01T{:02}:00:00", 8 + i % 12), count: 50 })
         .collect();
-    let chart = render_series(&out, 56, 6, false, None);
+    let chart = render_series(&out, 56, 6, Ink::Plain, None);
     // The x-tick line (the one with ':') must not contain a date dash.
     let tick_line = chart.lines().find(|l| l.contains(':')).unwrap_or("");
     assert!(
@@ -146,6 +146,6 @@ fn flat_series_has_no_spike_but_still_charts() {
     out.categories = (0..30)
         .map(|i| Category { name: format!("2024-01-01T{i:02}:00:00"), count: 100 })
         .collect();
-    let chart = render_series(&out, 40, 6, false, None);
+    let chart = render_series(&out, 40, 6, Ink::Plain, None);
     assert!(chart.contains("median (100)"), "flat-series median:\n{chart}");
 }

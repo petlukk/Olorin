@@ -53,6 +53,11 @@ body{background:var(--crust);color:var(--text);font-family:'Inter',system-ui,san
    overflow-x:auto otherwise forces overflow-y to auto and a sub-pixel overflow
    spawns a stray vertical scrollbar. */
 .chart{line-height:0.8;white-space:pre;overflow-x:auto;overflow-y:hidden;font-family:'OlorinChartMono','DejaVu Sans Mono',ui-monospace,'Liberation Mono',Menlo,Consolas,monospace}
+/* Bar colouring: normal bars in the accent blue (matching the SVG report's
+   #3a76b0), the flagged scanner/spike in red — the block-bar equivalent of the
+   terminal's ANSI red. Axis + labels stay --text. */
+.chart .bar{color:var(--blue)}
+.chart .spike{color:var(--red)}
 .chat-input-area{padding:16px 20px;border-top:1px solid var(--surface0);background:var(--mantle)}
 .chat-input-box{display:flex;align-items:center;gap:8px;background:var(--base);border:1px solid var(--surface1);border-radius:14px;padding:10px 16px;transition:border-color .15s ease,box-shadow .15s ease}
 .chat-input-box:focus-within{border-color:var(--lavender);box-shadow:0 0 0 3px rgba(180,190,254,.12)}
@@ -190,6 +195,26 @@ function addChatMsg(body,role,text){
 // up; everything else stays prose text in the bubble. Re-renders from the
 // accumulated `_raw` each token so a marker that is still mid-stream is handled.
 const PLOT_OPEN='',PLOT_CLOSE='';
+// Colour a chart's bar runs. The server can't emit ANSI to the web `<pre>`, so
+// it brackets normal bars in .. and the flagged scanner (spike) in
+// ..; everything else — axis, labels — stays plain. Built with
+// textContent only (never innerHTML), so nothing in the chart can inject markup.
+function renderChart(pre,text){
+  let cls=null,buf='';
+  const flush=()=>{
+    if(!buf)return;
+    if(cls){const s=document.createElement('span');s.className=cls;s.textContent=buf;pre.appendChild(s);}
+    else pre.appendChild(document.createTextNode(buf));
+    buf='';
+  };
+  for(const ch of text){
+    if(ch===''){flush();cls='spike';}
+    else if(ch===''){flush();cls='bar';}
+    else if(ch===''||ch===''){flush();cls=null;}
+    else buf+=ch;
+  }
+  flush();
+}
 function renderBubble(bubble){
   const raw=bubble._raw||'';bubble.textContent='';
   let i=0;
@@ -199,8 +224,8 @@ function renderBubble(bubble){
     if(o>i)bubble.appendChild(document.createTextNode(raw.slice(i,o)));
     const c=raw.indexOf(PLOT_CLOSE,o+PLOT_OPEN.length);
     const pre=el('div','chart');
-    if(c<0){pre.textContent=raw.slice(o+PLOT_OPEN.length);bubble.appendChild(pre);break;}
-    pre.textContent=raw.slice(o+PLOT_OPEN.length,c);bubble.appendChild(pre);
+    if(c<0){renderChart(pre,raw.slice(o+PLOT_OPEN.length));bubble.appendChild(pre);break;}
+    renderChart(pre,raw.slice(o+PLOT_OPEN.length,c));bubble.appendChild(pre);
     i=c+PLOT_CLOSE.length;
   }
 }
