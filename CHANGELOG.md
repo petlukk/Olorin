@@ -8,6 +8,25 @@ order.
 
 ## [Unreleased]
 
+## [3.17.7] — 2026-07-03
+
+### Fixed
+
+- **eanet fan-out chart bars are now coloured on the web — scanner red, the
+  rest blue.** v3.17.6 fixed the chart's structure (readable host labels,
+  zero-based axis, `typical` reference), but the web `<pre>` still drew every
+  bar in the same light `--text`, so five near-equal scanner hosts read as
+  pale, hollow-looking boxes and the flagged scanner had no highlight — even
+  though the terminal draws it in ANSI red and the SVG report fills it
+  `#c0392b`. The web path couldn't emit ANSI to a `<pre>`. `render` now takes a
+  proper output target — `Ink { Plain, Ansi, Web }` — and Web mode brackets bar
+  runs in Private-Use-Area sentinels (the flagged scanner distinct from normal
+  bars) that the web UI turns into coloured `<span>`s via `textContent` only
+  (no `innerHTML`, no injection): bars in the accent `--blue` (matching the SVG
+  report), the scanner in `--red`. eatime web charts get the same spike-red
+  treatment. Verified in a real Chromium render; the block-bar output stays
+  bit-identical across arches.
+
 ## [3.17.6] — 2026-07-03
 
 ### Fixed

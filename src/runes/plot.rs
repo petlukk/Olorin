@@ -25,6 +25,31 @@ const C_RED:   &str = "\x1b[31m";
 const C_DIM:   &str = "\x1b[2m";
 const C_RESET: &str = "\x1b[0m";
 
+/// Where a rendered chart is headed, which decides how bar/spike columns are
+/// tinted: a terminal understands ANSI; the web `<pre>` can't, so bar runs are
+/// bracketed with Private-Use-Area sentinels the frontend turns into coloured
+/// `<span>`s (accent bars, red scanner — matching the terminal + SVG report);
+/// `Plain` emits neither (golden-testable).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Ink {
+    Plain,
+    Ansi,
+    Web,
+}
+
+// Web-surface colour sentinels (PUA). A `BAR` run is a normal bar, a `SPIKE`
+// run is the flagged scanner. Distinct from the U+E000/E001 pair the server
+// uses to bracket the whole chart; none occur in real chart or prose text.
+const SPIKE_OPEN:  char = '\u{E002}';
+const SPIKE_CLOSE: char = '\u{E003}';
+const BAR_OPEN:    char = '\u{E004}';
+const BAR_CLOSE:   char = '\u{E005}';
+
+/// Closing sentinel for an open web run (2 = spike, else bar).
+fn web_close(open: u8) -> char {
+    if open == 2 { SPIKE_CLOSE } else { BAR_CLOSE }
+}
+
 /// One labeled tick on the x-axis: the column it sits under and its text.
 pub struct XTick {
     pub col:   usize,
@@ -41,7 +66,7 @@ pub struct Bars<'a> {
     pub median:      Option<f32>,
     pub x_ticks:     &'a [XTick],
     pub height_rows: usize,
-    pub color:       bool,
+    pub ink:         Ink,
     /// Force a zero baseline (a magnitude *ranking* — bars that tower from
     /// zero) instead of the auto-lifted variation band. A time-bucketed rate
     /// is a level signal where the variation matters, so it lifts; a fan-out
@@ -177,29 +202,52 @@ pub fn render(b: &Bars) -> String {
         }
 
         let is_med = med_row == Some(r);
+        let mut open: u8 = 0; // web run state: 0 none, 1 bar, 2 spike
         for c in 0..n {
             let e = cell_eighths(total_eighths[c], r);
             if e > 0 {
                 let g = BLOCKS[e as usize];
-                if b.color && b.spike[c] {
-                    out.push_str(C_RED);
-                    out.push(g);
-                    out.push_str(C_RESET);
-                } else {
-                    out.push(g);
-                }
-            } else if is_med {
-                // Median baseline shows through where no bar reaches.
-                if b.color {
-                    out.push_str(C_DIM);
-                    out.push('─');
-                    out.push_str(C_RESET);
-                } else {
-                    out.push('─');
+                match b.ink {
+                    Ink::Web => {
+                        // Coalesce consecutive same-kind cells into one span run.
+                        let want: u8 = if b.spike[c] { 2 } else { 1 };
+                        if open != want {
+                            if open != 0 {
+                                out.push(web_close(open));
+                            }
+                            out.push(if want == 2 { SPIKE_OPEN } else { BAR_OPEN });
+                            open = want;
+                        }
+                        out.push(g);
+                    }
+                    Ink::Ansi if b.spike[c] => {
+                        out.push_str(C_RED);
+                        out.push(g);
+                        out.push_str(C_RESET);
+                    }
+                    _ => out.push(g),
                 }
             } else {
-                out.push(' ');
+                if open != 0 {
+                    out.push(web_close(open));
+                    open = 0;
+                }
+                if is_med {
+                    // Median baseline shows through where no bar reaches.
+                    if b.ink == Ink::Ansi {
+                        out.push_str(C_DIM);
+                        out.push('─');
+                        out.push_str(C_RESET);
+                    } else {
+                        out.push('─');
+                    }
+                } else {
+                    out.push(' ');
+                }
             }
+        }
+        if open != 0 {
+            out.push(web_close(open));
         }
         out.push('\n');
     }
@@ -274,7 +322,7 @@ pub fn render_series(
     out: &RuneOutput,
     width: usize,
     height: usize,
-    color: bool,
+    ink: Ink,
     title: Option<&str>,
 ) -> String {
     if out.categories.is_empty() {
@@ -284,7 +332,7 @@ pub fn render_series(
     // bars that tower from zero over the `typical` host, not a downsampled
     // variation band. Route it through its own builder.
     if out.rune == "eanet" {
-        return super::plot_fanout::render_fanout(out, width, height, color, title);
+        return super::plot_fanout::render_fanout(out, width, height, ink, title);
     }
     let counts: Vec<f32> = out.categories.iter().map(|c| c.count as f32).collect();
     let n_src = counts.len();
@@ -322,7 +370,7 @@ pub fn render_series(
         median,
         x_ticks: &ticks,
         height_rows: height,
-        color,
+        ink,
         zero_based: false,
         baseline_label: "median",
     };
