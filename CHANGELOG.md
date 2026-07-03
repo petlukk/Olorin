@@ -8,6 +8,29 @@ order.
 
 ## [Unreleased]
 
+## [3.17.6] — 2026-07-03
+
+### Fixed
+
+- **eanet fan-out chart is now a readable ranking, not a mis-fit time
+  series.** Dropping a large pcap produced a chart the reporter couldn't
+  read: five near-equal scanner hosts collapsed into a single 5-column
+  sliver, every bar labeled with the shared `192.168.` prefix (the axis
+  `short_label` truncated to 8 chars), the y-axis floor auto-lifted to
+  ~1600 so the ~2000 values looked identical, and a stray `median (5)`
+  borrowed from eatime's spike detection. The block-bar renderer was built
+  for eatime's dense chronological series; a short host ranking is a
+  different chart kind. `Bars` now carries `zero_based` (a magnitude
+  ranking towers from zero; a time-bucketed rate keeps its auto-lifted
+  variation band) and `baseline_label` (`typical` for a fan-out ranking vs
+  `median` for a series). eanet routes through a new `plot_fanout` bridge:
+  wide gapped bars so per-host labels fit, octet-stripped labels that drop
+  the shared subnet prefix (`.73 .102 204.45 …`), a zero baseline so the
+  scanners visibly tower over a dashed `typical (N)` reference (the fan-out
+  median from the scan anomaly), matched in the SVG report path. Chart
+  output stays bit-identical across arches, so the Pi web UI renders the
+  same corrected `<pre>`.
+
 ## [3.17.5] — 2026-07-01
 
 ### Fixed

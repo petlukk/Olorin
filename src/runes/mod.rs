@@ -21,6 +21,7 @@ pub mod substream;
 pub mod timekey;
 pub mod anomaly;
 pub mod plot;
+pub mod plot_fanout;
 pub mod select;
 
 /// Output safety classification for a rune's `answer` field.

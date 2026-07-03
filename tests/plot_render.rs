@@ -2,7 +2,8 @@
 //! scalar string assembly — no kernel, no I/O — so its output is asserted
 //! exactly. Color is verified separately so the golden grid stays readable.
 
-use olorin::runes::plot::{render, Bars, XTick};
+use olorin::runes::output::{Anomaly, Category, RuneOutput, Source};
+use olorin::runes::plot::{render, render_series, Bars, XTick};
 
 /// A small hand-checkable chart: 8 columns, a clear peak at column 5, a
 /// median line at 20, no color. The exact grid is pinned so any change to
@@ -23,6 +24,8 @@ fn golden_block_bars_no_color() {
         x_ticks: &ticks,
         height_rows: 5,
         color: false,
+        zero_based: false,
+        baseline_label: "median",
     };
     let got = render(&bars);
 
@@ -63,6 +66,8 @@ fn median_line_shows_through_gaps() {
         x_ticks: &[],
         height_rows: 4,
         color: false,
+        zero_based: false,
+        baseline_label: "median",
     };
     let got = render(&bars);
     assert!(
@@ -83,6 +88,8 @@ fn color_wraps_spike_columns_in_red() {
         x_ticks: &[],
         height_rows: 3,
         color: true,
+        zero_based: false,
+        baseline_label: "median",
     };
     let got = render(&bars);
     // Spike column glyphs are wrapped in the red SGR + reset.
@@ -136,6 +143,8 @@ fn high_floor_series_auto_zooms_off_zero() {
         x_ticks: &[],
         height_rows: 8,
         color: false,
+        zero_based: false,
+        baseline_label: "median",
     };
     let got = render(&bars);
     // Floor sits high relative to the ceiling → the band, not zero, anchors.
@@ -160,6 +169,8 @@ fn spiky_low_floor_series_keeps_zero_baseline() {
         x_ticks: &[],
         height_rows: 8,
         color: false,
+        zero_based: false,
+        baseline_label: "median",
     };
     let got = render(&bars);
     // Floor near zero → the lowest gridline is a small fraction of the top.
@@ -167,6 +178,60 @@ fn spiky_low_floor_series_keeps_zero_baseline() {
         label_floor_ratio(&got) < 0.4,
         "spiky low-floor series should keep a near-zero baseline:\n{got}"
     );
+}
+
+/// An eanet source fan-out ranking: five same-/near-subnet scanner hosts all
+/// contacting ~2000 destinations, with the scan anomaly carrying the fan-out
+/// median (5 — what a normal host contacts) as its baseline.
+fn fanout_output() -> RuneOutput {
+    let mut out = RuneOutput::new("eanet", 1);
+    out.source = Some(Source { path: "cap.pcap".into(), bytes: 1000, format: "pcap".into() });
+    for (ip, n) in [
+        ("192.168.202.73", 2049u64),
+        ("192.168.202.102", 2049),
+        ("192.168.204.45", 2036),
+        ("192.168.202.110", 2030),
+        ("192.168.202.108", 1967),
+    ] {
+        out.categories.push(Category { name: ip.into(), count: n });
+    }
+    out.anomalies.push(Anomaly {
+        bucket: "192.168.202.73".into(),
+        count: 2049,
+        baseline: 5.0,
+        ratio: 409.8,
+        score: 409.8,
+    });
+    out
+}
+
+#[test]
+fn eanet_fanout_chart_is_readable() {
+    // The bug this fixes: a 5px sliver of identical "192.168." bars, a lifted
+    // 1600 floor compressing the ~2000 values, and a stray eatime "median (5)".
+    let out = fanout_output();
+    let chart = render_series(&out, 56, 10, false, None);
+
+    // Labels drop the shared 192.168 prefix — the third octet varies (202 vs
+    // 204) so two octets remain. The old truncation collapsed all to "192.168.".
+    assert!(chart.contains("202.73"), "octet-stripped label missing:\n{chart}");
+    assert!(!chart.contains("192.168."), "shared prefix must be stripped:\n{chart}");
+
+    // The baseline is the fan-out median (5), labeled "typical" not "median".
+    assert!(chart.contains("typical (5)"), "typical caption missing:\n{chart}");
+    assert!(!chart.contains("median ("), "eanet must not borrow eatime's 'median':\n{chart}");
+
+    // Zero-based ranking: the axis floor sits near zero so the bars tower over
+    // the typical(5) reference, instead of the old lifted 1600 floor.
+    assert!(
+        label_floor_ratio(&chart) < 0.4,
+        "fan-out ranking must be zero-based, not floor-lifted:\n{chart}"
+    );
+    assert!(chart.contains('█'), "scanner bars should tower with solid blocks:\n{chart}");
+
+    // Wide, readable bars — the full canvas, not a 5-column sliver.
+    let widest = chart.lines().map(|l| l.chars().count()).max().unwrap();
+    assert!(widest >= 40, "fan-out bars should be widened, got {widest}:\n{chart}");
 }
 
 #[test]
@@ -179,6 +244,8 @@ fn empty_series_is_graceful() {
         x_ticks: &[],
         height_rows: 5,
         color: false,
+        zero_based: false,
+        baseline_label: "median",
     };
     assert_eq!(render(&bars), "(no data to plot)\n");
 }

@@ -228,6 +228,7 @@ fn main() {
                 || name == "narration.rs" || name == "report.rs"
                 || name == "stream.rs" || name == "timekey.rs"
                 || name == "anomaly.rs" || name == "plot.rs"
+                || name == "plot_fanout.rs"
                 || name == "select.rs" || name == "grouping.rs"
                 || name == "filter.rs" || name == "incident.rs"
                 || name == "substream.rs" || name == "netflow.rs" { continue; }

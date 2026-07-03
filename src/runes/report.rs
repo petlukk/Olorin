@@ -15,6 +15,7 @@
 use super::incident::{self, Incident};
 use super::output::RuneOutput;
 use super::plot;
+use super::plot_fanout;
 
 /// One analyzed file: the friendly name, the rune that ran, its output.
 pub struct ReportSection {
@@ -293,12 +294,19 @@ pub fn svg_chart(out: &RuneOutput) -> Option<String> {
             spike_src[lo..hi].iter().any(|&f| f)
         })
         .collect();
+    // eanet is a host ranking: its `typical` reference is the fan-out median
+    // (the scan anomaly's baseline), not whatever anomaly happens to sort
+    // first — a talker anomaly's baseline is in bytes, not destinations.
+    let is_eanet = out.rune == "eanet";
     let ceil = plot::nice_ceil(heights.iter().copied().fold(0.0, f32::max));
-    let median = out
-        .anomalies
-        .first()
-        .map(|a| a.baseline as f32)
-        .unwrap_or_else(|| plot::robust_median(&counts));
+    let median = if is_eanet {
+        plot_fanout::fanout_baseline(out).unwrap_or(0.0)
+    } else {
+        out.anomalies
+            .first()
+            .map(|a| a.baseline as f32)
+            .unwrap_or_else(|| plot::robust_median(&counts))
+    };
 
     let plot_w = SVG_W - PAD_L - 8.0;
     let plot_h = SVG_H - PAD_T - PAD_B;
@@ -346,21 +354,35 @@ pub fn svg_chart(out: &RuneOutput) -> Option<String> {
             "<line x1=\"{PAD_L}\" y1=\"{ym:.1}\" x2=\"{:.1}\" y2=\"{ym:.1}\" \
              stroke=\"#5a6478\" stroke-width=\"1\" stroke-dasharray=\"4 3\"/>\n\
              <text x=\"{:.1}\" y=\"{:.1}\" font-size=\"10\" \
-             fill=\"#5a6478\">median {}</text>\n",
+             fill=\"#5a6478\">{} {}</text>\n",
             PAD_L + plot_w,
             PAD_L + 4.0, ym - 3.0,
+            if is_eanet { "typical" } else { "median" },
             fnum(median as f64),
         ));
     }
-    // x ticks (same 4-label policy as the block bars)
-    for t in plot::x_ticks(out, cols, n_src) {
-        let x = PAD_L + (t.col as f32 + 0.5) * bw;
-        s.push_str(&format!(
-            "<text x=\"{x:.1}\" y=\"{:.1}\" text-anchor=\"middle\" \
-             font-size=\"11\" fill=\"#5a6478\">{}</text>\n",
-            SVG_H - 6.0,
-            esc(&t.label),
-        ));
+    // x ticks: one octet-stripped host label per fan-out bar; otherwise the
+    // time series's 4-label policy.
+    if is_eanet {
+        for (i, label) in plot_fanout::fanout_labels(out).iter().enumerate() {
+            let x = PAD_L + (i as f32 + 0.5) * bw;
+            s.push_str(&format!(
+                "<text x=\"{x:.1}\" y=\"{:.1}\" text-anchor=\"middle\" \
+                 font-size=\"11\" fill=\"#5a6478\">{}</text>\n",
+                SVG_H - 6.0,
+                esc(label),
+            ));
+        }
+    } else {
+        for t in plot::x_ticks(out, cols, n_src) {
+            let x = PAD_L + (t.col as f32 + 0.5) * bw;
+            s.push_str(&format!(
+                "<text x=\"{x:.1}\" y=\"{:.1}\" text-anchor=\"middle\" \
+                 font-size=\"11\" fill=\"#5a6478\">{}</text>\n",
+                SVG_H - 6.0,
+                esc(&t.label),
+            ));
+        }
     }
     s.push_str("</svg>\n");
     Some(s)

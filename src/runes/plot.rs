@@ -42,6 +42,14 @@ pub struct Bars<'a> {
     pub x_ticks:     &'a [XTick],
     pub height_rows: usize,
     pub color:       bool,
+    /// Force a zero baseline (a magnitude *ranking* — bars that tower from
+    /// zero) instead of the auto-lifted variation band. A time-bucketed rate
+    /// is a level signal where the variation matters, so it lifts; a fan-out
+    /// ranking's whole point is "2000 vs a typical 5", which zero shows.
+    pub zero_based:  bool,
+    /// Legend word for the baseline line: "median" for a time series's
+    /// spike reference, "typical" for a fan-out ranking's normal host.
+    pub baseline_label: &'a str,
 }
 
 /// Round up to a "nice" axis ceiling (1, 2, or 5 × 10^k) so y-labels read
@@ -126,7 +134,7 @@ pub fn render(b: &Bars) -> String {
         .fold(0.0f32, f32::max)
         .max(b.median.unwrap_or(0.0));
     let y_max = nice_ceil(peak);
-    let y_min = baseline_floor(b.heights, y_max);
+    let y_min = if b.zero_based { 0.0 } else { baseline_floor(b.heights, y_max) };
     let range = (y_max - y_min).max(f32::EPSILON);
 
     // Per-column total eighths over [y_min, y_max]. Bars below the floor
@@ -204,11 +212,12 @@ pub fn render(b: &Bars) -> String {
         out.push_str(&render_xticks(b.x_ticks, gutter + 1, n));
     }
 
-    // Median legend line, matching the mockup's "median (NNN)".
+    // Baseline legend line, matching the mockup's "median (NNN)".
     if let Some(m) = b.median {
         out.push_str(&format!(
-            "{}median ({})\n",
+            "{}{} ({})\n",
             " ".repeat(gutter + 1),
+            b.baseline_label,
             m.round() as i64
         ));
     }
@@ -271,6 +280,12 @@ pub fn render_series(
     if out.categories.is_empty() {
         return "(no series to plot)\n".to_string();
     }
+    // eanet is a short host *ranking*, not a dense time series: wide labeled
+    // bars that tower from zero over the `typical` host, not a downsampled
+    // variation band. Route it through its own builder.
+    if out.rune == "eanet" {
+        return super::plot_fanout::render_fanout(out, width, height, color, title);
+    }
     let counts: Vec<f32> = out.categories.iter().map(|c| c.count as f32).collect();
     let n_src = counts.len();
     let cols = width.max(1).min(n_src);
@@ -308,6 +323,8 @@ pub fn render_series(
         x_ticks: &ticks,
         height_rows: height,
         color,
+        zero_based: false,
+        baseline_label: "median",
     };
     render(&bars)
 }
