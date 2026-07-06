@@ -8,6 +8,18 @@ order.
 
 ## [Unreleased]
 
+## [3.17.8] — 2026-07-06
+
+### Fixed
+
+- **Rune `[timing:]` footer now uses the same adaptive units as the `scan:`
+  line.** The output showed `scan: 2800 ms` (formatted) next to a raw
+  `[timing: 3082088µs]` — inconsistent units, and a raw microsecond count is
+  hard to read at a glance. The footer now goes through the same
+  `format_scan_time` helper, so the two agree (`[timing: 3082 ms]`); a
+  sub-millisecond rune still reads `[timing: 640 µs]` rather than a misleading
+  `0 ms`. Applies to both the web file-drop and REPL `/rune` surfaces.
+
 ## [3.17.7] — 2026-07-03
 
 ### Fixed
