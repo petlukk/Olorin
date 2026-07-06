@@ -91,7 +91,7 @@ fn cli_eatime_json_mode_emits_parseable_jsonl() {
 #[test]
 fn cli_eatime_text_mode_still_has_timing_footer() {
     // Negative test for the v0.9.4 fix: without --json, the legacy
-    // text format keeps the [timing: …µs] footer for human users.
+    // text format keeps the [timing: …] footer (adaptive µs/ms) for humans.
     let log = b"2026-05-11T08:00:00 only\n";
     let path = write_tmp("olorin_cli_eatime_text.log", log);
     let script = format!("/rune eatime {path}\n/quit\n");
