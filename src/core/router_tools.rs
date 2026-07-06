@@ -284,7 +284,7 @@ impl DispatchContext {
                 b.push_str("\n\n---\n");
                 b.push_str(&d);
             }
-            b.push_str(&format!("\n[timing: {timing_us}µs]"));
+            b.push_str(&format!("\n[timing: {}]", crate::runes::common::format_scan_time(timing_us)));
             b
         };
         if safety::scan(body.as_bytes()).blocked {
